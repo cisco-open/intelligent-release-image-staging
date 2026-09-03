@@ -12,6 +12,7 @@ server Dockerfile; these helpers shell out to it via subprocess.
 Plaintext only ever lives in tmpfs (/run/iris); the persistent copies on
 the iris-config volume are always ciphertext (`*.age`).
 """
+import errno
 import json
 import os
 import subprocess
@@ -19,6 +20,42 @@ import tempfile
 
 AGE_BIN = os.environ.get("IRIS_AGE_BIN", "age")
 _AGE_TIMEOUT = 30
+
+
+def _fsync_file(path):
+    """Flush *path*'s bytes to stable storage.
+
+    Used on a temp file an external process (`age`) wrote, so there is no
+    file object of ours to fsync through — reopen it read-only and sync the
+    descriptor. A read-only fd is enough for fsync on every filesystem the
+    server runs on.
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path):
+    """Flush the directory entry created by an os.replace into *path*.
+
+    Same discipline as the device agent's `_atomic_write_state`: a filesystem
+    that does not implement directory fsync raises EINVAL/ENOTSUP on the dir
+    fd, and that platform limitation is ignored — a real I/O failure still
+    surfaces, so callers cannot report a rotation durable that is not.
+    """
+    fd = os.open(path or ".", os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        unsupported = {errno.EINVAL}
+        if hasattr(errno, "ENOTSUP"):
+            unsupported.add(errno.ENOTSUP)
+        if e.errno not in unsupported:
+            raise
+    finally:
+        os.close(fd)
 
 
 def decrypt_to(enc_path, out_path, key_file, age_bin=AGE_BIN):
@@ -49,6 +86,14 @@ def encrypt_from(plain_path, enc_path, recipients_csv, age_bin=AGE_BIN):
     break-glass). Written atomically (a UNIQUE tmp in the same dir + os.replace)
     so a crash mid-write never truncates the only encrypted copy, and the
     existing `enc_path` file mode is preserved across rewrites.
+
+    Durable, not merely atomic: `enc_path` is the ONLY copy of the secrets
+    store that survives a restart, so the ciphertext bytes are fsynced before
+    the rename and the containing directory is fsynced after it. Without both,
+    a host crash seconds after a device-token rotation the server already
+    reported complete would come back up with the previous ciphertext, and the
+    device would 401 with a token nobody has. Same tmp+fsync+rename+dir-fsync
+    discipline as the device agent's `_atomic_write_state`.
     """
     recipients = [r.strip() for r in recipients_csv.split(",") if r.strip()]
     if not recipients:
@@ -69,7 +114,9 @@ def encrypt_from(plain_path, enc_path, recipients_csv, age_bin=AGE_BIN):
         subprocess.run(cmd, check=True, timeout=_AGE_TIMEOUT)
         if mode is not None:
             os.chmod(tmp, mode)
+        _fsync_file(tmp)          # bytes on disk BEFORE the rename ...
         os.replace(tmp, enc_path)
+        _fsync_dir(d)             # ... and the rename itself after it.
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)

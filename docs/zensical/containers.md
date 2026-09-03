@@ -57,13 +57,19 @@ SSH helper used by console onboarding:
 
 ```bash
 tools/get-aria2c.sh amd64
-docker build --platform linux/amd64 \
+docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t iris:latest .
 ```
 
-The image exposes all device-facing services, includes a `/healthz` Docker
-health check, and keeps aria2 RPC on loopback only.
+`--pull` re-resolves the `python:3.12-slim-trixie` base tag instead of reusing
+whatever the build host cached, which can be weeks of Debian security updates
+behind the tag. Set `IRIS_NO_PULL=1` on the helper scripts to keep a cached base
+for an A/B build of an unrelated change.
+
+The image exposes all device-facing services, includes a Docker health check
+that probes `/readyz` (so a container whose catalog or artifact listener died
+does not report `healthy`), and keeps aria2 RPC on loopback only.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which

@@ -121,3 +121,41 @@ def test_session_store_count_prunes_expired():
     ss.create("admin", now=0)
     ss.create("admin", now=0)
     assert ss.count(now=200) == 0              # both idle >= ttl -> pruned
+
+
+def test_verify_password_busy_raises_not_false():
+    """IRIS-01-006: with both scrypt slots taken the verifier must say
+    "busy", never "wrong password" -- a False here was penalised by the
+    limiter and audited as a failed login that never happened."""
+    encoded = gui_auth.hash_password("pw")
+    sem = gui_auth._PASSWORD_VERIFY_SLOTS
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+    try:
+        import pytest
+        with pytest.raises(gui_auth.VerifyBusy):
+            gui_auth.verify_password(encoded, "pw")
+    finally:
+        sem.release(); sem.release()
+    assert gui_auth.verify_password(encoded, "pw") is True
+
+
+def test_session_get_touch_false_leaves_last_seen():
+    ss = gui_auth.SessionStore(idle_ttl=100)
+    sid, _ = ss.create("admin", now=0)
+    assert ss.get(sid, now=60, touch=False) is not None
+    assert ss.get(sid, now=110) is None            # idle counted from 0, not 60
+    sid2, _ = ss.create("admin", now=0)
+    assert ss.get(sid2, now=60) is not None        # default touches
+    assert ss.get(sid2, now=110) is not None
+
+
+def test_set_admin_invalidate_sessions_stamps_and_preserves_floor():
+    store = {}
+    gui_auth.set_admin(store, "admin", "pw", now=100)
+    assert gui_auth.sessions_not_before(store) == 0
+    gui_auth.set_admin(store, "admin", "pw2", now=200, invalidate_sessions=True)
+    assert gui_auth.sessions_not_before(store) == 200
+    gui_auth.set_admin(store, "admin", "pw3", now=300)      # plain rewrite
+    assert gui_auth.sessions_not_before(store) == 200        # floor carried
+    assert gui_auth.sessions_not_before({"admin": {"sessions_not_before": "x"}}) == 0
+    assert gui_auth.sessions_not_before({"admin": {"sessions_not_before": True}}) == 0

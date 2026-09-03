@@ -29,6 +29,12 @@ finite regardless of clock games:
     entry from eviction, and a wildly wrong clock cannot mass-delete
     fresh entries below the cap either.
 
+Both env overrides parse the same way: a missing, non-integer or
+NON-POSITIVE value falls back to the compiled default, as
+catalog.handler_timeout() and peer_endpoints.endpoint_ttl() do.  0 is not
+"unlimited" for the cap and not "keep nothing" for the retention window --
+it is simply not a value either knob accepts.
+
 Pruning is AMORTIZED: rewriting the whole file on every append would turn
 each one-line append into an O(file) copy, so append_event() only prunes on
 every PRUNE_EVERY-th append per path per process (plus explicit prune()
@@ -87,25 +93,36 @@ _appends_since_prune = {}
 
 
 def _retention_seconds():
-    days = AUDIT_RETENTION_DAYS
+    """Retention window in seconds, honoring IRIS_AUDIT_RETENTION_DAYS.
+
+    A missing, non-integer or NON-POSITIVE value falls back to
+    AUDIT_RETENTION_DAYS -- the same rule catalog.handler_timeout() and
+    peer_endpoints.endpoint_ttl() apply, so one number means one thing across
+    the server.  0 used to mean "drop everything but the last few seconds",
+    the opposite of what 0 meant to the adjacent cap knob."""
     raw = os.environ.get("IRIS_AUDIT_RETENTION_DAYS")
-    if raw:
-        try:
-            days = int(raw)
-        except ValueError:
-            pass
-    return days * 86400
+    try:
+        days = int(raw) if raw else AUDIT_RETENTION_DAYS
+    except (TypeError, ValueError):
+        return AUDIT_RETENTION_DAYS * 86400
+    return (days if days > 0 else AUDIT_RETENTION_DAYS) * 86400
 
 
 def _max_events():
-    cap = AUDIT_MAX_EVENTS
+    """Hard entry cap, honoring IRIS_AUDIT_MAX_EVENTS.
+
+    A missing, non-integer or NON-POSITIVE value falls back to
+    AUDIT_MAX_EVENTS.  0 used to disable the cap entirely (kept[-0:] is the
+    whole list), so the audit file grew without bound while the very same
+    value on IRIS_AUDIT_RETENTION_DAYS threw the trail away.  Neither reading
+    is safe to guess at: an operator who wants an effectively unbounded trail
+    sets a large number."""
     raw = os.environ.get("IRIS_AUDIT_MAX_EVENTS")
-    if raw:
-        try:
-            cap = int(raw)
-        except ValueError:
-            pass
-    return cap
+    try:
+        cap = int(raw) if raw else AUDIT_MAX_EVENTS
+    except (TypeError, ValueError):
+        return AUDIT_MAX_EVENTS
+    return cap if cap > 0 else AUDIT_MAX_EVENTS
 
 
 def append_event(path, event, device_id=None, secret_name=None, old_id=None,
@@ -226,8 +243,8 @@ def _prune_locked(path, now):
             continue
         kept.append(line)
 
-    cap = _max_events()
-    if cap >= 0 and len(kept) > cap:
+    cap = _max_events()  # always >= 1: non-positive env values take the default
+    if len(kept) > cap:
         kept = kept[-cap:]  # evict oldest by append order (clock-game proof)
 
     dropped = total - len(kept)

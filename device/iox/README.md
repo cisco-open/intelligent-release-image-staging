@@ -32,8 +32,11 @@ architecture-matched `aria2c` from `ARIA2C_BIN`, a local agent bundle, or
 `deliverables/aria2c-<arch>`, verifying each against `tools/aria2c.sha256` and
 failing closed on a mismatch. The build never downloads a client: an earlier
 network fallback could silently ship an unpatched third-party build into the
-image. Supply the pinned catalog cert with `CATALOG_PEM`, or set both
-`CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`.
+image. Supply the pinned catalog cert with `CATALOG_PEM` (certificate block
+only — a combined cert+key file such as the server's `IRIS_CERT` is refused),
+or set both `CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`. The cert-only pem
+is also packaged as a top-level `iris-catalog.pem` in `artifacts.tar.gz`, the
+probe member `tools/check-package-freshness.sh` and the console read.
 
 ## Config delivery
 
@@ -54,15 +57,22 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 | `IRIS_CATALOG_URL` | `catalog_url` | required reachable URL covered by the pinned cert |
 | `IRIS_TARGET_FS` | `target_fs` | optional writable IOS disk prefix; installer default `sdflash:` |
 | `IRIS_TELEMETRY` | `telemetry` | default `on` — post-staging telemetry reports + pull (set `off` to silence) |
+| `IRIS_SHARE_DIR` | `share_dir` | C9300 SSD-share path **inside the app** (paired with a `run-opts -v` bind mount); the agent lands its scratch there so the placement is a local disk write |
+| `IRIS_SHARE_IOS_PATH` | `share_ios_path` | the same share as IOS sees it, e.g. `usbflash1:iox_host_data_share`; both are required together for the C9300 share path below |
 
 The IOx agent reuses one short-lived SSH control connection for CLI and SCP
 work. This avoids opening a new VTY login for every filesystem check, transfer,
 and verification call during an agent tick.
 
-> **Security follow-up:** the device login is held in cleartext in the conf on SD.
-> Scope it (AAA `parser view` / command-authorization to `copy`/`dir`/`event
-> manager`), restrict the VTY ACL to VLAN 666, prefer SSH **key** auth, and issue
-> a rotating credential via the #27 secrets-broker. Pending security review.
+> **Residual risk — device login held in cleartext.** The generated
+> `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's
+> persistent storage (SD on IE-3x00), mode `0600` and readable only inside the
+> app. There is no secrets broker; the credential is static until an operator
+> rotates it. Mitigate it at the device: scope the account with AAA
+> (`parser view` / command authorization limited to `copy`, `dir`, and `event
+> manager`), restrict the VTY ACL to the IRIS app subnet, and prefer SSH **key**
+> auth where the platform supports it. Rotating the credential means re-running
+> the installer with the new value.
 
 ## Deploy to the device (proven recipe)
 
@@ -89,8 +99,8 @@ and verification call during an agent tick.
    This is also the only manual prerequisite for **Console one-click onboarding**:
     once `iris-arm64.tar` is staged in `artifacts/`, the Console picks this installer
    automatically for IE-3x00/IR1101/IR18xx devices (by `model`/`platform`, or by
-   live auto-detection) — see the Console's Devices section in the top-level
-    README. Onboarding fails fast, before touching the device, if `iris-arm64.tar` is
+   live auto-detection) — see [Web Console](../../docs/zensical/console.md).
+   Onboarding fails fast, before touching the device, if `iris-arm64.tar` is
    missing.
 
 4. **On the device** — 3 gotchas, all required:

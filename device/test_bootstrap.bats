@@ -121,3 +121,31 @@ teardown() { rm -rf "$TMP"; }
   # the launcher MUST still have been consulted despite the live process
   [ -f "$TMP/gss.log" ]
 }
+
+@test "a bundle upgrade replaces bootstrap.sh by rename so the running tick still reaches the agent" {
+  # bootstrap.sh runs FROM $SRC/bootstrap.sh (the EEM applet's path) and, on
+  # a bundle drop, replaces that very file. `cp -f` rewrote the same inode,
+  # so the bash still executing it resumed at its old byte offset inside the
+  # NEW content -- executing whatever token landed there. The upgrade tick
+  # must finish on the OLD script's logic (step 5 runs the agent) and leave
+  # the new bootstrap in place for the next tick. The bundled replacement
+  # here is pure `exit 99` lines, so an in-place overwrite fails loudly.
+  cp "$BATS_TEST_DIRNAME/bootstrap.sh" "$SRC/bootstrap.sh"
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  BUNDLE="$TMP/bundle-src"; mkdir -p "$BUNDLE/agent"
+  { printf '#!/usr/bin/env bash\n'
+    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
+  } > "$BUNDLE/bootstrap.sh"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$BUNDLE/agent/iris_agent.py"
+  tar czf "$SRC/bundle.tgz" -C "$BUNDLE" bootstrap.sh agent
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$SRC/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the tick that performed the upgrade still ran the agent...
+  [ -f "$TMP/agent-invoked" ]
+  # ...and the next tick will read the bundled bootstrap
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE/bootstrap.sh"
+  [ ! -e "$SRC/bootstrap.sh.new" ]
+}

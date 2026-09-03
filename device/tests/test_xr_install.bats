@@ -187,6 +187,9 @@ case "$cmds" in
 esac
 STUB
   chmod +x "$STUBDIR/lab/xr-run.sh"
+  # The scp push sources the real trust policy from the tree it runs in.
+  cp "$BATS_TEST_DIRNAME/../../lab/iris-ssh-policy.sh" "$STUBDIR/lab/iris-ssh-policy.sh"
+  export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
 
   cat > "$STUBDIR/bin/sshpass" <<'STUB'
 #!/usr/bin/env bash
@@ -276,4 +279,16 @@ _xr_install_run_live() {
   FAKE_APP_UP_AFTER=3 ACTIVATE_TIMEOUT=30 ACTIVATE_POLL=1 run _xr_install_run_live
   [ "$status" -eq 0 ]
   [[ "$output" == *"'iris' is Up"* ]]
+}
+
+@test "live: the RPM scp verifies the router's host key (never /dev/null known_hosts)" {
+  _xr_install_stub_setup
+  FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/cmd.log"; : > "$FAKE_COMMAND_LOG"; export FAKE_COMMAND_LOG
+  run _xr_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  scp_line="$(grep '=== SCP:' "$FAKE_COMMAND_LOG")"
+  [[ "$scp_line" != *"UserKnownHostsFile=/dev/null"* ]] || return 1
+  [[ "$scp_line" != *"StrictHostKeyChecking=no"* ]] || return 1
+  [[ "$scp_line" == *"StrictHostKeyChecking=accept-new"* ]] || return 1
+  [[ "$scp_line" == *"UserKnownHostsFile=$IRIS_STATE/ssh/known_hosts"* ]]
 }

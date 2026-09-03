@@ -22,6 +22,24 @@ Run the Bats tests:
 bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
 
+Both suites are expected to be fully green on a clean checkout: no host
+provisioning, no running IRIS stack, and no dependence on which machine runs
+them.
+
+### Opt-in host-integration tests
+
+A few Bats tests cannot be hermetic — they run a real `docker build`, which
+needs a reachable Docker daemon, pulls the pinned base image and takes minutes.
+They are skipped by default and run only when you set `IRIS_TEST_HOST_INTEGRATION=1`:
+
+```bash
+IRIS_TEST_HOST_INTEGRATION=1 bats device/xr/tests/test_xr_image.bats
+```
+
+Today that covers the two image-build tests in
+`device/xr/tests/test_xr_image.bats`. Run them before cutting a release or
+after changing `device/xr/Dockerfile`.
+
 ## Documentation build
 
 The docs site builds clean from the repository root, with no reported issues.

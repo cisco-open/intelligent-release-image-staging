@@ -13,13 +13,32 @@
 #
 #   docker compose run --rm iris iris-bootstrap
 #
-# Idempotent: existing .age files are NOT overwritten unless --force is given.
-# Plaintext is written to a tmpfs (TMPDIR or /dev/shm or /tmp) and wiped
+# Idempotent: when all three .age files exist and decrypt with the mounted
+# identity, a plain run changes nothing. When only SOME of them exist the run
+# refuses (regenerating the rest would silently rotate the fleet's tokens and
+# pinned certificate); name the missing file with --repair to regenerate only
+# it. Plaintext is written to a tmpfs (TMPDIR or /dev/shm or /tmp) and wiped
 # immediately after encryption — it never lands on the persistent volume.
+# Every .age file this script writes is decrypted back with IRIS_AGE_KEY_FILE
+# before the run is reported successful, so a recipient list that does not
+# include the mounted identity fails here rather than at the next `up`.
 #
 # Usage:
-#   iris-bootstrap [--force]
-#     --force  overwrite existing .age files (re-key / disaster recovery)
+#   iris-bootstrap [--rekey | --repair <file> | --force --yes]
+#     (no flags)        fresh volume: create everything; complete volume: no-op
+#     --rekey           re-encrypt every existing .age file to the current
+#                       IRIS_AGE_RECIPIENTS (e.g. to add a break-glass key).
+#                       Keeps every secret, token and the pinned certificate.
+#                       Alias: --add-recipient
+#     --repair <file>   regenerate ONLY the named missing file; <file> is one of
+#                       secrets.json, rpc-secret, tls/key.pem (.age optional).
+#                       Repairing tls/key.pem also rewrites tls/crt.pem.
+#     --force --yes     disaster recovery: discard ALL existing state and mint
+#                       new secrets. Destroys every device catalog token, the
+#                       admin credential and credential profiles, the RPC
+#                       secret and the TLS key/certificate every onboarded
+#                       device and prebuilt package pins. --force without
+#                       --yes only prints this warning.
 
 set -euo pipefail
 
@@ -28,19 +47,43 @@ IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
 IRIS_AGE_BIN="${IRIS_AGE_BIN:-age}"
 IRIS_HOST_IP="${IRIS_HOST_IP:-127.0.0.1}"
 FORCE=0
+YES=0
+REKEY=0
+REPAIR=""
+
+USAGE="usage: iris-bootstrap [--rekey | --repair <secrets.json|rpc-secret|tls/key.pem> | --force --yes]"
 
 # ---- parse args ----
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --force) FORCE=1 ;;
-    *) echo "usage: iris-bootstrap [--force]" >&2; exit 2 ;;
+    --yes) YES=1 ;;
+    --rekey|--add-recipient) REKEY=1 ;;
+    --repair)
+      [ "$#" -ge 2 ] || { echo "$USAGE" >&2; exit 2; }
+      case "$2" in
+        secrets.json|secrets.json.age)                REPAIR="secrets" ;;
+        rpc-secret|rpc-secret.age)                    REPAIR="rpc" ;;
+        tls/key.pem|tls/key.pem.age|key.pem|key.pem.age) REPAIR="tls" ;;
+        *) echo "$USAGE" >&2; exit 2 ;;
+      esac
+      shift ;;
+    *) echo "$USAGE" >&2; exit 2 ;;
   esac
+  shift
 done
+if [ "$REKEY" -eq 1 ] && { [ "$FORCE" -eq 1 ] || [ -n "$REPAIR" ]; }; then
+  echo "$USAGE" >&2; exit 2
+fi
+if [ -n "$REPAIR" ] && [ "$FORCE" -eq 1 ]; then
+  echo "$USAGE" >&2; exit 2
+fi
 
 # ---- locate script dir so we can find secretfs/secrets_store ----
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 log()  { printf '[iris-bootstrap] %s\n' "$*"; }
+warn() { printf '[iris-bootstrap] WARNING: %s\n' "$*" >&2; }
 die()  { printf '[iris-bootstrap] FATAL: %s\n' "$*" >&2; exit 1; }
 
 # IRIS tracker peer addresses and the generated certificate SAN are IPv4-only.
@@ -52,18 +95,162 @@ python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' \
 # ---- ensure config dirs (tls/trust holds console-installed root CAs) ----
 mkdir -p "$IRIS_CONFIG/tls" "$IRIS_CONFIG/tls/trust"
 
-# ---- idempotency: check whether all three .age files exist ----
+# ---- the encrypted state this script owns ----
 AGE_SECRETS="$IRIS_CONFIG/secrets.json.age"
 AGE_RPC="$IRIS_CONFIG/rpc-secret.age"
 AGE_KEY="$IRIS_CONFIG/tls/key.pem.age"
+# Written by the console (gui_tls.py), never by bootstrap; --rekey must carry
+# it to the new recipient set when it exists, or the console's own TLS key
+# would stay locked to the old one.
+AGE_GUI_KEY="$IRIS_CONFIG/tls/gui-key.pem.age"
 
-all_present() {
-  [ -f "$AGE_SECRETS" ] && [ -f "$AGE_RPC" ] && [ -f "$AGE_KEY" ]
+FORCE_DESTROYS="--force --yes discards ALL existing state: every device catalog token, the admin credential and credential profiles, the RPC secret, and the TLS key + certificate that every onboarded device and prebuilt IOx/XR package pins (all devices must be re-onboarded and every package rebuilt)."
+
+# ---- age helpers (plaintext only ever lives under $SCRATCH) ----
+age_encrypt() {  # plain enc recipients_csv  (atomic: tmp + rename, see secretfs)
+  IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - "$1" "$2" "$3" <<'PY'
+import os, sys
+import secretfs
+secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
+                      age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+}
+age_decrypt() {  # enc out  -> non-zero when the mounted identity cannot open it
+  IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - "$1" "$2" "$IRIS_AGE_KEY_FILE" <<'PY' 2>/dev/null
+import os, sys
+import secretfs
+secretfs.decrypt_to(sys.argv[1], sys.argv[2], sys.argv[3],
+                    age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+}
+# Refuse to call a file "present" unless it is non-empty and, when the identity
+# is mounted, actually opens with it. A 0-byte or foreign-recipient .age file
+# used to count as "nothing to do" and then failed closed at the next `up` with
+# a misleading "bad master key?".
+check_existing() {  # enc scratch_dir
+  [ -s "$1" ] || die "$1 exists but is empty — restore it from backup, or regenerate only that file with: iris-bootstrap --repair $(basename "${1%.age}")"
+  if [ -f "$IRIS_AGE_KEY_FILE" ]; then
+    age_decrypt "$1" "$2/check" \
+      || die "$1 cannot be decrypted with $IRIS_AGE_KEY_FILE — the file is corrupt or was encrypted to other recipients; restore it from backup (the --force path would destroy the rest of the store)"
+    rm -f "$2/check"
+  fi
+}
+# After writing, prove the mounted identity opens what we wrote. This is what
+# catches an IRIS_AGE_RECIPIENTS that omits the identity's own public key.
+verify_roundtrip() {  # enc plain scratch_dir
+  age_decrypt "$1" "$3/verify" \
+    || die "$1 was written but does not decrypt with $IRIS_AGE_KEY_FILE — IRIS_AGE_RECIPIENTS ($IRIS_AGE_RECIPIENTS) must include that identity's public key"
+  cmp -s "$2" "$3/verify" || die "$1 decrypts to different content than was encrypted"
+  rm -f "$3/verify"
+}
+derive_pubkey() {
+  # age-keygen output: "# created: ...\n# public key: age1...\nAGE-SECRET-KEY-..."
+  local pk
+  pk="$(grep '^# public key:' "$IRIS_AGE_KEY_FILE" | awk '{print $NF}')"
+  [ -n "$pk" ] || die "could not derive public key from $IRIS_AGE_KEY_FILE (expected '# public key: age1...' header)"
+  printf '%s\n' "$pk"
+}
+make_scratch() {
+  # Prefer /dev/shm (always tmpfs on Linux), then TMPDIR, then /tmp.
+  # Write plaintext there and wipe immediately after encryption.
+  if [ -d "/dev/shm" ] && [ -w "/dev/shm" ]; then
+    SCRATCH_BASE="/dev/shm"
+  else
+    SCRATCH_BASE="${TMPDIR:-/tmp}"
+  fi
+  SCRATCH="$(mktemp -d "$SCRATCH_BASE/iris-bootstrap-XXXXXX")"
+  chmod 700 "$SCRATCH"
+  trap 'rm -rf "$SCRATCH"' EXIT
+  mkdir -p "$SCRATCH/tls"
 }
 
-if all_present && [ "$FORCE" -eq 0 ]; then
-  log "all .age files already exist — nothing to do (use --force to overwrite)"
+HAVE_SECRETS=0; HAVE_RPC=0; HAVE_TLS=0
+[ -f "$AGE_SECRETS" ] && HAVE_SECRETS=1
+[ -f "$AGE_RPC" ]     && HAVE_RPC=1
+[ -f "$AGE_KEY" ]     && HAVE_TLS=1
+PRESENT=$((HAVE_SECRETS + HAVE_RPC + HAVE_TLS))
+
+# ---- --rekey: re-encrypt existing state to the current recipient set ----
+if [ "$REKEY" -eq 1 ]; then
+  [ "$PRESENT" -gt 0 ] || die "--rekey: no .age files under $IRIS_CONFIG — run iris-bootstrap without flags first"
+  [ -f "$IRIS_AGE_KEY_FILE" ] || die "--rekey needs the current identity at $IRIS_AGE_KEY_FILE to decrypt the existing state"
+  [ -n "${IRIS_AGE_RECIPIENTS:-}" ] || die "--rekey: set IRIS_AGE_RECIPIENTS to the full new recipient list (primary,break-glass)"
+  umask 077
+  make_scratch
+  log "re-encrypting existing state to recipient(s): $IRIS_AGE_RECIPIENTS"
+  n=0
+  for enc in "$AGE_SECRETS" "$AGE_RPC" "$AGE_KEY" "$AGE_GUI_KEY"; do
+    [ -f "$enc" ] || continue
+    plain="$SCRATCH/rekey.$n"; tmp_enc="$enc.rekey.tmp"; n=$((n + 1))
+    # A failed round-trip must not leave a half-written ciphertext beside the
+    # original; the trap removes the current tmp along with the scratch dir.
+    trap 'rm -rf "$SCRATCH" "$tmp_enc"' EXIT
+    [ -s "$enc" ] || die "$enc is empty — restore it from backup before re-keying"
+    age_decrypt "$enc" "$plain" \
+      || die "$enc cannot be decrypted with $IRIS_AGE_KEY_FILE — nothing was changed"
+    rm -f "$tmp_enc"
+    age_encrypt "$plain" "$tmp_enc" "$IRIS_AGE_RECIPIENTS"
+    verify_roundtrip "$tmp_enc" "$plain" "$SCRATCH"
+    chmod --reference="$enc" "$tmp_enc" 2>/dev/null || chmod 600 "$tmp_enc"
+    mv -f "$tmp_enc" "$enc"
+    rm -f "$plain"
+    log "re-encrypted $enc"
+  done
+  rm -rf "$SCRATCH"; trap - EXIT
+  log "re-key complete: $n file(s) now encrypted to: $IRIS_AGE_RECIPIENTS"
+  log "set IRIS_AGE_RECIPIENTS to this value in the service environment so re-encrypt-on-write keeps targeting it"
   exit 0
+fi
+
+# ---- --force: destructive, needs an explicit --yes ----
+if [ "$FORCE" -eq 1 ] && [ "$YES" -eq 0 ]; then
+  die "refusing --force without --yes. $FORCE_DESTROYS To add a recipient without losing anything, use: iris-bootstrap --rekey"
+fi
+
+# ---- idempotency / partial-state guard ----
+if [ "$FORCE" -eq 0 ]; then
+  if [ "$PRESENT" -eq 3 ] && [ -z "$REPAIR" ]; then
+    umask 077
+    make_scratch
+    for enc in "$AGE_SECRETS" "$AGE_RPC" "$AGE_KEY"; do check_existing "$enc" "$SCRATCH"; done
+    rm -rf "$SCRATCH"; trap - EXIT
+    if [ -f "$IRIS_AGE_KEY_FILE" ]; then
+      log "all .age files already exist and decrypt with $IRIS_AGE_KEY_FILE — nothing to do (--rekey to add a recipient, --force --yes to start over)"
+    else
+      warn "identity $IRIS_AGE_KEY_FILE not mounted; could not verify that the existing .age files decrypt"
+      log "all .age files already exist — nothing to do (--rekey to add a recipient, --force --yes to start over)"
+    fi
+    exit 0
+  fi
+  if [ "$PRESENT" -gt 0 ] && [ "$PRESENT" -lt 3 ] && [ -z "$REPAIR" ]; then
+    missing=""; present=""
+    [ "$HAVE_SECRETS" -eq 1 ] && present="$present secrets.json.age" || missing="$missing secrets.json"
+    [ "$HAVE_RPC" -eq 1 ]     && present="$present rpc-secret.age"   || missing="$missing rpc-secret"
+    [ "$HAVE_TLS" -eq 1 ]     && present="$present tls/key.pem.age"  || missing="$missing tls/key.pem"
+    die "partial state under $IRIS_CONFIG: present:$present; missing:$missing. Refusing to regenerate. Restore the missing file(s) from backup, or regenerate only one with: iris-bootstrap --repair <$(echo $missing | tr ' ' '|')>. $FORCE_DESTROYS"
+  fi
+  if [ -n "$REPAIR" ]; then
+    case "$REPAIR" in
+      secrets) target="$AGE_SECRETS"; have=$HAVE_SECRETS ;;
+      rpc)     target="$AGE_RPC";     have=$HAVE_RPC ;;
+      tls)     target="$AGE_KEY";     have=$HAVE_TLS ;;
+    esac
+    [ "$have" -eq 0 ] || die "--repair: $target already exists; use --rekey to change recipients, or --force --yes to start over"
+    [ "$PRESENT" -eq 2 ] || die "--repair: only $PRESENT of the other .age files exist; --repair regenerates exactly one missing file (run without flags on an empty volume)"
+  fi
+fi
+
+# What this run generates. Fresh and --force: everything; --repair: one file.
+GEN_SECRETS=1; GEN_RPC=1; GEN_TLS=1
+if [ -n "$REPAIR" ]; then
+  GEN_SECRETS=0; GEN_RPC=0; GEN_TLS=0
+  case "$REPAIR" in
+    secrets) GEN_SECRETS=1 ;;
+    rpc)     GEN_RPC=1 ;;
+    tls)     GEN_TLS=1; warn "regenerating tls/key.pem also rewrites tls/crt.pem: devices and prebuilt packages pinning the old certificate must be re-onboarded / rebuilt" ;;
+  esac
+elif [ "$FORCE" -eq 1 ]; then
+  warn "$FORCE_DESTROYS"
 fi
 
 # ---- 1. ensure an age identity ----
@@ -85,10 +272,7 @@ if [ ! -f "$IRIS_AGE_KEY_FILE" ]; then
 fi
 
 # Derive the public recipient from the identity file.
-# age-keygen output: "# created: ...\n# public key: age1...\nAGE-SECRET-KEY-..."
-# We grab the 'public key:' comment line.
-_derived_pubkey="$(grep '^# public key:' "$IRIS_AGE_KEY_FILE" | awk '{print $NF}')"
-[ -n "$_derived_pubkey" ] || die "could not derive public key from $IRIS_AGE_KEY_FILE (expected '# public key: age1...' header)"
+_derived_pubkey="$(derive_pubkey)"
 
 # Use IRIS_AGE_RECIPIENTS if already set; otherwise use the derived primary key.
 if [ -z "${IRIS_AGE_RECIPIENTS:-}" ]; then
@@ -98,37 +282,31 @@ fi
 log "encrypting to recipient(s): $IRIS_AGE_RECIPIENTS"
 
 # ---- 2. create a tmpfs scratch area ----
-# Prefer /dev/shm (always tmpfs on Linux), then TMPDIR, then /tmp.
-# Write plaintext there and wipe immediately after encryption.
-if [ -d "/dev/shm" ] && [ -w "/dev/shm" ]; then
-  SCRATCH_BASE="/dev/shm"
-else
-  SCRATCH_BASE="${TMPDIR:-/tmp}"
-fi
-SCRATCH="$(mktemp -d "$SCRATCH_BASE/iris-bootstrap-XXXXXX")"
-chmod 700 "$SCRATCH"
-trap 'rm -rf "$SCRATCH"' EXIT
-
-mkdir -p "$SCRATCH/tls"
+make_scratch
 
 # ---- 3. generate rpc-secret ----
-log "generating rpc-secret"
-openssl rand -hex 32 > "$SCRATCH/rpc-secret"
-chmod 600 "$SCRATCH/rpc-secret"
+if [ "$GEN_RPC" -eq 1 ]; then
+  log "generating rpc-secret"
+  openssl rand -hex 32 > "$SCRATCH/rpc-secret"
+  chmod 600 "$SCRATCH/rpc-secret"
+fi
 
 # ---- 4. generate TLS key + self-signed cert with IP SAN ----
-log "generating TLS key + self-signed cert (CN=iris SAN=IP:$IRIS_HOST_IP)"
-openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
-  -keyout "$SCRATCH/tls/key.pem" \
-  -out    "$SCRATCH/tls/crt.pem" \
-  -subj   "/CN=iris" \
-  -addext "subjectAltName=IP:$IRIS_HOST_IP" \
-  2>/dev/null
-chmod 600 "$SCRATCH/tls/key.pem"
+if [ "$GEN_TLS" -eq 1 ]; then
+  log "generating TLS key + self-signed cert (CN=iris SAN=IP:$IRIS_HOST_IP)"
+  openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+    -keyout "$SCRATCH/tls/key.pem" \
+    -out    "$SCRATCH/tls/crt.pem" \
+    -subj   "/CN=iris" \
+    -addext "subjectAltName=IP:$IRIS_HOST_IP" \
+    2>/dev/null
+  chmod 600 "$SCRATCH/tls/key.pem"
+fi
 
 # ---- 5. generate initial secrets.json with a seeder announce token ----
-log "minting seeder announce token"
-PYTHONPATH="$SCRIPT_DIR" python3 - "$SCRATCH/secrets.json" <<'PY'
+if [ "$GEN_SECRETS" -eq 1 ]; then
+  log "minting seeder announce token"
+  PYTHONPATH="$SCRIPT_DIR" python3 - "$SCRATCH/secrets.json" <<'PY'
 import sys, time
 import secrets_store
 
@@ -138,45 +316,42 @@ secrets_store.mint(store, "seeder", "announce_token", int(time.time()))
 secrets_store.save(store, path)
 print("[iris-bootstrap] secrets.json written")
 PY
-chmod 600 "$SCRATCH/secrets.json"
+  chmod 600 "$SCRATCH/secrets.json"
+fi
 
-# ---- 6. encrypt to the age recipient(s) ----
-log "encrypting secrets.json -> $AGE_SECRETS"
-IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
-  "$SCRATCH/secrets.json" "$AGE_SECRETS" "$IRIS_AGE_RECIPIENTS" <<'PY'
-import os, sys
-import secretfs
-secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
-                      age_bin=os.environ["IRIS_AGE_BIN"])
-PY
+# ---- 6. encrypt to the age recipient(s), then prove the identity opens it ----
+if [ "$GEN_SECRETS" -eq 1 ]; then
+  log "encrypting secrets.json -> $AGE_SECRETS"
+  age_encrypt "$SCRATCH/secrets.json" "$AGE_SECRETS" "$IRIS_AGE_RECIPIENTS"
+  verify_roundtrip "$AGE_SECRETS" "$SCRATCH/secrets.json" "$SCRATCH"
+fi
 
-log "encrypting rpc-secret -> $AGE_RPC"
-IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
-  "$SCRATCH/rpc-secret" "$AGE_RPC" "$IRIS_AGE_RECIPIENTS" <<'PY'
-import os, sys
-import secretfs
-secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
-                      age_bin=os.environ["IRIS_AGE_BIN"])
-PY
+if [ "$GEN_RPC" -eq 1 ]; then
+  log "encrypting rpc-secret -> $AGE_RPC"
+  age_encrypt "$SCRATCH/rpc-secret" "$AGE_RPC" "$IRIS_AGE_RECIPIENTS"
+  verify_roundtrip "$AGE_RPC" "$SCRATCH/rpc-secret" "$SCRATCH"
+fi
 
-log "encrypting tls/key.pem -> $AGE_KEY"
-IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$SCRIPT_DIR" python3 - \
-  "$SCRATCH/tls/key.pem" "$AGE_KEY" "$IRIS_AGE_RECIPIENTS" <<'PY'
-import os, sys
-import secretfs
-secretfs.encrypt_from(sys.argv[1], sys.argv[2], sys.argv[3],
-                      age_bin=os.environ["IRIS_AGE_BIN"])
-PY
+if [ "$GEN_TLS" -eq 1 ]; then
+  log "encrypting tls/key.pem -> $AGE_KEY"
+  age_encrypt "$SCRATCH/tls/key.pem" "$AGE_KEY" "$IRIS_AGE_RECIPIENTS"
+  verify_roundtrip "$AGE_KEY" "$SCRATCH/tls/key.pem" "$SCRATCH"
 
-# ---- 7. copy public cert (not secret) to the volume ----
-cp "$SCRATCH/tls/crt.pem" "$IRIS_CONFIG/tls/crt.pem"
-log "tls/crt.pem written (public, plaintext — this is the cert agents pin)"
+  # ---- 7. copy public cert (not secret) to the volume ----
+  cp "$SCRATCH/tls/crt.pem" "$IRIS_CONFIG/tls/crt.pem"
+  log "tls/crt.pem written (public, plaintext — this is the cert agents pin)"
+fi
 
 # ---- 8. plaintext wipe (already covered by EXIT trap; explicit here for clarity) ----
 rm -rf "$SCRATCH"
 # Prevent the EXIT trap from failing on already-removed dir
 trap - EXIT
 log "plaintext scratch dir wiped"
+
+if [ -n "$REPAIR" ]; then
+  log "repair complete: regenerated only the file named by --repair; every other .age file is untouched"
+  exit 0
+fi
 
 # ---- 9. next-step guidance ----
 cat <<GUIDANCE
@@ -195,8 +370,10 @@ Master key: $IRIS_AGE_KEY_FILE
   * Recommended: add a break-glass recipient (offline age key) so a lost primary
     key does not permanently lock out the store.  Generate one with:
       age-keygen -o break-glass.age-key
-    then re-run bootstrap with:
-      IRIS_AGE_RECIPIENTS="$_derived_pubkey,<break-glass-pubkey>" iris-bootstrap --force
+    then re-encrypt the existing state (nothing is regenerated) with:
+      IRIS_AGE_RECIPIENTS="$_derived_pubkey,<break-glass-pubkey>" iris-bootstrap --rekey
+    Do NOT use --force for this: it mints new secrets and a new certificate,
+    which invalidates every onboarded device and prebuilt package.
 
 Age recipient(s) used: $IRIS_AGE_RECIPIENTS
   * Set IRIS_AGE_RECIPIENTS in your docker-compose.yml / environment to this

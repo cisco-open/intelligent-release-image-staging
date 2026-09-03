@@ -29,6 +29,10 @@ _NONTERMINAL = frozenset(("planned", "applying"))
 # its job is still non-terminal, so the busy guard in gui_onboard refuses the
 # undeploy before teardown is ever rendered.
 _RECOVERABLE = frozenset(("unknown", "drifted", "needs-reconcile", "applying"))
+# Recoverable states that describe a deployment nobody is working on. When a
+# NEWER record of the same device goes active, these no longer describe the
+# box and are abandoned (see _supersede_other_actives).
+_STALE_ON_ACTIVATION = frozenset(("unknown", "drifted", "needs-reconcile"))
 # States from which nothing further can happen: the record is history.
 _TERMINAL = frozenset(("removed", "superseded", "abandoned"))
 # Every non-terminal state can also be ABANDONED. That edge is reached when the
@@ -93,6 +97,18 @@ def _contains_secret(value):
     return False
 
 
+class RecordStoreUnreadable(ValueError):
+    """The record file is present but cannot be parsed.
+
+    A ``ValueError`` subclass so every existing ``except ValueError`` around a
+    write path keeps behaving exactly as before, but distinguishable by callers
+    that must not confuse "this device has no deployment record" with "we
+    cannot read the records at all". Telling an operator to adopt a device IRIS
+    may well already own is worse than saying nothing: adoption writes a record
+    asserting an unverified deployment, and the real fault is a file on the
+    server."""
+
+
 class DeploymentRecordStore:
     """Lock-protected record store persisted beneath ``IRIS_STATE``."""
     def __init__(self, state_dir, now_fn=time.time):
@@ -100,14 +116,38 @@ class DeploymentRecordStore:
         self.path = os.path.join(state_dir, "deployment_records.json")
         self._now = now_fn
 
-    def _read(self):
+    def _read(self, strict=False):
+        """Load the store. A MISSING file is an empty store. A file that is
+        present but unreadable is different: with strict=True (every write
+        path) it raises, so the next create/transition cannot rewrite a
+        corrupt but repairable file as a store holding one record -- these
+        records are the only proof of what IRIS created on each box and the
+        gate for undeploy/re-onboard. Without strict (reads) it degrades to
+        an empty view.
+
+        The strict failure is a RecordStoreUnreadable, so a reader that cannot
+        safely treat "unreadable" as "empty" -- the console's undeploy gate --
+        can ask for strict and report the real fault instead of "no record"."""
         try:
             with open(self.path) as stream:
                 data = json.load(stream)
-            records = data.get("records", {}) if isinstance(data, dict) else {}
-            return {"records": records} if isinstance(records, dict) else {"records": {}}
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return {"records": {}}
+        except (OSError, ValueError) as exc:
+            if strict:
+                raise RecordStoreUnreadable(
+                    "deployment record store %s is unreadable (%s); refusing "
+                    "to overwrite it -- repair or remove the file"
+                    % (self.path, exc))
+            return {"records": {}}
+        records = data.get("records", {}) if isinstance(data, dict) else None
+        if not isinstance(records, dict):
+            if strict:
+                raise RecordStoreUnreadable(
+                    "deployment record store %s is malformed; refusing to "
+                    "overwrite it -- repair or remove the file" % self.path)
+            return {"records": {}}
+        return {"records": records}
 
     @staticmethod
     def _validate(record):
@@ -130,18 +170,35 @@ class DeploymentRecordStore:
             raise ValueError("records must not contain secrets")
 
     def _supersede_other_actives(self, data, device_id, keep_record_id):
-        """Retire every OTHER active record of ``device_id`` (caller holds the
+        """Retire every OTHER live record of ``device_id`` (caller holds the
         store lock). A device has ONE live deployment: when a new record goes
         active — a re-onboard's idempotent teardown+redeploy, or an explicit
         adopt — the previous active record no longer describes what is on the
-        box. Without this, actives accumulate and active_for_device() refuses
-        undeploy for the device."""
+        box, and neither does a sibling left in a recoverable but inactive
+        state (unknown/drifted/needs-reconcile). Without this, actives
+        accumulate and active_for_device() refuses undeploy; and a recoverable
+        leftover survived the re-onboard only to resurface as teardown
+        authority once the new record was removed -- offering a full recorded
+        teardown, rendered from its stale VLAN/SVI numbers, against a box
+        that no longer carries any of it. Actives become ``superseded``;
+        the stale leftovers are ``abandoned`` with the reason recorded.
+        ``planned``/``applying`` siblings are left alone: they belong to a
+        job that is still in flight (adopt has no busy guard) and fail closed
+        on their own if this activation made them stale."""
         timestamp = int(self._now())
         for record in data["records"].values():
-            if (record.get("device_id") == device_id
-                    and record.get("state") == "active"
-                    and record.get("record_id") != keep_record_id):
+            if (record.get("device_id") != device_id
+                    or record.get("record_id") == keep_record_id):
+                continue
+            if record.get("state") == "active":
                 record["state"] = "superseded"
+                record.setdefault("timestamps", {})["finished_at"] = timestamp
+            elif record.get("state") in _STALE_ON_ACTIVATION:
+                record["state"] = "abandoned"
+                record["evidence"] = {
+                    "status": "abandoned",
+                    "reason": "superseded by the activation of record %s"
+                              % keep_record_id}
                 record.setdefault("timestamps", {})["finished_at"] = timestamp
 
     def create(self, record_in):
@@ -155,7 +212,7 @@ class DeploymentRecordStore:
         record["state"] = "planned"
         record["timestamps"] = {"planned_at": timestamp, "finished_at": None}
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             if record["record_id"] in data["records"]:
                 raise ValueError("record already exists: %s" % record["record_id"])
             data["records"][record["record_id"]] = record
@@ -176,7 +233,7 @@ class DeploymentRecordStore:
         record["adopted"] = True
         record["timestamps"] = {"planned_at": timestamp, "finished_at": timestamp}
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             if record["record_id"] in data["records"]:
                 raise ValueError("record already exists: %s" % record["record_id"])
             self._supersede_other_actives(data, record["device_id"],
@@ -199,7 +256,7 @@ class DeploymentRecordStore:
         immutable.
         """
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             record = data["records"].get(record_id)
             if record is None:
                 raise ValueError("unknown record: %s" % record_id)
@@ -215,8 +272,12 @@ class DeploymentRecordStore:
             _atomic_write_json(self.path, data)
             return copy.deepcopy(candidate)
 
-    def list(self, device_id=None):
-        records = self._read()["records"].values()
+    def list(self, device_id=None, strict=False):
+        """Records, optionally for one device. *strict* makes an unreadable
+        store raise RecordStoreUnreadable instead of reading as empty; use it
+        wherever an empty result would be reported to an operator as a fact
+        about the device rather than about the file."""
+        records = self._read(strict=strict)["records"].values()
         if device_id is not None:
             records = (record for record in records
                         if record.get("device_id") == device_id)
@@ -229,7 +290,7 @@ class DeploymentRecordStore:
         if evidence is not None and _contains_secret(evidence):
             raise ValueError("record evidence must not contain secrets")
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             record = data["records"].get(record_id)
             if record is None:
                 raise ValueError("unknown record: %s" % record_id)
@@ -255,7 +316,7 @@ class DeploymentRecordStore:
         the rest, restoring the one-active-per-device invariant undeploy needs."""
         changed = []
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             for record in data["records"].values():
                 if record.get("state") in _NONTERMINAL:
                     record["state"] = "unknown"
@@ -302,7 +363,7 @@ class DeploymentRecordStore:
         Returns the ids of the records retired, newest first."""
         retired = []
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             timestamp = int(self._now())
             for record in data["records"].values():
                 if (record.get("device_id") != device_id
@@ -316,14 +377,14 @@ class DeploymentRecordStore:
                 _atomic_write_json(self.path, data)
         return sorted(retired, reverse=True)
 
-    def active_for_device(self, device_id):
-        active = [record for record in self.list(device_id)
+    def active_for_device(self, device_id, strict=False):
+        active = [record for record in self.list(device_id, strict=strict)
                   if record.get("state") == "active"]
         if len(active) > 1:
             raise ValueError("multiple active records for device: %s" % device_id)
         return active[0] if active else None
 
-    def recoverable_for_device(self, device_id):
+    def recoverable_for_device(self, device_id, strict=False):
         """The record that may authorize a TEARDOWN of *device_id*: the active
         one, or — when there is none — a single record left in a recoverable
         state (unknown after a controller restart, or drifted/needs-reconcile).
@@ -334,11 +395,15 @@ class DeploymentRecordStore:
         Returns None when nothing is left to reconcile. Raises when more than
         one candidate exists: two records mean we cannot prove which one
         describes the box, and tearing down the wrong one could remove
-        resources the other still owns."""
-        active = self.active_for_device(device_id)
+        resources the other still owns.
+
+        *strict* raises RecordStoreUnreadable rather than returning None when
+        the store file itself cannot be read -- "no record" and "no readable
+        records" call for opposite advice to the operator."""
+        active = self.active_for_device(device_id, strict=strict)
         if active is not None:
             return active
-        candidates = [record for record in self.list(device_id)
+        candidates = [record for record in self.list(device_id, strict=strict)
                       if record.get("state") in _RECOVERABLE]
         if len(candidates) > 1:
             raise ValueError(

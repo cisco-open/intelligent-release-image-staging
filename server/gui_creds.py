@@ -41,8 +41,15 @@ class CredentialStore:
         if not pid:
             raise ValueError("profile id required")
         for req in _REQUIRED:
-            if not str(fields.get(req) or "").strip():
+            if not isinstance(fields.get(req), str) or not fields[req].strip():
                 raise ValueError("%s is required" % req)
+        # Values end up in an onboarding subprocess environment, which only
+        # takes strings: reject other JSON types at save time (the same
+        # typing the stage-host route enforces) rather than failing the
+        # onboard later with a TypeError.
+        if fields.get("enable_secret") is not None and \
+                not isinstance(fields.get("enable_secret"), str):
+            raise ValueError("enable_secret must be a string")
         rec = {
             "name": fields["name"],
             "device_user": fields["device_user"],

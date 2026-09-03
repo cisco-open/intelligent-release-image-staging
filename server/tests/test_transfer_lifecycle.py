@@ -354,13 +354,17 @@ def test_seeding_started_at_is_the_later_of_the_two_latches_floored_at_planned_a
              now=clock.now)
     assert late_seed.get(PLAN_A)["seeding_started_at"] == 1800.0
 
-    # Both facts predate the plan: floored at planned_at, never negative.
+    # The attesting report predates the plan: floored at planned_at, never
+    # negative. The registry row predates it too, so it is not this plan's
+    # evidence at all and the pass's own observation stands in (see
+    # seeder_facts) -- which is why the seeder fact is exactly `now` here.
     floored = _store(tmp_path, clock, name="floored")
     _observe(floored, _policy(planned_at=5000.0),
              reports=_ring(_report(received_at=1400.0)),
              snapshot=_swarm(completed_at=1200.0), images=_images(),
-             now=clock.now)
+             now=5000.0)
     row = floored.get(PLAN_A)
+    assert row["tracker_seeder_at"] == 5000.0
     assert row["seeding_started_at"] == 5000.0
     assert row["seeding_started_at"] - row["planned_at"] == 0.0
 
@@ -376,6 +380,46 @@ def test_the_seeder_fact_falls_back_from_completed_at_to_last_seen(tmp_path):
                                               last_seen=1234.0),
              images=_images(), now=clock.now)
     assert store.get(PLAN_A)["tracker_seeder_at"] == 1234.0
+
+
+def test_a_registry_row_from_the_previous_transfer_never_dates_the_new_plan(
+        tmp_path):
+    """A peer row belongs to a PEER, not to a plan.
+
+    Unassign and re-assign an image inside one agent tick and aria2 never
+    stops: the registry row survives with the PREVIOUS transfer's
+    completed_at, minted before the new plan existed. Latching it would export
+    iris.transfer.tracker_seeder_at BEFORE iris.transfer.planned_at -- the
+    tracker claiming it watched this plan seed before the plan was written --
+    and the observability page tells operators to read exactly those two
+    against each other to see which precondition was the laggard. The stale
+    instant is not this plan's evidence; the pass's own observation is.
+    """
+    clock = Clock(5000.0)
+    store = _store(tmp_path, clock)
+    stale = _swarm(completed_at=1200.0, last_seen=1205.0)
+    _observe(store, _policy(planned_at=5000.0), snapshot=stale,
+             images=_images(), now=clock.now)
+
+    row = store.get(PLAN_A)
+    assert row["tracker_seeder_at"] == 5000.0
+    assert row["tracker_seeder_at"] >= row["planned_at"]
+
+    # ... and last_seen is skipped for the same reason, not just completed_at.
+    fresh = _store(tmp_path, clock, name="last-seen")
+    _observe(fresh, _policy(planned_at=5000.0),
+             snapshot=_swarm(completed_at=None, last_seen=1205.0),
+             images=_images(), now=5100.0)
+    assert fresh.get(PLAN_A)["tracker_seeder_at"] == 5100.0
+
+    # A row whose completed_at is at or after the plan is this plan's own
+    # evidence and is latched verbatim -- the fix bounds the fact, it does not
+    # replace it with "now".
+    honest = _store(tmp_path, clock, name="honest")
+    _observe(honest, _policy(planned_at=5000.0),
+             snapshot=_swarm(completed_at=5200.0, last_seen=5205.0),
+             images=_images(), now=9000.0)
+    assert honest.get(PLAN_A)["tracker_seeder_at"] == 5200.0
 
 
 def test_the_info_hash_captured_at_mint_joins_a_plan_with_no_catalog_entry(
@@ -620,7 +664,10 @@ def test_two_plans_for_the_same_device_and_image_are_tracked_independently(
     _observe(store, _policy(), reports=_ring(_report()), snapshot=_swarm(),
              images=_images(), now=clock.now)
 
-    clock.tick()
+    # The clock advances past the re-assignment: planned_at is stamped off
+    # the same server clock, so a pass can never observe a plan minted in its
+    # own future.
+    clock.tick(1000.0)
     replan = _policy(plans=((IMAGE, PLAN_B, XFER_B),), planned_at=2000.0)
     # The device is still seeding and the OLD report is still in the ring.
     assert _observe(store, replan, reports=_ring(_report()),
@@ -632,7 +679,7 @@ def test_two_plans_for_the_same_device_and_image_are_tracked_independently(
     assert rows[PLAN_B]["planned_at"] == 2000.0
 
     # Only a report bearing the NEW transfer_id promotes the new plan.
-    clock.tick()
+    clock.tick(600.0)
     assert _observe(store, replan,
                     reports=_ring(_report(),
                                   _report(transfer_id=XFER_B,
@@ -1033,6 +1080,103 @@ def test_a_live_plan_is_never_pruned_by_retention(tmp_path):
     assert store.get(PLAN_A) == latched
     assert store.pending_emissions() == []
     assert store.stats()["plans_pruned"] == 0
+
+
+def test_prune_never_drops_a_live_plan(tmp_path):
+    """The manual hook obeys the same rule as retention and the size bound.
+
+    A `seeding` row is TERMINAL while its assignment still stands, so age
+    alone would retire a plan that is very much alive; observe() would then
+    re-open it from policy.json with an empty marker map and re-emit both
+    events, every time this is called. The guard is a correctness rule, not a
+    courtesy -- and it is selective: a row whose assignment was withdrawn
+    still goes.
+    """
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    policy = _policy(plans=((IMAGE, PLAN_A, XFER_A),
+                            (OTHER_IMAGE, PLAN_B, XFER_B)))
+    _observe(store, policy, reports=_ring(_report()), snapshot=_swarm(),
+             images=_images(), now=clock.now)
+    for plan_id, _row, event in store.outstanding_emissions():
+        assert store.mark_delivered_many(
+            [(plan_id, event, None)], now=clock.now) == [True]
+    assert store.get(PLAN_A)["state"] == "seeding"
+
+    # PLAN_B loses its assignment; PLAN_A keeps its own.
+    clock.tick()
+    live = transfer_lifecycle.live_plans_from_policy(_policy())
+    _observe(store, _policy(), now=clock.now)
+    assert store.get(PLAN_B)["state"] == "cancelled"
+
+    clock.tick(transfer_lifecycle.PLAN_RETENTION + 60.0)
+    assert store.prune(clock.now, live_plans=live) == [PLAN_B]
+    assert sorted(store.rows()) == [PLAN_A]
+    assert store.pending_emissions() == []
+
+
+def test_retiring_an_unacknowledged_event_counts_the_records_it_loses(
+        tmp_path):
+    """Retirement is keyed on `emitted`, never on `delivered` -- requiring
+    delivery would hold every row forever while a collector is down. The price
+    is that a collector outage longer than PLAN_RETENTION retires rows whose
+    records were queued and never acknowledged, and by then the 1000-slot
+    LogQueue no longer holds them: those events are gone. A bounded loss is
+    defensible; a SILENT one is not, so the store counts the records it drops
+    on the floor.
+    """
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    _observe(store, _policy(), now=clock.now)
+    assert store.mark_emitted(PLAN_A, "planned", XFER_A, now=clock.now)
+
+    clock.tick()
+    _observe(store, {}, now=clock.now)              # cancelled, never acked
+    assert store.stats()["plans_unconfirmed"] == 1
+    assert store.stats()["events_retired_undelivered"] == 0
+
+    clock.tick(transfer_lifecycle.PLAN_RETENTION + 60.0)
+    _observe(store, {}, now=clock.now)
+    assert store.get(PLAN_A) is None
+    stats = store.stats()
+    assert stats["plans_unconfirmed"] == 0          # the row is gone with it
+    assert stats["events_retired_undelivered"] == 1
+    assert stats["plans_pruned"] == 1
+
+
+def test_an_acknowledged_event_costs_nothing_when_its_row_retires(tmp_path):
+    """The counter must mean "records lost", not "rows retired". A row the
+    collector acknowledged owes nobody anything, and ageing it out is ordinary
+    housekeeping -- if that incremented too, the number could never be
+    alerted on."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    _observe(store, _policy(), now=clock.now)
+    assert store.mark_delivered_many([(PLAN_A, "planned", XFER_A)],
+                                     now=clock.now) == [True]
+
+    clock.tick()
+    _observe(store, {}, now=clock.now)
+    clock.tick(transfer_lifecycle.PLAN_RETENTION + 60.0)
+    _observe(store, {}, now=clock.now)
+
+    assert store.get(PLAN_A) is None
+    assert store.stats()["plans_pruned"] == 1
+    assert store.stats()["events_retired_undelivered"] == 0
+
+
+def test_evicting_a_live_row_is_a_replay_not_a_lost_record(tmp_path):
+    """A live row evicted by the cap is rebuilt from policy.json on the very
+    next pass and its records are re-queued under the same event.id, so its
+    unacknowledged markers cost nothing. Counting that as a loss would make
+    the number unusable exactly on the fleet that saturates the cap."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    _observe(store, _bulk_policy(transfer_lifecycle.MAX_PLANS + 2),
+             now=clock.now)
+    stats = store.stats()
+    assert stats["plans_live_evicted"] == 2
+    assert stats["events_retired_undelivered"] == 0
 
 
 def test_a_recovered_row_replays_one_instant_not_whatever_the_registry_says_now(

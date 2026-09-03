@@ -6,8 +6,9 @@
 
 """IRIS catalog: HTTPS JSON API + torrent serving. State is JSON files
 under the state dir, written atomically and re-read per request. Bearer-token
-auth on every endpoint. The server publishes images and a per-device
-install-approval flag but NEVER triggers install (spec §6). Stdlib only."""
+auth on every endpoint. The server publishes images and each device's
+staging approval (the ordered set of images it may STAGE) but NEVER triggers
+install (spec §6). Stdlib only."""
 import gzip
 import hashlib
 import io
@@ -111,7 +112,10 @@ def _atomic_write_json(path, obj):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".state-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
+            # allow_nan=False: a NaN/Infinity that slipped past ingest would
+            # otherwise be written as a bare token no browser JSON parser
+            # accepts, poisoning every reader of the file. Fail loudly here.
+            json.dump(obj, f, indent=2, sort_keys=True, allow_nan=False)
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -122,6 +126,97 @@ def _atomic_write_json(path, obj):
 
 # Global POST body cap (also applied to gzip-DECOMPRESSED bodies — bomb guard).
 MAX_BODY_BYTES = 65536
+
+# Per-connection socket inactivity timeout for the HTTP handler (seconds). A
+# client that stalls mid-request -- a partial request line, or a declared
+# Content-Length it never finishes sending -- would otherwise pin its handler
+# thread, file descriptor and stack for the life of the server, before any
+# authentication. Overridable with IRIS_HTTP_TIMEOUT; non-positive/garbage
+# falls back to the default rather than disabling the guard.
+HANDLER_TIMEOUT = 30.0
+
+
+def handler_timeout(env=None):
+    raw = (os.environ if env is None else env).get("IRIS_HTTP_TIMEOUT")
+    try:
+        value = float(raw) if raw else HANDLER_TIMEOUT
+    except (TypeError, ValueError):
+        return HANDLER_TIMEOUT
+    return value if value > 0 else HANDLER_TIMEOUT
+
+
+# Bound on how long a TLS handshake may occupy its worker thread.
+_HANDSHAKE_TIMEOUT = 30
+
+
+class _CatalogServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a fleet-sized accept backlog that completes
+    the TLS handshake in the WORKER thread.
+
+    Two stdlib defaults are wrong for a device-facing listener:
+
+    * ``request_queue_size`` is 5. Every device in the fleet contacts this
+      server on the same heartbeat cadence, so a rollout burst overflows the
+      accept queue and the kernel answers with RSTs; agents see a connection
+      reset rather than a slow answer.
+    * Wrapping the LISTENING socket makes socketserver run the whole
+      handshake inside accept() on the single serve_forever thread, so one
+      client that connects and never sends a ClientHello stalls every other
+      device. Here accept() hands back the plain socket and the wrap happens
+      per connection, bounded by _HANDSHAKE_TIMEOUT.
+
+    Same mechanism as gui_server._ConsoleServer and artifact_server._Server.
+    """
+
+    request_queue_size = 128
+    tls_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(request,
+                                                       server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's
+                # problem and nobody else's.
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)   # Handler.timeout re-arms it
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
+
+
+def _reject_constant(name):
+    # json.loads' default parse_constant ACCEPTS the non-standard NaN /
+    # Infinity / -Infinity literals; nothing downstream can serialise them
+    # for a browser, so they are a 400 at the door.
+    raise ValueError("non-finite number literal: %s" % name)
+
+
+def parse_json_body(body):
+    """json.loads for a device POST body. Refuses the NaN/Infinity literals
+    (ValueError) and maps a pathologically nested body's RecursionError to a
+    ValueError so every malformed body is a 400 rather than a dropped
+    connection. An empty body reads as {}."""
+    try:
+        return json.loads(body or b"{}", parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValueError("body too deeply nested")
+
+
+class StateFileError(RuntimeError):
+    """A state file under the state dir EXISTS but cannot be read or parsed
+    (or its top level is not a JSON object). Distinct from a missing file,
+    which is the empty store. Routes map it to 503; writers never replace
+    the file's content while it is in this state."""
 
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
                 "peers_total", "agent")
@@ -317,10 +412,10 @@ def _sanitize_report_v2(data):
     ``report_id`` is the ring dedupe key. No token/secret ever appears in a
     raised message (a report carries none, but the discipline is explicit)."""
     report_id = data.get("report_id")
-    if not isinstance(report_id, str) or not _HEX32.match(report_id):
+    if not isinstance(report_id, str) or not _HEX32.fullmatch(report_id):
         raise ValueError("bad report_id")
     transfer_id = data.get("transfer_id")
-    if not isinstance(transfer_id, str) or not _HEX32.match(transfer_id):
+    if not isinstance(transfer_id, str) or not _HEX32.fullmatch(transfer_id):
         raise ValueError("bad transfer_id")
     event = data.get("event")
     if event not in _REPORT_EVENTS:
@@ -328,7 +423,7 @@ def _sanitize_report_v2(data):
     rrid = data.get("report_request_id")
     if event == "pull":
         if rrid is not None and (not isinstance(rrid, str)
-                                 or not _HEX32.match(rrid)):
+                                 or not _HEX32.fullmatch(rrid)):
             raise ValueError("bad report_request_id")
     else:
         if rrid is not None:
@@ -339,33 +434,61 @@ def _sanitize_report_v2(data):
     if not math.isfinite(created) or created < 0:
         raise ValueError("bad report_created_at")
     image_id = data.get("image_id")
-    if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
+    if not isinstance(image_id, str) or not _IMAGE_RE.fullmatch(image_id):
         raise ValueError("bad image_id")
 
+    # ``window`` and ``content`` are optional: an agent that measured nothing
+    # (no transfer window opened, no aria2 stats in hand) may omit them or
+    # send null, and the stored report then omits the key -- not measured is
+    # never rendered as a zero-length window or zero bytes. When present the
+    # block is validated strictly, exactly as before.
     win = data.get("window")
-    if not isinstance(win, dict):
-        raise ValueError("bad window")
-    for key in ("start", "end"):
-        v = win.get(key)
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise ValueError("bad window.%s" % key)
-        if not math.isfinite(v) or v < 0:
-            raise ValueError("bad window.%s" % key)
-    if win["start"] > win["end"]:
-        raise ValueError("bad window order")
-    if not isinstance(win.get("complete"), bool):
-        raise ValueError("bad window.complete")
+    win_out = None
+    if win is not None:
+        if not isinstance(win, dict):
+            raise ValueError("bad window")
+        # ``end`` is always observed (the agent writes the report at that
+        # instant). ``start`` is per-key optional for the same reason the
+        # whole block is: an image adopted in place, or one whose started_ts
+        # was lost with a state file, has no observed opening edge, and the
+        # agent omits the key rather than collapsing it onto the end. A
+        # window with no start is stored open-ended, never as zero-length.
+        end = win.get("end")
+        if isinstance(end, bool) or not isinstance(end, (int, float)):
+            raise ValueError("bad window.end")
+        if not math.isfinite(end) or end < 0:
+            raise ValueError("bad window.end")
+        start = win.get("start")
+        if start is not None:
+            if isinstance(start, bool) or not isinstance(start, (int, float)):
+                raise ValueError("bad window.start")
+            if not math.isfinite(start) or start < 0:
+                raise ValueError("bad window.start")
+            if start > end:
+                raise ValueError("bad window order")
+        if not isinstance(win.get("complete"), bool):
+            raise ValueError("bad window.complete")
+        win_out = {"end": float(end), "complete": bool(win["complete"])}
+        if start is not None:
+            win_out["start"] = float(start)
 
     content = data.get("content")
-    if not isinstance(content, dict):
-        raise ValueError("bad content")
-    content_out = {
-        "completed_content_bytes": _bounded_report_int(
-            content.get("completed_content_bytes"), _CONTENT_CAP),
-        "total_content_bytes": _bounded_report_int(
-            content.get("total_content_bytes"), _CONTENT_CAP)}
-    if content_out["completed_content_bytes"] > content_out["total_content_bytes"]:
-        raise ValueError("completed content exceeds total")
+    content_out = None
+    # An EMPTY content block means the same thing as an absent one: the
+    # completion tick took no aria2 reading. The agent sends {} on that path
+    # (adopted image, RPC hiccup at completion), and a measured zero must
+    # stay distinguishable from an unmeasured field.
+    if content is not None and content != {}:
+        if not isinstance(content, dict):
+            raise ValueError("bad content")
+        content_out = {
+            "completed_content_bytes": _bounded_report_int(
+                content.get("completed_content_bytes"), _CONTENT_CAP),
+            "total_content_bytes": _bounded_report_int(
+                content.get("total_content_bytes"), _CONTENT_CAP)}
+        if content_out["completed_content_bytes"] \
+                > content_out["total_content_bytes"]:
+            raise ValueError("completed content exceeds total")
 
     csha = data.get("content_sha256")
     if not isinstance(csha, dict) or csha.get("state") not in \
@@ -442,23 +565,28 @@ def _sanitize_report_v2(data):
     report = {"v": 2, "schema": "v2", "report_id": report_id,
               "transfer_id": transfer_id, "report_request_id": rrid,
               "report_created_at": float(created), "image_id": image_id,
-              "event": event,
-              "window": {"start": float(win["start"]),
-                         "end": float(win["end"]),
-                         "complete": bool(win["complete"])},
-              "content": content_out, "content_sha256": content_sha256,
+              "event": event, "content_sha256": content_sha256,
               "ios_copy_verify": {"state": iocv["state"]},
               "sampling": sampling_out, "stage_state": stage_state,
               "peers": rows, "peers_total": peers_total,
               "peers_rows_dropped": peers_dropped,
               "peers_truncated": data["peers_truncated"] or peers_dropped > 0,
               "peers_saturated": data["peers_saturated"]}
+    if win_out is not None:
+        report["window"] = win_out
+    if content_out is not None:
+        report["content"] = content_out
     transfer_records = data.get("peer_transfer_records")
     if transfer_records is not None:
         # Optional and stored only when sent: an absent block means NOT
-        # MEASURED and must stay absent all the way to the reader.
+        # MEASURED and must stay absent all the way to the reader. Without a
+        # window the capture instant is bounded only by the report itself.
         report["peer_transfer_records"] = _sanitize_peer_transfer_records(
-            transfer_records, float(win["start"]), float(created))
+            transfer_records,
+            # No window, or a window with no observed start, leaves the
+            # capture instant bounded only by the report itself.
+            (win_out or {}).get("start", 0.0),
+            float(created))
     agent = data.get("agent")
     if isinstance(agent, dict):
         report["agent"] = _cap_strings(agent)
@@ -469,9 +597,13 @@ def _sanitize_report_v2(data):
 
 def _cap_strings(value):
     """Recursively cap every string in *value* (keys included) at
-    _REPORT_STR_MAX chars.  Non-container, non-string values pass through."""
+    _REPORT_STR_MAX chars.  Non-container, non-string values pass through,
+    except a non-finite float (``1e999`` parses as inf), which raises: it
+    cannot be stored or served as JSON."""
     if isinstance(value, str):
         return value[:_REPORT_STR_MAX]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite number in report")
     if isinstance(value, dict):
         return {str(k)[:_REPORT_STR_MAX]: _cap_strings(v)
                 for k, v in value.items()}
@@ -597,7 +729,8 @@ class CatalogStore:
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
-    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None):
+    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None,
+                 seeder_add_fn=None):
         self.state_dir = state_dir
         self.torrents_dir = os.path.join(state_dir, "torrents")
         os.makedirs(self.torrents_dir, exist_ok=True)
@@ -636,13 +769,30 @@ class CatalogStore:
         # be a cycle; the caller that wants the side effect injects it).
         self.audit_path = audit_path
         self._seeder_remove = seeder_remove_fn
+        # The inverse of seeder_remove_fn, for release_quarantine(): called
+        # as seeder_add_fn(torrent_path, image_dir, info_hash) to put the
+        # canonical torrent back into the seeder (publish.resume_torrent_rpc
+        # in main()). None (unwired) is a no-op, like seeder_remove_fn.
+        self._seeder_add = seeder_add_fn
 
     def _read(self, path):
+        """One state file as a dict. A MISSING file is the empty store (first
+        boot, legacy bootstrap). An EXISTING file that cannot be opened or
+        parsed, or whose top level is not an object, raises StateFileError
+        instead of reading as {}: served as empty, a corrupt policy.json is a
+        fleet-wide unassign every agent acts on, and the next set_policy
+        would replace the recoverable content with a single row."""
         try:
             with open(path) as f:
-                return json.load(f)
-        except (OSError, ValueError):
+                data = json.load(f)
+        except FileNotFoundError:
             return {}
+        except (OSError, ValueError) as exc:
+            raise StateFileError("state file unreadable: %s (%s)"
+                                 % (path, type(exc).__name__))
+        if not isinstance(data, dict):
+            raise StateFileError("state file is not a JSON object: %s" % path)
+        return data
 
     # --- images ---
     def save_image(self, entry):
@@ -718,7 +868,7 @@ class CatalogStore:
                     _atomic_write_json(path, data)
         return existed
 
-    # --- policy (install-approval gate) ---
+    # --- policy (per-device staging approval) ---
     def image_policy_lock(self):
         """Cross-process serializer for image-existence/assignment decisions.
 
@@ -852,8 +1002,9 @@ class CatalogStore:
                 for iid in ids:
                     row = prev_plans.get(iid)
                     if isinstance(row, dict) \
-                            and _HEX32.match(str(row.get("plan_id", ""))) \
-                            and _HEX32.match(str(row.get("transfer_id", ""))):
+                            and _HEX32.fullmatch(str(row.get("plan_id", ""))) \
+                            and _HEX32.fullmatch(
+                                str(row.get("transfer_id", ""))):
                         plans[iid] = row        # carry forward -- NEVER re-mint
                         continue
                     # info_hash is captured from the catalog entry set_policy
@@ -933,7 +1084,8 @@ class CatalogStore:
                 continue
             plan_id = str(row.get("plan_id", ""))
             transfer_id = str(row.get("transfer_id", ""))
-            if not _HEX32.match(plan_id) or not _HEX32.match(transfer_id):
+            if not _HEX32.fullmatch(plan_id) \
+                    or not _HEX32.fullmatch(transfer_id):
                 continue
             plans[image_id] = {"plan_id": plan_id,
                                "transfer_id": transfer_id}
@@ -984,6 +1136,33 @@ class CatalogStore:
             return True
         except Exception:   # seeder unreachable is non-fatal, but retried
             return False
+
+    def _resume_seeding(self, image_id, entry):
+        """Inverse of _stop_seeding, for release_quarantine(): hand the
+        canonical torrent back to the seeder from the directory the image
+        was published from. The quarantine force-removed it from aria2 and
+        nothing else ever re-adds a torrent (the startup re-seed skips
+        quarantined and unknown torrents on purpose), so without this a
+        released-then-assigned image has no origin seeder and every device
+        assigned it stalls at 0% with no error anywhere.
+
+        Returns (ok, reason): ok is True on success and for the not-wired
+        no-op; reason is a short, credential-free string (an exception class
+        name, never its text -- RPC/URL exceptions may carry request
+        material) when ok is False."""
+        if self._seeder_add is None:
+            return True, ""
+        image_dir = entry.get("source_dir")
+        if not isinstance(image_dir, str) or not os.path.isdir(image_dir):
+            # Never guess by basename: bt-seed-unverified would serve
+            # same-named bytes under this torrent's piece hashes.
+            return False, "image source_dir unavailable"
+        try:
+            self._seeder_add(self.torrent_path(image_id), image_dir,
+                             entry.get("info_hash_hex"))
+            return True, ""
+        except Exception as exc:
+            return False, exc.__class__.__name__
 
     def apply_hash_verification(self, verdicts, source, now=None):
         """Apply Cisco Bulk Hash reconciliation *verdicts* -- Task 1's
@@ -1312,8 +1491,24 @@ class CatalogStore:
             detail=("override: sha512 still does not match the Cisco Bulk "
                     "Hash feed" if still_mismatching else
                     "released: sha512 now matches the Cisco Bulk Hash feed"))
+        # The quarantine took the torrent out of the seeder; the release
+        # puts it back (see _resume_seeding). The release itself is already
+        # durable above -- a failed re-add is flagged in the result and
+        # audited, not hidden, so the operator knows the image has no origin
+        # seeder until it is resolved (a container restart re-seeds every
+        # catalogued, non-quarantined torrent).
+        resumed, reason = self._resume_seeding(image_id, entry)
+        if self._seeder_add is not None:
+            self._audit_event(
+                event="image_quarantine_release_seeding", category="image",
+                action="seed", target=image_id, actor=actor,
+                result="ok" if resumed else "fail",
+                detail="origin seeding resumed" if resumed else
+                       "origin seeding NOT resumed (%s): no seeder until "
+                       "fixed or the container restarts" % reason)
         return {"released": True, "override": still_mismatching,
-                "state": entry["hash_verification"]["state"]}
+                "state": entry["hash_verification"]["state"],
+                "seeding_resumed": resumed}
 
     # --- device telemetry reports (bounded ring, issue #13) ---
     def record_telemetry(self, device_id, report):
@@ -1476,13 +1671,83 @@ def _id_list(value, cap=16):
     else up to *cap* non-empty strings. cap > MAX_ASSIGNED_IMAGES so a
     misbehaving agent cannot bloat the heartbeat store unbounded.
 
-    A non-list, or a list holding anything other than strings, is rejected
+    A non-list, or a list holding anything other than image-id-shaped
+    strings (_IMAGE_RE: at most 128 chars of [A-Za-z0-9._-]), is rejected
     wholesale as None rather than silently filtered down to [] — a filtered
     [] would be indistinguishable from a real agent's "nothing staged yet",
     turning malformed input into meaningful data instead of failing closed."""
-    if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+    if not isinstance(value, list) or not all(
+            isinstance(i, str) and (not i or _IMAGE_RE.fullmatch(i))
+            for i in value):
         return None
     return [i for i in value[:cap] if i]
+
+
+# Heartbeat field whitelist (spec §6 bounds). The heartbeat is the device's
+# WHOLE stored record and is rewritten into devices.json on every tick, then
+# copied verbatim into the console's /api/devices JSON -- so every field is
+# typed and capped here. A value of the wrong type stores as None (the same
+# "absent" the console already handles for a legacy agent) rather than
+# failing the heartbeat, which would cost the device its policy poll.
+_HEARTBEAT_STR_CAPS = {"current_image_id": 128, "version": 128,
+                       "stage_state": 64, "stage_error": 1024,
+                       "target_fs": 64, "model": 128}
+_HEARTBEAT_BYTES_CAP = 2 ** 63 - 1
+
+
+def _hb_str(value, cap):
+    return value[:cap] if isinstance(value, str) else None
+
+
+def _hb_bytes(value):
+    """A non-negative, finite byte count as int, else None (bool is not a
+    count; NaN/inf never arrive -- parse_json_body refuses the literals, but
+    1e999 parses as inf and is refused here)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        value = int(value)
+    if not isinstance(value, int) or not 0 <= value <= _HEARTBEAT_BYTES_CAP:
+        return None
+    return value
+
+
+def _hb_bool(value):
+    return value if isinstance(value, bool) else None
+
+
+def sanitize_heartbeat(data, src_ip):
+    """The stored heartbeat record for one device POST body (a dict)."""
+    return {
+        "current_image_id": _hb_str(data.get("current_image_id"),
+                                    _HEARTBEAT_STR_CAPS["current_image_id"]),
+        "free_flash_bytes": _hb_bytes(data.get("free_flash_bytes")),
+        "version": _hb_str(data.get("version"), _HEARTBEAT_STR_CAPS["version"]),
+        "stage_state": _hb_str(data.get("stage_state"),
+                               _HEARTBEAT_STR_CAPS["stage_state"]),
+        "stage_error": _hb_str(data.get("stage_error"),
+                               _HEARTBEAT_STR_CAPS["stage_error"]),
+        "target_fs": _hb_str(data.get("target_fs"),
+                             _HEARTBEAT_STR_CAPS["target_fs"]),
+        "model": _hb_str(data.get("model"), _HEARTBEAT_STR_CAPS["model"]),
+        "telemetry_enabled": _hb_bool(data.get("telemetry_enabled")),
+        "telemetry_stream_enabled": _hb_bool(
+            data.get("telemetry_stream_enabled")),
+        # Multi-image staging state (issue: multi-image assignment).
+        # Sanitised via _id_list: absence/malformed input stores None
+        # (a legacy or misbehaving agent), never an invented [] --
+        # the console's fallback logic keys off staged_image_ids
+        # being None to fall back to the singular stage_state/
+        # current_image_id pair.
+        "staged_image_ids": _id_list(data.get("staged_image_ids")),
+        "errored_image_ids": _id_list(data.get("errored_image_ids")),
+        # The heartbeat's source IP is the agent's Guest Shell IP — the
+        # SAME IP it announces to the tracker with — so the swarm map can
+        # join this device's model onto its swarm peer by IP.
+        "swarm_ip": src_ip,
+    }
 
 
 def _device_image_view(entry):
@@ -1573,7 +1838,26 @@ class Catalog:
             canonical = f.read()
         return torrent_personalize.personalize(canonical, announce_url)
 
+    _STATE_UNAVAILABLE = (503, {"error": "state unavailable"})
+
     def route_get(self, path, auth_ctx=None, store_dict=None):
+        try:
+            return self._route_get(path, auth_ctx=auth_ctx,
+                                   store_dict=store_dict)
+        except StateFileError:
+            # An existing state file that cannot be read: refuse the request
+            # rather than serve an empty (fleet-wide unassign) answer.
+            return self._json(*self._STATE_UNAVAILABLE)
+
+    def route_post(self, path, body, src_ip=None, store=None, index=None,
+                   token=None):
+        try:
+            return self._route_post(path, body, src_ip=src_ip, store=store,
+                                    index=index, token=token)
+        except StateFileError:
+            return self._json(*self._STATE_UNAVAILABLE)
+
+    def _route_get(self, path, auth_ctx=None, store_dict=None):
         parts = path.strip("/").split("/")
         if parts == ["v1", "images"]:
             return self._json(200, {"images": [
@@ -1654,38 +1938,19 @@ class Catalog:
         except OSError:
             return self._json(404, {"error": "no such torrent"})
 
-    def route_post(self, path, body, src_ip=None, store=None, index=None,
-                   token=None):
+    def _route_post(self, path, body, src_ip=None, store=None, index=None,
+                    token=None):
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "heartbeat":
             try:
-                data = json.loads(body or b"{}")
+                data = parse_json_body(body)
             except ValueError:
                 return self._json(400, {"error": "bad json"})
-            self.store.record_heartbeat(parts[2], {
-                "current_image_id": data.get("current_image_id"),
-                "free_flash_bytes": data.get("free_flash_bytes"),
-                "version": data.get("version"),
-                "stage_state": data.get("stage_state"),
-                "stage_error": data.get("stage_error"),
-                "target_fs": data.get("target_fs"),
-                "model": data.get("model"),
-                "telemetry_enabled": data.get("telemetry_enabled"),
-                "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
-                # Multi-image staging state (issue: multi-image assignment).
-                # Sanitised via _id_list: absence/malformed input stores None
-                # (a legacy or misbehaving agent), never an invented [] --
-                # the console's fallback logic keys off staged_image_ids
-                # being None to fall back to the singular stage_state/
-                # current_image_id pair.
-                "staged_image_ids": _id_list(data.get("staged_image_ids")),
-                "errored_image_ids": _id_list(data.get("errored_image_ids")),
-                # The heartbeat's source IP is the agent's Guest Shell IP — the
-                # SAME IP it announces to the tracker with — so the swarm map can
-                # join this device's model onto its swarm peer by IP.
-                "swarm_ip": src_ip,
-            })
+            if not isinstance(data, dict):
+                return self._json(400, {"error": "bad json"})
+            self.store.record_heartbeat(
+                parts[2], sanitize_heartbeat(data, src_ip))
             # Live telemetry (spec §3/§10.1): a v2 `telemetry_observation`
             # envelope supersedes the legacy v1 `sample` on v2 agents; a bad
             # envelope/sample NEVER fails the heartbeat — reject-and-count.
@@ -1762,7 +2027,7 @@ class Catalog:
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "telemetry":
             try:
-                data = json.loads(body or b"{}")
+                data = parse_json_body(body)
             except ValueError:
                 return self._json(400, {"error": "bad json"})
             try:
@@ -1938,7 +2203,8 @@ class Catalog:
 
     @staticmethod
     def _json(status, obj):
-        return (status, "application/json", json.dumps(obj).encode())
+        return (status, "application/json",
+                json.dumps(obj, allow_nan=False).encode())
 
 
 def make_server(host, port, store, secrets_path, certfile=None,
@@ -1952,6 +2218,12 @@ def make_server(host, port, store, secrets_path, certfile=None,
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 
     class Handler(BaseHTTPRequestHandler):
+        # Socket inactivity timeout: StreamRequestHandler.setup applies it
+        # with settimeout, so a stalled readline/read raises TimeoutError and
+        # handle_one_request closes the connection instead of pinning the
+        # thread forever (IRIS-02-003).
+        timeout = handler_timeout()
+
         def _guard(self, parts, token):
             """Route-aware guard.
 
@@ -2076,6 +2348,16 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 self._send((401, "application/json",
                             json.dumps({"error": "unauthorized"}).encode()))
                 return
+            # A chunked (or otherwise length-less) POST is refused rather than
+            # read as an empty body: on the heartbeat route an empty body IS
+            # the device's whole stored record, so silently accepting one
+            # would blank every field the console relies on.
+            if self.headers.get("Transfer-Encoding") \
+                    or self.headers.get("Content-Length") is None:
+                self._send((411, "application/json",
+                            json.dumps({"error": "content-length required"}
+                                       ).encode()))
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
@@ -2118,11 +2400,13 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def log_message(self, *args):
             pass
 
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = _CatalogServer((host, port), Handler)
     if certfile:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        # Handshake per connection in the worker thread, NOT by wrapping the
+        # listening socket: see _CatalogServer.
+        srv.tls_context = ctx
     return srv
 
 

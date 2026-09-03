@@ -23,6 +23,7 @@ setup() {
   STDIN_LOG="$BATS_TEST_TMPDIR/stdin.log"; : > "$STDIN_LOG"
   export ARGV_LOG SLEEP_LOG STDIN_LOG
   export TMPDIR="$BATS_TEST_TMPDIR"
+  export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
   export DEVICE_USER=admin DEVICE_PASS=zzsecretzz
 
   # Fake sshpass: logs the argv it was invoked with, captures whatever

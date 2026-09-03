@@ -61,12 +61,18 @@ can be undeployed — they are never inferred as inband.
 ### Credentials are not in the CSV
 
 The v2 inventory carries network information only. There is no
-`credential_profile_id` column, so an imported device has no credential profile
-and cannot be onboarded until one is assigned. That assignment is a Console
-step: open **Devices**, check the imported rows, pick a profile in the
+`credential_profile_id` column, so a newly imported device has no credential
+profile and cannot be onboarded until one is assigned. That assignment is a
+Console step: open **Devices**, check the imported rows, pick a profile in the
 *credential for selected* dropdown, and press **Apply**. Creating a credential
 profile re-renders the device rows immediately, so devices imported before the
 profile existed become assignable without waiting for the next poll.
+
+The assignment survives the export → edit → re-import round trip: a re-import
+replaces a device's network fields from the CSV but keeps the credential
+profile (and the machine-determined `os_family` and registration stamp) already
+stored for that device. A CSV that lists the same `device_id` twice is rejected
+as a whole, naming both rows, rather than silently keeping the last one.
 
 Keep operator passwords out of `fleet/devices.csv` even as a convenience — the
 credential profile lives in the server's secret store, and the CSV is a
@@ -111,8 +117,14 @@ a deployment record or run preflight before minting an enrollment token:
 
 ```bash
 # legacy routed inventory only (old positional columns)
-tools/gen-device-installers.sh fleet/devices.csv
+tools/gen-device-installers.sh path/to/legacy-routed.csv
 ```
+
+There is deliberately **no template** for that format: it takes the old
+positional columns
+`device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip`, and it exists for sites
+that still hold such a file. `fleet/devices.csv.example` is CSV v2 and the
+generator refuses it — a new deployment uses the console.
 
 The generator asks the running server for a short-lived enrollment token per device. The token is enough for first contact, then the agent promotes it through the catalog token-refresh path.
 

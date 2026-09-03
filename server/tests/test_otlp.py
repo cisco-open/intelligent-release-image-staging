@@ -1151,3 +1151,50 @@ def test_existing_report_record_attributes_are_unchanged_by_the_lifecycle_additi
     v2 = otlp.build_report_record(_v2_report(), "iris8kv-1")
     assert v2["timeUnixNano"] == str(int(1755743200.0 * 1e9))   # received_at
     assert _attrs(v2)["iris.telemetry.schema.version"] == {"intValue": "2"}
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-002: sampled (evictable) records never evict durable-intent ones
+# ---------------------------------------------------------------------------
+
+def test_evictable_records_are_dropped_before_durable_ones():
+    q = otlp.LogQueue(max_queue=3)
+    assert q.emit({"n": "lifecycle-1"}) is True
+    assert q.emit({"n": "sample-1"}, evictable=True) is True
+    assert q.emit({"n": "sample-2"}, evictable=True) is True
+    # Full. A durable record evicts the OLDEST SAMPLED one, not lifecycle-1.
+    assert q.emit({"n": "lifecycle-2"}) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-1", "sample-2",
+                                              "lifecycle-2"]
+    # A sampled record likewise evicts a sampled one first.
+    assert q.emit({"n": "sample-3"}, evictable=True) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-1", "lifecycle-2",
+                                              "sample-3"]
+    # Nothing evictable left after this: only then does the oldest go.
+    assert q.emit({"n": "lifecycle-3"}) is True
+    assert q.emit({"n": "lifecycle-4"}) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-2", "lifecycle-3",
+                                              "lifecycle-4"]
+    assert q.dropped_total == 4
+
+
+def test_flush_after_mid_batch_eviction_removes_all_sent_events():
+    """An in-flight batch can lose an evictable record from its MIDDLE (not
+    only its head). After a successful send every retained sent event must
+    leave the queue and later emits stay queued in order."""
+    q = otlp.LogQueue(max_queue=4)
+    q.emit({"n": "a"})
+    q.emit({"n": "s"}, evictable=True)
+    q.emit({"n": "b"})
+    seen = []
+
+    def send(batch):
+        seen.append([e["n"] for e in batch])
+        q.emit({"n": "c"})                 # concurrent emits during send
+        q.emit({"n": "d"})                 # -> queue full, evicts "s"
+        q.emit({"n": "e"})                 # -> nothing evictable: drops "a"
+    assert q.flush(send) == 3
+    assert seen == [["a", "s", "b"]]
+    assert [e["n"] for e in q.snapshot()] == ["c", "d", "e"]
+    # "s" and "a" were delivered, not lost: their provisional drops undone.
+    assert q.dropped_total == 0

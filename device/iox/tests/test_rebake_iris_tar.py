@@ -267,3 +267,271 @@ def test_metadata_sizes_updated(tmp_path):
     rootfs = tarfile.open(fileobj=io.BytesIO(art), mode="r:gz").extractfile("rootfs.tar").read()
     assert meta["compressedArtifactsSizeInBytes"] == str(len(art))
     assert meta["uncompressedArtifactsSizeInBytes"] == str(len(rootfs))
+
+
+# ---------------------------------------------------------------------------
+# CLASSIC docker-archive layout -- what build.sh has exported via `skopeo copy
+# docker-archive:` since 2026-08-20 (manifest.json + plain layer tars, NO
+# index.json; the only layout IE3x00 CAF's legacy dockerd can load). The
+# OCI fixture above encoded the OLD `ioxclient docker package` layout only,
+# so rebake raised KeyError('index.json') on every current package
+# (review finding IRIS-12-003).
+# ---------------------------------------------------------------------------
+
+def _classic_package(tmp_path, legacy_dirs=False, probe_member=True):
+    """Build a miniature package laid out the way build.sh lays them out.
+
+    legacy_dirs=False: skopeo style -- `<digest>.tar` layer files, plus the
+    legacy `<id>/{VERSION,json,layer.tar}` triple where layer.tar is a
+    symlink to ../<digest>.tar. legacy_dirs=True: docker-save style --
+    `<id>/layer.tar` regular files named in manifest.json directly.
+    probe_member: include build.sh's top-level iris-catalog.pem probe member
+    (and package.yaml) in artifacts.tar.gz, as `ioxclient package .` does."""
+    cert = b"-----BEGIN CERTIFICATE-----\nOLD\n-----END CERTIFICATE-----\n"
+    agent = b"OLD_AGENT_CODE = 1\n"
+    layer1 = _tar_bytes([("opt/iris/iris-catalog.pem", cert),
+                         ("opt/iris/agent/iris_agent.py", agent)])
+    layer2 = _tar_bytes([("etc/other.conf", b"untouched\n")])
+    d1, d2 = _sha(layer1), _sha(layer2)
+    id1, id2 = _sha(b"legacy-" + d1.encode()), _sha(b"legacy-" + d2.encode())
+    config = json.dumps({"architecture": "arm64",
+                         "rootfs": {"type": "layers",
+                                    "diff_ids": ["sha256:" + d1, "sha256:" + d2]}}).encode()
+    dc = _sha(config)
+    if legacy_dirs:
+        layer_paths = [id1 + "/layer.tar", id2 + "/layer.tar"]
+    else:
+        layer_paths = [d1 + ".tar", d2 + ".tar"]
+    mjson = json.dumps([{"Config": dc + ".json",
+                         "RepoTags": ["iris-iox:arm64"],
+                         "Layers": layer_paths}]).encode()
+    repos = json.dumps({"iris-iox": {"arm64": id2}}).encode()
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        def add(name, data):
+            ti = tarfile.TarInfo(name); ti.size = len(data); ti.mtime = 1700000000
+            t.addfile(ti, io.BytesIO(data))
+
+        def link(name, target):
+            ti = tarfile.TarInfo(name); ti.type = tarfile.SYMTYPE
+            ti.linkname = target; ti.mtime = 1700000000
+            t.addfile(ti)
+        add("manifest.json", mjson)
+        add("repositories", repos)
+        add(dc + ".json", config)
+        for lid, dig, blob, parent in ((id1, d1, layer1, ""), (id2, d2, layer2, id1)):
+            meta = {"id": lid}
+            if parent:
+                meta["parent"] = parent
+            add(lid + "/VERSION", b"1.0")
+            add(lid + "/json", json.dumps(meta).encode())
+            if legacy_dirs:
+                add(lid + "/layer.tar", blob)
+            else:
+                add(dig + ".tar", blob)
+                link(lid + "/layer.tar", "../" + dig + ".tar")
+    rootfs = buf.getvalue()
+
+    pkg_yaml = b"descriptor-schema-version: '2.8'\napp:\n  cpuarch: aarch64\n"
+    art_members = [("package.yaml", pkg_yaml), ("rootfs.tar", rootfs)]
+    if probe_member:
+        art_members.append(("iris-catalog.pem", cert))
+    art_gz = _tar_bytes(art_members, gz=True)
+    art_mf = ("".join("SHA256(%s)= %s\n" % (n, _sha(b)) for n, b in art_members)).encode()
+    uncompressed = sum(len(b) for _, b in art_members)
+    meta_inner = json.dumps({"packageInfo": {
+        "compressedArtifactsSizeInBytes": str(len(art_gz)),
+        "uncompressedArtifactsSizeInBytes": str(uncompressed),
+        "compressedArtifactsSizeInMB": "0.0",
+        "uncompressedArtifactsSizeInMB": "0.0",
+        "ioxclientVersion": "1.18.0.0"}}).encode()
+
+    def mf(pairs):
+        return ("".join("SHA256(%s)= %s\n" % (n, _sha(b)) for n, b in pairs)).encode()
+
+    mf_inner = mf([(".package.metadata", meta_inner), ("artifacts.mf", art_mf),
+                   ("artifacts.tar.gz", art_gz), ("package.yaml", pkg_yaml)])
+    envelope = _tar_bytes([("package.yaml", pkg_yaml), ("package.mf", mf_inner),
+                           (".package.metadata", meta_inner),
+                           ("artifacts.mf", art_mf),
+                           ("artifacts.tar.gz", art_gz)], gz=True)
+    mf_outer = mf([(".package.metadata", meta_inner), ("artifacts.mf", art_mf),
+                   ("artifacts.tar.gz", art_gz),
+                   ("envelope_package.tar.gz", envelope),
+                   ("package.yaml", pkg_yaml)])
+    pkg = tmp_path / "iris-arm64.tar"
+    with tarfile.open(pkg, "w") as t:
+        for name, data in [("package.yaml", pkg_yaml), ("artifacts.mf", art_mf),
+                           (".package.metadata", meta_inner),
+                           ("package.mf", mf_outer),
+                           ("envelope_package.tar.gz", envelope),
+                           ("artifacts.tar.gz", art_gz)]:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+    return pkg
+
+
+def _verify_classic_chain(pkg_path):
+    """Self-consistency of a classic-layout package: SHA256 manifests match,
+    manifest.json's Config/Layers name real members, every layer's sha256 is
+    the config's diff_id for that slot, legacy symlinks resolve, and the
+    probe member (when present) equals the baked cert. Returns
+    (rootfs member map, artifacts member map)."""
+    with tarfile.open(pkg_path) as t:
+        outer = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
+    for line in outer["package.mf"].decode().strip().splitlines():
+        name = line[len("SHA256("):line.index(")")]
+        assert _sha(outer[name]) == line.split("= ")[1], "outer mf mismatch for %s" % name
+    with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"]), mode="r:gz") as t:
+        env = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
+    for line in env["package.mf"].decode().strip().splitlines():
+        name = line[len("SHA256("):line.index(")")]
+        assert _sha(env[name]) == line.split("= ")[1], "inner mf mismatch for %s" % name
+    assert env["artifacts.tar.gz"] == outer["artifacts.tar.gz"]
+    with tarfile.open(fileobj=io.BytesIO(outer["artifacts.tar.gz"]), mode="r:gz") as t:
+        art = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
+    for line in outer["artifacts.mf"].decode().strip().splitlines():
+        name = line[len("SHA256("):line.index(")")]
+        assert _sha(art[name]) == line.split("= ")[1], "artifacts.mf mismatch for %s" % name
+    rootfs = art["rootfs.tar"]
+    with tarfile.open(fileobj=io.BytesIO(rootfs)) as t:
+        rf = {m.name: (t.extractfile(m).read() if m.isfile() else m.linkname) for m in t}
+        links = {m.name: m.linkname for m in t if m.issym()}
+    assert "index.json" not in rf
+    mj = json.loads(rf["manifest.json"])[0]
+    config = rf[mj["Config"]]
+    assert mj["Config"] == _sha(config) + ".json"
+    diffs = json.loads(config)["rootfs"]["diff_ids"]
+    assert len(diffs) == len(mj["Layers"])
+    for i, path in enumerate(mj["Layers"]):
+        blob = rf[path]
+        assert diffs[i] == "sha256:" + _sha(blob), "diff_id mismatch layer %d" % i
+        if path.endswith(".tar") and "/" not in path:
+            assert path == _sha(blob) + ".tar"
+    for name, target in links.items():
+        resolved = name.rsplit("/", 1)[0] + "/" + target
+        parts = []
+        for p in resolved.split("/"):
+            if p == "..":
+                parts.pop()
+            else:
+                parts.append(p)
+        assert "/".join(parts) in rf, "dangling legacy symlink %s -> %s" % (name, target)
+    if "iris-catalog.pem" in art:
+        baked = None
+        for path in mj["Layers"]:
+            with tarfile.open(fileobj=io.BytesIO(rf[path])) as t:
+                for m in t:
+                    if m.name == "opt/iris/iris-catalog.pem":
+                        baked = t.extractfile(m).read()
+        assert baked == art["iris-catalog.pem"], "probe member drifted from the baked cert"
+    meta = json.loads(outer[".package.metadata"])["packageInfo"]
+    assert meta["compressedArtifactsSizeInBytes"] == str(len(outer["artifacts.tar.gz"]))
+    assert meta["uncompressedArtifactsSizeInBytes"] == str(sum(len(b) for b in art.values()))
+    return rf, art
+
+
+def _baked(rf, path):
+    mj = json.loads(rf["manifest.json"])[0]
+    for lp in mj["Layers"]:
+        with tarfile.open(fileobj=io.BytesIO(rf[lp])) as t:
+            for m in t:
+                if m.name == path:
+                    return t.extractfile(m).read()
+    return None
+
+
+@pytest.mark.parametrize("legacy_dirs", [False, True])
+def test_classic_fixture_is_self_consistent(tmp_path, legacy_dirs):
+    _verify_classic_chain(_classic_package(tmp_path, legacy_dirs=legacy_dirs))
+
+
+@pytest.mark.parametrize("legacy_dirs", [False, True])
+def test_rebake_classic_layout_replaces_files_and_keeps_chain_valid(tmp_path, legacy_dirs):
+    pkg = _classic_package(tmp_path, legacy_dirs=legacy_dirs)
+    out = tmp_path / "out.tar"
+    new_cert = tmp_path / "new.pem"
+    new_cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nNEW\n-----END CERTIFICATE-----\n")
+    new_agent = tmp_path / "iris_agent.py"; new_agent.write_bytes(b"NEW_AGENT = 2\n")
+    summary = rb.rebake(str(pkg), str(out),
+                        {"opt/iris/iris-catalog.pem": str(new_cert),
+                         "opt/iris/agent/iris_agent.py": str(new_agent)})
+    rf, art = _verify_classic_chain(out)
+    assert _baked(rf, "opt/iris/iris-catalog.pem") == new_cert.read_bytes()
+    assert _baked(rf, "opt/iris/agent/iris_agent.py") == b"NEW_AGENT = 2\n"
+    assert set(summary["replaced"]) == {"opt/iris/iris-catalog.pem",
+                                        "opt/iris/agent/iris_agent.py"}
+    # the untouched layer keeps its digest-named member byte for byte
+    rf_in, _ = _verify_classic_chain(pkg)
+    untouched = [n for n, b in rf_in.items()
+                 if isinstance(b, bytes) and b"untouched" in b]
+    assert untouched and all(rf.get(n) == rf_in[n] for n in untouched)
+
+
+def test_rebake_classic_replaces_the_probe_member_too(tmp_path):
+    # build.sh re-adds a top-level iris-catalog.pem to artifacts.tar.gz for
+    # the freshness readers; a rebake that left it carrying the OLD cert
+    # would make those readers report a rotation that already happened.
+    pkg = _classic_package(tmp_path)
+    out = tmp_path / "out.tar"
+    new_cert = tmp_path / "new.pem"
+    new_cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nNEW\n-----END CERTIFICATE-----\n")
+    rb.rebake(str(pkg), str(out), {"opt/iris/iris-catalog.pem": str(new_cert)})
+    _, art = _verify_classic_chain(out)
+    assert art["iris-catalog.pem"] == new_cert.read_bytes()
+    assert art["package.yaml"].startswith(b"descriptor-schema-version")
+    # member order of artifacts.tar.gz is preserved
+    with tarfile.open(fileobj=io.BytesIO(_read_member(pkg, "artifacts.tar.gz")), mode="r:gz") as t:
+        order_in = [m.name for m in t]
+    with tarfile.open(fileobj=io.BytesIO(_read_member(out, "artifacts.tar.gz")), mode="r:gz") as t:
+        order_out = [m.name for m in t]
+    assert order_in == order_out
+
+
+def test_rebake_classic_without_probe_member_still_works(tmp_path):
+    # packages built between the 2026-09-02 slimming and the probe member's
+    # restoration carry only package.yaml + rootfs.tar
+    pkg = _classic_package(tmp_path, probe_member=False)
+    out = tmp_path / "out.tar"
+    new_cert = tmp_path / "new.pem"
+    new_cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nNEW\n-----END CERTIFICATE-----\n")
+    summary = rb.rebake(str(pkg), str(out), {"opt/iris/iris-catalog.pem": str(new_cert)})
+    rf, art = _verify_classic_chain(out)
+    assert "iris-catalog.pem" not in art
+    assert _baked(rf, "opt/iris/iris-catalog.pem") == new_cert.read_bytes()
+    assert summary["replaced"] == ["opt/iris/iris-catalog.pem"]
+
+
+def test_rebake_classic_probe_member_alone_does_not_satisfy_a_replacement(tmp_path):
+    pkg = _classic_package(tmp_path)
+    ghost = tmp_path / "ghost.pem"; ghost.write_bytes(b"x")
+    with pytest.raises(rb.RebakeError, match="not found in any layer"):
+        rb.rebake(str(pkg), str(tmp_path / "out.tar"),
+                  {"opt/elsewhere/iris-catalog.pem": str(ghost)})
+
+
+def test_rebake_rejects_a_rootfs_with_neither_layout(tmp_path):
+    pkg = _classic_package(tmp_path)
+    # strip manifest.json out of rootfs.tar
+    with tarfile.open(pkg) as t:
+        outer = [(m, t.extractfile(m).read()) for m in t if m.isfile()]
+    with tarfile.open(fileobj=io.BytesIO(dict((m.name, b) for m, b in outer)["artifacts.tar.gz"]), mode="r:gz") as t:
+        art = [(m, t.extractfile(m).read() if m.isfile() else None) for m in t]
+    rootfs = dict((m.name, b) for m, b in art)["rootfs.tar"]
+    with tarfile.open(fileobj=io.BytesIO(rootfs)) as t:
+        stripped = [(m, t.extractfile(m).read() if m.isfile() else None)
+                    for m in t if m.name != "manifest.json"]
+    new_rootfs = rb._write_tar(stripped)
+    new_art = rb._write_tar([(m, new_rootfs if m.name == "rootfs.tar" else b) for m, b in art])
+    bad = tmp_path / "bad.tar"
+    with tarfile.open(bad, "w") as t:
+        for m, b in outer:
+            if m.name == "artifacts.tar.gz":
+                b = gzip.compress(new_art, mtime=0)
+            m.size = len(b)
+            t.addfile(m, io.BytesIO(b))
+    new_cert = tmp_path / "new.pem"; new_cert.write_bytes(b"NEW\n")
+    with pytest.raises(rb.RebakeError, match="neither a classic docker-archive"):
+        rb.rebake(str(bad), str(tmp_path / "out.tar"), {"opt/iris/iris-catalog.pem": str(new_cert)})

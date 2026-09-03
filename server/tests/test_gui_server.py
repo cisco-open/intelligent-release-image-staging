@@ -623,7 +623,11 @@ def test_login_sets_cookie_and_returns_csrf(tmp_path):
         assert "iris_sid=" in headers.get("Set-Cookie", "")
         assert "HttpOnly" in headers["Set-Cookie"]
         assert "SameSite=Strict" in headers["Set-Cookie"]
-        assert "Secure" in headers["Set-Cookie"]
+        # Rewritten (IRIS-06-003): this fixture serves plain HTTP, and a
+        # Secure cookie set over http:// is discarded by every browser except
+        # on localhost -- the old assertion encoded a login loop. Secure is
+        # asserted over TLS in test_login_cookie_is_secure_over_tls.
+        assert "Secure" not in headers["Set-Cookie"]
         assert "Path=/" in headers["Set-Cookie"]
         assert json.loads(body)["csrf"]
     finally:
@@ -767,6 +771,16 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
     env["IRIS_IMAGES_DIR"] = str(tmp_path / "images")
     env["IRIS_CERT"] = "/nonexistent-so-plain-http"
     env["IRIS_GUI_CERT"] = "/nonexistent-so-plain-http-too"
+    # With no usable certificate main() now fails CLOSED (IRIS-06-003):
+    # exit 2 with a message naming the opt-in, and nothing listening.
+    env.pop("IRIS_GUI_ALLOW_PLAINTEXT", None)
+    refused = subprocess.run([sys.executable, "gui_server.py"], cwd=_SERVER_DIR,
+                             env=env, capture_output=True, timeout=30)
+    assert refused.returncode == 2
+    assert b"IRIS_GUI_ALLOW_PLAINTEXT=1" in refused.stderr
+    assert not _wait_for_port(host, port, timeout=0.5)
+    # The explicit opt-in is what this plain-HTTP harness needs.
+    env["IRIS_GUI_ALLOW_PLAINTEXT"] = "1"
 
     proc = subprocess.Popen(
         [sys.executable, "gui_server.py"],
@@ -1241,6 +1255,32 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         assert st == 200
         assert json.loads(_req(host, port, "GET", "/api/devices",
                                headers={"Cookie": ck})[2])["devices"] == []
+    finally:
+        stop()
+
+
+def test_device_upsert_ignores_machine_determined_fields(tmp_path):
+    """os_family is classified from the device's own banner and registered_at
+    is the store's own stamp; a client body carrying either used to be
+    merged as-is (a wrong os_family wedged planning until hand-corrected)."""
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "model": "C9300", "os_family": "xr",
+                         "registered_at": 7}, headers=hh)
+        assert st == 200
+        saved = json.loads(b)["device"]
+        assert "os_family" not in saved
+        assert saved["registered_at"] != 7
+        # a cached classification survives an edit that tries to change it
+        fleet.upsert({"device_id": "d1", "os_family": "xe"})
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "os_family": "xr"}, headers=hh)
+        assert st == 200
+        assert json.loads(b)["device"]["os_family"] == "xe"
     finally:
         stop()
 
@@ -2256,7 +2296,9 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
 
         t = threading.Thread(target=read_all, daemon=True)
         t.start()
-        time.sleep(2.5)                       # 2.5x the idle cap, still queued
+        # 2.75 s: deliberately OFF-PHASE with the handler's 0.5 s poll (2.5 s
+        # landed release.set() exactly on a poll tick, IRIS-06-005).
+        time.sleep(2.75)                      # >2x the idle cap, still queued
         assert not done_reading.is_set()      # queue wait didn't close it
         assert b": keepalive" in b"".join(chunks)
         release.set()
@@ -2892,6 +2934,118 @@ def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
         assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
         assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
         assert ran[-1]["ROUTER_RESOURCES_OWNED"] == "1"
+    finally:
+        stop()
+
+
+def _serve_nonrouter(tmp_path, run_fn, device):
+    """Record-backed server for a Guest Shell or IOx device, handing back the
+    fleet and record store so a test can edit the inventory and read the
+    record the way the router variant above does."""
+    import deployment_records
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert(device)
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    record_store = deployment_records.DeploymentRecordStore(state)
+    art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
+    for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
+        open(os.path.join(art, pkg), "w").close()
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=run_fn, record_store=record_store, artifacts_dir=art,
+        probe_fn=lambda dev, env: "C9300",
+        guestshell_preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "FOC0000GS",
+            "detected_model": "C9300-48P"},
+        iox_preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "FCW0000IOX",
+            "detected_model": "IE-3400"})
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, record_store=record_store)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, fleet, record_store, srv.shutdown
+
+
+_GS_ROW = {"device_id": "edge", "device_ip": "192.0.2.10",
+           "management_type": "inband", "inband_vlan": "120",
+           "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+           "app_gateway": "192.0.2.1", "model": "C9300",
+           "platform": "guestshell", "credential_profile_id": "lab"}
+_IOX_ROW = dict(_GS_ROW, device_id="ie1", model="IE-3400", platform="iox")
+
+
+@pytest.mark.parametrize("device, identity", [(_GS_ROW, "FOC0000GS"),
+                                              (_IOX_ROW, "FCW0000IOX")])
+def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
+        tmp_path, device, identity):
+    """The router path was hardened against a post-deploy inventory edit
+    retargeting its teardown, and the route's comment claimed the guarantee
+    for every undeploy -- but Guest Shell and IOx records were written with
+    preflight 'not-required' and no identity, and their teardown took
+    DEVICE_IP from the live fleet row. The recorded teardown could then
+    remove an operator VLAN/SVI and IRIS-named config from whatever box
+    answered at the edited address, with an empty EXPECTED_DEVICE_IDENTITY."""
+    ran = []
+    did = device["device_id"]
+    host, port, fleet, record_store, stop = _serve_nonrouter(
+        tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1], device)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        _, _, body = _req(host, port, "POST", "/api/devices/%s/onboard" % did,
+                          {}, headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
+        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+        record = record_store.active_for_device(did)
+        # the record now carries the evidence of the check that ran
+        assert record["preflight"]["status"] == "passed"
+        assert record["preflight"]["device_identity"] == identity
+        assert record["resolved"]["device_identity"] == identity
+        assert record["resolved"]["device_ip"] == "192.0.2.10"
+
+        fleet.upsert({"device_id": did, "device_ip": "203.0.113.99"})
+        _, _, body = _req(host, port, "POST", "/api/devices/%s/undeploy" % did,
+                          {}, headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        assert ran[-1]["DEVICE_IP"] == "192.0.2.10", "teardown followed the edited row"
+        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+        assert ran[-1]["MANAGEMENT_TYPE"] == "inband"
+        assert record_store.get(record["record_id"])["state"] == "removed"
+    finally:
+        stop()
+
+
+def test_nonrouter_onboard_record_starts_pending_not_not_required(tmp_path):
+    """The planned record's preflight is 'pending' for every platform now;
+    'not-required' misdescribed a check that runs in the worker pool."""
+    gate = threading.Event()
+    host, port, _fleet, record_store, stop = _serve_nonrouter(
+        tmp_path, lambda path, env, on: (gate.wait(5), 0)[1], _GS_ROW)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        _, _, body = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                          headers=headers)
+        jid = json.loads(body)["job_id"]
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            states = [r["state"] for r in record_store.list("edge")]
+            if states == ["applying"]:
+                break
+            time.sleep(0.01)
+        (record,) = record_store.list("edge")
+        assert record["state"] == "applying"
+        assert record["preflight"]["status"] == "passed"     # already bound
+        gate.set()
+        assert _wait_onboard_job(host, port, cookie, jid)["state"] == "done"
     finally:
         stop()
 
@@ -5376,11 +5530,15 @@ def test_make_server_falls_back_to_iris_cert_when_gui_cert_is_corrupt(
         srv.shutdown()
 
 
-def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
+def test_make_server_refuses_plaintext_when_all_candidates_corrupt(
         tmp_path, monkeypatch):
-    """Both the gui-cert override and IRIS_CERT are unusable at startup --
-    make_server must still not crash; it serves plain HTTP (no tls_ctx),
-    same as the certfile=None path, rather than taking the process down."""
+    """Rewritten (IRIS-06-003 / IRIS-01-004): both the gui-cert override and
+    IRIS_CERT are unusable at startup. The old contract silently served
+    plain HTTP -- accepting the admin password in cleartext and then unable
+    to keep a session in any remote browser (Secure cookie over http://).
+    Now make_server fails CLOSED with ConsoleTLSError unless
+    IRIS_GUI_ALLOW_PLAINTEXT=1 opts in explicitly; with the opt-in it serves
+    plain HTTP as before (no tls context, reload_tls a safe no-op)."""
     builtin = tmp_path / "cert.pem"
     builtin.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
                        "-----END CERTIFICATE-----\n")
@@ -5389,9 +5547,14 @@ def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
                    "-----END CERTIFICATE-----\n")
     monkeypatch.setenv("IRIS_CERT", str(builtin))
     monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    monkeypatch.delenv("IRIS_GUI_ALLOW_PLAINTEXT", raising=False)
     certfile = gui_server._resolve_certfile()  # picks the corrupt override
     assert certfile == str(gui)
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    with pytest.raises(gui_server.ConsoleTLSError) as ei:
+        gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    assert "IRIS_GUI_ALLOW_PLAINTEXT=1" in str(ei.value)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
     try:
         assert srv.reload_tls() is False  # no live TLS context to hot-swap
@@ -5480,6 +5643,10 @@ def test_settings_gui_cert_roundtrip(tmp_path, monkeypatch):
         assert st == 200
         gc = json.loads(b)["gui_cert"]
         assert gc["source"] == "custom"
+        # this fixture serves plain HTTP: the answer must say the file was
+        # saved but NOT applied (takes effect at restart), not imply it is live
+        assert json.loads(b)["applied"] is False
+        assert "next restart" in json.loads(b)["note"]
         assert "iris-custom" in gc["subject"]
         assert gc["fingerprint_sha256"] not in ("", "unknown")
         # GET reflects it — and NEVER echoes key material
@@ -6875,7 +7042,7 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
     monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
     assert 'id="telemetry-health"' not in monitoring
     # it refreshes with the Overview, not as part of refreshMonitoring()
-    monitoring_fn = js.split("async function refreshMonitoring()", 1)[1].split("}", 1)[0]
+    monitoring_fn = js.split("async function refreshMonitoring(fromPoll)", 1)[1].split("}", 1)[0]
     assert "refreshTelemetryHealth" not in monitoring_fn
     overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
     assert "refreshTelemetryHealth" in overview_fn
@@ -7603,6 +7770,46 @@ def test_forced_undeploy_escapes_multiple_recoverable_records(tmp_path):
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert record_store.get(first)["state"] == "abandoned"
         assert record_store.get(second)["state"] == "abandoned"
+    finally:
+        stop()
+
+
+def test_undeploy_reports_a_corrupt_record_store_instead_of_adopt_it_first(
+        tmp_path):
+    """A record store that cannot be parsed is a SERVER fault, not proof that
+    the device has no deployment. It used to read as "no record", so the console
+    told the operator to adopt a device IRIS may already own -- which would
+    write a record asserting an unverified deployment on top of a repairable
+    file. The undeploy gate now reads strictly and reports the real fault."""
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_record(record_store)          # IRIS DOES own this device
+        with open(record_store.path, "w") as f: # ... and then the file rots
+            f.write("{\"records\": {truncated")
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 503, b
+        assert b"unreadable" in b
+        assert b"adopt it first" not in b, (
+            "an unreadable store was reported as an unowned device")
+    finally:
+        stop()
+
+
+def test_undeploy_still_says_adopt_when_there_is_genuinely_no_record(tmp_path):
+    """The corrupt-store branch must not swallow the real no-record advice:
+    an EMPTY (or absent) store still means the device was never deployed."""
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 409, b
+        assert b"adopt it first" in b
     finally:
         stop()
 
@@ -9235,3 +9442,399 @@ def test_images_import_blurb_drops_the_subdirectory_examples():
             '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
             "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
             "              different directory.</p>") in html
+
+
+# ---- fix-wave regressions: HTTP layer, session lifecycle, console sources ----
+
+def test_negative_content_length_rejected_before_any_read(tmp_path):
+    """IRIS-06-001: int() accepts a sign and rfile.read(-1) reads until EOF
+    with no cap, pre-auth. The server must answer 400 without reading. At
+    the review commit this recv blocks for the 60 s handler timeout."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        s = socket.create_connection((host, port), timeout=5)
+        s.sendall(b"POST /api/login HTTP/1.1\r\nHost: x\r\n"
+                  b"Content-Type: application/json\r\nContent-Length: -1\r\n\r\n")
+        resp = b""
+        while True:
+            chunk = s.recv(4096)           # server answers and closes
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        assert b" 400 " in resp.split(b"\r\n", 1)[0]
+        assert b"bad content-length" in resp
+    finally:
+        stop()
+
+
+def test_unauthenticated_post_rejected_before_body_is_buffered(tmp_path):
+    """IRIS-06-004: session + CSRF are checked BEFORE the body is read. The
+    client declares the 8 MiB CSV cap but sends only the 64 KiB drain
+    allowance; the 401 must arrive without the rest. At the review commit
+    the server read all 8 MiB first, so this recv timed out."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        s = socket.create_connection((host, port), timeout=5)
+        declared = 8 * 1024 * 1024
+        head = ("POST /api/devices/import-csv HTTP/1.1\r\nHost: x\r\n"
+                "Content-Type: text/csv\r\nContent-Length: %d\r\n\r\n"
+                % declared).encode()
+        s.sendall(head + b"x" * (64 * 1024))
+        resp = s.recv(4096)
+        s.close()
+        assert b" 401 " in resp.split(b"\r\n", 1)[0]
+        # a session without CSRF is rejected the same way, before the read
+        ck, _ = _auth(host, port)
+        s = socket.create_connection((host, port), timeout=5)
+        head = ("POST /api/devices/import-csv HTTP/1.1\r\nHost: x\r\nCookie: %s\r\n"
+                "Content-Type: text/csv\r\nContent-Length: %d\r\n\r\n"
+                % (ck, declared)).encode()
+        s.sendall(head + b"x" * (64 * 1024))
+        resp = s.recv(4096)
+        s.close()
+        assert b" 403 " in resp.split(b"\r\n", 1)[0]
+    finally:
+        stop()
+
+
+def test_tls_handshake_is_not_on_the_accept_thread(tmp_path, monkeypatch):
+    """IRIS-06-002: one idle TCP connection (no ClientHello) used to park the
+    whole console in accept() until it went away. With the handshake in the
+    worker thread, a second client's TLS request still completes."""
+    cert, key = _gen_cert_pair(tmp_path, "iris-builtin", "accept-thread")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(cert + key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "absent-gui-cert.pem"))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        assert srv.tls_active is True
+        assert not isinstance(srv.socket, ssl.SSLSocket)   # listener stays plain
+        idle = socket.create_connection((host, port), timeout=5)  # never handshakes
+        time.sleep(0.3)
+        assert _peer_cert_der(host, port) == _first_cert_der(cert)  # 5 s timeout
+        idle.close()
+    finally:
+        stop()
+
+
+def _serve_tls_admin(tmp_path, certfile):
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", srv.server_address[1], srv.shutdown
+
+
+def _https_req(host, port, method, path, body=None, headers=None):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    c = http.client.HTTPSConnection(host, port, context=ctx, timeout=5)
+    hdrs = dict(headers or {})
+    payload = None
+    if body is not None:
+        payload = json.dumps(body).encode()
+        hdrs["Content-Type"] = "application/json"
+    c.request(method, path, body=payload, headers=hdrs)
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r.status, dict(r.getheaders()), data
+
+
+def test_login_cookie_is_secure_over_tls(tmp_path, monkeypatch):
+    """The Secure attribute follows the listener: present under TLS (login
+    and the logout expiry cookie alike), absent on the plaintext opt-in."""
+    cert, key = _gen_cert_pair(tmp_path, "iris-builtin", "secure-cookie")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(cert + key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "absent-gui-cert.pem"))
+    host, port, stop = _serve_tls_admin(tmp_path, str(builtin))
+    try:
+        st, h, b = _https_req(host, port, "POST", "/api/login",
+                              {"username": "admin", "password": "pw"})
+        assert st == 200
+        assert "Secure" in h["Set-Cookie"] and "HttpOnly" in h["Set-Cookie"]
+        ck = h["Set-Cookie"].split(";")[0]
+        st, h, _ = _https_req(host, port, "POST", "/api/logout",
+                              headers={"Cookie": ck,
+                                       "X-CSRF-Token": json.loads(b)["csrf"]})
+        assert st == 200 and "Secure" in h["Set-Cookie"] and "Max-Age=0" in h["Set-Cookie"]
+    finally:
+        stop()
+
+
+def test_sse_idle_expiry_emits_terminal_end_frame(tmp_path, monkeypatch):
+    """IRIS-06-005: the idle exit used to close the stream silently, so the
+    client could not tell a stalled job from a dead server. It now ends
+    with `event: end / data: idle`."""
+    monkeypatch.setattr(gui_server, "_SSE_IDLE", 1)
+    monkeypatch.setattr(gui_server, "_SSE_KEEPALIVE", 0.2)
+    release = threading.Event()
+
+    def run_fn(p, e, on):
+        release.wait(10); return 0          # running, silent
+
+    host, port, stop = _serve_onboard(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        conn = http.client.HTTPConnection(host, port, timeout=15)
+        conn.request("GET", "/api/onboard/jobs/%s/stream" % jid,
+                     headers={"Cookie": ck})
+        resp = conn.getresponse()
+        started = time.time()
+        body = resp.read()                    # server closes on idle expiry
+        assert time.time() - started < 8
+        conn.close()
+        assert b"event: end\ndata: idle\n\n" in body
+        assert b"event: end\ndata: done" not in body
+    finally:
+        release.set()
+        stop()
+
+
+def test_api_responses_are_no_store_and_static_assets_revalidate(tmp_path):
+    """IRIS-06-006: session-gated JSON never lands in a disk cache; the
+    un-hashed SPA assets revalidate cheaply (Last-Modified -> 304)."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        ck, _ = _auth(host, port)
+        st, h, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 200 and h["Cache-Control"] == "private, no-store"
+        st, h, _ = _req(host, port, "GET", "/api/session")
+        assert st == 401 and h["Cache-Control"] == "private, no-store"
+        st, h, body = _req(host, port, "GET", "/app.js")
+        assert st == 200 and body and "Last-Modified" in h
+        assert "no-cache" in h["Cache-Control"]
+        st, h2, body2 = _req(host, port, "GET", "/app.js",
+                             headers={"If-Modified-Since": h["Last-Modified"]})
+        assert st == 304 and body2 == b""
+        st, _, _ = _req(host, port, "GET", "/app.js",
+                        headers={"If-Modified-Since": "garbage"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_poll_header_does_not_refresh_idle_expiry(tmp_path):
+    """IRIS-08-004: a GET carrying X-IRIS-Poll: 1 validates the session but
+    does not count as operator activity, so an unattended polled view
+    reaches the idle timeout; an ordinary GET still refreshes it."""
+    import gui_auth
+    clock = [1000.0]
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"), now_fn=lambda: clock[0],
+                         sessions=gui_auth.SessionStore(idle_ttl=100))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    host, port = "127.0.0.1", srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _ = _auth(host, port)
+        clock[0] = 1060
+        st, _, _ = _req(host, port, "GET", "/api/session",
+                        headers={"Cookie": ck, "X-IRIS-Poll": "1"})
+        assert st == 200                               # valid, but not touched
+        clock[0] = 1110
+        st, _, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 401                               # 110 s since login
+        clock[0] = 1200
+        ck, _ = _auth(host, port)
+        clock[0] = 1260
+        st, _, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 200                               # touched
+        clock[0] = 1310
+        st, _, _ = _req(host, port, "GET", "/api/session",
+                        headers={"Cookie": ck, "X-IRIS-Poll": "1"})
+        assert st == 200                               # 50 s since the touch
+    finally:
+        srv.shutdown()
+
+
+def test_corrupt_secrets_store_fails_closed_with_503(tmp_path):
+    """IRIS-01-002 at the HTTP layer: a truncated live store must not turn
+    into "first run" (the default credential minted a setup grant) or a
+    dropped connection; every store-backed route answers 503."""
+    host, port, app, stop = _serve(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        with open(app.secrets_path, "w") as f:
+            f.write("{ truncated")
+        st, _, b = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 503 and b"secrets store unreadable" in b
+        st, _, b = _req(host, port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 503 and b"setup_grant" not in b
+        with open(app.secrets_path) as f:
+            assert f.read() == "{ truncated"         # nothing persisted over it
+    finally:
+        stop()
+
+
+def test_break_glass_reset_ends_live_console_session(tmp_path):
+    """IRIS-01-003 end to end: a session minted before an out-of-process
+    admin reset is refused on its next request."""
+    host, port, app, stop = _serve(tmp_path)
+    try:
+        ck, _ = _auth(host, port)
+        assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 200
+        time.sleep(1.1)                                # floor is whole seconds
+        cli = gui_app.GuiApp(app.secrets_path)         # the iris-gui-admin process
+        cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
+        assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 401
+        time.sleep(1.1)
+        st, h, _ = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "reset-pw"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_login_busy_verifier_is_503_not_a_failed_login(tmp_path):
+    """IRIS-01-006: with both scrypt slots taken the route answers 503 +
+    Retry-After instead of "invalid credentials" (which penalised the
+    limiter and audited a failure that never happened)."""
+    import gui_auth
+    host, port, _, stop = _serve(tmp_path)
+    sem = gui_auth._PASSWORD_VERIFY_SLOTS
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+    try:
+        st, h, b = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "pw"})
+        assert st == 503 and h.get("Retry-After") == "1"
+        assert b"invalid credentials" not in b
+    finally:
+        sem.release(); sem.release()
+    try:
+        st, _, _ = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "pw"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def _webroot(name):
+    with open(os.path.join(gui_server.WEBROOT, name)) as f:
+        return f.read()
+
+
+def test_console_fetch_wrapper_handles_session_loss_polls_and_stale_state():
+    """Source guard (IRIS-08-003/004): one fetch for the whole console --
+    401 anywhere redirects to login, 5xx/network marks the header as stale,
+    background polls carry X-IRIS-Poll and the telemetry badge never turns
+    a proxy failure into "off"."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert "function fetch(url, opts)" in js
+    assert "if (r.status === 401) onSessionLost();" in js
+    assert "window.location.href = '/login.html';" in js
+    assert "h.set('X-IRIS-Poll', '1');" in js
+    assert js.count("backgroundPoll = true;") == 2          # view poll + batch poll
+    assert "function markConnection(ok)" in js
+    assert 'id="conn-state"' in html
+    assert "if (!r.ok) throw new Error('health proxy '" in js
+    assert "poll = pollMonitoring;" in js
+    assert "if (fromPoll && auditExtraPages > 0) return;" in js
+    assert "if (!brushDrag) renderBrush(auditSel);" in js
+
+
+def test_bulk_credential_modal_untouched_is_noop_and_clear_confirms():
+    """Source guard (IRIS-08-001): the resting placeholder is disabled (an
+    untouched Apply does nothing), clearing is a distinct sentinel that is
+    confirmed, and the modal refuses to open without a profile list."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert '<select id="cred-selected"><option value="" disabled selected>' in html
+    assert 'id="cred-modal-msg"' in html
+    assert "var CRED_CLEAR = '__none';" in js
+    assert "<option value=\"\" disabled>" in js
+    assert "var pid = raw === CRED_CLEAR ? '' : raw;" in js
+    assert "confirm('Clear the credential on '" in js
+    assert "if (!raw) {" in js
+
+
+def test_credential_list_failure_is_not_rendered_as_no_credential():
+    """Source guard (IRIS-08-002): a failed /api/credentials keeps the last
+    good list, disables the pickers and says so, instead of matching every
+    row to "no credential"."""
+    js = _webroot("app.js")
+    assert "var credListOk = false;" in js
+    assert "if (cr.ok) credOpts = (await cr.json()).profiles || [];" in js
+    assert "credential pickers are disabled until it loads." in js
+    assert "var credSel = credListOk" in js
+    assert "credential list unavailable; assign later" in js
+    assert "Credential list unavailable; not opening the picker." in js
+
+
+def test_console_id_keyed_maps_are_prototype_free():
+    """Source guard (IRIS-08-009): every map keyed by an operator-chosen id
+    is created with Object.create(null)."""
+    js = _webroot("app.js")
+    for decl in ("var LAST_JOBS_BY_DEVICE = Object.create(null);",
+                 "var best = Object.create(null);",
+                 "var imageFilenames = Object.create(null);",
+                 "var imageQuarantined = Object.create(null);",
+                 "var peerPolicyBusy = Object.create(null);",
+                 "var marked = Object.create(null);",
+                 "var checkedSet = Object.create(null);",
+                 "imageFilenames = Object.create(null);",
+                 "imageQuarantined = Object.create(null);"):
+        assert decl in js, decl
+    assert "var marked = {};" not in js and "var checkedSet = {};" not in js
+
+
+def test_telemetry_filter_has_unknown_bucket():
+    """Source guard (IRIS-08-008): the filter's tri-state matches the cell's."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert '<option value="unknown">' in html.split('id="dev-filter-telemetry"')[1].split("</select>")[0]
+    assert ": 'unknown';" in js and "typeof d.telemetry_stream_enabled === 'boolean'" in js
+
+
+def test_swarm_map_treats_error_body_as_failed_poll():
+    """Source guard (IRIS-08-005): the proxy's 200-with-error shape is a
+    failed poll in the map, and its poll is marked as background."""
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "swarmmap.html")) as f:
+        html = f.read()
+    assert 'data.error)throw Error(' in html
+    assert '"X-IRIS-Poll":"1"' in html
+
+
+def test_login_page_distinguishes_throttling_and_network_errors():
+    """Source guard (IRIS-08-010)."""
+    js = _webroot("login.js")
+    assert "res.status === 429" in js and "Retry-After" in js
+    assert "Could not reach the server" in js
+    assert "res.status === 401" in js
+
+
+def test_corrupt_catalog_state_fails_closed_with_503(tmp_path):
+    """IRIS-02-001 at the console HTTP layer: a corrupt catalog state file
+    must not reach the operator as a dropped connection and a traceback.
+
+    catalog.CatalogStore raises StateFileError for a present-but-unreadable
+    state file so no reader mistakes it for empty and no writer overwrites
+    it. gui_server had no mapping for that, so the console answered nothing
+    at all. The contract is the same fail-closed 503 the secrets store gets.
+    """
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        cookie, csrf = _auth(host, port)
+        with open(str(tmp_path / "state" / "policy.json"), "w") as f:
+            f.write("{ truncated")
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"},
+                        headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert st == 503 and b"state unavailable" in b
+        with open(str(tmp_path / "state" / "policy.json")) as f:
+            assert f.read() == "{ truncated"      # nothing written over it
+    finally:
+        stop()

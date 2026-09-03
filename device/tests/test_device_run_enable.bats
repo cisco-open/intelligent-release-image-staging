@@ -27,7 +27,8 @@ setup() {
   RUN="$BATS_TEST_DIRNAME/../../lab/device-run.sh"
   STUB="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB"
   LOG="$BATS_TEST_TMPDIR/sent.log"
-  export TMPDIR="$BATS_TEST_TMPDIR"          # keep the escalation marker local
+  export TMPDIR="$BATS_TEST_TMPDIR"
+  export IRIS_STATE="$BATS_TEST_TMPDIR/state"  # keep known_hosts + the escalation marker local
   export DEVICE_USER=u DEVICE_PASS=zzsecretzz
   # The stub records what was piped in, and replays a transcript whose prompt
   # marker is controlled by FAKE_PROMPT (# = already enabled, > = user mode).

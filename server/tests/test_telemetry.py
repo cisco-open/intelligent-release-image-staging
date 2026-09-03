@@ -2320,7 +2320,7 @@ def test_sampler_emits_a_peer_rate_record_per_measured_edge():
     hub = _rate_hub([{"ip": "10.0.0.5", "port": "51999", "uploadSpeed": "2048"}])
     hub._registry.announce("abc", "lx", "10.0.0.5", 6881, left=900,
                            principal=auth.Principal("device", "dz"))
-    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
     hub.sample()
     rates = [r for r in emitted if r.get("eventName") == "iris.swarm.peer_rate"]
     assert len(rates) == 1, emitted
@@ -2457,7 +2457,7 @@ def test_peer_bytes_record_names_the_device_and_the_measured_role(tmp_path):
                      devices={"rtr-04": {"swarm_ip": "10.0.0.2"}})
     hub.sample()
     emitted = []
-    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
     peers[0] = _peer("10.0.0.2", "51422", 700, seeder="true")
     torrent["uploadLength"] = 700
     hub.sample()
@@ -2480,7 +2480,7 @@ def test_no_record_is_emitted_for_a_peer_that_gained_nothing(tmp_path):
     hub = _swarm_hub(tmp_path, peers, {"uploadLength": 400})
     hub.sample()
     emitted = []
-    hub.log_queue.emit = lambda rec: emitted.append(rec)
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
     hub.sample()                        # same counter, same sample
     assert [r for r in emitted
             if r.get("eventName") == "iris.swarm.peer_bytes"] == []
@@ -3584,3 +3584,211 @@ def test_one_sample_pass_marks_every_lifecycle_event_in_a_single_store_write(
 
     assert len(_lc_events(hub)) == 4
     assert len(writes) == 2
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-002: a multi-torrent wave's sampled records cannot evict the
+# tracker peer event queued at the start of the flush window
+# ---------------------------------------------------------------------------
+
+def test_sampled_overflow_never_evicts_a_tracker_peer_event(tmp_path):
+    """Reviewer probe: with several torrents transferring at aria2's default
+    55 peers, ~2 sampled records per connection per 2 s pass overflow the
+    log queue between two 15 s flushes; the drop-oldest policy then evicted
+    the tracker lifecycle event queued at the window's start. The sampled
+    stream is now evictable and drops among itself."""
+    import auth
+    import peer_ledger
+    T, C = 3, 40
+    IH = {t: "%040x" % (0xabc0 + t) for t in range(T)}
+    tick = {"k": 0}
+
+    def rpc(method, params=None):
+        if method == "aria2.getGlobalStat":
+            return {"uploadSpeed": "1", "downloadSpeed": "0",
+                    "numActive": str(T)}
+        if method == "aria2.tellActive":
+            if "files" in params[0]:
+                return [{"connections": str(C), "infoHash": IH[t],
+                         "totalLength": "1000",
+                         "files": [{"path": "/img/img%d.bin" % t}]}
+                        for t in range(T)]
+            return [{"gid": "g%d" % t, "infoHash": IH[t],
+                     "uploadLength": str(1000 * tick["k"])} for t in range(T)]
+        if method == "aria2.getSessionInfo":
+            return {"sessionId": "s0"}
+        if method == "aria2.getPeers":
+            t = int(params[0][1:])
+            return [{"ip": "10.%d.0.%d" % (t, i), "port": str(6000 + i),
+                     "uploadSpeed": "100", "uploaded": str(100 * tick["k"]),
+                     "seeder": "false"} for i in range(1, C + 1)]
+        raise AssertionError(method)
+    hub = telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=15,
+                              peer_ledger=peer_ledger.PeerLedger(str(tmp_path)))
+    for t in range(T):
+        for i in range(1, C + 1):
+            hub._registry.announce(
+                IH[t], "p%d-%d" % (t, i), "10.%d.0.%d" % (t, i), 6000 + i,
+                left=500, principal=auth.Principal("device", "d%d-%d" % (t, i)))
+    hub.sample_seeder(0.0)
+    hub.on_swarm_event({"event_id": "SENTINEL-tracker-peer-event",
+                        "info_hash": IH[0], "ip": "10.0.0.1", "left": 0,
+                        "ts": 1.0})
+    for k in range(1, 15 // telemetry.ACTIVE_INTERVAL + 1):
+        tick["k"] = k
+        hub.sample_seeder(2.0 * k)
+    assert hub.log_queue.dropped_total > 0            # the window did overflow
+    assert any(isinstance(e, dict)
+               and e.get("event_id") == "SENTINEL-tracker-peer-event"
+               for e in hub.log_queue.snapshot())
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-003: the rejected-samples counter is monotonic across staleness
+# ---------------------------------------------------------------------------
+
+class TestRejectedCounterIsNotResetByStaleness:
+    IMAGES = {"img1": {"filename": "img1.bin", "info_hash_hex": "a" * 40,
+                       "size": 1000}}
+
+    def test_stale_snapshot_keeps_its_last_written_count(self):
+        live = {"written_at": 1000.0,
+                "counters": {"samples_rejected_total": 37}, "samples": {}}
+        _, fresh = telemetry.aggregate_transfers(live, self.IMAGES, 1010.0)
+        _, stale = telemetry.aggregate_transfers(live, self.IMAGES, 1031.0)
+        assert fresh["samples_rejected_total"] == 37
+        assert stale["samples_rejected_total"] == 37    # not 0
+        assert stale["stream_devices"] == 0
+
+    def test_unreadable_snapshot_latches_the_hubs_last_known_count(self):
+        docs = [{"written_at": 1000.0,
+                 "counters": {"samples_rejected_total": 37}, "samples": {}},
+                None, None,
+                {"written_at": 1100.0,
+                 "counters": {"samples_rejected_total": 40}, "samples": {}}]
+        hub = telemetry.Telemetry(PeerRegistry(), rpc=None, interval=10,
+                                  live_info=lambda: docs.pop(0),
+                                  images_info=lambda: self.IMAGES)
+        hub.sample(1010.0)
+        assert hub._extras["samples_rejected_total"] == 37
+        hub.sample(1020.0)                    # snapshot unreadable: unknown
+        assert hub._extras["samples_rejected_total"] == 37
+        pts = telemetry._metric_points([], hub._extras, 1020.0)
+        assert [p for p in pts if p["name"] ==
+                "iris.telemetry.samples.rejected"][0]["value"] == 37
+        assert "iris_telemetry_samples_rejected_total 37" in hub.metrics_text()
+        hub.sample(1030.0)
+        assert hub._extras["samples_rejected_total"] == 37
+        hub.sample(1110.0)                    # a real, newer count wins
+        assert hub._extras["samples_rejected_total"] == 40
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-008: export-state audit events carry a category and an actor
+# ---------------------------------------------------------------------------
+
+def test_export_state_audit_events_are_categorised(tmp_path):
+    import audit
+    audit_path = str(tmp_path / "audit.jsonl")
+    hub = telemetry.from_env({"IRIS_AUDIT": audit_path,
+                              "IRIS_STATE": str(tmp_path)})
+    hub.export_health.record(False, "logs", 100.0)     # -> degraded edge
+    events = audit.read_events(audit_path)
+    assert [e["event"] for e in events] == ["otlp-export-degraded"]
+    ev = events[0]
+    assert ev["category"] == "telemetry"
+    assert ev["actor"] == "system"
+    assert "device_id" not in ev
+    assert audit.read_events(audit_path, category="telemetry")
+
+
+# ---------------------------------------------------------------------------
+# The transfer-lifecycle store's bounds reach an operator (issues #43, #63)
+# ---------------------------------------------------------------------------
+
+def _lc_metrics_hub(tmp_path, policy):
+    hub, store = _lc_hub(tmp_path, policy)
+    exports = []
+    hub.metrics_exporter = type("E", (), {
+        "export": lambda _self, points: exports.append(points) or True})()
+    return hub, store, exports
+
+
+def _points_by_name(points):
+    return {p["name"]: p for p in points}
+
+
+def test_the_lifecycle_store_bounds_reach_both_metric_surfaces(tmp_path):
+    """TransferLifecycle.stats() had no caller anywhere in the tree.
+
+    The store applies two hard bounds and counts every row and record they
+    cost -- and the module docstring justifies that with "a bound the store
+    applies is a bound the store reports ... shows up as a number on the
+    dashboard rather than as events that quietly never arrived". Nothing read
+    those counters, so a fleet past MAX_PLANS, or a collector outage long
+    enough to age out unacknowledged records, presented to an operator as
+    lifecycle events that simply never arrived -- indistinguishable from a
+    fleet that never seeded. Asserted through the two surfaces an operator
+    actually reads (the OTLP metric export and the :9101 exposition), never
+    through stats() alone: a reader test passes whether or not anything calls
+    the reader, which is the exact defect this covers.
+    """
+    plan_id, transfer_id = _lc_id(0x51), _lc_id(0x52)
+    hub, store, exports = _lc_metrics_hub(
+        tmp_path, _lc_policy(plan_id, transfer_id))
+
+    hub.sample(1100.0)
+    assert store.get(plan_id)["state"] == "planned"
+
+    points = _points_by_name(exports[-1])
+    assert points["iris.transfer.lifecycle.plans"]["value"] == 1
+    assert points["iris.transfer.lifecycle.plan_cap"]["value"] == \
+        transfer_lifecycle.MAX_PLANS
+    assert points["iris.transfer.lifecycle.unconfirmed"]["value"] == 1
+    assert points["iris.transfer.lifecycle.dropped_unemitted"]["kind"] == "sum"
+
+    text = hub.metrics_text()
+    assert "iris_transfer_lifecycle_plans 1" in text
+    cap = transfer_lifecycle.MAX_PLANS
+    assert "iris_transfer_lifecycle_plan_cap %d" % cap in text
+    assert "iris_transfer_lifecycle_unconfirmed 1" in text
+
+    # The counters the bounds increment travel too. What increments them is
+    # covered in test_transfer_lifecycle.py; what is at stake HERE is the
+    # plumbing, so the values are put in the store directly.
+    with open(store.path) as stream:
+        doc = json.load(stream)
+    doc["counters"]["plans_dropped_unemitted"] = 5
+    doc["counters"]["events_retired_undelivered"] = 3
+    doc["counters"]["plans_live_evicted"] = 2
+    with open(store.path, "w") as stream:
+        json.dump(doc, stream)
+
+    hub.sample(1200.0)
+    points = _points_by_name(exports[-1])
+    assert points["iris.transfer.lifecycle.dropped_unemitted"]["value"] == 5
+    assert points["iris.transfer.lifecycle.retired_undelivered"]["value"] == 3
+    assert points["iris.transfer.lifecycle.live_evicted"]["value"] == 2
+
+    text = hub.metrics_text()
+    assert "iris_transfer_lifecycle_dropped_unemitted_total 5" in text
+    assert "iris_transfer_lifecycle_retired_undelivered_total 3" in text
+    assert "iris_transfer_lifecycle_live_evicted_total 2" in text
+
+
+def test_a_hub_with_no_lifecycle_store_omits_the_families_rather_than_zeroing(
+        tmp_path):
+    """An unreadable or unwired store is NOT a store with nothing in it. A
+    fabricated 0 would read as "the bound never bit", which is the one thing
+    these numbers exist to disprove -- the same rule the rest of this module
+    follows for an unmeasured value."""
+    hub = telemetry.Telemetry(PeerRegistry())
+    exports = []
+    hub.metrics_exporter = type("E", (), {
+        "export": lambda _self, points: exports.append(points) or True})()
+    hub.sample(1100.0)
+
+    assert hub._transfer_lifecycle_numbers() is None
+    assert not [p for p in exports[-1]
+                if p["name"].startswith("iris.transfer.lifecycle.")]
+    assert "iris_transfer_lifecycle_" not in hub.metrics_text()

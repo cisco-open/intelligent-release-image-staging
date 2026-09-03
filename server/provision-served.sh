@@ -43,8 +43,11 @@ stage_atomic() {  # stage_atomic <tmp-file> <final-name>
   mv -f "$1" "$ART/$2"
 }
 
-# Guest Shell bundle — rebuilt every start so the served bundle can never drift
-# from the deployed agent code (device/ is bind-mounted from the same checkout).
+# Guest Shell bundle — rebuilt every start from the image-baked device/ sources
+# (server/Dockerfile COPYs device/ into /opt/iris/device; there is no bind
+# mount, so a host-side edit under device/ reaches the served bundle only
+# after an image rebuild), so the served bundle can never drift from the
+# agent code this image carries.
 if [ -d "$DEVICE/agent" ] && [ -f "$ARIA2" ]; then
   if "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$ART/.iris-agent.tgz.tmp"; then
     stage_atomic "$ART/.iris-agent.tgz.tmp" iris-agent.tgz

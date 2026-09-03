@@ -75,11 +75,20 @@ class ImageService:
         """Catalog entry for *image_id* (or None) — CatalogStore passthrough."""
         return self._store().get_image(image_id)
 
-    def delete_image(self, image_id, live_device_ids=None):
+    def delete_image(self, image_id, live_device_ids=None, warnings=None):
         """Full delete of a published image. If any device is assigned it, returns
         the sorted list of those device ids and deletes NOTHING (caller -> 409).
-        Otherwise removes the catalog entry, the image file, the .torrent, and
-        best-effort stops the seeder, returning []. Raises KeyError if unknown.
+        Otherwise removes the catalog entry, stops the seeder, then removes the
+        image file and the .torrent, returning []. Raises KeyError if unknown.
+
+        The seeder is told to stop BEFORE the file is unlinked: aria2 holds the
+        image open, and unlinking first turns an active seed into read errors
+        on a vanished file instead of a clean removal. The stop is best-effort
+        (an unreachable seeder must not leave a half-deleted catalog), but it
+        is not silent: when *warnings* is a list, a failed stop appends a
+        one-line, credential-free description to it so the caller can audit
+        and report the truth ("deleted; seeder still holds it until restart")
+        rather than an unconditional "deleted".
 
         When *live_device_ids* is given, the assigned check is intersected with it,
         so a stale policy for a device that has since been removed from the fleet no
@@ -118,6 +127,15 @@ class ImageService:
             if assigned:
                 return assigned
             store.delete_image(image_id)
+        try:
+            self._seeder_remove(entry.get("info_hash_hex"))
+        except Exception as exc:   # seeder unreachable is non-fatal, not silent
+            if warnings is not None:
+                # Class name only: an RPC/URL exception may carry request
+                # material, and nothing here needs more than "which failure".
+                warnings.append("seeder stop failed (%s); the origin keeps "
+                                "serving it until the next restart"
+                                % exc.__class__.__name__)
         fn = entry.get("filename")
         if fn and self._file_is_ours(entry):
             try:
@@ -127,10 +145,6 @@ class ImageService:
         try:
             os.remove(store.torrent_path(image_id))
         except OSError:
-            pass
-        try:
-            self._seeder_remove(entry.get("info_hash_hex"))
-        except Exception:   # seeder unreachable is non-fatal
             pass
         return []
 
@@ -368,6 +382,7 @@ class ImageService:
             self._publishing.add(pending_id)
 
         def run():
+            tracker_url = None
             try:
                 tracker_url = self._tracker_url_fn()
                 if not tracker_url:
@@ -376,7 +391,13 @@ class ImageService:
                 entry = self._publish_fn(image_path, self._store(), tracker_url)
                 self._finish(job_id, "done", image_id=entry.get("id"))
             except Exception as exc:  # publish is best-effort; report, don't crash
-                self._finish(job_id, "error", message=str(exc))
+                # Exception text is untrusted here: the job message is served
+                # to every console session and truncated into the exported
+                # audit trail, and the tracker URL carries the seeder's
+                # announce token. publish.make_torrent already strips it at
+                # the source; this keeps the guarantee for any other raiser.
+                self._finish(job_id, "error",
+                             message=publish_mod.redact(exc, tracker_url))
             finally:
                 with self._lock:
                     self._publishing.discard(pending_id)

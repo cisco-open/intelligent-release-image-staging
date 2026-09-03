@@ -104,6 +104,15 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
 
+`CATALOG_PEM` must be the certificate block **only** — the public cert IRIS
+hands to devices, never the server's combined cert+key file (`IRIS_CERT`).
+The build refuses a file carrying a private-key block, and only CERTIFICATE
+blocks reach the image. The same cert-only bytes are packaged a second time
+as a top-level `iris-catalog.pem` inside `artifacts.tar.gz`: that is the
+pinned-cert probe member `tools/check-package-freshness.sh` and the console's
+Setup "device packages" card read, so a served package can be checked
+against the live certificate without unpacking its image.
+
 `device/iox/build.sh` never downloads `aria2c`. The binary is a handed-in
 deliverable, produced elsewhere by the aria2-next-static project and only
 verified here — never fetched from a third party, never built in this
@@ -138,7 +147,10 @@ tools/stage-iox-package.sh --arch amd64
 ```
 
 On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
-`tools/bin/ioxclient`; that binary is git-ignored and not embedded in the
+`tools/bin/ioxclient`, verifying the extracted binary against
+`tools/ioxclient.sha256` and refusing a mismatch or an unrecorded version
+(`IOXCLIENT_SKIP_VERIFY=1` is the explicit one-off escape hatch, which prints
+the sha256 to record); that binary is git-ignored and not embedded in the
 repository or seed-server image. The helper retrieves the live catalog
 certificate from the running `iris` container, builds a package that pins it,
 and places the result in `/srv/artifacts`. When the served host directory is not

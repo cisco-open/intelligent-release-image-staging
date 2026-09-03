@@ -182,9 +182,47 @@ def package_fingerprint(tar_path):
     """The catalog certificate an IOx package PINS, as (fingerprint, reason).
 
     reason is "" on success, else one of: absent, unreadable, no-artifacts,
-    no-cert, bad-cert. Only the single pem member is read -- the ~60 MB package
-    is never unpacked to disk.
+    no-cert, bad-cert. Only the pem bytes are read -- the ~60 MB package is
+    never unpacked to disk.
+
+    Two places are consulted, in order. First the PINNED-CERT PROBE MEMBER:
+    a top-level ``iris-catalog.pem`` inside ``artifacts.tar.gz``, which
+    device/iox/build.sh deliberately packages next to rootfs.tar for exactly
+    this reader (and tools/check-package-freshness.sh, which mirrors it).
+    Failing that, the classic docker-archive ``rootfs.tar`` is walked
+    layer by layer for ``opt/iris/iris-catalog.pem``, the path the Dockerfile
+    bakes the cert at -- so a package built without the probe member (builds
+    between 2026-09-02's packaging slimming and the member's restoration,
+    review finding IRIS-12-001) still reports the certificate it really
+    pins instead of a permanent "no-cert" that reads as STALE forever. Both
+    walks stream member-by-member and stop at the first match.
     """
+    baked_path = "opt/iris/" + _CERT_MEMBER
+
+    def _pem_from_rootfs(rootfs_file):
+        """Stream a classic docker-archive (manifest.json + layer tars) and
+        return the baked pem bytes from the first layer carrying it, or
+        None. Layers are recognised by shape (a tar member that is itself a
+        tar), not by name: skopeo writes ``<digest>.tar`` plus legacy
+        ``<id>/layer.tar`` symlinks, docker-save writes ``<id>/layer.tar``."""
+        with tarfile.open(fileobj=rootfs_file, mode="r|") as rootfs:
+            for member in rootfs:
+                if not member.isfile() or not member.name.endswith(".tar"):
+                    continue
+                layer_file = rootfs.extractfile(member)
+                if layer_file is None:
+                    continue
+                try:
+                    with tarfile.open(fileobj=layer_file, mode="r|") as layer:
+                        for entry in layer:
+                            if (entry.isfile()
+                                    and entry.name.lstrip("./") == baked_path):
+                                pem = layer.extractfile(entry)
+                                return pem.read() if pem is not None else None
+                except tarfile.TarError:
+                    continue      # not a layer tar (a config/metadata blob)
+        return None
+
     if not os.path.exists(tar_path):
         return None, "absent"
     try:
@@ -200,17 +238,27 @@ def package_fingerprint(tar_path):
                 # of getmembers(), which walks the ENTIRE inner archive
                 # (packages run ~60 MB) before we ever look at a name.
                 member = None
+                rootfs_member = None
                 for m in inner:
                     if os.path.basename(m.name) == _CERT_MEMBER:
                         member = m
                         break
-                if member is None:
-                    return None, "no-cert"
-                pem_file = inner.extractfile(member)
-                if pem_file is None:
+                    if (rootfs_member is None
+                            and os.path.basename(m.name) == "rootfs.tar"):
+                        rootfs_member = m
+                pem_bytes = None
+                if member is not None:
+                    pem_file = inner.extractfile(member)
+                    if pem_file is not None:
+                        pem_bytes = pem_file.read()
+                if pem_bytes is None and rootfs_member is not None:
+                    rootfs_file = inner.extractfile(rootfs_member)
+                    if rootfs_file is not None:
+                        pem_bytes = _pem_from_rootfs(rootfs_file)
+                if pem_bytes is None:
                     return None, "no-cert"
                 fingerprint = fingerprint_pem(
-                    pem_file.read().decode("utf-8", "replace"))
+                    pem_bytes.decode("utf-8", "replace"))
     except (tarfile.TarError, OSError, EOFError):
         return None, "unreadable"
     if fingerprint is None:
@@ -425,6 +473,12 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         "stage_host": {
             "state": "ok" if stage_host.get("configured") else "unset",
             "username": stage_host.get("username", ""),
+            # Never required: console onboarding always stages per-device
+            # material locally (gui_onboard._build_env exports
+            # IRIS_STAGE_LOCAL=1), so no recipe reaches the ssh branch that
+            # would read this credential. The wizard must not hold setup
+            # open on it.
+            "required": False,
         },
         "packages": packages,
         "image_verification": _image_verification_status(image_verification_last_run),

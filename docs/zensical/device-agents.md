@@ -211,21 +211,59 @@ IRIS uses two checks because the server and device have different capabilities:
 
 If verification fails, the agent reports the failure and leaves installation decisions untouched. It does not change boot variables and does not reload the device.
 
-## Replaced image cleanup
+## Unassigned image park
 
-When a device is reassigned to a different image, the agent removes the storage-root
-copy it placed for the previous image — never an image IRIS did not place. The
-delete is queued in agent state and executed through a one-shot
-`event manager applet ... authorization bypass` EEM applet, the same mechanism the
-copy-to-root and bundle-mode reclaim paths use. A raw exec `delete` is not used: on a
-device running AAA command authorization IOS discards it silently, which leaves the
-replaced image on flash and the delete queued on every 60-second tick.
+Unchecking an image — or reassigning a device from image A to image B, which is
+the same thing for image A — **parks** it. The agent stops that image's torrent,
+deletes its staging copy, and marks the record parked. **The copy already placed
+on the storage root is deliberately kept.** A set is something an operator edits,
+and an image that comes back is a presence-and-size check instead of another
+multi-gigabyte placement.
 
-After firing the applet the agent re-checks whether the file is gone. Cleanup is
-reported only on proven absence; a name still present stays queued and is retried on
-the next tick, which also covers the case where the applet is still running when the
-agent looks. Queued names are re-validated against the agent's filename whitelist
-before they reach the applet, so a hand-edited state file cannot inject a command.
+The kept copy is not pinned there forever. It is kept the way any replaced image
+is kept: **available to the reclaim gate the moment a newly checked image needs
+the room.** On a bundle-mode device the space check runs `dir`, decides it is
+short, and reclaims unused image artifacts — a parked root copy among them.
+Reclaiming that space is what frees it; nothing about the park itself does.
+
+Two files are never deleted on any path — bundle-mode reclaim, the agent's own
+failed-placement reclaim, and the legacy replaced-root queue alike:
+
+* the **running image** (`show version`), and
+* the file the **`BOOT` variable** names (`show boot`), because that is what the
+  device boots next and an operator may have pointed it at a staged image for a
+  later maintenance window.
+
+When either read fails the agent skips the delete rather than guess, logs
+`RECLAIM-DEFERRED` or `CLEANUP-PENDING`, and retries on the next tick.
+
+!!! warning "Plan storage for this"
+    A reassignment does **not** reclaim the previous image's space at the moment
+    you reassign. Size the storage root for the images you want resident at once
+    plus headroom — see
+    [Sizing the storage root](management-type.md#sizing-the-storage-root). To
+    reclaim root space deliberately, undeploy the agent, or let the next
+    assignment's reclaim gate do it.
+
+### The legacy delete queue
+
+State files written by an older agent can still carry a `pending_root_deletes`
+queue from the era when reassignment did queue the previous root copy for
+deletion. Those deletes were promised to an operator, so the drain still runs.
+Nothing queues into it any more.
+
+The drain executes through a one-shot
+`event manager applet ... authorization bypass` EEM applet, the same mechanism
+the copy-to-root and bundle-mode reclaim paths use. A raw exec `delete` is not
+used: on a device running AAA command authorization IOS discards it silently,
+which would leave the image on flash and the delete queued on every 60-second
+tick. After firing the applet the agent re-checks whether the file is gone;
+cleanup is reported only on proven absence, and a name still present stays
+queued for the next tick. Queued names are re-validated against the agent's
+filename whitelist before they reach the applet, so a hand-edited state file
+cannot inject a command. A queued name the agent did not place (an
+operator-adopted file on IOS-XR) or that `BOOT` now points at is logged
+`ROOTCOPY-KEPT` and resolved out of the queue rather than retried forever.
 
 ## Device SSH host-key pinning
 

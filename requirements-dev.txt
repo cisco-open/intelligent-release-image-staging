@@ -1,0 +1,19 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Test-only dependencies for the Python suites documented in TESTING.md.
+# The server, device agents and tools themselves are stdlib-only; nothing
+# here ships to a device or into the server image.
+#
+# PyYAML is NOT optional. The Kubernetes manifest and docker-compose tests
+# parse the shipped YAML to assert security properties (single replica,
+# read-only root filesystem, tmpfs-only secret plaintext, the age key mounted
+# as a read-only secret). Without it those tests used to disappear behind a
+# quiet "skipped" while their siblings hard-errored, so a clean machine got a
+# weaker result than CI from the same documented command.
+#
+# Pinned loosely on purpose: this is a floor, not a lockfile. CI installs the
+# same file (.github/workflows/tests.yml).
+pytest>=8
+PyYAML>=6

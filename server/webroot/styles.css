@@ -103,7 +103,8 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .chip:focus-visible { outline:none; box-shadow:var(--focus-ring); }
 .chip.active { background:var(--action); color:#fff; border-color:var(--action); }
 .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; }
-.login-card { background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-card); padding:28px; width:420px; box-shadow:var(--shadow-xs); }
+.login-card { background:var(--surface); border:1px solid var(--rule); border-radius:var(--radius-card); padding:28px; width:420px; max-width:calc(100vw - 32px); box-sizing:border-box; box-shadow:var(--shadow-xs); }
+.conn-state { color:var(--danger); font-size:12px; margin-left:12px; }
 .login-card h1 { font-size:20px; margin:0 0 4px; }
 .login-card .sub { color:var(--text-secondary); font-size:13px; margin:0 0 18px; }
 .login-card label { display:block; font-size:12px; color:var(--text-secondary); margin:12px 0 4px; }
@@ -356,7 +357,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    above) -- inside a flyout there is only one level below the panel's own
    .nav-group header, so 48px reads as a large, unexplained gap under a
    header sitting at .nav-group's 16px. Magnetic's own drawer reference
-   (agentinfo/magnetic_export, navigation/drawer sub-items) shows sub-item
+   (the Magnetic design system's navigation/drawer sub-items) shows sub-item
    text flush with its group header, not stepped in further -- so this
    flattens .nav-flyout's sub items to that same 16px rather than
    re-deriving a new nesting depth for a one-level panel. Scoped to
@@ -517,8 +518,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 }
 
 /* First-run setup wizard + the nudge that brings an operator back to it.
-   Magnetic Stepper anatomy (agentinfo/facelift-2026-08-30-visual-
-   direction.md lines 63-70): left step panel ~320px (range 200-400px),
+   Magnetic Stepper anatomy: left step panel ~320px (range 200-400px),
    content area right, Next/Back right-aligned at the content column's own
    bottom. .wz-layout/.wz-panel/.wz-content are new -- every wz-step-*/
    wz-nav/wz-steplist id below stays on the same functionally equivalent
@@ -742,7 +742,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
    toolbar, and the selection bar -- carrying buttons in four different
    visual weights, two unrelated controls both labelled "More", and a
    "Select devices" toggle with no counterpart anywhere in Magnetic. The
-   rules applied here, all from the Magnetic archive under agentinfo/:
+   rules applied here, all from the Cisco Magnetic design system:
 
      Table > Placement > Table-level actions -- with a filter bar present,
        table-level actions belong on the RIGHT SIDE of that filter bar,

@@ -109,7 +109,7 @@ REAL_ROW = (
 # replicated rather than imported)
 # ---------------------------------------------------------------------------
 
-def _serve(tmp_path, audited=True):
+def _serve(tmp_path, audited=True, seeder_add_fn=None):
     """Boot gui_server wired the way main() wires it for these routes: a
     real CatalogStore with audit_path SET (unlike test_gui_server.py's
     _serve_full_audit, whose CatalogStore is NOT audit-wired -- catalog.py
@@ -133,7 +133,8 @@ def _serve(tmp_path, audited=True):
     creds = gui_creds.CredentialStore(secrets_path)
     cat = catalog_mod.CatalogStore(
         state_dir, audit_path=audit_path,
-        seeder_remove_fn=lambda info_hash: None)
+        seeder_remove_fn=lambda info_hash: None,
+        seeder_add_fn=seeder_add_fn)
     srv = gui_server.make_server(
         "127.0.0.1", 0, app, images, fleet, creds, cat,
         audit_path=audit_path, certfile=None)
@@ -725,8 +726,10 @@ def test_release_quarantine_clean_release_200_and_audited(tmp_path):
                                {"override": False}, headers)
         assert status == 200
         result = json.loads(body)
+        # seeding_resumed: the release re-adds the torrent to the seeder
+        # (unwired here, so vacuously True) instead of leaving no origin.
         assert result == {"released": True, "override": False,
-                          "state": "verified"}
+                          "state": "verified", "seeding_resumed": True}
         assert cat.get_image("img1")["quarantined"] is False
         releases = [e for e in _read_audit_lines(audit_path)
                    if e.get("event") == "image_quarantine_release"]
@@ -773,7 +776,8 @@ def test_release_quarantine_override_correct_confirm_text_200_and_audited(
         assert status == 200
         result = json.loads(body)
         assert result == {"released": True, "override": True,
-                          "state": "mismatch"}   # truthful: still unresolved
+                          "state": "mismatch",    # truthful: still unresolved
+                          "seeding_resumed": True}
         assert cat.get_image("img1")["quarantined"] is False
         releases = [e for e in _read_audit_lines(audit_path)
                    if e.get("event") == "image_quarantine_release"]
@@ -938,5 +942,34 @@ def test_images_list_rows_never_carry_internal_bookkeeping_fields(tmp_path):
         row = json.loads(body)["images"][0]
         assert "quarantine_actions_complete" not in row
         assert "quarantine_override_sha512" not in row
+    finally:
+        stop()
+
+
+def test_release_quarantine_route_resumes_origin_seeding(tmp_path):
+    """The quarantine force-removed the torrent from aria2; the release must
+    put it back (from the recorded source_dir, re-synced to the current
+    credential by publish.resume_torrent_rpc in production) and say so."""
+    added = []
+    host, port, (_, _, _, cat), state_dir, audit_path, stop = _serve(
+        tmp_path, seeder_add_fn=lambda *a: added.append(a))
+    try:
+        src = tmp_path / "images"; src.mkdir()
+        cat.save_image(_entry(sha512="bb" * 64, source_dir=str(src),
+                              info_hash_hex="cc" * 20))
+        (tmp_path / "state" / "torrents" / "img1.torrent").write_bytes(b"d")
+        _quarantine(cat, feed_sha512="bb" * 64)
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, body = _req(host, port, "POST",
+                               "/api/images/img1/release-quarantine",
+                               {"override": False}, headers)
+        assert status == 200
+        assert json.loads(body)["seeding_resumed"] is True
+        assert added == [(cat.torrent_path("img1"), str(src), "cc" * 20)]
+        seed = [e for e in _read_audit_lines(audit_path)
+                if e.get("event") == "image_quarantine_release_seeding"]
+        assert len(seed) == 1 and seed[0]["result"] == "ok"
+        assert seed[0]["actor"] == "console:admin"
     finally:
         stop()

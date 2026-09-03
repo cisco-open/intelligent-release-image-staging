@@ -173,3 +173,42 @@ def test_write_conf_restricts_secret_bearing_file_to_owner(tmp_path):
     agent_config.write_conf(str(p), {
         "catalog_url": "https://x", "catalog_token": "secret", "device_id": "d"})
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_write_conf_does_not_persist_backfilled_defaults(tmp_path):
+    # IRIS-10-007: load() backfills DEFAULTS into the dict it returns; writing
+    # that dict back froze the agent's defaults into every device conf on its
+    # first token refresh, so a later release that changes a default never
+    # reached a deployed device. Keys the file never had, still at their
+    # default value, stay out of the file.
+    p = tmp_path / "iris-agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "token_expires_at = 0\n")
+    cfg = agent_config.load(str(p))
+    assert cfg["max_peers"] == "10"                 # backfilled in memory...
+    cfg["catalog_token"] = "NEW"
+    agent_config.write_conf(str(p), cfg)
+    keys = sorted(agent_config._file_keys(str(p)))
+    assert keys == ["catalog_token", "catalog_url", "device_id",
+                    "token_expires_at"]              # ...but not on disk
+    assert agent_config.load(str(p))["catalog_token"] == "NEW"
+
+
+def test_write_conf_keeps_explicit_and_non_default_values(tmp_path):
+    p = tmp_path / "iris-agent.conf"
+    # max_peers explicitly set to the default value in the file: stays.
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "max_peers = 10\n")
+    cfg = agent_config.load(str(p))
+    cfg["telemetry_stream"] = "on"                  # differs from the default
+    cfg["rpc_secret"] = ""                          # default, not in file
+    cfg["catalog_ca"] = "/flash/iris-catalog.pem"   # outside DEFAULTS
+    agent_config.write_conf(str(p), cfg)
+    keys = agent_config._file_keys(str(p))
+    assert "max_peers" in keys and "telemetry_stream" in keys
+    assert "catalog_ca" in keys
+    assert "rpc_secret" not in keys and "stage_dir" not in keys
+    back = agent_config.load(str(p))
+    assert back["telemetry_stream"] == "on" and back["max_peers"] == "10"

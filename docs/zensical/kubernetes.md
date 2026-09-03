@@ -53,7 +53,7 @@ the console on a different external port.
 ## External address
 
 Reserve a stable, device-reachable IPv4 address before bootstrapping. Put that
-exact value in `kubernetes/configmap.yaml` as `IRIS_HOST_IP`, and configure the
+exact value in `kubernetes/iris-seed-server.env` as `IRIS_HOST_IP`, and configure the
 LoadBalancer to use the same address with the mechanism provided by the cluster.
 IRIS uses it in the certificate SAN, torrent tracker URLs, and seeder announces.
 
@@ -121,16 +121,27 @@ kubectl -n iris create secret generic iris-age \
 kubectl apply -k kubernetes
 ```
 
-Replace the recipient and external-address sentinels in `configmap.yaml`, and
-change the image mapping in `kustomization.yaml` to a registry image reachable
-by every cluster node. The default PVC request is `50Gi`; size it for the images
+Replace the recipient and external-address sentinels in `iris-seed-server.env`,
+and change the image mapping in `kustomization.yaml` to a registry image
+reachable by every cluster node. The env file is turned into the ConfigMap by
+kustomize's `configMapGenerator`, so editing it and re-applying rolls the pod
+onto the new values. The image tag is a mutable placeholder pulled with
+`imagePullPolicy: Always`; after rebuilding under the same tag run
+`kubectl -n iris rollout restart deployment/iris-seed-server` to re-pull. The default PVC request is `50Gi`; size it for the images
 that must remain available for seeding.
 
 ## Health and operation
 
-Startup, readiness, and liveness probes use `http://<pod>:9101/healthz`. The
+Startup, readiness, and liveness probes use `http://<pod>:9101/readyz`, which
+TCP-probes the tracker, catalog, artifact server and console listeners and
+answers 503 naming any that are down (`/healthz` answers 200 unconditionally
+and proves only that the telemetry server is alive — curl `/readyz`, not
+`/healthz`, when diagnosing a `Readiness probe failed` event). Set
+`IRIS_HEALTH_LISTENERS` in `iris-seed-server.env` to `name:port,name:port` to
+narrow that probe set, or to the literal `off` to check nothing, for a
+deployment that runs a subset of the services. The
 same port serves the swarm and peer-distribution counters at `/metrics` when
-`IRIS_OBSERVABILITY=1` is set in the ConfigMap ([Telemetry
+`IRIS_OBSERVABILITY=1` is set in `iris-seed-server.env` ([Telemetry
 export](telemetry-export.md)); the peer ledger they are read from lives under
 `IRIS_STATE` on the PVC, so the totals survive a pod restart. The
 external Service publishes ports 6969, 8443, 8000, 6881, 8080, and 9101. Port

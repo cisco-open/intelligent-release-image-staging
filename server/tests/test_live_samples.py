@@ -136,3 +136,45 @@ class TestWriterLoop:
             assert json.load(f)["samples"] == {}
         stop.set()
         th.join(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-001: a non-finite observed_at never reaches the swarm document
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"),
+                                 -1.0])
+def test_observation_rejects_non_finite_or_negative_observed_at(bad):
+    env = {"v": 2, "obs_state": "not_due", "observed_at": bad,
+           "image_id": "img1"}
+    with pytest.raises(ValueError):
+        live_samples.sanitize_observation(env, "img1", 32)
+
+
+def test_snapshot_writer_refuses_nan(tmp_path):
+    # Defence in depth: even if a NaN reached the table, the snapshot file
+    # (which feeds /swarm and the browser) must not be written with a bare
+    # NaN token.
+    path = str(tmp_path / "live-samples.json")
+    with pytest.raises(ValueError):
+        live_samples._atomic_write_json(path, {"x": float("nan")})
+    assert not os.path.exists(path)
+
+
+# ---------------------------------------------------------------------------
+# IRIS-02-005: ids are matched whole (no trailing newline)
+# ---------------------------------------------------------------------------
+
+def test_ids_with_a_trailing_newline_are_rejected():
+    base = {"v": 2, "obs_state": "not_due", "observed_at": 1.0}
+    with pytest.raises(ValueError):
+        live_samples.sanitize_observation(
+            dict(base, transfer_id="a" * 32 + "\n"), "img1", 32)
+    with pytest.raises(ValueError):
+        live_samples.sanitize_observation(
+            dict(base, image_id="img1\n"), "img1\n", 32)
+    with pytest.raises(ValueError):
+        live_samples.sanitize_sample(
+            {"v": 1, "image_id": "img1\n", "phase": "seeding", "tier": "good",
+             "done_bytes": 0, "down_bps": 0, "up_bps": 0, "peers": 0},
+            "img1\n")

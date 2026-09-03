@@ -122,8 +122,15 @@ RUN groupadd --system --gid 10001 iris \
 EXPOSE 6969 8443 8000 6881 8080 9101
 VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts", "/var/lib/iris-images"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9101/healthz || exit 1
+# /readyz, NOT /healthz: /healthz answers 200 unconditionally (telemetry.py)
+# and only ever proved the :9101 telemetry server was alive, so a container
+# whose catalog or artifact server had died still showed `healthy` and
+# tools/start-compose-server.sh went on to stage packages against it.
+# /readyz TCP-probes the listeners named by IRIS_HEALTH_LISTENERS (2s each,
+# ~8s worst case with everything down), hence the 12s timeout -- the same
+# reasoning as kubernetes/deployment.yaml.
+HEALTHCHECK --interval=30s --timeout=12s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:9101/readyz || exit 1
 
 USER iris
 

@@ -23,6 +23,20 @@ Choose a VLAN and SVI that do not already exist on the device: the installer
 applies them as IRIS-created, the deployment record marks them as IRIS-owned, and
 routed teardown removes them.
 
+Two details of what routed mode touches beyond the VLAN and SVI:
+
+- The AppGigabitEthernet app-hosting trunk is changed **additively** only
+  (`switchport trunk allowed vlan add <vlan>`), exactly as in inband mode, so
+  other IOx apps riding the same uplink keep their VLANs. Teardown removes
+  only the IRIS VLAN from that allowed list (`... allowed vlan remove`).
+- The SVI joins an IGP only when the record says so: `SVI_IGP=isis` adds
+  `ip router isis` (for fabrics such as an SD-Access underlay that need to
+  learn the IRIS subnet). The default (`none`) never injects the IRIS subnet
+  into the operator's routing protocol and never creates a `router isis`
+  process. Before this was unconditional. The console passes its container
+  environment to the installer, so `SVI_IGP=isis` in `server/.env` is a
+  fleet-wide default for a fabric that needs it.
+
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers
 (`device/device-install.sh`, `device/iox/install.sh`) check for it before
@@ -127,9 +141,24 @@ removing `IRIS-NAT-<vpg>`, and on failure it preserves the ACL for safe
 reconciliation. It never flushes device-wide NAT state. Routed teardown does
 not clear translations because it configures no NAT.
 
-Both modes stage only to `bootflash:`. Allow roughly **2× the image size + 200
-MB** of free bootflash (about 4.2 GB for a 2 GB image); the agent safely
-refuses to stage when space is insufficient.
+Both modes stage only to `bootflash:`.
+
+### Sizing the storage root
+
+Allow roughly **2× the image size + 200 MB** of free bootflash (about 4.2 GB for
+a 2 GB image) for one image in flight: the staging copy plus the placed copy
+coexist while the placement runs. The agent safely refuses to stage when space
+is insufficient.
+
+Budget beyond that for the images you want **resident at once**, not for the
+number of reassignments you expect. Unchecking or reassigning an image parks it
+and deliberately keeps the copy already on the storage root — see
+[Unassigned image park](device-agents.md#unassigned-image-park). That kept copy
+is reclaimable, but it is reclaimed by the *next* placement's space check when
+that placement is short of room, not at the moment you reassign. On a device
+sized for exactly one image plus headroom this still converges; on a device with
+several parked copies and no headroom the reclaim gate has to free them one
+rollout at a time.
 
 ## XR host — the router's own network stack
 

@@ -189,7 +189,32 @@ else
   fi
   echo ">> cert fingerprint verified: $got"
 fi
-grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert"; exit 1; }
+grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
+# CATALOG_PEM discipline (the same guard tools/build-xr-package.sh applies):
+# bake ONLY certificate blocks into the image. The server's IRIS_CERT is a
+# COMBINED cert+key file (server/setup_status.py reads that shape server-side)
+# and pointing CATALOG_PEM at it used to ship the catalog/console TLS private
+# key inside every layer of a package that is served to, and left on, every
+# device. Refuse outright rather than silently bake key material; never echo
+# the file's contents.
+if grep -q "BEGIN.*PRIVATE KEY" "$CTX/iris-catalog.pem"; then
+  cat >&2 <<EOF
+!! CATALOG_PEM contains a PRIVATE KEY block -- refusing to build.
+   CATALOG_PEM must be the certificate block ONLY (the public cert IRIS
+   hands to devices at onboard time), never a combined cert+key file such
+   as the one IRIS_CERT points at server-side. Extract just the
+   certificate, e.g.:
+     openssl x509 -in combined.pem -out iris-catalog.pem
+EOF
+  exit 1
+fi
+# Keep only the CERTIFICATE blocks (a chain stays intact; any other PEM
+# block or stray text around them is dropped). The private-key refusal
+# above is the guard; this is the belt to that suspender.
+sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
+  "$CTX/iris-catalog.pem" > "$CTX/iris-catalog.pem.certonly"
+mv -f "$CTX/iris-catalog.pem.certonly" "$CTX/iris-catalog.pem"
+grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
 
 cp "$HERE/Dockerfile" "$HERE/entrypoint.sh" "$HERE/reconcile.sh" "$CTX/"
 cp "$PACKAGE_DESCRIPTOR" "$CTX/package.yaml"
@@ -233,16 +258,26 @@ if tar xOf "$CTX/rootfs.tar" manifest.json 2>/dev/null | grep -q "attestation-ma
 fi
 
 echo ">> ioxclient package -> $PACKAGE_NAME"
-# Package from a directory holding ONLY the descriptor and rootfs.tar.
-# `ioxclient package` tars its whole working directory into artifacts.tar.gz,
-# and the descriptor references nothing but rootfs.tar -- packaging the docker
-# build context itself shipped a second copy of aria2c, the agent sources,
-# the Dockerfile and the cert as dead weight (~3.3 MB, 5.6% of every IOx tar;
-# measured 2026-09-02, scrubber #75).
+# Package from a directory holding ONLY the descriptor, rootfs.tar and the
+# pinned-cert probe member. `ioxclient package` tars its whole working
+# directory into artifacts.tar.gz, and the descriptor references nothing but
+# rootfs.tar -- packaging the docker build context itself shipped a second
+# copy of aria2c, the agent sources and the Dockerfile as dead weight
+# (~3.3 MB, 5.6% of every IOx tar; measured 2026-09-02, scrubber #75).
+#
+# iris-catalog.pem IS deliberately re-added (a few KB): it is the PINNED-CERT
+# PROBE MEMBER. server/setup_status.py's package_fingerprint() (the console's
+# Setup "device packages" card) and tools/check-package-freshness.sh both read
+# a top-level `iris-catalog.pem` out of artifacts.tar.gz to tell whether a
+# served package still pins the live catalog certificate. Dropping it made
+# every freshly built package read as "no pinned cert" -> STALE forever, and
+# --rebuild could never converge (review finding IRIS-12-001). It must be the
+# same cert-only bytes the Dockerfile baked at /opt/iris/iris-catalog.pem.
 PKG="$CTX/pkg"
 mkdir -p "$PKG"
 mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
 cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"
+cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"
 ( cd "$PKG" && "$IOXCLIENT" package . )
 cp "$PKG/package.tar" "$OUT/$PACKAGE_NAME"
 echo ">> done: $OUT/$PACKAGE_NAME"

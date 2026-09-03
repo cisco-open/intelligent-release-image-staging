@@ -46,6 +46,9 @@ class MultiCatalog:
         # ids whose lookup RAISES this tick (a 5xx/timeout), as opposed to
         # answering None (the image is genuinely gone from the catalog).
         self.raises = set()
+        # ids whose TORRENT the catalog refuses this tick (404 missing file,
+        # 503 deployment gate closed, 500 no announce credential).
+        self.torrent_raises = set()
 
     def get_policy(self, sid):
         return {"approved_image_id": self.ids[0] if self.ids else None,
@@ -57,6 +60,8 @@ class MultiCatalog:
         return self.images.get(image_id)
 
     def download_torrent(self, image_id, dest):
+        if image_id in self.torrent_raises:
+            raise OSError("torrent %s -> HTTP 503" % image_id)
         self.downloaded.append((image_id, dest))
 
     def heartbeat(self, sid, data):
@@ -67,7 +72,8 @@ class MultiCatalog:
 def make_deps(catalog, sizes, free=9_000_000_000, root_ok=True,
               verify_ok=True, mode="bundle", reclaimables=()):
     """Fake Deps + a `rec` dict of everything the agent did to the device."""
-    rec = {"emitted": [], "ios": [], "aria_added": [], "aria_removed": [],
+    rec = {"emitted": [], "boot": {"image": "running.bin"}, "aria_added": [],
+           "aria_removed": [],
            "copied": [], "purged": [], "reclaimed": [], "bundle_reclaimed": [],
            "removed": [], "verified": []}
 
@@ -86,7 +92,7 @@ def make_deps(catalog, sizes, free=9_000_000_000, root_ok=True,
     deps = iris_agent.Deps(
         catalog=catalog,
         emit=lambda m, msg: rec["emitted"].append((m, msg)),
-        ios=lambda cmd: rec["ios"].append(cmd) or "",
+        boot_image=lambda: rec["boot"]["image"],
         aria_add=lambda t, d: rec["aria_added"].append((t, d)),
         file_size=lambda p: sizes.get(p),
         verify=_verify,
@@ -595,3 +601,59 @@ def test_single_image_heartbeat_omits_errored_image_ids():
 
     iris_agent.run_once(CFG, deps, state)
     assert "errored_image_ids" not in cat.heartbeats[0]
+
+
+def test_parked_root_copy_that_is_the_boot_target_survives_the_reclaim_gate():
+    """IRIS-09-002 through the park contract: a parked image's root copy is
+    deliberately reclaimable — but not when the operator has pointed BOOT at
+    it. Bundle reclaim for the newly checked image protects the BOOT target
+    on the same footing as the running image, and the space comes from
+    something else (or nowhere)."""
+    cat = MultiCatalog([_img("img-a"), _img("img-b", size=5_000_000_000)],
+                       ids=["img-b"])
+    deps, rec = make_deps(cat, {}, free=500_000_000)
+    rec["boot"]["image"] = "flash:img-a.bin"
+    seen = {}
+
+    def reclaimable(prefix, protect):
+        seen["protect"] = set(protect)
+        return [n for n in ("img-a.bin", "stale.bin") if n not in protect]
+
+    deps = deps._replace(reclaimable=reclaimable)
+    state = {"img-a": {"root_file": "img-a.bin", "parked": True,
+                       "done": False, "copied": True}}
+    assert iris_agent.run_once(CFG, deps, state) == "no-space"
+    assert "img-a.bin" in seen["protect"]            # the BOOT target
+    assert "running.bin" in seen["protect"]
+    assert rec["bundle_reclaimed"] == [("flash:", ["stale.bin"])]
+    assert state["img-a"]["root_file"] == "img-a.bin"   # record untouched
+
+
+def test_one_image_torrent_fetch_failure_does_not_abort_the_set_tick():
+    """IRIS-09-004: the catalog refuses ONE image's torrent (503 behind the
+    deployment gate). The sibling's work still completes and is reported, the
+    set heartbeat still goes out carrying the error, and nothing raises — so
+    main() persists the sibling's done/copied instead of re-hashing and
+    re-copying ~1.2 GB every tick."""
+    cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
+    cat.torrent_raises = {"img-b"}
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == \
+        "multi:complete,torrent-unavailable"
+    assert state["img-a"]["done"] and state["img-a"]["copied"]
+    assert rec["copied"] == ["img-a.bin"]
+    assert rec["aria_added"] == []
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[0]
+    assert hb["stage_state"] == "error"
+    assert hb["staged_image_ids"] == ["img-a"]
+    assert hb["errored_image_ids"] == ["img-b"]
+    assert "torrent" in hb["stage_error"]
+    assert _emits(rec, "TORRENT-UNAVAILABLE")
+    # next tick, gate open: img-b starts, img-a stays steady (no re-copy)
+    cat.torrent_raises = set()
+    rec["copied"].clear()
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,downloading"
+    assert rec["copied"] == []
+    assert rec["aria_added"] == [("/stage/img-b.torrent", "/stage")]

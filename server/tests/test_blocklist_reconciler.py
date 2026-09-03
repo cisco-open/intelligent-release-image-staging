@@ -287,3 +287,50 @@ class TestApply:
             br.apply_blocklist(aria, denied_ips=["not-an-ip"],
                                apply_empty=True)
         assert aria.calls == []
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-005 / IRIS-04-003 helpers: denied retention + denied addresses
+# ---------------------------------------------------------------------------
+
+class TestDeniedRetention:
+    def _policy(self, quarantined=()):
+        doc = peer_policy.base_document()
+        for dev in quarantined:
+            doc["assignments"][dev] = peer_policy.RESERVED_QUARANTINE
+        return peer_policy.PolicyResult(
+            document=doc, degraded=False, fail_closed=False)
+
+    def test_keep_names_revoked_and_denied_principals_only(self):
+        keep = br.denied_retention(
+            self._policy(quarantined=["bad"]), {"device:gone"})
+        assert keep("device", "bad", "10.0.0.2") is True
+        assert keep("device", "gone", "10.0.0.3") is True
+        assert keep("device", "good", "10.0.0.1") is False
+        assert keep("service", "seeder", "10.0.0.9") is False
+
+    def test_keep_under_fail_closed_keeps_only_revoked(self):
+        pr = peer_policy.PolicyResult(
+            document={"_fail_closed": True}, degraded=True, fail_closed=True)
+        keep = br.denied_retention(pr, {"device:gone"})
+        assert keep("device", "gone", "10.0.0.3") is True
+        assert keep("device", "bad", "10.0.0.2") is False
+
+    def test_denied_endpoint_ips_ignores_conflicts_and_non_devices(self):
+        durable = {
+            "device:bad": {"principal_type": "device", "principal_id": "bad",
+                           "endpoints": [{"ipv4": "10.0.0.2"}]},
+            "device:good": {"principal_type": "device", "principal_id": "good",
+                            "endpoints": [{"ipv4": "10.0.0.2"},   # shared
+                                          {"ipv4": "10.0.0.1"}]},
+            "device:gone": {"principal_type": "device", "principal_id": "gone",
+                            "endpoints": [{"ipv4": "10.0.0.3"}]},
+            "service:seeder": {"principal_type": "service",
+                               "principal_id": "seeder",
+                               "endpoints": [{"ipv4": "10.0.0.9"}]},
+        }
+        ips = br.denied_endpoint_ips(
+            self._policy(quarantined=["bad"]), durable, {"device:gone"})
+        # The shared 10.0.0.2 IS denied here (fail closed for the legacy
+        # question) even though derive_denied_set would record a conflict.
+        assert ips == {"10.0.0.2", "10.0.0.3"}

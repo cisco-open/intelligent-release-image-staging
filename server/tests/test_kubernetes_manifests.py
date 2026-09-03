@@ -4,10 +4,11 @@
 
 import os
 
-import pytest
-
-
-yaml = pytest.importorskip("yaml")
+# Imported directly, NOT via pytest.importorskip: PyYAML is a declared test
+# dependency (requirements-dev.txt), and these are SECURITY assertions about
+# the shipped manifests. A missing dependency must fail the run, not quietly
+# subtract ten checks from it.
+import yaml
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 K8S = os.path.join(ROOT, "kubernetes")
 
@@ -54,8 +55,23 @@ def test_load_balancer_preserves_sources_and_never_exposes_rpc():
     assert 6800 not in ports
 
 
+def _load_env(name):
+    """KEY=VALUE file consumed by kustomize configMapGenerator (envs:)."""
+    data = {}
+    with open(os.path.join(K8S, name), encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            data[key] = value
+    return data
+
+
 def test_config_keeps_persistent_and_plaintext_paths_separate():
-    data = _load("configmap.yaml")["data"]
+    # The ConfigMap is generated from the env file (IRIS-13-014): a plain
+    # configmap.yaml resource was updated in place and never rolled the pod.
+    data = _load_env("iris-seed-server.env")
     assert data["IRIS_STATE"].startswith("/data/")
     assert data["IRIS_CONFIG"].startswith("/data/")
     assert data["IRIS_SECRETS"] == "/run/iris/secrets.json"
@@ -86,3 +102,21 @@ def test_pod_satisfies_restricted_pod_security_profile():
 def test_operator_copy_works_with_dropped_chown_capability():
     with open(os.path.join(K8S, "README.md"), encoding="utf-8") as f:
         assert "kubectl -n iris cp --no-preserve" in f.read()
+
+
+def test_configmap_is_generated_so_edits_roll_the_pod():
+    kust = _load("kustomization.yaml")
+    assert "configmap.yaml" not in kust["resources"]
+    gen = kust["configMapGenerator"][0]
+    assert gen["name"] == "iris-seed-server"
+    assert gen["envs"] == ["iris-seed-server.env"]
+    pod = _load("deployment.yaml")["spec"]["template"]["spec"]
+    for container in pod["initContainers"] + pod["containers"]:
+        assert container["envFrom"][0]["configMapRef"]["name"] == "iris-seed-server"
+        # mutable placeholder tag: never let a node keep a stale cached image
+        assert container["imagePullPolicy"] == "Always"
+
+
+def test_rollout_restart_is_documented_for_same_tag_rebuilds():
+    with open(os.path.join(K8S, "README.md"), encoding="utf-8") as f:
+        assert "rollout restart deployment/iris-seed-server" in f.read()

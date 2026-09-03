@@ -63,19 +63,71 @@ Compose refuses to start without these; none has a default.
 | `IRIS_AGE_RECIPIENTS` | Comma-separated age public keys the at-rest secret store is encrypted to: the primary key plus an offline break-glass recipient. |
 | `IRIS_AGE_KEY_FILE_HOST` | Host path of the age identity (private key), mounted as the Docker secret `iris_age_key` at `/run/secrets/iris_age_key`. |
 
+!!! important "How a variable reaches the container"
+    Compose injects **only** the keys named in the `environment:` block of
+    `server/docker-compose.yml`. Exporting a variable in your shell, or adding a
+    line to `server/.env`, sets it for *interpolation* — Compose substitutes it
+    into `"${VAR:-…}"` on the right-hand side of that block, and a variable the
+    block never names is silently dropped. Every variable in the tables below is
+    named there, so `server/.env` (or an `export`) is the supported way to set
+    any of them. A variable that is **not** in these tables — an internal tuning
+    value, or one added to the code later — needs a line added to the
+    `environment:` block before it has any effect.
+
+    Kubernetes differs: `kubernetes/kustomization.yaml` generates the ConfigMap
+    from `kubernetes/iris-seed-server.env` and the pod pulls it with `envFrom`,
+    so any key in that file reaches the process without a manifest change.
+
 ### Optional at deploy time
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory bind-mounted read-write at `/srv/artifacts`. |
+| `COMPOSE_PROJECT_NAME` | `iris` (the `name:` in `server/docker-compose.yml`) | Compose project name, and therefore the prefix on the named volumes (`iris_iris-state`, `iris_iris-config`, `iris_iris-images`). Host-side only: read by Compose itself, never passed into the container. Set it to give a second checkout on the same host its own volumes; a deployment created before `name:` was declared keeps `server_`-prefixed volumes and needs the migration in [Server](server.md#compose-project-name). |
+| `IRIS_CONTAINER` | `iris` | Name of the server container: Compose applies it as `container_name`, and `tools/apply-assignments.sh`, `tools/stage-iox-package.sh`, `tools/gen-device-installers.sh` and `tools/check-package-freshness.sh` address that name. Host-side only. Container names are host-global, so a second stack needs this as well as `COMPOSE_PROJECT_NAME`. `tools/start-compose-server.sh` resolves the container from its own Compose project when this is unset. |
+| `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory bind-mounted read-write at `/srv/artifacts`. Host-side only: it is interpolated into the bind mount, not passed into the container. |
 | `IRIS_GUI_PUBLISH` | `8080` | Published host port for the console. The container always listens on 8080 internally. |
 | `IRIS_CONSOLE_URL` | unset | Overrides the console link on the port 9101 pointer page verbatim, for hosts publishing the console somewhere other than `https://<IRIS_HOST_IP>:8080/`. Read per request. |
-| `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. |
+| `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` lets the console serve plain HTTP when no usable certificate exists (`IRIS_GUI_CERT` / `IRIS_CERT`). Without it `iris-gui` refuses to start in that state. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
+| `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. Build-time only: it is not a container variable. |
+| `IRIS_GUI_ADMIN_PASSWORD` | unset (prompts) | Read by `iris-gui-admin` to set the console admin password non-interactively. Pass it on the one-shot command (`docker compose … run --rm -e IRIS_GUI_ADMIN_PASSWORD=… iris iris-gui-admin`); it is deliberately **not** in the Compose `environment:` block, so a long-running container never holds the password in its environment. |
 | `IRIS_SAMPLE_INTERVAL` | `15` (seconds) | Seeder/telemetry poll cadence. A transfer that completes inside one interval can be observed with no connected peer, so per-peer rates and the map's measured edges never appear — a 1 GB image at ~90 MB/s lands in about 15 seconds. Lower it to 2–5 on a fast fabric or for a live demo; the cost is more aria2 RPC calls. |
+| `IRIS_TRACKER_PORT` | `6969` | Port the tracker listens on. The canonical (seeder) announce, per-device personalized announces and the rotation CLI all derive their announce base from `IRIS_HOST_IP` and this port, so changing it needs the compose port mapping changed to match. |
+| `IRIS_TRACKER_ANNOUNCE` | unset | Full announce base (`http://host:port/announce`, no query) used verbatim in place of the `IRIS_HOST_IP` + `IRIS_TRACKER_PORT` derivation, by every path that builds an announce URL. |
 | `IRIS_REQUIRE_IDENTITY_GATE` | unset (off) | Set to `1` to make the catalog answer 503 to every per-device torrent request until the checkpoint file `identity-compatible-ready` exists under `IRIS_STATE` — the file a proven seeder rotation writes and `--recover` removes. Read per request, so opening or closing the gate needs no restart. The canonical (service) torrent path is unaffected. A deployment that does not set it serves per-device torrents as before. |
 | `IRIS_ONBOARD_CONCURRENCY` | `25` | Maximum onboard/undeploy jobs the worker pool runs at once; the rest queue. `GET /api/onboard/jobs` reports the active value as `max_concurrent`. |
 | `IRIS_XR_SESSION_TIMEOUT` | `150` seconds | Wall-clock bound for each IOS-XR command session. `0` disables it; an invalid value falls back to the default with a warning. |
-| `IRIS_DEVICE_ENABLE_ALWAYS` | unset (off) | Compatibility escape hatch that always sends `enable` plus its secret on IOS-XE SSH sessions. Normally IRIS learns whether escalation is needed from the device prompt and sends neither line to already-privileged logins. |
+| `IRIS_DEVICE_ENABLE_ALWAYS` | unset (off) | Compatibility escape hatch: each agent process starts by sending `enable` plus its secret on IOS-XE SSH sessions, and drops the pair for the rest of that process once a session's own prompt shows the login was already privileged (`#`). Normally IRIS learns whether escalation is needed from the device prompt and sends neither line to already-privileged logins. |
+| `IRIS_ONBOARD_JOB_TIMEOUT` | `7200` seconds | Wall-clock deadline for one onboard/undeploy job, measured from the moment it starts **running** (never from when it was queued). A running job past the deadline is stopped like an operator abort. |
+| `IRIS_ONBOARD_REAP_GRACE` | `60` seconds | Grace between the `SIGTERM` sent to a deadline-expired installer's process group and the `SIGKILL` that follows. |
+| `IRIS_HTTP_TIMEOUT` | `30` seconds | Per-connection socket timeout for the tracker and catalog request handlers: a connection that stalls mid-request is closed instead of pinning a thread. A non-numeric or non-positive value falls back to the default. |
+| `IRIS_ENDPOINT_TTL` | `900` seconds | Freshness window for a device's durable peer endpoint in `peer-endpoints.json`. A missing, non-integer or non-positive value falls back to the default (a TTL of 0 would make every row stale and apply an empty blocklist under an `enforced` status). Endpoint rows for quarantined or revoked devices are retained regardless — see [Operations](operations.md#peer-policy-operations-and-their-backlog). |
+| `IRIS_ENROLL_TTL` | `3600` seconds | Lifetime of the one-shot enrollment token minted into a per-device installer, overriding the standard catalog-token TTL for that first exchange only. |
+| `IRIS_HEALTH_LISTENERS` | `tracker:6969,catalog:8443,artifacts:8000,console:8080` | What `:9101/readyz` TCP-probes, as `name:port,name:port`. Blank keeps the default set; the literal `off` checks nothing, for a deployment that runs a subset of the services and does not want the missing ones reported down. |
+| `IRIS_AUDIT_RETENTION_DAYS` | `90` days | Audit entries older than this are dropped by timestamp on the next amortized prune. A non-integer or non-positive value falls back to the default. |
+| `IRIS_AUDIT_MAX_EVENTS` | `50000` | Hard cap on surviving audit entries. A prune above the cap evicts the **oldest by file position** (append order), so a forged far-future timestamp cannot shield an entry and a wrong clock cannot mass-delete fresh ones. A non-integer or non-positive value falls back to the default. Raise both of these if you have a longer retention obligation — the trail is append-only JSONL and prunes itself. |
+| `SEED_MAX_CONCURRENT` | `1000` | `--max-concurrent-downloads` for the origin seeder's aria2c. See [Operations](operations.md#scaling-notes) for when this matters; the device-side equivalent is `IRIS_MAX_CONCURRENT` in the container agents. |
+| `IRIS_SSH_LEGACY` | `0` | `1` re-enables SHA-1 KEX, `ssh-rsa` and CBC ciphers for server-side device sessions, for old IOS-XE images that offer nothing else. |
+| `IRIS_SSH_HOST_KEY` | unset | Pin one device/stage-host public host key (`<type> <base64>`) for strict verification. See [Security](security.md#device-ssh-host-keys). |
+| `IRIS_SSH_KNOWN_HOSTS` | unset | Path to a `known_hosts` file to verify strictly against. With neither this nor `IRIS_SSH_HOST_KEY` set, host keys are recorded on first contact into a persistent `known_hosts` under `$IRIS_STATE/ssh` and must match afterwards; `/dev/null` is never used. |
+| `SVI_IGP` | `none` | Routed Guest Shell installs only: `isis` adds `ip router isis` to the IRIS SVI, for fabrics (an SD-Access underlay, say) that must learn the IRIS subnet. The default injects nothing into your IGP. See [Management type](management-type.md). |
+
+Parser behaviour is not uniform, so each row above states its own. Several of
+the numeric knobs (`IRIS_HTTP_TIMEOUT`, `IRIS_ENDPOINT_TTL`,
+`IRIS_XR_SESSION_TIMEOUT`, `IRIS_AUDIT_RETENTION_DAYS`,
+`IRIS_AUDIT_MAX_EVENTS`) fall back to their default on a value they cannot
+parse. `IRIS_HTTP_TIMEOUT`, `IRIS_ENDPOINT_TTL` and both audit knobs also fall
+back on a **non-positive** one, so `0` is not a meaningful setting for them and
+is treated as unset — it does not mean "no cap" on `IRIS_AUDIT_MAX_EVENTS`, and
+it does not mean "keep nothing" on `IRIS_AUDIT_RETENTION_DAYS`. For an
+effectively unbounded audit trail set a large number and give the volume the
+space for it. (`IRIS_XR_SESSION_TIMEOUT` is the exception: `0` genuinely
+disables its deadline, as its row says.)
+The others are parsed with a bare `int()` and a garbage value raises at
+startup rather than degrading — an *empty* value does too for
+`IRIS_ONBOARD_CONCURRENCY`, `IRIS_ENROLL_TTL` and `IRIS_METRICS_PORT`, which is
+why `server/docker-compose.yml` restates their defaults instead of passing an
+empty string through. Set a real value or leave the variable unset; do not set
+one to the empty string.
 
 The host-side ownership these paths need is in
 [Server](server.md#host-paths-to-chown-on-every-deploy).
@@ -179,7 +231,7 @@ collector and backend.
 
 * Prometheus `/metrics` is served only while `IRIS_OBSERVABILITY` is enabled; otherwise the path answers 404.
 * OTLP export requires **both** an effective enabled flag **and** an effective endpoint. Each field is the console override from `$IRIS_STATE/telemetry-destination.json` when set, else the deployment env (`IRIS_OBSERVABILITY` / `IRIS_OTLP_ENDPOINT`). An endpoint on its own is inert — nothing is exported.
-* `/healthz` and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable. `/swarm` answers only loopback peers by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it to remote peers.
+* `/healthz`, `/readyz` and the `/swarmmap` pointer page are served whenever the listener runs, regardless of either variable. `/healthz` answers 200 unconditionally and proves only that the telemetry listener is alive; `/readyz` TCP-probes the tracker, catalog, artifact server and console and answers 503 naming any that are down — it is what the Compose `HEALTHCHECK` and the Kubernetes probes use, and `IRIS_HEALTH_LISTENERS` narrows or disables its probe set. `/swarm` answers only loopback peers by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it to remote peers.
 * The console reads `/swarm` over container loopback (`127.0.0.1:9101`), so port 9101 needs external reachability only for Prometheus scraping or operator tools — never for the console.
 
 `IRIS_OBSERVABILITY` still decides the Prometheus `/metrics` surface at
@@ -212,19 +264,19 @@ upload at 256 MiB.
 
 | Route | Body / result |
 | --- | --- |
-| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie; 401 on bad credentials. Before any admin exists, signing in with the default `iris` / `irisisgreat!` credential instead returns `{setup: true, setup_grant}` — no session — for use with `POST /api/setup` below. |
+| `POST /api/login` | Pre-auth. `{username, password}` → `{username, csrf}` plus the session cookie (`HttpOnly; SameSite=Strict`, plus `Secure` when the listener serves TLS); 401 on bad credentials, 429 with `Retry-After` when throttled, 503 with `Retry-After` when both password-verification slots are busy (not a credential failure: no limiter penalty, no audit row). Before any admin exists, signing in with the default `iris` / `irisisgreat!` credential instead returns `{setup: true, setup_grant}` — no session — for use with `POST /api/setup` below. |
 | `POST /api/setup` | Pre-auth, first run only. `{username, password, setup_grant}` creates the admin account, where `setup_grant` is the one-time, 10-minute grant from the default-credential login above; 403 on a missing/invalid/expired grant, 409 once an admin exists. |
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
-| `GET /api/session` | The current session's info, or 401. |
+| `GET /api/session` | The current session's info, or 401. Any GET carrying `X-IRIS-Poll: 1` (the console's periodic refreshers) is validated without refreshing the session's idle clock. All `/api/*` responses carry `Cache-Control: private, no-store`; a present-but-unreadable secrets store answers 503 on every store-backed route. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
-| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` — the two IOx tars plus the IOS-XR agent RPM (`iris-xr.rpm`), each with its own build time, state, reason, and rebuild `remedy` command (the RPM's differs from the tars' — see [Setup](console.md#setup)); the RPM entry also carries a `detail` string naming exactly what was and was not verified, since its baked certificate cannot be pinned the way the tars' can — `reference_fingerprint`, and the card-level `remedy` command (the IOx tars' rebuild script). See [Setup](console.md#setup). |
+| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`; `stage_host` also carries `required: false` (console onboarding stages locally and never uses it). `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` — the two IOx tars plus the IOS-XR agent RPM (`iris-xr.rpm`), each with its own build time, state, reason, and rebuild `remedy` command (the RPM's differs from the tars' — see [Setup](console.md#setup)); the RPM entry also carries a `detail` string naming exactly what was and was not verified, since its baked certificate cannot be pinned the way the tars' can — `reference_fingerprint`, and the card-level `remedy` command (the IOx tars' rebuild script). See [Setup](console.md#setup). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
 | `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
 | `DELETE /api/settings/stage-host` | `{deleted: <bool>}` — clears that credential. |
-| `POST /api/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. |
+| `POST /api/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. Returns `{gui_cert, applied, note}`: `applied` is `false` (with a `note`) when the listener is not serving TLS, in which case the saved certificate takes effect at the next restart. |
 | `DELETE /api/settings/gui-cert` | Reverts the console to the built-in certificate, hot-applied. |
-| `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. |
+| `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. Every block must parse as an X.509 certificate; a decodable-but-not-a-certificate block rejects the whole upload (400). |
 | `DELETE /api/settings/trust/<name>` | Removes one trust entry and rebuilds the runtime bundle. |
 | `POST /api/settings/ca-trust` | `{url, auto}` — configures the public-CA bundle download; the URL must be `https://`. |
 | `POST /api/settings/ca-trust/refresh` | Starts a download-now job; returns `{job}`. Downloads refuse redirects, cap at 2 MiB, and must yield at least one certificate (plain PEM, a certs-only PKCS#7 bundle, or a verified CMS-signed wrapper). |
@@ -296,6 +348,7 @@ verification](operations.md#image-verification).
 | `DELETE /api/devices/<id>` | Retires the device: revokes its credentials first, then clears peer-policy assignment, inventory row, and catalog state. `{deleted: <bool>, degraded: [...]}` — 200 when cleanup was complete, 207 when part of it failed (`degraded` names the areas), 500 `{deleted: false, error: "secret revoke failed"}` when the revoke could not be persisted, in which case nothing was changed. Endpoint rows are retained until they age out. See [Retiring a device](operations.md#retiring-a-device). |
 | `GET /api/devices/export-csv`, `GET /api/devices/example-csv` | The inventory as `devices.csv`, and a blank example. |
 | `POST /api/devices/import-csv` | Bulk inventory import (8 MiB cap, all-or-nothing); returns per-row stats. |
+| `GET /api/install-options?model=<model>` | `{options: [...]}` — the agent-install platforms that model may run, which is what the console's platform picker offers. An 8000-series (IOS-XR) model returns exactly `["xr-appmgr"]` and nothing else; a blank model, or one this table has no opinion on, returns `null` — meaning no guardrail applies and every explicit choice stays available. |
 | `GET /api/devices/<id>/plan` | `{plan}` — the resolved deployment plan; 409 when it cannot resolve. |
 | `GET /api/devices/<id>/reports` | `{reports: [...]}` — the device's stored telemetry ring. |
 | `GET /api/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
@@ -303,10 +356,35 @@ verification](operations.md#image-verification).
 | `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
-| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. |
+| `POST /api/devices/<id>/onboard`, `POST /api/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
 
 Router deployments carry extra preflight and ownership rules — see
 [Management Type and VLAN Ownership](management-type.md#router-preflight-and-ownership).
+
+### Peer policy
+
+The read side of the swarm's isolation posture, and the one compare-and-set
+write in the whole API.
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/peer-policy` | The count-only policy view: `schema`, `revision`, `degraded`, `fail_closed`, `quarantine` (the reserved-ACL descriptor), `quarantine_assignments` (the sorted device ids currently quarantined), and `enforcement` — the tracker's reconciler status as `state`, `desired_ip_count`, `applied_revision`, `last_reconciled_at`, `conflict_count`, `conflict_types`, `last_effect` (aggregate `disconnected_peers` / `removed_peers` counts only), `last_error`, and `last_operation_exported_revision`. Deliberately count-only: no peer address ever crosses this boundary. |
+| `PUT /api/peer-policy/quarantine/<device_id>` | Quarantines or releases one device. The body must be **exactly** `{"quarantined": <bool>, "if_revision": <int ≥ 1>}` — no other keys, no other types. `if_revision` is the revision you read from `GET /api/peer-policy`, and the write commits only if the policy is still at that revision. 200 `{ok: true, revision, quarantined}` on success. |
+
+Refusals on the write, all of them fail-closed:
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| 400 | `{"error": "bad peer-policy request"}` | The body is not exactly the two required keys with the required types. |
+| 409 | `{"error": "revision_conflict", "revision": <current>}` | Someone else committed since you read; re-read and retry against the revision returned. |
+| 422 | `{"error": "unknown device"}` | No such device in inventory (an encoded `/` in the id is rejected here too). |
+| 422 | `{"error": "policy_error"}` | The policy document is degraded, or the mutation was refused. |
+| 503 | `{"error": "policy_fail_closed"}` | The policy could not be loaded; nothing is mutated. |
+| 503 | `{"error": "operation_backlog_full"}` | Too many committed operations still un-exported to the tracker. |
+| 413 | `{"error": "payload too large"}` | Body over the 64 KiB cap. |
+
+The backlog bound and what to do about each refusal are in
+[Peer-policy operations and their backlog](operations.md#peer-policy-operations-and-their-backlog).
 
 ### Onboarding jobs
 
@@ -346,6 +424,19 @@ Persisted deployment logs are plain files under `$IRIS_STATE/deploy-logs`,
 one per finished onboard or undeploy job with a machine-parseable header
 line; the newest 200 are kept. `/api/help`'s `deployment_id` comes from
 `$IRIS_STATE/instance-id`, minted once on first start and immutable after.
+
+### The device-facing catalog API is not in this table
+
+Everything above is the **console** API on port 8080. The catalog serves a
+separate, device-facing API on port 8443 — `GET /v1/images`,
+`/v1/images/<id>`, `/v1/torrents/<id>`, `/v1/devices`,
+`/v1/devices/<id>/policy`, and `POST /v1/devices/<id>/heartbeat`,
+`/telemetry`, `/token-refresh`. That is the agent protocol: it is
+authenticated per device with a catalog token, it is versioned and changed in
+lockstep with `device/agent/`, and it is not an integration surface. It is
+documented by behaviour on [Device agents](device-agents.md) and
+[Architecture](architecture.md) rather than route by route here, and nothing
+outside the agent should call it.
 
 ### Import skip reasons
 
@@ -392,7 +483,12 @@ from the read-only root stays on disk and a same-named file in the uploads volum
 is never destroyed. Entries published before `source_dir` was recorded keep the
 older behaviour: their delete unlinks `IRIS_IMAGES_DIR/<filename>`. The startup
 re-seed likewise prefers `source_dir`, falling back to its basename walk for
-entries with no `source_dir` or whose recorded directory has gone away.
+entries with no `source_dir` or whose recorded directory has gone away. The
+catalog is the authority on *what* is re-seeded: a `.torrent` file with no
+catalog entry (left by a publish that failed after the torrent was built and
+before the entry was written — normally rolled back, but a crash can leave
+one) and the torrent of a `quarantined` image are skipped, so a restart never
+serves what the API says is absent or withheld.
 
 ## Policy schema
 
@@ -456,7 +552,7 @@ writes plan identity into `policy.json` and never touches this file.
 | `plan_id`, `transfer_id`, `device_id`, `image_id`, `info_hash`, `planned_at` | Copied from the plan's `policy.json` row and refreshed from it on every pass. This file mints no identity of its own. |
 | `state` | `planned` at creation; `seeding` once both latches below are set; `cancelled` when the assignment is withdrawn before that. Both `seeding` and `cancelled` are terminal — a later unassign never un-seeds a transfer that already happened, and a cancelled plan can never be promoted. |
 | `checksum_verified_at` | First precondition, latched first-write-wins: the server-stamped `received_at` of the earliest terminal report (`staging-complete` or `seeding-only`) from that device carrying **this plan's own** `transfer_id` with `content_sha256.state == "verified"`. Both terminal events are reachable only after the agent hashed the fully downloaded file, so this single fact carries both "the content is complete on the device" and "its checksum verified". `null` until such a report arrives. |
-| `tracker_seeder_at` | Second precondition, latched first-write-wins: when this tracker saw the device itself announce `left = 0` on the image's torrent under its own authenticated principal — the peer registry row's `completed_at`, falling back to `last_seen`. A device announcing on a legacy or shared seeder token proves no identity and can never satisfy this. `null` until then. |
+| `tracker_seeder_at` | Second precondition, latched first-write-wins: when this tracker saw the device itself announce `left = 0` on the image's torrent under its own authenticated principal — the peer registry row's `completed_at`, falling back to `last_seen`, and finally to the pass's own instant. A device announcing on a legacy or shared seeder token proves no identity and can never satisfy this. `null` until then. **Never earlier than `planned_at`:** a peer row belongs to a peer, not to a plan, so unassigning and re-assigning an image the device is already seeding leaves a row carrying the *previous* transfer's `completed_at`. That instant is not this plan's evidence — the tracker did not watch this plan seed before it existed — so a candidate predating the plan is skipped and the next one down the chain stands in. |
 | `seeding_started_at` | `max(checksum_verified_at, tracker_seeder_at, planned_at)`: the instant the later of the two preconditions became true, floored at the plan's own creation so a planned→seeding duration can never render negative. Computed once, at promotion, before any record is built, and never recomputed — which is what makes a replay after a crash byte-identical. |
 | `observed_at` | The end of the attesting report's measurement window, on the **device's** clock. Carried for correlation only, and never subtracted from the server instants above: two clocks. |
 | `updated_at` | When this row was last written. Drives retention and eviction order. |
@@ -468,6 +564,17 @@ rows go first; an eviction forced to drop a row that still owes an event is
 counted in the store's `plans_dropped_unemitted` rather than disappearing
 quietly. `plans_awaiting_report` counts plans the tracker has already watched
 seed for which no matching report has arrived.
+
+Retirement is keyed on the export queue having *accepted* a record, never on
+the collector having acknowledged it — the alternative holds every row forever
+whenever a collector is down. A collector outage longer than the retention
+window therefore costs those records, and `events_retired_undelivered` counts
+exactly how many, alongside `plans_unconfirmed` for the backlog that has not
+yet aged out. Every counter here leaves the process as an
+`iris.transfer.lifecycle.*` metric point and an `iris_transfer_lifecycle_*`
+Prometheus family (see
+[Observability](observability.md#metrics-names-operator-contract)): a bound
+nothing reports is a bound an operator cannot check.
 
 ### Lifecycle events
 

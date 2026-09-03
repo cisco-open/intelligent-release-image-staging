@@ -334,3 +334,86 @@ class TestRetryWithoutAnnounce:
         q = peer_endpoints.PendingEndpointQueue()
         assert peer_endpoints.retry_pending(store_path, q, now=1.0) == []
         assert not os.path.exists(store_path)
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-007: a non-positive TTL falls back to the default
+# ---------------------------------------------------------------------------
+
+class TestTTLClamp:
+    def test_zero_ttl_falls_back_to_default(self, monkeypatch):
+        # With ttl 0 no row is ever fresh: a valid policy would apply an EMPTY
+        # blocklist under `enforced`, and the maintenance deadline would fire
+        # on every 2 s poll.
+        monkeypatch.setenv("IRIS_ENDPOINT_TTL", "0")
+        assert peer_endpoints.endpoint_ttl() == 900
+
+    def test_negative_ttl_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("IRIS_ENDPOINT_TTL", "-5")
+        assert peer_endpoints.endpoint_ttl() == 900
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-001: entry-level corruption is store corruption (fail closed)
+# ---------------------------------------------------------------------------
+
+class TestEntryValidation:
+    def _write(self, path, endpoint):
+        with open(path, "w") as f:
+            json.dump({"schema": 1, "updated_at": 0.0, "principals": {
+                "device:x": {"principal_type": "device", "principal_id": "x",
+                             "updated_at": 0.0, "endpoints": [endpoint]}}}, f)
+
+    @pytest.mark.parametrize("endpoint", [
+        {"port": 6881, "observed_at": 1000.0},                    # no ipv4
+        {"ipv4": "fe80::1", "port": 6881, "observed_at": 1000.0},  # not IPv4
+        {"ipv4": "10.0.0.1", "port": 6881, "observed_at": "now"},  # str time
+        {"ipv4": "10.0.0.1", "port": "6881", "observed_at": 1000.0},
+        {"ipv4": "10.0.0.1", "port": 70000, "observed_at": 1000.0},
+        "not-a-dict",
+    ])
+    def test_malformed_endpoint_row_is_store_error(self, store_path, endpoint):
+        self._write(store_path, endpoint)
+        with pytest.raises(peer_endpoints.EndpointStoreError):
+            peer_endpoints.fresh_endpoints(store_path, now=1000.0)
+        with pytest.raises(peer_endpoints.EndpointStoreError):
+            peer_endpoints.record_endpoint(store_path, DEV, "10.0.0.2", 6881,
+                                           1000.0)
+        with open(store_path) as f:
+            assert "device:x" in f.read()        # never overwritten
+
+    def test_well_formed_row_still_loads(self, store_path):
+        self._write(store_path, {"ipv4": "10.0.0.1", "port": 6881,
+                                 "observed_at": 1000.0, "source": "announce"})
+        assert "device:x" in peer_endpoints.fresh_endpoints(store_path, 1000.0)
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-005: rows claimed by `keep` outlive the TTL (denied/revoked)
+# ---------------------------------------------------------------------------
+
+class TestKeepPredicate:
+    def test_fresh_endpoints_retains_kept_rows_past_ttl(self, store_path):
+        peer_endpoints.record_endpoint(store_path, DEV, "10.0.0.1", 6881, 1000.0)
+        peer_endpoints.record_endpoint(store_path, DEV2, "10.0.0.2", 6881, 1000.0)
+        keep = lambda ptype, pid, ip: pid == DEV.id
+        fresh = peer_endpoints.fresh_endpoints(store_path, now=1000.0 + 901,
+                                               keep=keep)
+        assert list(fresh) == ["device:iris8kv-3"]
+        assert fresh["device:iris8kv-3"]["endpoints"][0]["ipv4"] == "10.0.0.1"
+        # No predicate: the old contract, both aged out.
+        assert peer_endpoints.fresh_endpoints(store_path, now=1000.0 + 901) == {}
+
+    def test_prune_keeps_kept_rows_and_drops_the_rest(self, store_path):
+        peer_endpoints.record_endpoint(store_path, DEV, "10.0.0.1", 6881, 1000.0)
+        peer_endpoints.record_endpoint(store_path, DEV2, "10.0.0.2", 6881, 1000.0)
+        peer_endpoints.prune(store_path, now=1000.0 + 901,
+                             keep=lambda ptype, pid, ip: pid == DEV.id)
+        assert list(_read(store_path)["principals"]) == ["device:iris8kv-3"]
+
+    def test_row_released_by_keep_ages_out_normally(self, store_path):
+        peer_endpoints.record_endpoint(store_path, DEV, "10.0.0.1", 6881, 1000.0)
+        assert peer_endpoints.fresh_endpoints(
+            store_path, now=1000.0 + 901, keep=lambda *a: True)
+        assert peer_endpoints.fresh_endpoints(
+            store_path, now=1000.0 + 901, keep=lambda *a: False) == {}

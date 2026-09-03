@@ -115,3 +115,26 @@ def test_revoke_too_many_args_returns_rc2(tmp_path, monkeypatch):
     mod = _load_cli()
     rc = mod.main(["dev-1", "extra"])
     assert rc == 2
+
+
+def test_revoke_refuses_corrupt_store(tmp_path, monkeypatch, capsys):
+    """A present-but-unreadable store is refused, not treated as empty.
+
+    Regression for IRIS-01-002: load() used to return the empty skeleton for a
+    truncated store, so a revoke would re-encrypt that emptiness over the only
+    durable copy of every device credential. The CLI must now stop with rc 1
+    and a message that names the path but no file content.
+    """
+    sp = str(tmp_path / "secrets.json")
+    with open(sp, "w") as f:
+        f.write('{"devices": {"dev-1":')      # truncated JSON
+    monkeypatch.setenv("IRIS_SECRETS", sp)
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+
+    mod = _load_cli()
+    rc = mod.main(["dev-1"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unreadable" in err
+    assert "dev-1\":" not in err               # never echoes file content

@@ -8,6 +8,7 @@ GET /api/images/jobs/<id> publish-status poll) with HttpOnly session cookies
 and double-submit CSRF on state-changing requests.
 Mirrors catalog.py's ThreadingHTTPServer + BaseHTTPRequestHandler + TLS pattern.
 Stdlib only."""
+import email.utils
 import http.cookies
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import re
 import secrets
 import shutil
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +32,7 @@ import audit_export
 import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
+import deployment_records
 import gui_app
 import gui_auth
 import gui_onboard
@@ -110,6 +113,16 @@ _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
                   # behind the onboard pool legitimately waits >10 min)
 _SSE_KEEPALIVE = 15  # comment-frame interval so proxies don't reap a quiet stream
 _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing, held in memory)
+# How long a client gets to complete the TLS handshake once its connection
+# has been handed to a worker thread (see _ConsoleServer). Generous for a
+# browser on an operator network; bounded so a connection that never sends
+# a ClientHello gives its thread back.
+_HANDSHAKE_TIMEOUT = 30
+# Explicit opt-in for serving the console over plain HTTP. Without it the
+# console refuses to start when no usable certificate exists: the session
+# cookie is Secure-only under TLS, and a plaintext console would otherwise
+# accept the admin password in cleartext and then fail to keep a session.
+_PLAINTEXT_OPT_IN_ENV = "IRIS_GUI_ALLOW_PLAINTEXT"
 _MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GiB — streamed image uploads (not the JSON cap)
 # 256 MiB — streamed offline Cisco Bulk Hash tar upload (KGV reconciler
 # Task 4). The real feed tar was ~46 MB on 2026-08-29 (bulkhash_refresh.py's
@@ -450,9 +463,9 @@ def _resolve_certfile():
     The console-specific override (IRIS_GUI_CERT, combined cert+key built by
     the cert-upload flow and the entrypoint) wins WHEN ITS FILE EXISTS; else
     the shared combined IRIS_CERT file all three TLS services load; else
-    None -> plain-HTTP fallback (unchanged, tested behavior). Catalog and
-    artifact server keep loading IRIS_CERT directly, so device pinning is
-    untouched."""
+    None -> main() refuses to start unless IRIS_GUI_ALLOW_PLAINTEXT=1 opts
+    into a plain-HTTP console. Catalog and artifact server keep loading
+    IRIS_CERT directly, so device pinning is untouched."""
     gui = os.environ.get("IRIS_GUI_CERT", "/run/iris/tls/gui-cert.pem")
     if os.path.exists(gui):
         return gui
@@ -658,6 +671,51 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
             pass                    # the daily thread must never die
 
 
+def _plaintext_allowed():
+    return os.environ.get(_PLAINTEXT_OPT_IN_ENV, "") == "1"
+
+
+class ConsoleTLSError(RuntimeError):
+    """A certificate was configured for the console but none of the
+    candidate files is usable, and plaintext was not opted into."""
+
+
+class _ConsoleServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that completes the TLS handshake in the WORKER
+    thread. Same mechanism (and reason) as artifact_server._Server: wrapping
+    the LISTENING socket makes socketserver perform the whole handshake
+    inside accept() on the single serve_forever thread, so one client that
+    connects and never sends a ClientHello (nc, a port scan, a TCP health
+    check, a stalled NAT'd client) freezes the console for every operator
+    until it goes away. Here accept() hands back the plain socket and the
+    wrap happens per connection. ``tls_context`` is retained, so
+    reload_tls() hot-swapping the chain keeps working unchanged."""
+
+    request_queue_size = 128
+    tls_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(request, server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's
+                # problem and nobody else's.
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)   # Handler.timeout re-arms it
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time):
@@ -720,6 +778,71 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
+
+        def parse_request(self):
+            ok = super().parse_request()
+            # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
+            # periodic refreshers) validates the session WITHOUT refreshing its
+            # idle clock, so an unattended console on a polled view still
+            # reaches the advertised idle timeout. GET-only: a mutation can
+            # never opt out of counting as activity. gui_app.session_info
+            # consults this per-thread flag for every lookup in the request.
+            gui_app.set_request_session_touch(
+                not (ok and self.command == "GET"
+                     and self.headers.get("X-IRIS-Poll", "").strip() == "1"))
+            return ok
+
+        def handle_one_request(self):
+            try:
+                super().handle_one_request()
+            except secrets_store.StoreCorruptError as exc:
+                # The live secrets store is present but unreadable. Every
+                # route that needs it fails closed here with a diagnosable
+                # answer (nothing has been written) instead of a dropped
+                # connection and a traceback; the message carries the path
+                # and failure class only.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "secrets store unreadable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
+            except catalog_mod.StateFileError as exc:
+                # A catalog state file (policy.json, devices.json, ...) is
+                # present but unreadable. Same fail-closed contract as the
+                # secrets store above: the console must not render a corrupt
+                # file as empty state, and the operator gets a diagnosable
+                # answer rather than a traceback with no response.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "state unavailable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
+
+        def _cookie_attrs(self):
+            """Session-cookie attributes. Secure only when this listener
+            actually serves TLS: a Secure cookie set over plain HTTP is
+            discarded by every browser except on localhost, which turned the
+            plaintext opt-in into a login loop with no diagnostic."""
+            return ("; HttpOnly; Secure; SameSite=Strict; Path=/"
+                    if srv.tls_active else "; HttpOnly; SameSite=Strict; Path=/")
+
+        def _drain_body(self, length):
+            """Consume and discard up to min(length, _MAX_BODY) bytes of a
+            request body that the route will not read (rejected before the
+            read). Bounded, so an unauthenticated client can never make
+            this process hold more than the small-body cap; enough that a
+            well-behaved client's small body is drained and the error
+            response reaches it instead of a connection reset."""
+            left = min(int(length), _MAX_BODY)
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    return
+                left -= len(chunk)
 
         def _audit(self, event, category, action=None, target=None, detail=None,
                   actor=None, result="ok", src_ip=None):
@@ -826,10 +949,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return plan
 
         @staticmethod
-        def _apply_router_preflight(plan, evidence):
-            """Bind live, ownership-sensitive router evidence into a plan."""
-            resolved = gui_onboard.apply_router_preflight(
-                plan["resolved"], evidence)
+        def _apply_preflight(plan, evidence):
+            """Bind a platform's live execution-time evidence (board ID,
+            model, router ownership facts) into a plan and re-hash it. Used
+            to exist for routers only; every platform's preflight now feeds
+            the record the same way."""
+            resolved = gui_onboard.bind_preflight(plan["resolved"], evidence)
             updated = dict(plan)
             updated["resolved"] = resolved
             payload = {key: value for key, value in updated.items()
@@ -988,7 +1113,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             self.send_header("Content-Length", str(len(body)))
             for k, v in _SECURITY_HEADERS:
                 self.send_header(k, v)
-            for k, v in (extra_headers or []):
+            extra = list(extra_headers or [])
+            if self.path.split("?", 1)[0].startswith("/api/") and not any(
+                    k.lower() == "cache-control" for k, _ in extra):
+                # Session-gated JSON/CSV must never land in a disk cache or
+                # bfcache that outlives the session.
+                self.send_header("Cache-Control", "private, no-store")
+            for k, v in extra:
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
@@ -1002,14 +1133,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             m = jar.get(COOKIE)
             return m.value if m else ""
 
-        def _require_session_csrf(self):
+        def _require_session_csrf(self, unread_body=0):
             """Return the session info for a valid session+CSRF request, else send
-            the error response and return None."""
+            the error response and return None. *unread_body* is the declared
+            body length the caller has deliberately NOT read yet (auth before
+            buffering); on rejection a bounded amount is drained so the error
+            answer is delivered rather than reset."""
             info = app.session_info(self._sid())
             if info is None:
+                self._drain_body(unread_body)
                 self._json(401, {"error": "unauthorized"})
                 return None
             if not _csrf_ok(self.headers.get("X-CSRF-Token", ""), info["csrf"]):
+                self._drain_body(unread_body)
                 self._json(403, {"error": "bad csrf"})
                 return None
             return info
@@ -1050,8 +1186,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if not full.startswith(WEBROOT + os.sep) or not os.path.isfile(full):
                 self._send(404, "text/plain", b"not found")
                 return
-            with open(full, "rb") as f:
-                body = f.read()
             ext = os.path.splitext(full)[1]
             # The SPA assets (index.html/app.js/styles.css) are not
             # content-hashed, so without this a browser keeps serving a stale
@@ -1059,8 +1193,34 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # stay invisible until the user manually clears their cache.
             # no-cache = the browser may store it but MUST revalidate with the
             # server before use, so a redeploy is picked up on the next load.
+            # Last-Modified + If-Modified-Since -> 304 is what makes that
+            # revalidation cheap instead of a full ~780 KB re-download per load.
+            try:
+                mtime = int(os.stat(full).st_mtime)
+            except OSError:
+                mtime = None
+            cache_headers = [("Cache-Control", "no-cache")]
+            if mtime is not None:
+                cache_headers.append(
+                    ("Last-Modified", email.utils.formatdate(mtime, usegmt=True)))
+                ims = self.headers.get("If-Modified-Since")
+                if ims:
+                    try:
+                        ims_ts = email.utils.parsedate_to_datetime(ims).timestamp()
+                    except (TypeError, ValueError, OverflowError):
+                        ims_ts = None
+                    if ims_ts is not None and mtime <= int(ims_ts):
+                        self.send_response(304)
+                        for k, v in _SECURITY_HEADERS:
+                            self.send_header(k, v)
+                        for k, v in cache_headers:
+                            self.send_header(k, v)
+                        self.end_headers()
+                        return
+            with open(full, "rb") as f:
+                body = f.read()
             self._send(200, _CONTENT_TYPES.get(ext, "application/octet-stream"),
-                       body, extra_headers=[("Cache-Control", "no-cache")])
+                       body, extra_headers=cache_headers)
 
         def _serve_swarmmap(self):
             """Serve the swarm-map page (session gate happens in do_GET) from
@@ -1785,6 +1945,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self.send_header(k, v)
             self.end_headers()
             cursor = 0
+            last_state = None
             idle_deadline = time.time() + _SSE_IDLE
             next_beat = time.time() + _SSE_KEEPALIVE
             try:
@@ -1801,8 +1962,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         safe = lines[cursor].replace("\r", " ").replace("\n", " ")
                         self.wfile.write(("data: %s\n\n" % safe).encode("utf-8"))
                         cursor += 1
-                    if progressed or job["state"] == "queued":
+                    # A state change (queued -> running) is progress too:
+                    # without this the poll that sees the transition, before
+                    # the first line lands, spends idle budget on it.
+                    state = job["state"]
+                    if progressed or state == "queued" or state != last_state:
                         idle_deadline = time.time() + _SSE_IDLE
+                    last_state = state
                     if time.time() >= next_beat:
                         self.wfile.write(b": keepalive\n\n")
                         next_beat = time.time() + _SSE_KEEPALIVE
@@ -1812,7 +1978,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             ("event: end\ndata: %s\n\n" % job["state"]).encode("utf-8"))
                         self.wfile.flush(); return
                     time.sleep(0.5)
-            except (BrokenPipeError, ConnectionError):
+                # Idle expiry gets a terminal frame too, so the client can
+                # tell a stalled job from a dead server.
+                self.wfile.write(b"event: end\ndata: idle\n\n")
+                self.wfile.flush()
+            except OSError:      # BrokenPipe/ConnectionReset and ssl-layer errors alike
                 return
 
         def _handle_offline_refresh(self, length):
@@ -2000,6 +2170,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except ValueError:
                 self._json(400, {"error": "bad content-length"})
                 return
+            if length < 0:
+                # int() accepts a sign, and rfile.read(-1) reads until the
+                # client half-closes with no cap at all -- pre-auth. Fail
+                # closed before any read (do_PUT already does).
+                self._json(400, {"error": "bad content-length"})
+                return
             if path == "/api/image-verification/offline":
                 # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
                 # diverted before the generic cap/eager-read below (sized and
@@ -2012,6 +2188,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if length > cap:
                 self._json(413, {"error": "payload too large"})
                 return
+            info = None
+            if path not in ("/api/login", "/api/setup"):
+                # Session + CSRF are checked BEFORE the body is buffered, so
+                # an unauthenticated connection can never make this process
+                # hold a body (up to the 8 MiB CSV cap) in memory; only the
+                # two pre-auth routes read a body first, under _MAX_BODY.
+                info = self._require_session_csrf(unread_body=length)
+                if info is None:
+                    return
             raw = self.rfile.read(length) if length else b""
 
             if path == "/api/login":
@@ -2041,7 +2226,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                src_ip=src_ip)
                     self._json(200, {"setup": True, "setup_grant": grant})
                     return
-                res = app.login(username, password)
+                try:
+                    res = app.login(username, password)
+                except gui_auth.VerifyBusy:
+                    # Nothing was verified: neither a limiter penalty nor a
+                    # login_fail audit event -- just ask for a retry.
+                    self._json(503, {"error": "server busy, retry shortly"},
+                               extra_headers=[("Retry-After", "1")])
+                    return
                 if res is None:
                     login_limiter.failure(src_ip)
                     self._audit("login_fail", "auth", action="login",
@@ -2053,7 +2245,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 sid, csrf = res
                 self._audit("login", "auth", action="login",
                            actor="console:" + username, result="ok", src_ip=src_ip)
-                cookie = "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/" % (COOKIE, sid)
+                cookie = "%s=%s%s" % (COOKIE, sid, self._cookie_attrs())
                 self._json(200, {"username": username, "csrf": csrf},
                            extra_headers=[("Set-Cookie", cookie)])
                 return
@@ -2110,8 +2302,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            src_ip=self.client_address[0])
                 self._json(200, {"ok": True}); return
 
-            # every other POST requires a live session + CSRF
-            info = self._require_session_csrf()
+            # every other POST: session + CSRF were verified above, before
+            # the body was read
             if info is None:
                 return
             sid = self._sid()
@@ -2120,8 +2312,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 app.logout(sid)
                 self._audit("logout", "auth", action="logout", actor=actor,
                            src_ip=self.client_address[0])
-                expired = ("%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
-                           % COOKIE)
+                expired = "%s=%s; Max-Age=0" % (COOKIE, self._cookie_attrs())
                 self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", expired)])
                 return
             if path == "/api/images/import":
@@ -2168,7 +2359,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": "password must be at least 8 characters"}); return
                 if new != confirm:
                     self._json(400, {"error": "passwords do not match"}); return
-                if not app.change_password(str(data.get("current", "")), new):
+                try:
+                    changed = app.change_password(str(data.get("current", "")), new)
+                except gui_auth.VerifyBusy:
+                    self._json(503, {"error": "server busy, retry shortly"},
+                               extra_headers=[("Retry-After", "1")])
+                    return
+                if not changed:
                     self._audit("password_change_fail", "auth", action="password_change",
                                actor=actor, result="fail",
                                detail="current password incorrect",
@@ -2437,7 +2634,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": err}); return
                 try:
                     gui_tls.persist_override(cert_pem, key_pem)
-                    reload_tls()  # new handshakes serve the new chain immediately
+                    # new handshakes serve the new chain immediately -- when
+                    # this listener serves TLS at all; the answer says which
+                    applied = reload_tls()
                     cert_info = gui_tls.active_info()
                     self._audit("gui-cert-replace", "settings", action="replace",
                                target="gui-cert", actor=actor,
@@ -2445,7 +2644,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                       % (cert_info.get("subject"),
                                          cert_info.get("fingerprint_sha256")),
                                src_ip=self.client_address[0])
-                    self._json(200, {"gui_cert": cert_info}); return
+                    self._json(200, {"gui_cert": cert_info, "applied": applied,
+                                     "note": None if applied else
+                                     "saved; this console is not serving TLS, "
+                                     "so it takes effect at the next restart"})
+                    return
                 except Exception as exc:
                     self._audit("gui-cert-replace", "settings", action="replace",
                                target="gui-cert", actor=actor, result="fail",
@@ -2594,6 +2797,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 rec = self._json_body(raw)
                 if rec is None:
                     return
+                # Machine-determined fields never come from a client body:
+                # os_family is classified from the device's own 'show
+                # version' banner (a wrong value here wedged planning until
+                # hand-corrected), and registered_at is the store's own
+                # stamp. The same rule the CSV importer already applies.
+                for machine_key in ("os_family", "registered_at"):
+                    rec.pop(machine_key, None)
                 rec_id = str(rec.get("device_id") or "").strip()
                 prev = fleet.get_device(rec_id) if rec_id else None
                 try:
@@ -2987,32 +3197,39 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             rid = record_store.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                # Router preflight runs in the bounded worker pool,
-                                # not synchronously in this HTTP request. This lets a
-                                # large selected batch show queued progress immediately.
-                                "preflight": ({"status": "pending"}
-                                              if resolved.get("platform") == "router"
-                                              else {"status": "not-required"}),
+                                # EVERY platform's preflight runs in the bounded
+                                # worker pool, not synchronously in this HTTP
+                                # request (a large selected batch shows queued
+                                # progress immediately), and pre_apply below
+                                # replaces this with the evidence it returns.
+                                # Non-router records used to be created as
+                                # "not-required" and never updated, so they
+                                # misdescribed a check that had in fact run.
+                                "preflight": {"status": "pending"},
                                 "resources": self._owned_resources(plan["resolved"])})["record_id"]
                             record_ref["id"] = rid
                             return rid
 
-                        if resolved.get("platform") == "router":
-                            def pre_apply(evidence):
-                                # The job may have waited in the queue. Refresh
-                                # live ownership immediately before apply, then
-                                # atomically replace the planned record inputs.
-                                final_plan = self._apply_router_preflight(plan, evidence)
-                                rid = record_ref.get("id")
-                                if not rid:
-                                    raise ValueError("planned record is unavailable")
-                                record_store.update_planned(
-                                    rid, plan_hash=final_plan["plan_hash"],
-                                    resolved=final_plan["resolved"],
-                                    preflight=evidence,
-                                    resources=self._owned_resources(
-                                        final_plan["resolved"]))
-                                return final_plan["resolved"]
+                        def pre_apply(evidence):
+                            # The job may have waited in the queue. Bind the
+                            # live evidence (board ID, model, router
+                            # ownership) immediately before apply, then
+                            # atomically replace the planned record inputs.
+                            # This is what lets a later undeploy render from
+                            # the record alone: DEVICE_IP and
+                            # EXPECTED_DEVICE_IDENTITY for Guest Shell and IOx
+                            # teardowns come from here, not the live fleet row.
+                            final_plan = self._apply_preflight(plan, evidence)
+                            rid = record_ref.get("id")
+                            if not rid:
+                                raise ValueError("planned record is unavailable")
+                            record_store.update_planned(
+                                rid, plan_hash=final_plan["plan_hash"],
+                                resolved=final_plan["resolved"],
+                                preflight=evidence,
+                                resources=self._owned_resources(
+                                    final_plan["resolved"]))
+                            return final_plan["resolved"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
@@ -3073,7 +3290,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # what IRIS created. Teardown must accept it, or
                                 # the device is stranded — a router cannot be
                                 # adopted and its preflight refuses a re-onboard.
-                                record = record_store.recoverable_for_device(did)
+                                # strict: an unreadable store must NOT read as
+                                # "no record for this device" — see the
+                                # RecordStoreUnreadable branch below.
+                                record = record_store.recoverable_for_device(
+                                    did, strict=True)
+                            except deployment_records.RecordStoreUnreadable as exc:
+                                # The records exist, we just cannot read them.
+                                # Reporting that as "no record" sent the
+                                # operator to adopt a device IRIS may already
+                                # own, writing an unverified record on top of a
+                                # repairable file. Server-state fault -> 503,
+                                # like the other record-store outages here.
+                                _reject(503, "%s; the console cannot tell "
+                                        "whether this device has a deployment "
+                                        "until the file is repaired" % exc)
+                                return
                             except ValueError as exc:
                                 # duplicate actives should be impossible
                                 # (activation supersedes siblings; startup
@@ -3393,8 +3625,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is not None:
                     live = {d.get("device_id") for d in fleet.list_devices()}
                 entry = images.get_image(iid)
+                warnings = []
                 try:
-                    assigned = images.delete_image(iid, live_device_ids=live)
+                    assigned = images.delete_image(iid, live_device_ids=live,
+                                                   warnings=warnings)
                 except KeyError:
                     self._json(404, {"error": "no such image"}); return
                 if assigned:
@@ -3406,28 +3640,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                          + ("..." if len(assigned) > 3 else "")))
                     self._json(409, {"error": "image is assigned to devices",
                                      "assigned": assigned}); return
+                # A failed seeder stop is not a failed delete (the catalog row,
+                # file and .torrent are gone), but the audit row must say so:
+                # the origin keeps serving that torrent until it restarts.
                 self._audit("image_delete", "image", action="delete", target=iid,
                            actor=actor,
-                           detail="deleted %s (%s)"
+                           detail="deleted %s (%s)%s"
                                   % ((entry or {}).get("filename"),
-                                     _fmt_bytes((entry or {}).get("size"))))
-                self._json(200, {"deleted": True}); return
+                                     _fmt_bytes((entry or {}).get("size")),
+                                     "; " + "; ".join(warnings) if warnings
+                                     else ""))
+                self._json(200, {"deleted": True, "warnings": warnings}); return
             self._json(404, {"error": "not found"})
 
         def log_message(self, *args):
             pass
 
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = _ConsoleServer((host, port), Handler)
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the
         # gui-cert override, since _resolve_certfile() picks it on existence
         # alone) can be a corrupt or mismatched cert/key pair -- e.g. a crash
         # between writing the cert and the key. Probe with a throwaway
-        # context BEFORE wrapping the listening socket; on failure, fall
-        # back to the next candidate (IRIS_CERT) rather than crashing the
-        # process. If that also fails, serve plain HTTP -- never take the
-        # console down over a bad cert file.
+        # context first; on failure, fall back to the next candidate
+        # (IRIS_CERT) rather than crashing the process. If that also fails,
+        # fail CLOSED (ConsoleTLSError) unless plaintext was opted into with
+        # IRIS_GUI_ALLOW_PLAINTEXT=1: a silently plaintext console accepts
+        # the admin password in cleartext, and its Secure cookie could not
+        # even keep a session in a remote browser.
         candidates = [certfile]
         iris_cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
         if iris_cert != certfile:
@@ -3442,9 +3683,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 continue                          # corrupt/mismatched pair
             tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_ctx.load_cert_chain(cand)
-            srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
             break
+        if tls_ctx is None and not _plaintext_allowed():
+            srv.server_close()
+            raise ConsoleTLSError(
+                "no usable console certificate (tried: %s); refusing to serve "
+                "plain HTTP. Set %s=1 to opt in deliberately."
+                % (", ".join(candidates), _PLAINTEXT_OPT_IN_ENV))
 
+    # Set AFTER construction: _ConsoleServer.get_request consults it, and
+    # nothing is accepted before serve_forever(). The handshake happens per
+    # connection in the worker thread; the listening socket stays plain.
+    srv.tls_context = tls_ctx
     srv.tls_active = tls_ctx is not None
 
     def reload_tls():
@@ -3483,7 +3733,6 @@ def main():
     import gui_images
     import gui_fleet
     import gui_creds
-    import deployment_records
     import catalog as catalog_mod
     import publish as publish_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
@@ -3494,6 +3743,13 @@ def main():
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
     images_dir = os.environ.get("IRIS_IMAGES_DIR", "/var/lib/iris-images")
     certfile = _resolve_certfile()
+    if certfile is None and not _plaintext_allowed():
+        print("iris-gui: no console certificate found (IRIS_GUI_CERT / "
+              "IRIS_CERT); refusing to serve the console over plain HTTP. "
+              "Set %s=1 to opt in deliberately (loopback or an isolated "
+              "lab network only)." % _PLAINTEXT_OPT_IN_ENV,
+              file=sys.stderr, flush=True)
+        sys.exit(2)
     audit_path = os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     # Mint the per-deployment instance id up front so the very first
     # /api/help call already sees the durable value.
@@ -3513,17 +3769,27 @@ def main():
     # (KGV reconciler) stops seeding and writes audit entries through THIS
     # instance -- mirrors exactly how `images` (gui_images.ImageService,
     # above) is wired for the identical seeder-teardown + audit concern.
+    # seeder_add_fn is the inverse, for release_quarantine(): the release
+    # puts the canonical torrent back into the seeder (re-synced to the
+    # current announce credential) instead of leaving the image with no
+    # origin until the next container restart.
     catalog = catalog_mod.CatalogStore(
         state_dir, audit_path=audit_path,
-        seeder_remove_fn=publish_mod.remove_torrent_rpc)
+        seeder_remove_fn=publish_mod.remove_torrent_rpc,
+        seeder_add_fn=publish_mod.resume_torrent_rpc)
     record_store = deployment_records.DeploymentRecordStore(state_dir)
     record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
         clear_state_fn=catalog.forget_device, record_store=record_store,
         log_dir=os.path.join(state_dir, "deploy-logs"))
-    srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
-                       None, certfile=certfile, audit_path=audit_path, record_store=record_store)
+    try:
+        srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
+                          None, certfile=certfile, audit_path=audit_path,
+                          record_store=record_store)
+    except ConsoleTLSError as exc:
+        print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+        sys.exit(2)
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
     ca_stop = threading.Event()     # never set in production; loop dies with us
@@ -3544,6 +3810,11 @@ def main():
                            creds.audit_export_secrets, _bg_audit),
                      daemon=True).start()
     scheme = "https" if srv.tls_active else "http"
+    if not srv.tls_active:
+        print("iris-gui: WARNING: serving the console over PLAIN HTTP (%s=1): "
+              "the admin password and session cookie cross the network in "
+              "cleartext and the cookie is not marked Secure."
+              % _PLAINTEXT_OPT_IN_ENV, file=sys.stderr, flush=True)
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()
 

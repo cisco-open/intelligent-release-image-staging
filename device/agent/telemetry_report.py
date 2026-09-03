@@ -450,8 +450,13 @@ def classify(state, avg_bps):
     """Link tier, first match wins (spec section 1 table):
       bad         -> fail_streak >= FAIL_STREAK_BAD (defer with backoff)
       constrained -> median RTT > RTT_CONSTRAINED_MS, or the last download
-                     averaged below SLOW_BPS (send trimmed payload)
-      good        -> otherwise (send full report)
+                     averaged below SLOW_BPS
+      good        -> otherwise
+    The tier drives STREAMING CADENCE only (STREAM_TIER_TICKS): a constrained
+    link is sampled less often, it is NOT sent a smaller payload. The v1
+    report's `link.trimmed` is therefore a constant False, and v2 dropped the
+    field with the rest of the `link` section. Payload trimming was removed
+    with v2 — do not re-document it here without re-implementing it.
     avg_bps may be None/0 (no completed download yet) -> not constraining."""
     link = state.get("link") or {}
     if int(link.get("fail_streak", 0)) >= FAIL_STREAK_BAD:
@@ -903,8 +908,8 @@ def report_peer_transfer_records(tele, window_start=None, created=None):
     measurement that cannot be placed in the window is dropped here instead of
     costing the terminal report. That is reachable without any bug: a transfer
     whose started_ts was never recorded (agent state lost while the staged file
-    survived) collapses window.start onto done_ts, which is strictly after the
-    hook fired. Dropping is also the honest outcome — the alternative,
+    survived) has no window start at all, so the caller bounds the records at
+    done_ts, which is strictly after the hook fired. Dropping is also the honest outcome — the alternative,
     stretching window.start back to captured_at, would misstate the transfer
     window to save a byte count."""
     block = (tele or {}).get("peer_transfer_records")
@@ -958,18 +963,38 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
     peer_rows, peers_total, truncated, saturated = _report_peer_rows_v2(tele)
     runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
                     or cfg.get("runtime_mode") or "guestshell")
-    completed = int(tele.get("completed_content_bytes",
-                             tele.get("total_bytes", 0)) or 0)
-    total = int(tele.get("total_content_bytes",
-                         tele.get("total_bytes", 0)) or 0)
+    # Content-at-end bytes are a MEASUREMENT (aria2's tellStatus at the
+    # completion tick) and are emitted only when one was taken. A completion
+    # tick with no stats — an operator-staged image adopted in place (aria2
+    # never had a gid for it), an RPC hiccup on that exact tick, a state file
+    # lost while the staged file survived — used to report a "measured" 0/0
+    # over a zero-length "complete" window, indistinguishable from a real
+    # reading. A measured zero and an unmeasured field are different facts
+    # (peer_transfer_records already lives by that rule): the keys are ABSENT
+    # when unmeasured, never invented. Same for window.start: an unrecorded
+    # started_ts is left absent rather than collapsed onto the end, and the
+    # window is `complete` only when both ends were observed by this agent
+    # and the transfer inside it was measured.
+    content = {}
+    measured = tele.get("completed_content_bytes", tele.get("total_bytes"))
+    if measured is not None:
+        completed = int(measured or 0)
+        content["completed_content_bytes"] = completed
+        content["total_content_bytes"] = int(
+            tele.get("total_content_bytes", completed) or completed)
     sha_state = content_sha256_state(state, img_id)
     content_sha256 = {"state": sha_state}
     if sha_state in ("verified", "mismatch"):
         content_sha256["algo"] = "sha256"
     end = float(tele.get("done_ts", now) or now)
     start = window_start
-    if start is None:
-        start = float(tele.get("started_ts", end) or end)
+    if start is None and tele.get("started_ts") is not None:
+        start = float(tele["started_ts"])
+    window = {"end": end,
+              "complete": bool(window_complete) and start is not None
+              and bool(content)}
+    if start is not None:
+        window["start"] = start
     report = {
         "v": 2,
         "report_id": report_id,
@@ -978,10 +1003,8 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "report_created_at": float(now),
         "image_id": img_id,
         "event": event,
-        "window": {"start": start, "end": end,
-                   "complete": bool(window_complete)},
-        "content": {"completed_content_bytes": completed,
-                    "total_content_bytes": total},
+        "window": window,
+        "content": content,
         "content_sha256": content_sha256,
         "ios_copy_verify": {"state": ios_copy_verify_state(state, img_id)},
         "sampling": {
@@ -998,7 +1021,11 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
-    transfer_records = report_peer_transfer_records(tele, window_start=start, created=now)
+    # An unknown start still cannot PLACE a capture inside the window, so the
+    # records keep the documented drop (bounded at the end) rather than
+    # riding along on a window whose start nobody observed.
+    transfer_records = report_peer_transfer_records(
+        tele, window_start=start if start is not None else end, created=now)
     if transfer_records is not None:
         # Optional by construction: the key is absent, not zeroed, when nothing
         # was measured (report_peer_transfer_records explains what absence means).
@@ -1048,17 +1075,6 @@ def pull_request_id(resp):
     return None
 
 
-def trim_report(report):
-    """Constrained-tier copy: per-peer rows dropped, link marked trimmed.
-    Returns a NEW dict (fresh 'link' too) — the original stays intact so a
-    later pull can still send the full detail from state."""
-    out = dict(report)
-    out["peers"] = []
-    out["link"] = dict(report.get("link") or {})
-    out["link"]["trimmed"] = True
-    return out
-
-
 def pull_requested(resp):
     """True ONLY for a dict heartbeat response carrying report_requested: true.
     Tolerates None (send failed), strings, lists and other captive-portal
@@ -1078,7 +1094,6 @@ STREAM_TIER_TICKS = {"good": 1, "constrained": 4}   # 'bad' streams nothing
 STREAM_EVERY_MIN = 1
 STREAM_EVERY_MAX = 60
 STREAM_DIRECTIVE_FRESH_TICKS = 3    # expire without heartbeat renewal
-SAMPLE_V = 1
 
 
 def stream_enabled(cfg):
@@ -1155,24 +1170,3 @@ def should_sample(state, tele, tier, now):
     interval_ticks = max(STREAM_TIER_TICKS[tier], every)
     last = float(tele.get("stream_last_ts", 0) or 0)
     return (now - last) >= (interval_ticks - 0.5) * TICK_SECONDS
-
-
-def build_sample(img_id, phase, stats, tier):
-    """The v1 wire sample (spec section 5.1) or None when nothing should be
-    sent. stats is the aria2 tellStatus subset (string values, exactly what
-    _aria_stats_impl already fetches). run_once phase 'seeding-only' maps to
-    wire 'seeding' (the server checks enums exactly). A seeder with zero
-    connections streams nothing."""
-    if phase not in ("downloading", "seeding-only") or not stats:
-        return None
-    if tier not in STREAM_TIER_TICKS:
-        return None
-    conns = int(stats.get("connections", "0") or 0)
-    wire = "downloading" if phase == "downloading" else "seeding"
-    if wire == "seeding" and conns <= 0:
-        return None
-    return {"v": SAMPLE_V, "image_id": img_id, "phase": wire,
-            "done_bytes": int(stats.get("completedLength", "0") or 0),
-            "down_bps": int(stats.get("downloadSpeed", "0") or 0),
-            "up_bps": int(stats.get("uploadSpeed", "0") or 0),
-            "peers": conns, "tier": tier}

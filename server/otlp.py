@@ -803,10 +803,17 @@ class LogQueue:
     by a destination change.
 
     Durability contract:
-      * ``emit`` appends FIFO; when the queue is full the OLDEST event is
-        dropped BEFORE the append (bounded best-effort, Day-1 in-process), and
-        ``dropped_total`` is incremented per drop. FIFO order of the kept
-        events is preserved.
+      * ``emit`` appends FIFO; when the queue is full the OLDEST EVICTABLE
+        event is dropped BEFORE the append (bounded best-effort, Day-1
+        in-process), and ``dropped_total`` is incremented per drop. FIFO
+        order of the kept events is preserved. ``emit(event, evictable=True)``
+        marks a SAMPLED record (the per-connection ``iris.swarm.peer_rate`` /
+        ``peer_bytes`` stream, which the hub queues on every 2 s seeder pass
+        and which the durable ledger already holds): those are evicted first,
+        so a burst of them can never push a tracker peer lifecycle event, a
+        policy operation, a device report or its exact per-peer fan-out out
+        of the queue. Only when nothing evictable is queued is the oldest
+        durable-intent event dropped.
       * ``flush(send)`` hands a snapshot batch to ``send`` and removes those
         events from the queue ONLY after ``send`` returns without raising.
         On failure the batch remains in place. Concurrent emits remain
@@ -848,12 +855,29 @@ class LogQueue:
             self._event_key = event_key
             self._delivered_callback = delivered_callback
             self._queue = collections.deque(
-                (event_id, event, self._key(event))
-                for event_id, event, _ in self._queue)
-            self._keys = {key for _, _, key in self._queue}
+                (event_id, event, self._key(event), evictable)
+                for event_id, event, _, evictable in self._queue)
+            self._keys = {key for _, _, key, _ in self._queue}
             self._keys.discard(None)
 
-    def emit(self, event):
+    def _evict_one(self):
+        """Drop one queued event to make room: the oldest evictable
+        (sampled) one if any, else the oldest event. Caller holds the lock."""
+        victim = None
+        for index, (_, _, _, evictable) in enumerate(self._queue):
+            if evictable:
+                victim = index
+                break
+        if victim is None:
+            _, _, dropped_key, _ = self._queue.popleft()
+        else:
+            _, _, dropped_key, _ = self._queue[victim]
+            del self._queue[victim]
+        if dropped_key is not None:
+            self._keys.discard(dropped_key)
+        self._dropped += 1
+
+    def emit(self, event, evictable=False):
         with self._lock:
             key = self._key(event)
             if key is not None and (key in self._keys or
@@ -863,11 +887,8 @@ class LogQueue:
                 self._dropped += 1
                 return False
             while len(self._queue) >= self._max:
-                dropped_id, _, dropped_key = self._queue.popleft()
-                if dropped_key is not None:
-                    self._keys.discard(dropped_key)
-                self._dropped += 1
-            self._queue.append((self._next_id, event, key))
+                self._evict_one()
+            self._queue.append((self._next_id, event, key, bool(evictable)))
             if key is not None:
                 self._keys.add(key)
             self._next_id += 1
@@ -885,7 +906,7 @@ class LogQueue:
 
     def snapshot(self):
         with self._lock:
-            return [event for _, event, _ in self._queue]
+            return [event for _, event, _, _ in self._queue]
 
     def flush(self, send):
         """Deliver the current FIFO prefix via ``send(batch)`` (which must
@@ -895,12 +916,13 @@ class LogQueue:
         with self._flush_lock:
             with self._lock:
                 queued_batch = list(self._queue)
-                self._inflight_ids = {event_id for event_id, _, _ in queued_batch}
-                self._inflight_keys = {key for _, _, key in queued_batch
+                self._inflight_ids = {event_id
+                                      for event_id, _, _, _ in queued_batch}
+                self._inflight_keys = {key for _, _, key, _ in queued_batch
                                        if key is not None}
             if not queued_batch:
                 return None
-            batch = [event for _, event, _ in queued_batch]
+            batch = [event for _, event, _, _ in queued_batch]
             try:
                 send(batch)
             except Exception:
@@ -908,16 +930,20 @@ class LogQueue:
                     self._inflight_ids.clear()
                     self._inflight_keys.clear()
                 return 0
-            sent_ids = {event_id for event_id, _, _ in queued_batch}
-            sent_keys = {key for _, _, key in queued_batch if key is not None}
+            sent_ids = {event_id for event_id, _, _, _ in queued_batch}
+            sent_keys = {key for _, _, key, _ in queued_batch
+                         if key is not None}
             with self._lock:
-                retained_sent_ids = {event_id for event_id, _, _ in self._queue
+                retained_sent_ids = {event_id
+                                     for event_id, _, _, _ in self._queue
                                      if event_id in sent_ids}
-                # Overflow may have dropped part of this in-flight prefix.
-                # Remove only its still-retained contiguous suffix; later
-                # concurrent emits have distinct IDs and stay queued.
-                while self._queue and self._queue[0][0] in sent_ids:
-                    _, _, key = self._queue.popleft()
+                # Overflow may have dropped part of this in-flight prefix
+                # (evictable records anywhere in it, or the oldest). Remove
+                # every still-retained sent event; later concurrent emits have
+                # distinct IDs and stay queued in order.
+                self._queue = collections.deque(
+                    item for item in self._queue if item[0] not in sent_ids)
+                for _, _, key, _ in queued_batch:
                     if key is not None:
                         self._keys.discard(key)
                 # Events evicted while this successful send was in flight were

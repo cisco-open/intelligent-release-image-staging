@@ -4,6 +4,15 @@
 
 # Keep the seed-server build context small and, more importantly, keep local
 # credentials, images, generated artifacts, and lab state out of image layers.
+#
+# Pattern semantics (Docker / moby patternmatcher): a pattern WITHOUT a
+# leading `**/` is anchored at the context root -- `*.key` excludes only
+# `./x.key`, never `server/certs/x.key`. server/Dockerfile COPYs whole trees
+# (`COPY server/`, `COPY device/`, `COPY lab/`), so every secret-shaped
+# pattern below is written `**/...` to reach nested files. Last match wins,
+# and `!` re-includes a single file after a broader exclusion.
+# server/tests/test_dockerignore.py evaluates this file against a planted
+# tree and fails if any of the names below leak back in.
 .git/
 .cache/
 .pytest_cache/
@@ -22,26 +31,47 @@ bin/
 # tools/get-aria2c.sh; it is gitignored but must reach the build context.
 !bin/aria2c
 images/
+deliverables/
+agentinfo/
 fleet/*.csv
 fleet/*.conf
 fleet/dist/
 lab/evidence/
 
-.env
-*.env
-*.pem
-*.key
-*.crt
-*.p12
-*.bin
-*.pkg
-*.torrent
-*.aria2
+# Credentials and key material, wherever they sit in the tree.
+**/.env
+**/*.env
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+**/rpc-secret
+**/tokens.txt
+**/id_rsa*
+# ...except the pinned Cisco Bulk Hash verify cert: public material (no
+# private key), tracked in git, read by server/bulkhash.py at runtime.
+!server/certs/cisco_bulkhash_verify.pem
+
+# Device images, torrents, download state, built device packages.
+**/*.bin
+**/*.pkg
+**/*.torrent
+**/*.aria2
+**/*.rpm
+**/*.tgz
+**/*.tar
+
+# Host-specific Compose override (lab ports/mounts) and the Cisco-licensed
+# console typeface, which is staged onto the running host at deploy time and
+# must never be distributed inside an image (see .gitignore).
+server/docker-compose.override.yml
+server/webroot/fonts/SharpSans-Bold.woff2
 
 deploy/
 site/
 release/
 device/iox/out/
+device/xr/out/
 HANDOFF*.md
 
 # Tests and generated documentation are not needed by either runtime role.
@@ -49,5 +79,6 @@ server/tests/
 device/tests/
 device/agent/tests/
 device/iox/tests/
+device/xr/tests/
 lab/tests/
 docs/

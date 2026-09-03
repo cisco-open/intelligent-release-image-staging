@@ -280,19 +280,36 @@ class FleetStore:
         except (TypeError, ValueError):
             raise ValueError("registered_at must be an integer or null")
 
-    def _read(self):
+    def _read(self, strict=False):
+        """Load the store. A MISSING file is an empty fleet. A file that is
+        present but unreadable is different: with strict=True (every write
+        path) it raises, so the next upsert cannot rewrite a corrupt but
+        repairable inventory as a fresh one-device fleet at revision 1;
+        without it (reads) it degrades to an empty view."""
         try:
             with open(self.path) as stream:
                 data = json.load(stream)
+        except FileNotFoundError:
+            return {"revision": 0, "devices": {}}
+        except (OSError, ValueError) as exc:
+            if strict:
+                raise ValueError("fleet store %s is unreadable (%s); refusing "
+                                 "to overwrite it -- repair or remove the file"
+                                 % (self.path, exc))
+            return {"revision": 0, "devices": {}}
+        try:
             if not isinstance(data, dict):
-                return {"revision": 0, "devices": {}}
+                raise ValueError("top level is not an object")
             if "devices" in data and isinstance(data["devices"], dict):
-                result = {"revision": int(data.get("revision", 0)), "devices": data["devices"]}
-            else:
-                # Upgrade the old bare mapping in memory on the next write.
-                result = {"revision": 0, "devices": data}
-            return result
-        except (OSError, ValueError):
+                return {"revision": int(data.get("revision", 0)),
+                        "devices": data["devices"]}
+            # Upgrade the old bare mapping in memory on the next write.
+            return {"revision": 0, "devices": data}
+        except (TypeError, ValueError) as exc:
+            if strict:
+                raise ValueError("fleet store %s is malformed (%s); refusing "
+                                 "to overwrite it -- repair or remove the file"
+                                 % (self.path, exc))
             return {"revision": 0, "devices": {}}
 
     def list_devices(self):
@@ -307,7 +324,7 @@ class FleetStore:
     def upsert(self, record):
         did = _text(record.get("device_id"))
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             previous = data["devices"].get(did)
             previous_record = previous if isinstance(previous, dict) else {}
             merged = dict(previous_record)
@@ -366,7 +383,7 @@ class FleetStore:
 
     def delete(self, device_id):
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             existed = data["devices"].pop(device_id, None) is not None
             if existed:
                 data["revision"] += 1
@@ -403,19 +420,31 @@ class FleetStore:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
         cols = header if header in v2_headers else CSV_V2_COLS
         records = []
+        first_row_of = {}
         for index, row in enumerate(data_rows, 1):
             if len(row) != len(header):
                 raise ValueError("data row %d has %d columns, need %d"
                                  % (index, len(row), len(header)))
             try:
-                records.append(_legacy_record(row) if legacy else
-                               validate_record(dict(zip(cols, row)),
-                                               allow_legacy=True))
+                record = (_legacy_record(row) if legacy else
+                          validate_record(dict(zip(cols, row)),
+                                          allow_legacy=True))
             except ValueError as exc:
                 raise ValueError("data row %d: %s" % (index, exc))
+            # Two rows for one device used to collapse silently (last row
+            # wins, stats counting it as new AND updated). The import is
+            # all-or-nothing for bad rows; a conflicting duplicate is bad
+            # input too, and naming both rows is what lets the operator fix
+            # the sheet.
+            seen_at = first_row_of.setdefault(record["device_id"], index)
+            if seen_at != index:
+                raise ValueError("data row %d repeats device_id %s from data "
+                                 "row %d" % (index, record["device_id"],
+                                             seen_at))
+            records.append(record)
         new = updated = 0
         with secrets_store.store_lock(self.path):
-            data = self._read()
+            data = self._read(strict=True)
             for record in records:
                 previous = data["devices"].get(record["device_id"])
                 if previous is not None:
@@ -435,6 +464,15 @@ class FleetStore:
                 family = previous.get("os_family") if isinstance(previous, dict) else None
                 if family:
                     record["os_family"] = family
+                # And the credential profile: the CSV deliberately carries no
+                # credential column (fleet-workflows.md), so the assignment
+                # made in the Console after the first import must survive the
+                # export -> edit -> re-import cycle, or one bulk edit silently
+                # disarms every device's onboard/undeploy until re-assigned.
+                profile = (previous.get("credential_profile_id")
+                           if isinstance(previous, dict) else None)
+                if profile and not record.get("credential_profile_id"):
+                    record["credential_profile_id"] = profile
                 data["devices"][record["device_id"]] = record
             if records:
                 data["revision"] += 1

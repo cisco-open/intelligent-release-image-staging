@@ -36,7 +36,14 @@ def main(argv=None):
     # a concurrent rotation can't load a pre-revoke snapshot and write it back
     # over our revoke (which would silently re-arm a revoked device's token).
     with secrets_store.store_lock(secrets_path):
-        store = secrets_store.load(secrets_path)
+        try:
+            store = secrets_store.load(secrets_path)
+        except secrets_store.StoreCorruptError as exc:
+            # Fail closed: a present-but-unreadable store must never be
+            # mistaken for an empty one and re-encrypted over the durable
+            # ciphertext holding every device credential.
+            print("error: %s" % exc, file=sys.stderr)
+            return 1
 
         if device_id not in store.get("devices", {}):
             print("error: device '%s' not found in secrets store" % device_id,

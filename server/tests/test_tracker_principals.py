@@ -255,6 +255,96 @@ def test_quarantined_device_is_visible_but_filtered_both_directions(tmp_path):
         srv.shutdown()
 
 
+def test_legacy_credential_at_an_unquarantined_address_still_discovers(tmp_path):
+    """Control for the test below: a legacy (previous seeder token) announce
+    from an address no denied device is attributed to keeps its open
+    discovery."""
+    sp = _secrets_path(tmp_path)
+    good_tok = _mint_device(sp, "good")
+    prev, _cur = _rotate_seeder(sp)
+    ap, lp = _policy_paths(tmp_path)
+    peer_policy.initialize(ap, lp)
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    srv, port = _serve(tmp_path, secrets_path=sp, policy_paths=(ap, lp),
+                       endpoints_path=ep_path)
+    try:
+        assert _announce(port, "pgood", good_tok, port_val=6881)[0] == 200
+        status, body = _announce(port, "leg", prev, port_val=6890)
+        assert status == 200
+        peers = bencode.decode(body)[b"peers"]
+        assert any(p[b"port"] == 6881 for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_quarantined_device_cannot_escape_quarantine_with_legacy_token(tmp_path):
+    """IRIS-04-003: a quarantined device still holds the seeder's previous
+    announce token from its torrent. Announcing with it resolved to a
+    ``legacy`` principal with no ACL slot, so the device received the full
+    permitted peer list and was handed out to permitted devices. Now a
+    legacy requester or candidate at an address a durable endpoint
+    attributes to a denied device is treated as that device: no peers for
+    it, and it is handed to nobody. (Every peer here shares 127.0.0.1, which
+    is exactly the situation on a device: the legacy announce comes from the
+    address its own authenticated announce was recorded at.)"""
+    from peer_registry import PeerRegistry
+    sp = _secrets_path(tmp_path)
+    good_tok = _mint_device(sp, "good")
+    bad_tok = _mint_device(sp, "bad")
+    prev, _cur = _rotate_seeder(sp)
+    ap, lp = _policy_paths(tmp_path)
+    _quarantine_device(ap, lp, "bad", time.time())
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    reg = PeerRegistry()
+    srv, port = _serve(tmp_path, secrets_path=sp, registry=reg,
+                       policy_paths=(ap, lp), endpoints_path=ep_path)
+    try:
+        assert _announce(port, "pgood", good_tok, port_val=6881)[0] == 200
+        # The quarantined device's own authenticated announce records its
+        # address; with its own token it sees nothing (mutual deny).
+        status, body = _announce(port, "pbad", bad_tok, port_val=6882,
+                                 left=100)
+        assert status == 200
+        assert bencode.decode(body)[b"peers"] == []
+        # Same device, same address, previous seeder token: still nothing.
+        status, body = _announce(port, "pbad2", prev, port_val=6882, left=100)
+        assert status == 200
+        assert bencode.decode(body)[b"peers"] == []
+        # ...and the permitted device is not handed the legacy-classified
+        # peer at the quarantined address either.
+        status, body = _announce(port, "pgood", good_tok, port_val=6881)
+        assert bencode.decode(body)[b"peers"] == []
+        # The legacy announce itself is still a visible participant.
+        rows = reg.snapshot()[INFO_HASH_HEX]
+        assert any(r["principal_type"] == "legacy" for r in rows)
+    finally:
+        srv.shutdown()
+
+
+def test_legacy_discovery_fails_closed_when_endpoint_store_is_unreadable(tmp_path):
+    """With the endpoint store unreadable the tracker cannot tell whether a
+    legacy address belongs to a denied device, so a legacy requester gets no
+    peers (attributable principals keep discovering -- see the corrupt-store
+    announce test)."""
+    sp = _secrets_path(tmp_path)
+    good_tok = _mint_device(sp, "good")
+    prev, _cur = _rotate_seeder(sp)
+    ap, lp = _policy_paths(tmp_path)
+    peer_policy.initialize(ap, lp)
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    with open(ep_path, "w") as f:
+        f.write("{ corrupt")
+    srv, port = _serve(tmp_path, secrets_path=sp, policy_paths=(ap, lp),
+                       endpoints_path=ep_path)
+    try:
+        assert _announce(port, "pgood", good_tok, port_val=6881)[0] == 200
+        status, body = _announce(port, "leg", prev, port_val=6890)
+        assert status == 200
+        assert bencode.decode(body)[b"peers"] == []
+    finally:
+        srv.shutdown()
+
+
 def test_permitted_peers_discover_each_other(tmp_path):
     sp = _secrets_path(tmp_path)
     a_tok = _mint_device(sp, "a")
@@ -296,6 +386,8 @@ def test_fail_closed_policy_yields_zero_candidates(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_attributable_valid_port_writes_durable_endpoint(tmp_path):
+    # Rewritten (IRIS-04-004): a device's durable endpoint is its SOCKET
+    # source; the ip= override it sends is ignored (see the two tests below).
     sp = _secrets_path(tmp_path)
     tok = _mint_device(sp, "dev-a")
     ep_path = str(tmp_path / "peer-endpoints.json")
@@ -304,7 +396,40 @@ def test_attributable_valid_port_writes_durable_endpoint(tmp_path):
         assert _announce(port, "p1", tok, extra="&ip=10.0.0.5")[0] == 200
         snap = peer_endpoints.fresh_endpoints(ep_path, time.time())
         assert "device:dev-a" in snap
-        assert snap["device:dev-a"]["endpoints"][0]["ipv4"] == "10.0.0.5"
+        assert snap["device:dev-a"]["endpoints"][0]["ipv4"] == "127.0.0.1"
+    finally:
+        srv.shutdown()
+
+
+def test_service_seeder_ip_override_is_persisted(tmp_path):
+    """The containerized seeder's socket source is loopback/bridge-local, so
+    the service principal's ip= override IS its durable endpoint."""
+    sp = _secrets_path(tmp_path)
+    tok = _mint_seeder(sp)
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    srv, port = _serve(tmp_path, secrets_path=sp, endpoints_path=ep_path)
+    try:
+        assert _announce(port, "seed", tok, extra="&ip=10.0.0.5")[0] == 200
+        snap = peer_endpoints.fresh_endpoints(ep_path, time.time())
+        assert snap["service:seeder"]["endpoints"][0]["ipv4"] == "10.0.0.5"
+    finally:
+        srv.shutdown()
+
+
+def test_device_ip_override_cannot_forge_a_durable_endpoint(tmp_path):
+    """IRIS-04-004: the seeder blocklist is derived from durable endpoints, so
+    a permitted device that could name a quarantined device's address would
+    create a shared permit/deny conflict and lift that block. A device's
+    override is therefore never persisted -- only its socket source is."""
+    sp = _secrets_path(tmp_path)
+    good_tok = _mint_device(sp, "good")
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    srv, port = _serve(tmp_path, secrets_path=sp, endpoints_path=ep_path)
+    try:
+        assert _announce(port, "pg", good_tok, extra="&ip=10.0.0.2")[0] == 200
+        snap = peer_endpoints.fresh_endpoints(ep_path, time.time())
+        ips = [e["ipv4"] for e in snap["device:good"]["endpoints"]]
+        assert ips == ["127.0.0.1"]
     finally:
         srv.shutdown()
 
@@ -360,10 +485,45 @@ def test_endpoint_write_failure_keeps_200_and_enqueues_pending(tmp_path):
         # latest tuple enqueued for retry
         assert len(pending) == 1
         snap = pending.snapshot()
-        assert snap["device:dev-a"]["endpoints"][0]["ipv4"] == "10.0.0.5"
+        # The device's socket source, not its ip= claim (IRIS-04-004).
+        assert snap["device:dev-a"]["endpoints"][0]["ipv4"] == "127.0.0.1"
         assert degraded  # degrade callback fired
     finally:
         srv.shutdown()
+
+
+def test_corrupt_endpoint_store_keeps_announce_200_and_enqueues_pending(tmp_path):
+    """IRIS-04-002: a corrupt peer-endpoints.json raises EndpointStoreError
+    from record_endpoint. That must take the same posture as an OSError --
+    200 with the peer list, tuple queued, degrade signal -- not escape the
+    handler and close the socket with no response (which stopped discovery
+    for every attributable principal until the file was repaired)."""
+    sp = _secrets_path(tmp_path)
+    a_tok = _mint_device(sp, "a")
+    b_tok = _mint_device(sp, "b")
+    ep_path = str(tmp_path / "peer-endpoints.json")
+    with open(ep_path, "w") as f:
+        f.write("{ corrupt")
+    pending = peer_endpoints.PendingEndpointQueue()
+    degraded = []
+    ap, lp = _policy_paths(tmp_path)
+    peer_policy.initialize(ap, lp)
+    srv, port = _serve(
+        tmp_path, secrets_path=sp, endpoints_path=ep_path,
+        pending_queue=pending, policy_paths=(ap, lp),
+        on_endpoint_failure=lambda: degraded.append(True))
+    try:
+        assert _announce(port, "pa", a_tok, port_val=6881)[0] == 200
+        status, body = _announce(port, "pb", b_tok, port_val=6882)
+        assert status == 200
+        peers = bencode.decode(body)[b"peers"]
+        assert any(p[b"port"] == 6881 for p in peers)   # discovery continues
+        assert len(pending) == 2
+        assert degraded
+    finally:
+        srv.shutdown()
+    with open(ep_path) as f:
+        assert f.read() == "{ corrupt"      # never overwritten
 
 
 # ---------------------------------------------------------------------------

@@ -44,12 +44,16 @@ point.
 | ------ | ---- | ------- |
 | `iris_origin_sent_bytes_total` | counter | Bytes the origin seeder actually uploaded for this torrent |
 | `iris_peer_attributed_bytes_total` | counter | Of those, the bytes **traced to a device** — the ledger saw the connection that carried them |
-| `iris_peer_unattributed_bytes_total` | counter | The honest residue: **untraced** — sent for certain, recipient unknown |
-| `iris_swarm_peers_attributed` | gauge | Peer edges the ledger currently has traced totals for |
-| `iris_swarm_peers_saturated` | gauge | Peers whose banked total stopped advancing |
+| `iris_peer_unattributed_bytes_total` | gauge | The honest residue: **untraced** — sent for certain, recipient unknown. A gauge (despite the historical `_total` name) because tracing a device late steps it **down**; graph the value, never `rate()` it |
+| `iris_swarm_peers_attributed` | gauge | Peer edges the ledger currently has a nonzero traced total for — a level, not an accumulation |
+| `iris_swarm_peers_saturated` | gauge | **A 0/1 flag, not a count.** `1` means the ledger's per-torrent peer cap refused new peers, so part of the untraced residue went to peers the cap turned away rather than to connections that ended between samples |
 
-These are **counters**, deliberately. A finished transfer keeps its history and
-a panel does not blank out when the swarm goes idle.
+The origin and attributed **byte** series are counters, deliberately: a
+finished transfer keeps its history and a panel does not blank out when the
+swarm goes idle. The other three families are gauges, and `rate()`,
+`increase()` and `resets()` mean nothing on any of them — the residue because
+it is the difference of two counters and can decrease, the two peer families
+because one is a level and the other is a flag.
 
 !!! info "What it means to trace a byte to a device"
     The origin seeder knows **exactly** how many bytes it uploaded — that total
@@ -83,9 +87,17 @@ a panel does not blank out when the swarm goes idle.
 | ----------- | ------ | ------ |
 | `iris.swarm.peer_bytes` | Server-side peer ledger | Origin-side **sampled estimate** of one edge's bytes |
 | `iris.device.peer_transfer_record` | Device-side completion hook | Device-**measured exact** bytes received from one peer |
-| `iris.device.report` | Device agent | Terminal per-device transfer report |
+| `iris.device.transfer.report` | Device agent (v2) | **Terminal per-device transfer report.** The record every delivery panel on both boards unwraps, via `iris.transfer.completed_content_bytes`. |
+| `iris.device.report` | Device agent | **Legacy v1** projection of the same report, carrying a deliberately reduced attribute subset. It does **not** carry `iris.transfer.completed_content_bytes`; a query written against this name gets v1 records only. |
+| `iris.swarm.peer_rate` | Server-side peer ledger | Sampled per-connection send rate (`iris.transfer.peer_send_bps`) |
+| `iris.tracker.peer` | Tracker | Tracker peer lifecycle (announce, join, leave) |
+| `iris.peer.policy` | Tracker | Peer-policy revision applied / enforcement outcome |
 | `iris.transfer.lifecycle` | Tracker (server-side assignment + swarm observation) | Plan lifecycle: assignment recorded, seeding confirmed |
-| `iris.swarm.start` / `.complete` / `.stop` / `.stale` | Server | Swarm lifecycle events |
+
+Those seven are the **complete** set of `otel.log.name` values IRIS emits
+(`server/otlp.py`). There are no `iris.swarm.start` / `.complete` / `.stop` /
+`.stale` records — a filter built on those names matches nothing, which looks
+exactly like the benign "an idle fleet produces no swarm events" case.
 
 !!! danger "Never sum the two peer record names together"
     `iris.swarm.peer_bytes` and `iris.device.peer_transfer_record` describe the *same
@@ -166,10 +178,17 @@ with no restart. `IRIS_OBSERVABILITY` still needs a restart, because it also
 gates the `:9101/metrics` surface at startup.
 
 For an authenticated collector, add
-`IRIS_OTLP_HEADERS="Authorization=Bearer <token>"` or
-`IRIS_OTLP_HEADERS_FILE=/path` for a secret mount. Those values are never
-logged, and IRIS refuses HTTP redirects so a header cannot leak to a redirect
-target.
+`IRIS_OTLP_HEADERS="Authorization=Bearer <token>"` to the same `server/.env`,
+or `IRIS_OTLP_HEADERS_FILE=/path` for a secret mount (the `_FILE` form is
+preferred: a bearer token in `server/.env` is a plaintext secret on the Docker
+host). Those values are never logged, and IRIS refuses HTTP redirects so a
+header cannot leak to a redirect target.
+
+!!! note "`server/.env` reaches the container only for the keys Compose names"
+    All three of these are named in `server/docker-compose.yml`'s
+    `environment:` block, so `server/.env` works for them. A variable that is
+    *not* named there is interpolation-only and never reaches the process — see
+    [How a variable reaches the container](reference.md#environment-variables).
 
 ## The collector
 
@@ -419,19 +438,31 @@ On the boards the two right-hand terms read **traced to a device** and
 `unattributed` families named above. Because these are counters, the panel
 keeps its shape after the swarm goes idle.
 
-**Swarm participation.** `iris_swarm_peers_attributed` and
-`iris_swarm_peers_saturated` against total swarm peers, showing how much of the
-swarm the ledger can trace bytes to and how many edges have stopped
-advancing.
+**Swarm participation.** `iris_swarm_peers_attributed` against total swarm
+peers, showing how much of the swarm the ledger can trace bytes to, beside
+`iris_swarm_peers_saturated` — the 0/1 flag saying the per-torrent peer cap
+refused peers, which is what tells a residue caused by the cap apart from one
+caused by short-lived connections.
 
 **Per-peer edges (origin view).** A table built from `iris.swarm.peer_bytes`
 log records, one row per edge, keyed on `network.peer.address` and
 `iris.image.id`. This is the origin's sampled view.
 
-**Per-device transfer records (device view).** A table built from
-`iris.device.peer_transfer_record`, split by `iris.peer.attribution` into `origin`,
-`device` and `unknown`. This is the panel family that answers "did this device
-get its image from a peer or from the origin?" — and the one to quote.
+**Per-device transfer records (device view).**
+`iris.device.peer_transfer_record` is exported for every completed transfer,
+split by `iris.peer.attribution` into `origin`, `device` and `unknown`, and it
+is the exact, device-measured answer to "did this device get its image from a
+peer or from the origin?".
+
+!!! warning "Neither shipped board charts it"
+    `iris.device.peer_transfer_record` appears in **neither**
+    `grafana-iris-swarm.json` nor `splunk-iris-swarm.xml`. Every per-device
+    peer-share panel on both boards is built on `iris.swarm.peer_bytes`, the
+    origin-side **sampled** estimate with 12–27% documented sampling loss. So
+    the number you can read off a shipped board is the estimate; the number you
+    can defend has to come from a panel you write yourself against the device
+    record. Build it and you will have the better figure — the record is
+    already reaching your collector.
 
 **Offload share.** Peer-sourced bytes as a percentage of the image, per device
 and per fleet.
@@ -446,8 +477,8 @@ quotes a number in a meeting.
 | `iris_origin_sent_bytes_total` | **Measured** | The origin seeder's own upload counter, banked across counter resets |
 | `iris.device.peer_transfer_record` byte values | **Measured** | The receiving device's own cumulative per-peer counter, read once at the instant the last piece landed |
 | `iris.peer.attribution` (`origin`/`device`/`unknown`) | **Derived** | A server-side join of peer address against the device address map — authoritative, but a join |
-| `iris_peer_attributed_bytes_total` (bytes traced to a device) | **Derived (sampled)** | Sum of per-edge deltas observed by periodic `getPeers` sampling; lossy by construction |
-| `iris_peer_unattributed_bytes_total` (untraced bytes) | **Derived** | Origin sent minus traced. A real published quantity, not an error bar |
+| `iris_peer_attributed_bytes_total` (bytes traced to a device) | **Measured** | An accumulation of aria2's own per-connection counters, banked into the durable ledger — not arithmetic. Both boards label it measured. Its *coverage* is what sampling limits: an edge that opened and closed between two polls is never banked, so this is a floor on what peers really carried, and the shortfall is published as the untraced residue rather than hidden |
+| `iris_peer_unattributed_bytes_total` (untraced bytes) | **Measured** | Both boards label it measured, and it is a real published quantity rather than an error bar. It is computed as `max(0, origin sent − traced)`, so it is arithmetic on two measurements — which is exactly why it is a gauge and never `rate()`d |
 | `iris.swarm.peer_bytes` byte values | **Derived (sampled)** | The origin-side estimate of an edge; the device transfer record is the exact form of the same bytes |
 | Offload share percentages | **Derived** | A ratio of the above |
 

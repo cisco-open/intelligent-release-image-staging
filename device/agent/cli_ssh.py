@@ -164,7 +164,12 @@ class SSHCli(object):
         already privileged and can stop. Anchored on our known first command so
         the prompt character is positional, not merely present -- a banner
         containing `>` or `#` cannot move this."""
-        text = transcript or ""
+        # IOS `-tt` transcripts are CRLF and only extract_output strips the
+        # CR; the un-learn anchor below is end-of-line, so on the raw text
+        # `...#enable\r` never matched and a process that started escalated
+        # (IRIS_DEVICE_ENABLE_ALWAYS=1) kept sending the pair to a priv-15
+        # box on every session — the +48 s hostname lookup per call.
+        text = (transcript or "").replace("\r", "")
         if not self._needs_enable:
             if re.search(r">[ \t]*terminal length 0", text):
                 self._needs_enable = True

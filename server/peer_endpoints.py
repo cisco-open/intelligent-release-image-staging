@@ -11,9 +11,15 @@ authenticated announce from an **attributable** principal (device / service); a
 serialized by a per-file advisory ``fcntl.flock`` (same discipline as
 ``secrets_store``); there is no process-local persistence lock.
 
-Retention (spec 7 retirement): endpoints are pruned only when older than
-``ENDPOINT_TTL``; revoke/delete never removes rows. Re-onboard clears a device's
-old rows via ``clear_principal`` before new credentials become usable.
+Retention (spec 7 retirement): endpoints age out of the fresh view, and are
+pruned from disk by the tracker's maintenance pass, once older than
+``ENDPOINT_TTL`` -- EXCEPT rows the caller's ``keep`` predicate claims (the
+reconciler passes one that names every revoked principal and every principal
+the current policy denies at that address, so a quarantined or revoked device
+that simply stops announcing keeps its seeder block until it is re-onboarded
+or un-quarantined, not merely until the TTL lapses). Revoke/delete never
+removes rows. Re-onboard clears a device's old rows via ``clear_principal``
+before new credentials become usable.
 
 Principals are accepted structurally (any object exposing ``.type``/``.id``) so
 this module stays decoupled from the identity lane's ``auth.Principal``;
@@ -21,7 +27,9 @@ integration later passes the real ``auth.Principal`` unchanged.
 """
 import contextlib
 import fcntl
+import ipaddress
 import json
+import math
 import os
 import tempfile
 import threading
@@ -39,14 +47,18 @@ class EndpointStoreError(ValueError):
 
 def endpoint_ttl():
     """Effective endpoint TTL, honoring ``IRIS_ENDPOINT_TTL`` (spec 6). A
-    missing or non-integer value falls back to :data:`ENDPOINT_TTL`."""
+    missing, non-integer or non-positive value falls back to
+    :data:`ENDPOINT_TTL`: with a TTL of 0 or less no row is ever fresh, so a
+    valid policy would apply an EMPTY blocklist under an ``enforced`` status
+    and the maintenance deadline would fire on every 2 s poll."""
     raw = os.environ.get("IRIS_ENDPOINT_TTL")
     if raw is None:
         return ENDPOINT_TTL
     try:
-        return int(raw)
+        value = int(raw)
     except (TypeError, ValueError):
         return ENDPOINT_TTL
+    return value if value >= 1 else ENDPOINT_TTL
 
 
 def principal_key(principal):
@@ -111,6 +123,26 @@ def _load(path):
             if not isinstance(entry.get("principal_type"), str) \
                     or not isinstance(entry.get("principal_id"), str):
                 raise ValueError("bad principal identity")
+            # Entry-level validation: a row the reconciler would otherwise
+            # trip over (KeyError on a missing ipv4, TypeError on a string
+            # observed_at, AddressValueError on a non-IPv4 rule) is store
+            # corruption and takes the same fail-closed path as bad JSON.
+            for ep in entry["endpoints"]:
+                if not isinstance(ep, dict):
+                    raise ValueError("bad endpoint")
+                try:
+                    ipaddress.IPv4Address(ep.get("ipv4"))
+                except (ipaddress.AddressValueError, ValueError, TypeError):
+                    raise ValueError("bad endpoint ipv4")
+                port = ep.get("port")
+                if isinstance(port, bool) or not isinstance(port, int) \
+                        or not 1 <= port <= 65535:
+                    raise ValueError("bad endpoint port")
+                observed = ep.get("observed_at")
+                if isinstance(observed, bool) \
+                        or not isinstance(observed, (int, float)) \
+                        or not math.isfinite(observed):
+                    raise ValueError("bad endpoint observed_at")
         return data
     except ValueError as exc:
         raise EndpointStoreError("endpoint store is corrupt") from exc
@@ -176,9 +208,25 @@ def clear_principal(path, principal):
             _atomic_write_json(path, doc)
 
 
-def prune(path, now):
+def _is_fresh(entry, ep, now, ttl, keep):
+    """TTL filter shared by prune/fresh_endpoints: within the TTL, or claimed
+    by the caller's ``keep(principal_type, principal_id, ipv4)`` predicate
+    (a revoked/denied principal's row is retained regardless of age)."""
+    if now - ep.get("observed_at", 0.0) <= ttl:
+        return True
+    if keep is None:
+        return False
+    try:
+        return bool(keep(entry["principal_type"], entry["principal_id"],
+                         ep["ipv4"]))
+    except Exception:
+        return True     # an undecidable row is retained, never silently aged
+
+
+def prune(path, now, keep=None):
     """Drop endpoints older than the effective TTL; remove principals left with
-    no fresh endpoints (spec 6 prune)."""
+    no fresh endpoints (spec 6 prune). Called by the tracker's maintenance
+    pass. Rows claimed by ``keep`` (see :func:`fresh_endpoints`) survive."""
     ttl = endpoint_ttl()
     with _lock(path):
         doc = _load(path)
@@ -187,7 +235,7 @@ def prune(path, now):
         for key in list(principals):
             entry = principals[key]
             fresh = [e for e in entry["endpoints"]
-                     if now - e.get("observed_at", 0.0) <= ttl]
+                     if _is_fresh(entry, e, now, ttl, keep)]
             if len(fresh) != len(entry["endpoints"]):
                 changed = True
             if fresh:
@@ -199,16 +247,19 @@ def prune(path, now):
             _atomic_write_json(path, doc)
 
 
-def fresh_endpoints(path, now):
+def fresh_endpoints(path, now, keep=None):
     """Read-only view of ``{key: {principal_type, principal_id, endpoints}}``
-    holding only endpoints within the effective TTL. Missing file -> ``{}``.
-    Does not mutate the durable file (a pure snapshot for derivation)."""
+    holding only endpoints within the effective TTL, plus every row the
+    optional ``keep(principal_type, principal_id, ipv4)`` predicate claims
+    regardless of age (the reconciler's revoked/denied retention). Missing
+    file -> ``{}``. Does not mutate the durable file (a pure snapshot for
+    derivation)."""
     ttl = endpoint_ttl()
     doc = _load(path)
     out = {}
     for key, entry in doc["principals"].items():
         fresh = [e for e in entry["endpoints"]
-                 if now - e.get("observed_at", 0.0) <= ttl]
+                 if _is_fresh(entry, e, now, ttl, keep)]
         if fresh:
             out[key] = {"principal_type": entry["principal_type"],
                         "principal_id": entry["principal_id"],

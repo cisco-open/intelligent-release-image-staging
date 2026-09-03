@@ -27,7 +27,13 @@ id_rsa*
 *.bin
 *.pkg
 *.SPA.bin
-images/ios-xe/
+# Everything an operator stages under images/ is a large, Cisco-proprietary
+# artifact, whatever its extension (.bin, .iso, .tar, .rpm today). Ignore the
+# whole directory rather than chasing the format list, and re-include only its
+# README. `images/*` (not `images/`) is what makes the negation possible: git
+# cannot re-include a file inside an ignored DIRECTORY.
+images/*
+!images/README.md
 
 # --- torrents / aria2 download state ---
 *.torrent
@@ -79,9 +85,14 @@ deploy/
 HANDOFF.md
 lab/evidence/
 
-# --- IOx app build output (generated iris.tar / packaging) ---
+# --- IOx / IOS-XR app build output (generated iris.tar / iris-xr.rpm) ---
 device/iox/out/
+device/xr/out/
+*.rpm
 HANDOFF-*.md
+
+# --- host-specific Compose override (lab ports/mounts; never shared) ---
+server/docker-compose.override.yml
 
 # --- superpowers brainstorm/visual-companion scratch (local only) ---
 .superpowers/

@@ -33,6 +33,25 @@ Do not add code or documentation that causes IRIS to install, activate, commit, 
 4. Update documentation when the operator workflow changes.
 5. Avoid committing generated artifacts, credentials, images, or lab-only evidence.
 
+### Test dependencies
+
+The shipped code is stdlib-only, but the test suites are not. Install the
+declared test dependencies once, then run the suites from `TESTING.md`:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+| Pin | Where | Value |
+| --- | --- | --- |
+| Test dependencies | `requirements-dev.txt` | `pytest>=8`, `PyYAML>=6` |
+
+`.github/workflows/tests.yml` installs that same file, so a clean machine and
+CI run the same set. `PyYAML` is required, not optional: the Kubernetes
+manifest and `docker-compose.yml` tests parse the shipped YAML to assert
+security properties, and a missing dependency fails the run instead of quietly
+removing those checks from it.
+
 ## Embedded agent packages
 
 Every Python source under `device/agent/` is embedded into the Guest Shell
@@ -57,8 +76,12 @@ any shared-agent change and redeploy each affected device.
 Keep operator-visible changes under `CHANGELOG.md` → `Unreleased` during normal
 development. To cut a release, move those entries under the current CalVer
 heading, set `VERSION` to the same `YYYY.0M.0D[.MICRO]` value, run the complete
-tests and documentation build, and run `tools/make-release.sh`. The release tag
-is `v` plus the exact `VERSION`, including a `.MICRO` suffix when present.
+tests and documentation build, and run `tools/make-release.sh`. The assembler
+ships tracked files only (from `git ls-files`, so commit new files first),
+writes `release/iris.tgz` together with `release/iris.tgz.sha256` and a
+per-member `MANIFEST.txt`, and leaves the previous release untouched if any
+step fails; send the tarball with its `.sha256`. The release tag is `v` plus
+the exact `VERSION`, including a `.MICRO` suffix when present.
 
 ## Documentation loop
 

@@ -32,6 +32,8 @@ def main(argv=None):
         recipients_csv=os.environ.get("IRIS_AGE_RECIPIENTS") or None,
         secrets_enc=os.environ.get("IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age"),
     )
-    app.set_admin(username, password)
-    print("admin '%s' set" % username)
+    # Break-glass semantics: a reset from outside the console process must
+    # also end every console session minted under the old credential.
+    app.set_admin(username, password, invalidate_sessions=True)
+    print("admin '%s' set; existing console sessions invalidated" % username)
     return 0

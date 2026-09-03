@@ -404,15 +404,15 @@ def test_build_deps_reclaim_is_a_documented_no_op(tmp_path):
     assert deps.reclaim() is None
 
 
-def test_build_deps_ios_escape_hatch_refuses_instead_of_pretending(tmp_path):
-    """deps.ios is dead in run_once and there is no CLI here. Raising beats
-    returning "" — a caller that grew a dependency on it must find out."""
+def test_build_deps_has_no_ios_passthrough_and_reports_no_boot_target(tmp_path):
+    """The arbitrary IOS-exec seam (`deps.ios`) is gone from the contract
+    altogether — there is no CLI here and no production caller anywhere. Its
+    slot carries the one read-only fact reclaim needs, and XR's answer is the
+    POSITIVE "no separate BOOT target" (""): None would read as "unreadable"
+    and refuse every reclaim forever."""
     _cfg_out, deps = _build(tmp_path)
-    try:
-        deps.ios("show version")
-        assert False, "expected RuntimeError"
-    except RuntimeError as exc:
-        assert "IOS-XR" in str(exc)
+    assert "ios" not in iris_agent.Deps._fields
+    assert deps.boot_image() == ""
 
 
 def test_build_deps_refresh_rebinds_the_live_catalog_client(tmp_path):

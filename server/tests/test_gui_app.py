@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 
+import pytest
+
 import gui_app
 import gui_auth
 import gui_server
@@ -167,3 +169,90 @@ def test_overview_refresh_has_generation_and_abort_protection():
     assert "failed: true" in fn
     assert "dbody.failed || imgsBody.failed" in fn
     assert "renderOverviewAttention(devs, devNow, imgs, fleetDataUnavailable)" in fn
+
+
+def test_set_admin_refuses_corrupt_live_store(tmp_path):
+    """IRIS-01-002: a present-but-corrupt live store must never be treated as
+    empty by a writer; set_admin raises before persisting and the file is
+    left exactly as it was (no skeleton re-encrypted over the fleet)."""
+    app, secrets_path = _app(tmp_path)
+    app.set_admin("admin", "pw")
+    with open(secrets_path, "w") as f:
+        f.write("{ truncated")
+    with pytest.raises(secrets_store.StoreCorruptError):
+        app.set_admin("admin", "new-pw")
+    with open(secrets_path) as f:
+        assert f.read() == "{ truncated"
+    with pytest.raises(secrets_store.StoreCorruptError):
+        app.needs_setup()          # never "first run" for a corrupt store
+    with pytest.raises(secrets_store.StoreCorruptError):
+        app.change_password("pw", "new-pw-2")
+
+
+def test_break_glass_reset_invalidates_live_sessions(tmp_path):
+    """IRIS-01-003: iris-gui-admin runs in ANOTHER process and only rewrites
+    the store; the console process must still drop every session created
+    at or before that reset. Two GuiApp instances model the two processes."""
+    secrets_path = str(tmp_path / "secrets.json")
+    clock = [1000]
+    console = gui_app.GuiApp(secrets_path, now_fn=lambda: clock[0])
+    console.set_admin("admin", "pw")
+    sid, csrf = console.login("admin", "pw")
+    clock[0] = 1010
+    assert console.session_info(sid) == {"username": "admin", "csrf": csrf}
+    # break-glass from a separate process, seconds later
+    clock[0] = 1020
+    cli = gui_app.GuiApp(secrets_path, now_fn=lambda: clock[0])
+    cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
+    clock[0] = 1021
+    assert console.session_info(sid) is None            # dropped
+    assert console.session_info(sid) is None            # and stays dropped
+    assert console.login("admin", "pw") is None          # old credential gone
+    clock[0] = 1030
+    new_sid, _ = console.login("admin", "reset-pw")
+    assert console.session_info(new_sid) is not None    # post-reset login works
+    # the floor survives a later in-console password change
+    assert console.change_password("reset-pw", "third-pw") is True
+    assert gui_auth.sessions_not_before(secrets_store.load(secrets_path)) == 1020
+    assert console.session_info(new_sid) is not None
+
+
+def test_in_console_password_change_keeps_current_session(tmp_path):
+    """The console's own password change revokes OTHER sessions via the
+    route; the caller's session must survive the admin-record rewrite."""
+    clock = [1000]
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"), now_fn=lambda: clock[0])
+    app.set_admin("admin", "pw")
+    sid, _ = app.login("admin", "pw")
+    clock[0] = 1005
+    assert app.change_password("pw", "new-pw-1") is True
+    clock[0] = 1006
+    assert app.session_info(sid) is not None
+
+
+def test_session_info_touch_false_does_not_refresh_idle_clock(tmp_path):
+    """IRIS-08-004: a background poll validates the session without counting
+    as activity; explicit touch=True (or the default) does refresh."""
+    clock = [0]
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"), now_fn=lambda: clock[0],
+                         sessions=gui_auth.SessionStore(idle_ttl=100))
+    app.set_admin("admin", "pw")
+    sid, _ = app.login("admin", "pw")
+    clock[0] = 60
+    assert app.session_info(sid, touch=False) is not None
+    clock[0] = 120                                    # 120s since the last touch
+    assert app.session_info(sid) is None              # expired despite the poll
+    sid2, _ = app.login("admin", "pw")
+    clock[0] = 180
+    assert app.session_info(sid2, touch=True) is not None
+    clock[0] = 240                                    # 60s since the touch
+    assert app.session_info(sid2) is not None
+    # the per-request policy is what the HTTP layer sets; None defers to it
+    gui_app.set_request_session_touch(False)
+    try:
+        clock[0] = 300
+        assert app.session_info(sid2) is not None     # 60s: alive, not touched
+        clock[0] = 350                                # 110s since the last touch
+        assert app.session_info(sid2) is None
+    finally:
+        gui_app.set_request_session_touch(True)

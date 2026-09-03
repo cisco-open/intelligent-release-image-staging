@@ -32,6 +32,15 @@
 # Env (subset of the installer's, supplied by OnboardService._build_env):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] [VLAN=666]
 #   [PKG=iris-arm64.tar] [PKG_FS=flash:]
+#   [EXPECTED_DEVICE_IDENTITY]  the processor board ID the deployment record
+#       was written for (the same value the installer hard-requires). When set,
+#       the FIRST device session is a read-only `show version` and the teardown
+#       refuses to send any destructive command unless the live board ID
+#       matches -- a re-addressed or replaced box, or a session that never
+#       returned a board ID, aborts before anything is touched. Skipped in
+#       force mode (IRIS_FORCE_AGENT_ONLY=1: the record-less rescue has no
+#       identity to compare against, same as device/router-uninstall.sh).
+#       Unset: no identity check (legacy callers).
 # Usage:  iox/uninstall.sh [--dry-run]
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -146,6 +155,33 @@ else
 fi
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }
 app_state() { printf 'show app-hosting list\n' | RUN 2>/dev/null | awk -v a="$APPID" '$1==a{print $2}'; }
+
+# A deployment record binds this teardown to one physical device. Verify the
+# live processor board ID against the record BEFORE the first destructive
+# command (mirrors device/router-uninstall.sh and the installer's own guard):
+# whatever answers at DEVICE_IP is not necessarily the box the record was
+# written for -- overwhelmingly because it was rebuilt or replaced, which
+# keeps the address and the device id but gets a fresh board ID. Force mode
+# is the record-less rescue path and has no identity to compare against.
+EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
+if [ "$FORCE_AGENT_ONLY" != "1" ] && [ -n "$EXPECTED_DEVICE_IDENTITY" ]; then
+  VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)" || VERSION_OUT=""
+  LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
+    | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
+  if [ -z "$LIVE_IDENTITY" ]; then
+    echo "ERROR: could not read the processor board ID from $DEVICE_IP (show version returned no identity); refusing to modify it" >&2
+    echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY'; check reachability and device credentials, then retry" >&2
+    exit 1
+  fi
+  if [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
+    echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
+    echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '$LIVE_IDENTITY'" >&2
+    echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
+    echo "  (removes the IRIS agent footprint only, leaving the operator VLAN/SVI" >&2
+    echo "  untouched), or delete and re-add it in the Console." >&2
+    exit 1
+  fi
+fi
 
 echo "[1/4] app-hosting stop -> deactivate -> uninstall '$APPID' on $DEVICE_IP"
 # Idempotent + order-tolerant: each step is a no-op (harmless error, swallowed)

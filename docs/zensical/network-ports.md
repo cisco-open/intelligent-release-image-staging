@@ -15,13 +15,14 @@ address plus bidirectional device-to-device BitTorrent traffic.
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
 | 22 | TCP | Console/server host -> device IOS | SSH | Drive the installer, configure the trustpoint, and transfer configuration. |
-| 22 | TCP | Console/server host -> remote stage host | SSH | Only when the Console and artifact/stage host are different machines. |
 | 8000 | TCP | Console/server host -> artifact server | HTTPS | Installer preflight. |
 | 8000 | TCP | Device IOS -> artifact server | HTTPS | Download the Guest Shell bundle, bootstrap, certificate, per-device configuration, IOx package, or XR RPM. |
 
-In the standard Compose deployment the Console and artifact server share the
-same container, so per-device configuration is staged locally and there is no
-Console-to-stage-host SSH hop.
+The Console and artifact server share the same container, so Console
+onboarding always stages per-device configuration locally: there is no
+Console-to-stage-host SSH hop, and the optional stage-host credential in
+Settings is not passed to any installer. (A port-22 hop to a remote stage host
+exists only for a manual `device/device-install.sh` run from another machine.)
 
 ## Steady-state operation
 

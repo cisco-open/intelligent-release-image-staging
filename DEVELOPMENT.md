@@ -38,13 +38,41 @@ mutates the running/booted software state of a device.
 
    The first step installs the handed-in `aria2c` binary that the image build
    copies in; it verifies the binary against `tools/aria2c.sha256` and fails
-   closed on a mismatch. Without a deliverable to hand, build one from the
-   corresponding source described in `tools/aria2c-patches/README.md` and
-   point `ARIA2C_DELIVERABLE` at it.
+   closed on a mismatch, with no override. Point `ARIA2C_DELIVERABLE` at a
+   handed-in binary whose sha256 is the one recorded there.
+
+   Building your own from the corresponding source
+   (`tools/aria2c-patches/README.md`) will **not** reproduce those bytes — a
+   different toolchain or flag set produces a different binary — so
+   `get-aria2c.sh` will refuse it. Building one is adopting your own client,
+   which means updating `tools/aria2c.sha256` to its sha256 on purpose, and
+   accepting that the pin no longer matches what the project ships.
 
 The seed-server Dockerfile uses the repository root as its build context so the
 image can carry the device installers and console onboarding helper. Build it
 directly with `docker build --platform linux/amd64 -f server/Dockerfile .`.
+
+### Running a dev checkout beside a live deployment
+
+`server/docker-compose.yml` declares `name: iris`, so every checkout of this
+repository resolves to the **same** Compose project and the same named volumes
+(`iris_iris-state`, `iris_iris-config`, `iris_iris-images`). Bringing a dev
+checkout up on a host that already runs IRIS would otherwise adopt the live
+container, re-bootstrap live state with `run --rm iris iris-bootstrap`, and
+delete all three volumes on `down -v`. Give the dev stack its own project name
+and its own container name — container names are host-global:
+
+```bash
+COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
+  docker compose -f server/docker-compose.yml up -d
+```
+
+Put both in `server/.env` if you work in that checkout regularly.
+`IRIS_CONTAINER` is the override the helpers under `tools/` already honour, so
+it also points them at the dev container. A deployment created before the
+project name was declared keeps `server_`-prefixed volumes and needs a one-time
+migration — see [Compose project
+name](docs/zensical/server.md#compose-project-name).
 
 ## Embedded agent packages
 
@@ -107,7 +135,18 @@ Each source file must carry, after any shebang line:
 ```
 
 Copy that block verbatim into any new source file (adjusting the comment
-character to match the file's syntax). Non-source assets and files that can't
-carry an inline comment header — for example IOS-XE EEM `.cfg` applets — are
-left unannotated; they inherit the repository's
-Apache-2.0 license.
+character to match the file's syntax).
+
+Two kinds of file are excepted and left unannotated; both inherit the
+repository's Apache-2.0 license:
+
+1. **Files whose syntax has no comment form at all** — JSON, for example, which
+   is why `docs/zensical/dashboards/grafana-iris-swarm.json` carries no header.
+2. **Files where a header would change the artifact's meaning** — IOS-XE EEM
+   `.cfg` applets, which are pasted into a device configuration verbatim, and
+   the `tools/aria2c-patches/*.patch` files, where added lines would alter the
+   patch content and stop it applying.
+
+A format that *can* carry a comment is not excepted: `.xml`, `.yaml`, `.toml`,
+`.css`, `.html` and `.md` all take the header (Markdown and HTML as an
+`<!-- ... -->` block, XML likewise).

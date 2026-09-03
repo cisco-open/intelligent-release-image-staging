@@ -67,7 +67,11 @@ class _HeartbeatSpy:
 def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
               root_ok=True, removed=None, mode="bundle", reclaimables=()):
     emitted = []
-    ios_cmds = []
+    # The BOOT variable's target as the fake `show boot` reports it: what the
+    # device boots NEXT, which by default is the running image. Tests that
+    # model an operator pointing BOOT elsewhere set boot["image"]; None models
+    # an unreadable `show boot`.
+    boot = {"image": "running.bin"}
     aria_calls = []
     copied = []
     purged = []
@@ -84,7 +88,7 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
     deps = iris_agent.Deps(
         catalog=catalog,
         emit=lambda m, msg: emitted.append((m, msg)),
-        ios=lambda cmd: ios_cmds.append(cmd) or "",
+        boot_image=lambda: boot["image"],
         aria_add=lambda t, d: aria_calls.append((t, d)),
         file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: verify_ok,
@@ -113,7 +117,7 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
         aria_session=lambda: None,
         copy_in_place=False,
     )
-    return (deps, emitted, ios_cmds, aria_calls, copied, purged, reclaimed,
+    return (deps, emitted, boot, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
 
 
@@ -235,7 +239,7 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
@@ -245,7 +249,6 @@ def test_replaced_image_cleanup_claim_gated_on_actual_absence():
                         "origin": "downloaded"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"])]   # via the bypass applet
-    assert all("delete" not in c for c in ios_cmds)        # never a raw exec delete
     # queued for retry every tick — NOT silently forgotten
     assert state.get("pending_root_deletes") == ["old.bin"]
     assert any(m == "CLEANUP-PENDING" for m, _ in emitted)
@@ -259,7 +262,7 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                       # the old root REFUSES to die
         root_present=lambda fname, prefix="flash:", expected_size=None: fname == "old.bin")
@@ -271,7 +274,6 @@ def test_replaced_image_cleanup_retry_refires_bypass_applet():
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == [("flash:", ["old.bin"]),
                                 ("flash:", ["old.bin"])]
-    assert all("delete" not in c for c in ios_cmds)
     assert state.get("pending_root_deletes") == ["old.bin"]
 
 
@@ -279,7 +281,7 @@ def test_replaced_image_cleanup_confirmed_when_gone():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(                        # old root really deleted
         root_present=lambda fname, prefix="flash:", expected_size=None: fname != "old.bin")
@@ -303,7 +305,7 @@ def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -312,7 +314,6 @@ def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
                         "origin": "adopted"}}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == []                # delete never attempted
-    assert all("delete" not in c for c in ios_cmds)
     assert "pending_root_deletes" not in state   # resolved, not retried forever
     kept = [msg for m, msg in emitted if m == "ROOTCOPY-KEPT"]
     assert kept and "old.bin" in kept[0] and "operator-adopted" in kept[0]
@@ -326,7 +327,7 @@ def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted_on_xr()
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -346,7 +347,7 @@ def test_pending_delete_ignores_the_origin_gate_on_a_platform_with_no_adoption()
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img2", "pending_root_deletes": ["old.bin"]}
@@ -359,7 +360,7 @@ def test_pending_delete_mixed_queue_only_deletes_the_downloaded_entry():
     cat = FakeCatalog({"approved_image_id": "img3"},
                       {"id": "img3", "filename": "img3.bin", "size": 7,
                        "sha256": "xyz"})
-    deps, emitted, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img3.bin": 7}, verify_ok=True)
     deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -387,14 +388,13 @@ def test_replaced_image_cleanup_whitelists_names_before_applet():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin", "size": 7,
                        "sha256": "def"})
-    deps, _, ios_cmds, _, _, _, _, bundle_reclaimed = make_deps(
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img2.bin": 7}, verify_ok=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img2",
              "pending_root_deletes": ['bad"name', "img2.bin"]}
     iris_agent.run_once(CFG, deps, state)
     assert bundle_reclaimed == []               # applet never templated
-    assert all("delete" not in c for c in ios_cmds)
     assert "pending_root_deletes" not in state  # dropped, not retried
 
 
@@ -415,13 +415,12 @@ def test_low_space_runs_reclaim_then_errors_if_still_short():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin",
                        "size": 1_260_618_344, "sha256": "abc"})
-    deps, emitted, ios_cmds, aria, _, _, reclaimed, _ = make_deps(
+    deps, emitted, _, aria, _, _, reclaimed, _ = make_deps(
         cat, {}, free=500_000_000,            # not complete, no room even after reclaim
         mode="install")
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "no-space"
     assert reclaimed == [True]                         # reclaim attempted once...
-    assert ios_cmds == []                              # ...via deps.reclaim(), NOT raw ios()
     assert any(m == "FLASH-FULL" for m, _ in emitted)  # just syslogs insufficiency
     assert aria == []                                  # never started a download
     # second tick while still short must NOT re-fire reclaim (the once-guard) —
@@ -676,7 +675,7 @@ def test_reassignment_parks_old_image_and_keeps_its_root_copy():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
@@ -686,7 +685,6 @@ def test_reassignment_parks_old_image_and_keeps_its_root_copy():
     assert purged == [(["img2.bin"], ["img2"])]
     assert bundle_reclaimed == []                      # root copy NOT deleted
     assert "pending_root_deletes" not in state         # and never queued
-    assert all("delete" not in c for c in ios_cmds)
     assert any(m == "PARKED" for m, _ in emitted)
     assert state["img1"]["parked"] is True             # remembered, not dropped
     assert state["image_id"] == "img2"
@@ -707,7 +705,7 @@ def test_reassignment_parks_an_adopted_root_on_xr_and_logs_left_in_place():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
     deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -716,7 +714,6 @@ def test_reassignment_parks_an_adopted_root_on_xr_and_logs_left_in_place():
                       "root_file": "img1.bin", "origin": "adopted"}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert bundle_reclaimed == []                      # adopted root NOT deleted
-    assert all("delete" not in c for c in ios_cmds)
     parked_msg = [msg for m, msg in emitted if m == "PARKED"][0]
     assert "root copy left in place (adopted)" in parked_msg
 
@@ -730,7 +727,7 @@ def test_reassignment_parks_a_downloaded_root_on_xr_and_logs_removed():
     cat = FakeCatalog({"approved_image_id": "img2"},
                       {"id": "img2", "filename": "img2.bin",
                        "size": 1000, "sha256": "def"})
-    deps, emitted, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+    deps, emitted, _, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {}, free=9_000_000_000)
     deps = deps._replace(copy_in_place=True)
     state = {"schema_version": iris_agent._STATE_SCHEMA,
@@ -788,14 +785,13 @@ def test_same_assignment_never_purges():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
                        "sha256": "abc"})
-    deps, _, ios_cmds, _, _, purged, _, bundle_reclaimed = make_deps(
+    deps, _, _, _, _, purged, _, bundle_reclaimed = make_deps(
         cat, {"/stage/img1.bin": 5})
     state = {"schema_version": iris_agent._STATE_SCHEMA,
              "image_id": "img1", "root_file": "img1.bin",
              "img1": {"done": True, "copied": True, "sha": "abc"}}
     iris_agent.run_once(CFG, deps, state)
     assert purged == [] and bundle_reclaimed == []
-    assert all("delete" not in c for c in ios_cmds)
 
 
 # --- self-heal: re-acquire if the staged/root image vanishes or content changes ---
@@ -832,15 +828,27 @@ def test_self_heal_recopies_when_root_file_gone():
 def test_self_heal_redownloads_when_content_sha_changed():
     # same image id re-published with NEW content (new sha) -> discard the stale
     # staged file and re-download, even though the size matches.
+    # Rewritten with the OLD torrent still on disk (the real device state): the
+    # original form never modelled it, so it passed while the agent re-added
+    # that old torrent — the old info hash — every tick and never asked the
+    # catalog for the regenerated one, which made a same-id republish
+    # unconvergeable fleet-wide (IRIS-09-001).
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 5,
                        "sha256": "NEWSHA"})
     removed = []
     deps, emitted, _, aria, _, _, _, _ = make_deps(
-        cat, {"/stage/img1.bin": 5}, removed=removed)
-    assert iris_agent.run_once(CFG, deps, _DONE(sha="OLDSHA")) == "downloading"
-    assert removed == ["/stage/img1.bin"]              # stale content discarded
-    assert aria == [("/stage/img1.torrent", "/stage")]  # re-downloaded
+        cat, {"/stage/img1.bin": 5, "/stage/img1.torrent": 300},
+        removed=removed)
+    state = _DONE(sha="OLDSHA")
+    state["img1"]["torrent_id"] = "sha:OLDSHA"   # what the on-disk torrent was fetched for
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "/stage/img1.bin" in removed                 # stale content discarded
+    assert "/stage/img1.torrent" in removed             # and the stale torrent with it
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]   # re-fetched
+    assert aria == [("/stage/img1.torrent", "/stage")]  # re-added from the NEW torrent
+    assert state["img1"]["torrent_id"] == "sha:NEWSHA"
+    assert any(m == "RECHECK" and "torrent changed" in msg for m, msg in emitted)
     # copy_in_place=False here (default fixture): no adoption concept, so no
     # replace warning is due regardless of origin.
     assert all(m != "ROOTCOPY-REPLACED" for m, _ in emitted)
@@ -983,7 +991,10 @@ def test_bad_sha_discards_staged_file_so_next_tick_redownloads():
     deps, emitted, _, _, _, _, _, _ = make_deps(
         cat, {"/stage/img1.bin": 5}, verify_ok=False, removed=removed)
     assert iris_agent.run_once(CFG, deps, {}) == "bad-sha"
-    assert removed == ["/stage/img1.bin"]      # corrupt/stale file dropped
+    # the corrupt/stale file is dropped — and so is the torrent it came from,
+    # so the next tick re-fetches the catalog's CURRENT torrent instead of
+    # re-adding one a same-id republish may have left stale (IRIS-09-001)
+    assert removed == ["/stage/img1.bin", "/stage/img1.torrent"]
     assert any(m == "ERROR" for m, _ in emitted)
 
 
@@ -2255,11 +2266,15 @@ def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
     share = tmp_path / "share"
     share.mkdir()
     emitted, calls = [], []
+    # The REAL IOS transcript for a missing file echoes the requested name.
+    # (The fixture used to omit it, which hid that the probe was a substring
+    # test on the name and passed on exactly this error — IRIS-09-003.)
     result = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:WRONG",
         lambda copy_source: calls.append(1) or True,
         lambda m, msg: emitted.append((m, msg)),
-        lambda cmd: "%Error opening usbflash1:WRONG/ (No such device)")
+        lambda cmd: "%Error opening usbflash1:WRONG/iris-probe.txt "
+                    "(No such file or directory)")
     assert result is None          # -> scp fallback
     assert calls == []             # the copy was never attempted
     assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
@@ -3618,8 +3633,13 @@ def test_heartbeat_failure_feeds_link_fail_streak():
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert state["link"]["fail_streak"] == 1
-    # a SUCCESSFUL heartbeat next tick must NOT reset the streak (only a
-    # delivered report does) — old-server backoff depends on this.
+    # a SUCCESSFUL heartbeat next tick RESETS the streak: it measures the
+    # catalog link, and a 200 on that link is the proof it is back. (Rewritten:
+    # the old contract — only a delivered REPORT resets — left a three-tick
+    # outage's `bad` tier in place for the life of the state file, deferring
+    # every later terminal report until the 60-attempt give-up, IRIS-10-001.
+    # The old-server case rides the separate report_fail_streak, asserted in
+    # test_report_send_failure_is_logged_and_retried_with_backoff.)
     # (hb_response={"ok": True} — FakeCatalog's default of None would itself
     # look like a failed heartbeat to _telemetry_tick, same as a raise.)
     cat2 = FakeCatalog({"approved_image_id": "img1"}, _IMG)
@@ -3627,7 +3647,7 @@ def test_heartbeat_failure_feeds_link_fail_streak():
     deps2, *_ = make_deps(cat2, {"/stage/img1.bin": 2,
                                  "/stage/img1.bin.aria2": 1})
     assert iris_agent.run_once(CFG, deps2, state) == "downloading"
-    assert state["link"]["fail_streak"] == 1
+    assert state["link"]["fail_streak"] == 0
 
 
 # ---- live streaming samples (device transfer telemetry spec section 5) ----
@@ -3654,36 +3674,6 @@ STREAM_STATS = {"completedLength": "1000", "downloadSpeed": "10",
                 "uploadSpeed": "5", "connections": "2"}
 STREAM_CFG_ON = {"telemetry": "on", "telemetry_stream": "on",
                  "device_id": "d1", "agent_version": "t"}
-
-
-class TestMaybeSample:
-    def test_disabled_makes_no_rpc(self):
-        deps, calls = _fake_deps(stats=STREAM_STATS)
-        cfg = dict(STREAM_CFG_ON, telemetry_stream="off")
-        sample, peers = iris_agent._maybe_sample(
-            cfg, deps, {}, "img", "/s/f.bin", "downloading", 1000.0)
-        assert sample is None and peers is None
-        assert calls == {"stats": 0, "peers": 0}
-
-    def test_due_sample_fetches_once_and_stamps(self):
-        deps, calls = _fake_deps(stats=STREAM_STATS,
-                                 peers=[{"ip": "10.0.0.2"}])
-        state = {}
-        sample, peers = iris_agent._maybe_sample(
-            STREAM_CFG_ON, deps, state, "img", "/s/f.bin", "downloading",
-            1000.0)
-        assert sample["phase"] == "downloading" and sample["peers"] == 2
-        assert peers == [{"ip": "10.0.0.2"}]
-        assert state["img"]["tele"]["stream_last_ts"] == 1000.0
-        assert calls == {"stats": 1, "peers": 1}
-
-    def test_never_raises(self):
-        deps = types.SimpleNamespace(
-            aria_stats=lambda s: (_ for _ in ()).throw(RuntimeError("boom")),
-            aria_peers=lambda s: [], emit=lambda *a: None)
-        assert iris_agent._maybe_sample(
-            STREAM_CFG_ON, deps, {}, "img", "/s", "downloading", 0.0) == \
-            (None, None)
 
 
 class TestHeartbeatPayload:
@@ -3713,3 +3703,544 @@ class TestTickDirectivesAndPeersReuse:
         assert state["stream_directives"]["every"] == 7
         assert calls["peers"] == 0                     # reused, not re-fetched
         assert "10.0.0.3" in state["img"]["tele"]["peers"]
+
+
+# =====================================================================
+# IRIS-09-002: the file the BOOT variable names is protected exactly like
+# the running image, on every path that deletes at the target-FS root.
+# =====================================================================
+
+def test_bundle_reclaim_protects_the_boot_target():
+    # The operator pointed BOOT at a placed image for a later window; that
+    # image has since been parked (root copy deliberately reclaimable). The
+    # gate must still never offer it up.
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, _, boot, _, _, _, _, bundle_reclaimed = make_deps(cat, {})
+    boot["image"] = "next.bin"
+    seen = {}
+    deps = deps._replace(reclaimable=lambda prefix, protect:
+                         (seen.update(protect=set(protect)) or ["stale.bin"]))
+    state = {"parked-img": {"root_file": "next.bin", "parked": True}}
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _IMG, state) is True
+    assert "next.bin" in seen["protect"]          # the BOOT target
+    assert "running.bin" in seen["protect"]       # still the running image
+    assert bundle_reclaimed == [("flash:", ["stale.bin"])]
+
+
+def test_bundle_reclaim_skips_when_the_boot_variable_is_unreadable():
+    # No BOOT fact -> no safe protect set -> no delete, and False so the
+    # caller's once-guard is not burned on the skip (retries next tick).
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {}, reclaimables=["stale.bin"])
+    boot["image"] = None
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _IMG, {}) is False
+    assert bundle_reclaimed == []
+    assert any(m == "RECLAIM-DEFERRED" and "BOOT" in msg for m, msg in emitted)
+
+    def boom():
+        raise RuntimeError("show boot glitch")
+
+    deps = deps._replace(boot_image=boom)
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _IMG, {}) is False
+    assert bundle_reclaimed == []
+
+
+def test_bundle_reclaim_still_runs_when_ios_reports_no_boot_target():
+    # "" is IOS positively saying there is no BOOT variable (not a read
+    # failure): nothing extra to protect, reclaim proceeds as before.
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, _, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {}, reclaimables=["stale.bin"])
+    boot["image"] = ""
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _IMG, {}) is True
+    assert bundle_reclaimed == [("flash:", ["stale.bin"])]
+
+
+def test_download_gate_reclaim_never_offers_the_boot_target(monkeypatch):
+    # Through run_once: flash is tight for a new assignment, bundle mode, and
+    # the gate's reclaim runs with the BOOT target in its protect set.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 5_000_000_000, "sha256": "abc"})
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {}, free=500_000_000, mode="bundle")
+    boot["image"] = "flash:next.bin"     # deps may hand back a full path
+    seen = {}
+    deps = deps._replace(reclaimable=lambda prefix, protect:
+                         (seen.update(protect=set(protect)) or []))
+    assert iris_agent.run_once(CFG, deps, {}) == "no-space"
+    assert "next.bin" in seen["protect"]
+    assert bundle_reclaimed == []
+
+
+def test_install_mode_reclaim_is_unchanged_by_boot_protection():
+    # Install mode has no name-level protect set: `install remove inactive`
+    # is the only reclaim there and IOS itself keeps the active packages.conf
+    # (the BOOT target) — this pins that the boot fact neither blocks it nor
+    # routes it through the bundle delete path.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 5_000_000_000, "sha256": "abc"})
+    deps, _, boot, _, _, _, reclaimed, bundle_reclaimed = make_deps(
+        cat, {}, free=500_000_000, mode="install")
+    boot["image"] = "packages.conf"
+    assert iris_agent.run_once(CFG, deps, {}) == "no-space"
+    assert reclaimed == [True]
+    assert bundle_reclaimed == []
+
+
+def test_failed_placement_reclaim_refuses_the_boot_target():
+    # Even a provable partial of our own is left in place when BOOT names it:
+    # deleting it leaves BOOT dangling and the next reload in rommon. Case
+    # must not matter (IOS is inconsistent about it in `show boot`).
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    deps = deps._replace(boot_image=lambda: "flash:IMG1.BIN")
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    assert bundle_reclaimed == []
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "BOOT target" in msg
+               for m, msg in emitted)
+
+
+def test_failed_placement_reclaim_refuses_when_boot_variable_is_unknown():
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    for unknown in (lambda: None,
+                    lambda: (_ for _ in ()).throw(RuntimeError("show boot"))):
+        emitted.clear()
+        iris_agent._reclaim_failed_root_copy(
+            deps._replace(boot_image=unknown), "flash:",
+            {"id": "img1", "filename": "img1.bin"})
+        assert bundle_reclaimed == []
+        assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "BOOT variable unknown"
+                   in msg for m, msg in emitted)
+
+
+def test_failed_placement_reclaim_still_deletes_when_boot_names_another_file():
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    deps = deps._replace(boot_image=lambda: "other.bin")
+    iris_agent._reclaim_failed_root_copy(
+        deps, "flash:", {"id": "img1", "filename": "img1.bin"})
+    assert bundle_reclaimed == [("flash:", ["img1.bin"])]
+
+
+def test_terminal_placement_failure_leaves_the_boot_target_in_place_end_to_end(
+        monkeypatch):
+    # The reviewer's second variant, through the real retry schedule: four
+    # genuine post-delete-first failures go terminal, and the one-shot reclaim
+    # that used to delete the partial refuses because BOOT names it.
+    deps, emitted, bundle_reclaimed = _reclaim_probe_deps(running="running.bin")
+    deps = deps._replace(
+        boot_image=lambda: "img1.bin",
+        copy_to_root=lambda fname, target_prefix="flash:", expected_size=None:
+            False)
+    state = _tick_to_terminal(deps, monkeypatch)
+    assert state["img1"]["copy_terminal"] is True
+    assert state["img1"]["ios_copy_started"] is True     # Layer 1 WAS armed
+    assert bundle_reclaimed == []                        # ...and still no delete
+    assert any(m == "ROOTCOPY-GIVEUP" for m, _ in emitted)
+    assert any(m == "ROOTCOPY-RECLAIM-REFUSED" and "BOOT target" in msg
+               for m, msg in emitted)
+
+
+def test_pending_root_delete_keeps_the_boot_target_and_resolves_the_entry():
+    # Legacy replaced-root queue: a name the operator has since pointed BOOT at
+    # is kept, logged, and resolved out of the queue (a retry could never
+    # change what BOOT says).
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    boot["image"] = "old.bin"
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin", "older.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                         "origin": "downloaded"}}
+    deps = deps._replace(
+        root_present=lambda fname, prefix="flash:", expected_size=None:
+            fname == "old.bin")
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["older.bin"])]   # only the other one
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "old.bin is the BOOT target" in msg
+               for m, msg in emitted)
+
+
+def test_pending_root_delete_is_deferred_when_boot_variable_is_unreadable():
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    boot["image"] = None
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                         "origin": "downloaded"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []                          # nothing deleted
+    assert state["pending_root_deletes"] == ["old.bin"]    # kept for retry
+    assert any(m == "CLEANUP-PENDING" and "BOOT variable unreadable" in msg
+               for m, msg in emitted)
+
+
+def test_deps_contract_has_no_arbitrary_ios_passthrough():
+    # IRIS-09-006: the old `ios` field was an arbitrary IOS-exec seam with no
+    # production caller — the one place any IOS command could have run. Its
+    # replacement is the single read-only fact the reclaim paths needed.
+    assert "ios" not in iris_agent.Deps._fields
+    assert "boot_image" in iris_agent.Deps._fields
+    assert len(iris_agent.Deps._fields) == 27
+
+
+# =====================================================================
+# IRIS-09-001: a same-id republish refreshes the device's .torrent
+# =====================================================================
+
+def test_torrent_identity_prefers_the_catalog_info_hash_over_sha():
+    assert iris_agent._torrent_identity(
+        {"info_hash_hex": " ABCD ", "sha256": "x"}) == "ih:abcd"
+    assert iris_agent._torrent_identity({"sha256": "x"}) == "sha:x"
+    assert iris_agent._torrent_identity(
+        {"info_hash_hex": "", "sha256": "x"}) == "sha:x"
+
+
+def test_stale_torrent_by_info_hash_is_dropped_and_refetched_mid_download():
+    # Mid-download (partial + control file) when the catalog regenerates the
+    # torrent under the same id and same sha-less identity: everything the
+    # old torrent produced is stale together.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc", "info_hash_hex": "NEW"})
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
+              "/stage/img1.torrent": 300}, removed=removed)
+    state = {"img1": {"torrent_id": "ih:old"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert removed == ["/stage/img1.bin", "/stage/img1.bin.aria2",
+                       "/stage/img1.torrent"]
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert state["img1"]["torrent_id"] == "ih:new"
+    assert any(m == "RECHECK" and "torrent changed" in msg for m, msg in emitted)
+    assert all(m != "PROGRESS" for m, _ in emitted)
+
+
+def test_same_id_republish_with_a_new_size_converges_instead_of_pinning_progress():
+    # The reviewer's second scenario: the old torrent completed at the OLD size
+    # (no control file left), the catalog now declares another size, and the
+    # agent used to emit PROGRESS 71% forever with no re-add and no re-fetch.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 7,
+                       "sha256": "NEWSHA"})
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5, "/stage/img1.torrent": 300}, removed=removed)
+    state = {"schema_version": iris_agent._STATE_SCHEMA, "image_id": "img1",
+             "img1": {"done": False, "copied": False, "sha": "OLDSHA",
+                      "torrent_id": "sha:OLDSHA"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "/stage/img1.torrent" in removed and "/stage/img1.bin" in removed
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert all(m != "PROGRESS" for m, _ in emitted)
+
+
+def test_more_bytes_than_the_catalog_declares_is_stale_content_not_progress():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 9, "/stage/img1.torrent": 300}, removed=removed)
+    state = {"img1": {"torrent_id": "sha:abc"}}      # identity unchanged
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "/stage/img1.bin" in removed and "/stage/img1.torrent" in removed
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert all(m != "PROGRESS" for m, _ in emitted)
+
+
+def test_legacy_state_without_torrent_identity_refetches_without_touching_the_download():
+    # A state file from before the identity was recorded: the torrent on disk
+    # is re-fetched once (cheap) and the identity recorded, but the in-flight
+    # download is NOT discarded — its provenance is unknown, not stale.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
+              "/stage/img1.torrent": 300}, removed=removed)
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert removed == []
+    assert aria == []
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert state["img1"]["torrent_id"] == "sha:abc"
+    assert any(m == "PROGRESS" for m, _ in emitted)
+
+
+def test_torrent_is_not_refetched_while_its_identity_is_unchanged():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    deps, _, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
+              "/stage/img1.torrent": 300})
+    state = {"img1": {"torrent_id": "sha:abc"}}
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert cat.downloaded == [] and aria == []
+
+
+def test_bad_sha_clears_the_torrent_identity_so_the_next_tick_refetches():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    removed = []
+    deps, _, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 5, "/stage/img1.torrent": 300},
+        verify_ok=False, removed=removed)
+    state = {"img1": {"torrent_id": "sha:abc"}}
+    assert iris_agent.run_once(CFG, deps, state) == "bad-sha"
+    assert "torrent_id" not in state["img1"]
+    assert "/stage/img1.torrent" in removed
+    # next tick: fresh torrent, fresh download
+    deps = deps._replace(verify=lambda p, sha: True)
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+
+
+# =====================================================================
+# IRIS-09-004: a torrent the catalog will not serve is THIS image's error
+# =====================================================================
+
+class _NoTorrentCatalog(FakeCatalog):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.refuse = True
+
+    def download_torrent(self, image_id, dest):
+        if self.refuse:
+            import catalog_client
+            raise catalog_client.CatalogError("torrent %s -> HTTP 503" % image_id)
+        return super().download_torrent(image_id, dest)
+
+
+def test_torrent_fetch_failure_heartbeats_an_error_instead_of_dying():
+    # 503 while the deployment gate is closed (also 404/500): the device used
+    # to vanish from the console for as long as the catalog refused its
+    # torrent — the tick unwound before the heartbeat. Report it, retry later.
+    cat = _NoTorrentCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, emitted, _, aria, _, _, _, _ = make_deps(cat, {})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "torrent-unavailable"
+    assert aria == []
+    assert any(m == "TORRENT-UNAVAILABLE" and "HTTP 503" in msg
+               for m, msg in emitted)
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[0]
+    assert hb["current_image_id"] == "img1"
+    assert hb["stage_state"] == "error"
+    assert "torrent" in hb["stage_error"]
+    assert "torrent_id" not in state.get("img1", {})   # nothing recorded
+    # the gate opens: the very next tick fetches and starts the download
+    cat.refuse = False
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+
+
+# =====================================================================
+# IRIS-09-003: the share probe wants a parsed `dir` row of the probe's size
+# =====================================================================
+
+def test_stage_via_share_probe_rejects_a_row_of_the_wrong_size(tmp_path):
+    stage = _mk_scratch(tmp_path, content=b"X" * 4096)
+    share = tmp_path / "share"
+    share.mkdir()
+    emitted, calls = [], []
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: calls.append(1) or True,
+        lambda m, msg: emitted.append((m, msg)),
+        lambda cmd: "  12 -rw-  0  " + cmd.split("/")[-1])   # present, 0 bytes
+    assert result is None and calls == []
+    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert _iris_share_files(share) == []
+
+
+def test_stage_via_share_probe_rejects_a_name_mention_without_a_dir_row(tmp_path):
+    # The name alone — in an error, a banner, a directory header — is not a
+    # listing. Only a parsed file row of exactly the probe's size passes.
+    stage = _mk_scratch(tmp_path, content=b"X" * 4096)
+    share = tmp_path / "share"
+    share.mkdir()
+    emitted, calls = [], []
+    result = iris_agent._stage_via_share_impl(
+        "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
+        lambda copy_source: calls.append(1) or True,
+        lambda m, msg: emitted.append((m, msg)),
+        lambda cmd: "Directory of usbflash1:iox_host_data_share/iris-probe.txt\n"
+                    "\nNo files in directory\n")
+    assert result is None and calls == []
+    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+
+
+# =====================================================================
+# IRIS-10-001: a recovered catalog link delivers the next terminal report
+# =====================================================================
+
+def test_streak_from_an_outage_clears_on_recovery_so_the_terminal_report_is_sent():
+    # The reviewer's wedge: three failed heartbeats (a catalog restart), then
+    # a healthy link. The next image to complete must deliver its report on
+    # the completion tick, not sit behind a `bad` tier nothing could clear.
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, emitted, *_ = make_deps(cat, {})
+    deps = deps._replace(
+        aria_stats=lambda p: {"completedLength": "5", "totalLength": "5"})
+    cfg = dict(CFG, telemetry="on")
+    state = {"img0": {"copied": True,
+                      "tele": {"report_pending": False,
+                               "event": "staging-complete"}}}
+    now = 1_000_000.0
+    for _ in range(3):
+        now += 60
+        iris_agent._telemetry_tick(cfg, deps, state, "img0", "/stage/img0.bin",
+                                   "steady", None, now)
+    assert state["link"]["fail_streak"] == 3
+    assert telemetry_report.classify(state, None) == "bad"
+    now += 60
+    iris_agent._telemetry_tick(cfg, deps, state, "img0", "/stage/img0.bin",
+                               "steady", {"ok": True}, now)
+    assert state["link"]["fail_streak"] == 0
+    assert telemetry_report.classify(state, None) == "good"
+    # a new image completes with the catalog healthy
+    state["img1"] = {"copied": True, "tele": {"started_ts": now}}
+    now += 60
+    iris_agent._telemetry_tick(cfg, deps, state, "img1", "/stage/img1.bin",
+                               "copied", {"ok": True}, now)
+    tele = state["img1"]["tele"]
+    assert tele["report_pending"] is False
+    assert len(cat.telemetry) == 1
+    assert cat.telemetry[0][1]["event"] == "staging-complete"
+    assert all("giving up" not in msg for _, msg in emitted)
+
+
+def test_outage_tiering_still_defers_while_the_link_is_down():
+    # Kept: during the outage itself the report is deferred with backoff.
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, *_ = make_deps(cat, {})
+    cfg = dict(CFG, telemetry="on")
+    state = {"link": {"fail_streak": 3},
+             "img1": {"copied": True, "tele": {"started_ts": 1.0}}}
+    iris_agent._telemetry_tick(cfg, deps, state, "img1", "/stage/img1.bin",
+                               "copied", None, 100.0)
+    tele = state["img1"]["tele"]
+    assert tele["report_pending"] is True
+    assert tele["report_attempts"] == 1
+    assert cat.telemetry == []
+
+
+# =====================================================================
+# IRIS-10-002: nothing measured -> nothing invented in the frozen report
+# =====================================================================
+
+def test_completion_tick_without_aria_stats_freezes_an_honest_report():
+    # aria_stats None at the completion tick (RPC hiccup; on XR an adopted
+    # image aria2 never had a gid for). The frozen v2 report carries no
+    # content bytes and an incomplete window instead of a measured-looking
+    # 0/0 over a zero-length complete window.
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    cat.hb_response = {"ok": True}
+    deps, *_ = make_deps(cat, {"/stage/img1.bin": 5})
+    state = {}
+    assert iris_agent.run_once(dict(CFG, telemetry="on"), deps, state) == "complete"
+    assert len(cat.telemetry) == 1
+    report = cat.telemetry[0][1]
+    assert report["content"] == {}
+    assert "start" not in report["window"]
+    assert report["window"]["complete"] is False
+    assert report["content_sha256"] == {"state": "verified", "algo": "sha256"}
+
+
+# =====================================================================
+# IRIS-10-005: a malformed 200 refresh body is a logged, best-effort failure
+# =====================================================================
+
+def test_refresh_impl_malformed_200_body_is_logged_not_a_crash(tmp_path):
+    conf = tmp_path / "iris-agent.conf"
+    conf.write_text(
+        "catalog_url = https://x\ncatalog_token = OLD\ndevice_id = sw1\n"
+        "token_expires_at = 0\n")
+    cfg = {"catalog_url": "https://x", "catalog_token": "OLD",
+           "device_id": "sw1", "token_expires_at": "0"}
+    import agent_config
+    for bag in ({"ok": True}, None, "NEW", {"catalog_token": "",
+                                            "expires_at": 1},
+                {"catalog_token": "NEW", "expires_at": "soon"}):
+        client = _RefreshClient(bag=bag)
+        emitted = []
+        out = iris_agent._refresh_impl(cfg, str(conf), client,
+                                       lambda m, msg: emitted.append((m, msg)))
+        assert out is None, bag
+        assert client.token == "OLD"                       # not re-pointed
+        assert agent_config.load(str(conf))["catalog_token"] == "OLD"
+        assert any(m == "TOKEN-REFRESH-FAIL" for m, _ in emitted), bag
+        assert all("NEW" not in msg for _, msg in emitted)  # no token in the log
+
+
+# --- install-mode reclaim must report a refusal (hardware-found) -----------
+# A C9300 stack on IOS-XE 17.18.3 was observed refusing `install remove
+# inactive` with "FAILED: cannot start new install operation, some operation
+# is already running." while `show install summary` showed only committed
+# packages and an inactive auto-abort timer. The pre-check reads that summary,
+# so it cannot see the condition; the refusal is only visible in the output of
+# the attempt itself. Reporting success there burns the caller's once-guard on
+# a no-op and permanently disables reclaim for that image.
+
+_REFUSAL = ("FAILED: cannot start new install operation, some operation is "
+            "already running. Thu Sep 03 03:23:30 UTC 2026")
+
+
+def test_install_reclaim_refused_matches_the_real_ios_refusal():
+    assert iris_agent.install_reclaim_refused(_REFUSAL) is True
+    # Matched on either stable half, case-insensitively, so punctuation drift
+    # between versions cannot turn a refusal into a false success.
+    assert iris_agent.install_reclaim_refused(
+        "cannot start new install operation") is True
+    assert iris_agent.install_reclaim_refused(
+        "SOME OPERATION IS ALREADY RUNNING") is True
+    # A normal run says nothing of the sort.
+    assert iris_agent.install_reclaim_refused("") is False
+    assert iris_agent.install_reclaim_refused(None) is False
+    assert iris_agent.install_reclaim_refused(
+        "SUCCESS: install_remove  Thu Sep 03 03:00:00 UTC 2026") is False
+
+
+def test_install_mode_reclaim_refusal_does_not_burn_the_once_guard():
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {})
+    deps = deps._replace(reclaim=lambda: False)      # device refused
+    assert iris_agent._reclaim_for_mode(
+        deps, "install", "flash:", _IMG, {}) is False
+
+
+def test_install_mode_reclaim_success_is_still_reported_as_run():
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, _, _, _, _, _, _, _ = make_deps(cat, {})
+    deps = deps._replace(reclaim=lambda: True)
+    assert iris_agent._reclaim_for_mode(
+        deps, "install", "flash:", _IMG, {}) is True
+    # An older Deps whose reclaim() returns None must keep the old meaning
+    # (it ran) rather than silently becoming a permanent no-op.
+    deps = deps._replace(reclaim=lambda: None)
+    assert iris_agent._reclaim_for_mode(
+        deps, "install", "flash:", _IMG, {}) is True

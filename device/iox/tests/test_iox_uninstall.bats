@@ -237,3 +237,99 @@ STUB
   [[ "$output" == *"VLAN not set"* ]] || return 1
   [ "$status" -ne 0 ]
 }
+
+
+# --- EXPECTED_DEVICE_IDENTITY: the record binds the teardown to one box ------
+# The console passes the deployment record's processor board ID. The first
+# device session is then a read-only `show version`, and no destructive
+# command is sent unless the live board ID matches -- mirrors the router
+# uninstaller and the IOx installer's own guard. Force mode (record-less
+# rescue) has nothing to compare against and skips it.
+
+_iox_identity_stub_setup() {
+  # $1 = the board ID the stub device reports ("" = a truncated session that
+  # never returns one). Every command the script sends is logged, so the
+  # tests can prove nothing destructive went out before the abort.
+  STUBDIR="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
+  export IRIS_STUB_LOG="$BATS_TEST_TMPDIR/sent.log" IRIS_STUB_BOARD_ID="$1"
+  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+#!/usr/bin/env bash
+cmds="$(cat)"
+printf '%s\n' "$cmds" >> "$IRIS_STUB_LOG"
+if printf '%s\n' "$cmds" | grep -q '^show version'; then
+  echo "Cisco IOS XE Software, Version 17.15.01"
+  echo "cisco IE-3400-8T2S (ARM) processor with 512K bytes of memory."
+  [ -n "$IRIS_STUB_BOARD_ID" ] && echo "Processor board ID $IRIS_STUB_BOARD_ID"
+  exit 0
+fi
+echo "[OK]"
+STUB
+  chmod +x "$STUBDIR/lab/device-run.sh"
+  ln -sf "$UNINSTALL" "$STUBDIR/device/iox/uninstall.sh"
+}
+
+_sent_destructive() {
+  grep -E '^(app-hosting (stop|deactivate|uninstall)|no |configure terminal|delete |copy running-config)' \
+    "$IRIS_STUB_LOG" || true
+}
+
+@test "identity mismatch aborts before any destructive command" {
+  _iox_identity_stub_setup FCW9999LIVE
+  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
+    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
+    bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"device identity mismatch"* ]] || return 1
+  [[ "$output" == *"FCW1234RECORD"*"FCW9999LIVE"* ]] || return 1
+  [[ "$output" == *"undeploy it again with Force"* ]] || return 1
+  # the ONLY session was the read-only probe
+  grep -q '^show version' "$IRIS_STUB_LOG" || return 1
+  [ -z "$(_sent_destructive)" ]
+}
+
+@test "a session that returns no board ID aborts instead of proceeding" {
+  # a dropped or unauthenticated session must never read as "identity ok"
+  _iox_identity_stub_setup ""
+  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
+    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
+    bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"could not read the processor board ID"* ]] || return 1
+  [ -z "$(_sent_destructive)" ]
+}
+
+@test "matching identity proceeds with the teardown" {
+  _iox_identity_stub_setup FCW1234RECORD
+  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
+    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
+    bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"identity mismatch"* ]] || return 1
+  # show version came FIRST, then the teardown
+  first="$(grep -nE '^(show version|app-hosting stop)' "$IRIS_STUB_LOG" | head -1)"
+  [[ "$first" == *"show version"* ]] || return 1
+  grep -q '^app-hosting stop appid iris' "$IRIS_STUB_LOG"
+}
+
+@test "without EXPECTED_DEVICE_IDENTITY the teardown runs as before (no probe)" {
+  _iox_identity_stub_setup FCW9999LIVE
+  run env -u EXPECTED_DEVICE_IDENTITY DEVICE_IP=192.0.2.10 DEVICE_USER=u \
+    DEVICE_PASS=p VLAN=666 bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -eq 0 ] || return 1
+  ! grep -q '^show version' "$IRIS_STUB_LOG"
+}
+
+@test "force mode skips the identity check (record-less rescue)" {
+  _iox_identity_stub_setup FCW9999LIVE
+  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p \
+    IRIS_FORCE_AGENT_ONLY=1 EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
+    bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"identity mismatch"* ]]
+}
+
+@test "the header documents EXPECTED_DEVICE_IDENTITY" {
+  grep -q 'EXPECTED_DEVICE_IDENTITY' "$UNINSTALL"
+  head -50 "$UNINSTALL" | grep -q 'EXPECTED_DEVICE_IDENTITY'
+}

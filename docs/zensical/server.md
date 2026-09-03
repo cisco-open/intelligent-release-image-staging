@@ -94,15 +94,17 @@ default capabilities, not through the Compose service:
 
 ```bash
 docker run --rm -u 0 \
-  -v server_iris-state:/var/lib/iris \
-  -v server_iris-config:/etc/iris \
-  -v server_iris-images:/var/lib/iris-images \
+  -v iris_iris-state:/var/lib/iris \
+  -v iris_iris-config:/etc/iris \
+  -v iris_iris-images:/var/lib/iris-images \
   iris:latest chown -R 10001:10001 /var/lib/iris /etc/iris /var/lib/iris-images
 ```
 
 `iris:latest` is the image Compose builds. The volume names carry the Compose
-project prefix — `server_` for the default project name, which comes from the
-directory holding the compose file.
+project prefix — `iris_`, from the `name:` in `server/docker-compose.yml`. A
+deployment created before that line existed has `server_`-prefixed volumes; see
+[Compose project name](#compose-project-name) below, and substitute the prefix
+your `docker volume ls` actually shows.
 
 `docker compose run --user 0` does not work for this: that form inherits the
 service's `cap_drop: [ALL]`, so every path is denied with
@@ -123,16 +125,92 @@ The host image tree bind-mounted at `/opt/images` (`IRIS_IMAGE_ROOT`) must be
 readable and traversable by uid `10001`. A conventional `755` tree is fine; a
 `700` root-owned tree fails to publish and seed.
 
+## Compose project name
+
+`server/docker-compose.yml` declares `name: iris`, so the Compose project — and
+with it the named volumes `iris_iris-state`, `iris_iris-config` and
+`iris_iris-images` — is stable wherever the repository is checked out.
+
+Without that line Compose names the project after the directory holding the
+compose file, which is always `server`. Every checkout of this repository on a
+host therefore resolved to the *same* project, so a second checkout beside a
+live deployment shared its volumes: `docker compose up` adopted the production
+container, `docker compose run --rm iris iris-bootstrap` re-bootstrapped
+production state, and `docker compose down -v` deleted the state, the encrypted
+config and the published images.
+
+### One-time migration for a deployment created before the rename
+
+A deployment first started under the old default has `server_`-prefixed volumes.
+Compose will not find them under the new project name; it creates empty ones
+instead, and the server comes up as if it had never been bootstrapped. The old
+volumes are not touched, so nothing is lost — but pick one of these before the
+next `up`:
+
+* **Keep the old project name.** Add `COMPOSE_PROJECT_NAME=server` to
+  `server/.env`. `COMPOSE_PROJECT_NAME` overrides the declared `name:`, so the
+  deployment keeps its `server_` volumes and its container. Nothing else
+  changes, and the collision is now at least explicit rather than implied by a
+  directory name.
+* **Move the data to the new names.** With the stack **down**, copy each volume
+  and then start normally:
+
+    ```bash
+    COMPOSE_PROJECT_NAME=server docker compose -f server/docker-compose.yml down
+    for v in iris-state iris-config iris-images; do
+      docker volume create "iris_$v"
+      docker run --rm -u 0 -v "server_$v":/from -v "iris_$v":/to \
+        iris:latest sh -c 'cp -a /from/. /to/'
+    done
+    ```
+
+    `COMPOSE_PROJECT_NAME=server` on the `down` matters: without it Compose
+    looks for the *new* project and leaves the old container running on the
+    ports. `-u 0` on the copy matters for the same reason the ownership
+    migration above needs it — volume content may still be root-owned. Verify
+    the console and the Images screen, then remove the old `server_*` volumes
+    when you are satisfied.
+
+Check which set is live with `docker volume ls | grep iris`.
+
+### Running a second stack on the same host
+
+A dev checkout beside a live deployment needs a project name **and** a container
+name of its own — container names are host-global:
+
+```bash
+COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
+  docker compose -f server/docker-compose.yml up -d
+```
+
+`IRIS_CONTAINER` is the same variable `tools/apply-assignments.sh`,
+`tools/stage-iox-package.sh`, `tools/gen-device-installers.sh` and
+`tools/check-package-freshness.sh` already honour, so one setting names the
+container and points the helpers at it. `tools/start-compose-server.sh` resolves
+the container from its own Compose project, so it needs no override.
+
 ## Important paths
 
 | Path | Role |
 | --- | --- |
-| `/var/lib/iris` | Catalog state, policies, torrent metadata, audit state, and deployment records. |
-| `/etc/iris` | Encrypted secrets and generated TLS material. |
+| `/var/lib/iris` | Catalog state, policies, torrent metadata, the peer ledger, peer endpoints, and deployment records. |
+| `/etc/iris` | The age-encrypted secret store and generated TLS material, **plus two plaintext files**: the console certificate override `tls/gui-crt.pem` (its private key is the age-encrypted `tls/gui-key.pem.age`) and the append-only audit trail `audit.jsonl`. |
 | `/run/iris` | Plaintext runtime secrets on tmpfs. |
 | `/var/lib/iris-images` | Uploads volume (`IRIS_IMAGES_DIR`); images the console received over HTTP. |
 | `/opt/images` | Read-only import root (`IMAGES_ROOT`), the host `IRIS_IMAGE_ROOT` tree mounted `:ro`. |
 | `/srv/artifacts` | Served bootstrap and agent artifacts. |
+
+!!! warning "`/etc/iris` is not wholly encrypted"
+    Only `secrets.json.age`, `gui-key.pem.age` and the other `.age` files on
+    that volume are encrypted at rest. `audit.jsonl` is plaintext JSONL and
+    carries console usernames, device ids, and every settings and onboarding
+    action; deliberately so, since encrypting it would put a live secret's
+    key material on the same volume it protects. Treat a snapshot or off-box
+    copy of `/etc/iris` as sensitive. The audit trail's path is
+    `IRIS_AUDIT` — `/etc/iris/audit.jsonl` on Compose,
+    `/data/config/audit.jsonl` on Kubernetes. The console's *export audit
+    trail* action is a separate thing and is always age-encrypted
+    ([Operations](operations.md#audit-export)).
 
 Those two image locations are the server's only image roots. The uploads volume
 is writable and owned by the runtime uid; the import root is where operators

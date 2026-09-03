@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """HTTPS client for the IRIS catalog (Phase 1 server). Bearer auth.
-Lab uses a self-signed cert, so the agent passes an unverified SSL context;
-PRODUCTION should pin the server cert instead. Stdlib only."""
+The `context` the agent passes is the VERIFYING ssl.SSLContext built by
+iris_agent.make_catalog_context from the pinned catalog_ca (chain + hostname
+/ IP-SAN checks); that builder fails closed and never falls back to an
+unverified context. `context=None` exists for plain-http unit tests only.
+Stdlib only."""
 import gzip
 import json
 import os
@@ -122,8 +125,9 @@ class CatalogClient:
             raise CatalogError("torrent %s -> HTTP %d" % (image_id, status))
         # Write to a sibling tmp then os.replace() over dest_path, so a crash
         # mid-write never leaves a truncated/0-byte .torrent. The agent only
-        # re-downloads when file_size(torrent) is None (iris_agent.run_once),
-        # so a partial file would be treated as already-present and fed to
+        # re-downloads when file_size(torrent) is None or the catalog's
+        # torrent identity moved (iris_agent._stage_image), so a partial file
+        # would be treated as already-present and fed to
         # aria2 (which rejects it) -> a silent permanent stall. The rename is
         # atomic, so a present .torrent is always complete. Matches
         # agent_config.write_conf's atomic-write pattern. Stdlib only.

@@ -880,3 +880,180 @@ def test_absent_package_state_renders_inactive_not_warning():
     levels = js.split("var SETUP_CHIP_LEVELS = {", 1)[1].split("\n  };", 1)[0]
     assert "absent: 'inactive'" in levels
     assert "absent: 'warning'" not in levels
+
+
+# --- stage host is optional ------------------------------------------------
+# Console onboarding always stages locally (gui_onboard._build_env exports
+# IRIS_STAGE_LOCAL=1 to every recipe), so the stage-host credential has no
+# consumer; the wizard used to hold setup open on it and claim onboarding
+# could not start without it.
+
+def test_stage_host_is_reported_as_not_required(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    for configured in (False, True):
+        st = _call(d, served, stage_host={"configured": configured,
+                                          "username": "svc" if configured else ""})
+        assert st["stage_host"]["required"] is False
+
+
+def test_wizard_treats_the_stage_host_step_as_optional():
+    js = _webroot("app.js")
+    optional = js.split("var SETUP_ITEM_OPTIONAL = {", 1)[1].split("}", 1)[0]
+    assert "stage_host: true" in optional
+    first = js.split("function wizardFirstIncompleteStep(", 1)[1].split("\n  }", 1)[0]
+    assert "required === false" in first
+    assert "SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]" in first
+    html = _webroot("index.html")
+    assert "cannot start" not in html.split('id="wz-step-stagehost"', 1)[1].split("</div>", 1)[0]
+    assert "Docker onboarding" not in html
+
+
+# ---------------------------------------------------------------------------
+# Package layouts as device/iox/build.sh REALLY lays them out (review finding
+# IRIS-12-001). The _make_iox_package fixture above is the pre-2026-09-02
+# shape (a bare pem in artifacts.tar.gz); the two shapes below are what the
+# skopeo docker-archive build produces, with and without the top-level
+# pinned-cert probe member build.sh re-adds next to rootfs.tar.
+# ---------------------------------------------------------------------------
+
+def _classic_rootfs(baked_pem, legacy_dirs=False):
+    """A classic docker-archive rootfs.tar: manifest.json + <cfg>.json +
+    plain layer tars (skopeo style `<digest>.tar` plus the legacy
+    `<id>/layer.tar` symlink, or docker-save style `<id>/layer.tar` files).
+    The pem lives ONLY inside a layer, at the path the Dockerfile bakes."""
+    import hashlib
+    import json
+
+    def tar_bytes(members):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                t.addfile(ti, io.BytesIO(data))
+        return buf.getvalue()
+
+    sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+    base = tar_bytes([("etc/os-release", b"ID=debian\n"),
+                      ("opt/iris/bin/aria2c", b"\x7fELF fake " * 64)])
+    top = tar_bytes([("opt/iris/iris-catalog.pem", baked_pem.encode()),
+                     ("opt/iris/agent/iris_agent.py", b"AGENT = 1\n")])
+    d_base, d_top = sha(base), sha(top)
+    id_base, id_top = sha(b"legacy" + d_base.encode()), sha(b"legacy" + d_top.encode())
+    config = json.dumps({"architecture": "arm64", "rootfs": {
+        "type": "layers", "diff_ids": ["sha256:" + d_base, "sha256:" + d_top]}}).encode()
+    layers = ([id_base + "/layer.tar", id_top + "/layer.tar"] if legacy_dirs
+              else [d_base + ".tar", d_top + ".tar"])
+    manifest = json.dumps([{"Config": sha(config) + ".json",
+                            "RepoTags": ["iris-iox:arm64"], "Layers": layers}]).encode()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        def add(name, data):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+        add("manifest.json", manifest)
+        add("repositories", json.dumps({"iris-iox": {"arm64": id_top}}).encode())
+        add(sha(config) + ".json", config)
+        for lid, dig, blob in ((id_base, d_base, base), (id_top, d_top, top)):
+            add(lid + "/VERSION", b"1.0")
+            add(lid + "/json", json.dumps({"id": lid}).encode())
+            if legacy_dirs:
+                add(lid + "/layer.tar", blob)
+            else:
+                add(dig + ".tar", blob)
+                ti = tarfile.TarInfo(lid + "/layer.tar")
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = "../" + dig + ".tar"
+                t.addfile(ti)
+    return buf.getvalue()
+
+
+def _make_built_package(path, baked_pem, probe_pem=None, legacy_dirs=False):
+    """An outer IOx tar whose artifacts.tar.gz holds package.yaml + a classic
+    rootfs.tar (pem baked in a layer) and, when probe_pem is given, the
+    top-level iris-catalog.pem probe member -- exactly `ioxclient package .`
+    over build.sh's packaging directory."""
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
+        members = [("package.yaml", b"descriptor-schema-version: '2.8'\n"),
+                   ("rootfs.tar", _classic_rootfs(baked_pem, legacy_dirs))]
+        if probe_pem is not None:
+            members.append(("iris-catalog.pem", probe_pem.encode()))
+        for name, data in members:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    blob = inner.getvalue()
+    with tarfile.open(path, mode="w") as outer:
+        for name, data in (("package.yaml", b"descriptor-schema-version: '2.8'\n"),
+                           ("artifacts.tar.gz", blob)):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            outer.addfile(ti, io.BytesIO(data))
+
+
+def test_package_fingerprint_reads_the_probe_member_build_sh_packages(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_A, probe_pem=CERT_A)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_A)
+
+
+def test_package_fingerprint_falls_back_to_the_layer_baked_cert(tmp_path):
+    # a package built between the 2026-09-02 slimming and the probe member's
+    # restoration: no top-level pem, the cert only inside a layer tar. It
+    # used to read as "no-cert" -> unknown forever; it must report what it
+    # really pins.
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=None)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_B)
+
+
+def test_package_fingerprint_layer_fallback_handles_docker_save_dirs(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=None, legacy_dirs=True)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_B)
+
+
+def test_package_fingerprint_prefers_the_probe_member_over_the_layer(tmp_path):
+    # the probe member is the contract; a divergent layer copy is a build bug
+    # this reader is not in a position to adjudicate, so it reports the member
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=CERT_A)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert fp == setup_status.fingerprint_pem(CERT_A)
+
+
+def test_package_fingerprint_no_cert_anywhere_in_a_classic_package(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, "not a certificate", probe_pem=None)
+    # the baked "pem" is present but unparseable -> bad-cert, not no-cert
+    fp, reason = setup_status.package_fingerprint(p)
+    assert fp is None and reason == "bad-cert"
+    # and a rootfs that carries no pem at all -> no-cert
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as rt:
+            data = b"[]"
+            ti = tarfile.TarInfo("manifest.json")
+            ti.size = len(data)
+            rt.addfile(ti, io.BytesIO(data))
+        data = buf.getvalue()
+        ti = tarfile.TarInfo("rootfs.tar")
+        ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+    q = str(tmp_path / "iris-amd64.tar")
+    with tarfile.open(q, mode="w") as outer:
+        blob = inner.getvalue()
+        ti = tarfile.TarInfo("artifacts.tar.gz")
+        ti.size = len(blob)
+        outer.addfile(ti, io.BytesIO(blob))
+    fp, reason = setup_status.package_fingerprint(q)
+    assert fp is None and reason == "no-cert"

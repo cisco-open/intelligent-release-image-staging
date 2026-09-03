@@ -83,6 +83,35 @@ IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
 [[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
   || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
+
+# The values below ride inside the double-quoted `run-opts N "-e K=V"` lines
+# of the app-hosting block (appid_block). A literal double-quote or newline
+# in any of them breaks out of that token or splices in extra config lines;
+# the paste discards IOS's errors, so the malformed line was silently
+# DROPPED, the app started without the variable, died on its entrypoint's
+# required-env guard, and the installer timed out at wait_state RUNNING --
+# after [1/9] had already torn down the previously working app. Same guard
+# device/xr-install.sh applies to its docker-run-opts; reject early, before
+# anything on the device is touched. A password is allowed to contain
+# whitespace (it stays inside the quotes); the identity/URL values are not.
+_no_quotes_or_newlines() {
+  case "$2" in
+    *'"'*|*$'\n'*)
+      echo "ERROR: $1 must not contain a double quote or newline" >&2
+      exit 1 ;;
+  esac
+  if [ "${3:-}" = "no-whitespace" ]; then
+    case "$2" in *[[:space:]]*)
+      echo "ERROR: $1 contains whitespace, which would split the quoted run-opts value" >&2
+      exit 1 ;;
+    esac
+  fi
+}
+_no_quotes_or_newlines DEVICE_SSH_PASS "$DEVICE_SSH_PASS"
+_no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN" no-whitespace
+_no_quotes_or_newlines CATALOG_URL "$CATALOG_URL" no-whitespace
+_no_quotes_or_newlines DEVICE_ID "$DEVICE_ID" no-whitespace
+_no_quotes_or_newlines DEVICE_SSH_USER "$DEVICE_SSH_USER" no-whitespace
 APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin

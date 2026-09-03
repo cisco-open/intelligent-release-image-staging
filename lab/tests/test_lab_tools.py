@@ -108,11 +108,12 @@ class TestDiagRpcToken(unittest.TestCase):
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
             mod.rpc("aria2.tellActive", [["gid"]])
 
-        # Should not crash, and first param should still start with "token:"
-        self.assertTrue(
-            captured["params"][0].startswith("token:"),
-            f"First param should be 'token:...', got: {captured['params'][0]!r}"
-        )
+        # Should not crash. The daemon never runs with an EMPTY secret --
+        # guestshell-start.sh launches it on the `iris` placeholder when the
+        # file is missing/empty -- so the fallback must be that placeholder,
+        # not "token:" (which reported Unauthorized against a healthy device).
+        # (Rewritten for IRIS-11-006: this test used to accept the empty token.)
+        self.assertEqual(captured["params"][0], "token:iris")
 
 
 # ===========================================================================

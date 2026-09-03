@@ -15,6 +15,73 @@
     window.location.href = '/login.html';
   });
 
+  // ---- one fetch for the whole console ------------------------------------
+  // Shadows window.fetch inside this closure so EVERY request made by this
+  // file goes through it (function declarations hoist, so the session check
+  // above used it too). Three concerns no individual refresher used to
+  // handle:
+  //  1. Session loss after the initial check (container restart, "Sign out
+  //     other sessions" from another tab, idle expiry): a 401 anywhere stops
+  //     the view poll and sends the operator to the login page, instead of
+  //     every poll returning silently and a frozen fleet view passing for
+  //     live for the rest of the day.
+  //  2. A poll that fails (server down, 5xx, network) is announced in the
+  //     header as "live data unavailable since <time>" while the last known
+  //     state stays on screen; the note clears on the next successful GET.
+  //  3. Background polls are marked with "X-IRIS-Poll: 1" (GET only). The
+  //     server validates the session for them WITHOUT refreshing its idle
+  //     clock, so an unattended console on a polled view reaches the idle
+  //     timeout Settings advertises. "Background" = no operator input since
+  //     the poll tick began: pointer/keyboard input clears the mark, so a
+  //     refresh the operator actually caused still counts as activity.
+  // window.fetch is called directly (never cached in a var): the session
+  // check above runs before any var here is assigned, and hoisting means
+  // it already goes through this wrapper.
+  var sessionLost = false;
+  var backgroundPoll = false;
+  var staleSince = null;
+  ['pointerdown', 'keydown'].forEach(function (ev) {
+    document.addEventListener(ev, function () { backgroundPoll = false; }, true);
+  });
+  function markConnection(ok) {
+    var el = document.getElementById('conn-state');
+    if (!el) return;
+    // == null on purpose: the session check above runs before this
+    // closure's vars are assigned, so staleSince can still be undefined.
+    if (ok) {
+      if (staleSince != null) { staleSince = null; el.hidden = true; el.textContent = ''; }
+      return;
+    }
+    if (staleSince == null) staleSince = new Date();
+    el.textContent = 'Live data unavailable since ' + staleSince.toLocaleTimeString() +
+      ' — showing the last known state, retrying.';
+    el.hidden = false;
+  }
+  function onSessionLost() {
+    if (sessionLost) return;
+    sessionLost = true;
+    try { stopViewPoll(); } catch (e) { /* not wired yet */ }
+    window.location.href = '/login.html';
+  }
+  function fetch(url, opts) {
+    opts = opts || {};
+    var isGet = !opts.method || String(opts.method).toUpperCase() === 'GET';
+    if (isGet && backgroundPoll) {
+      var h = new Headers(opts.headers || {});
+      h.set('X-IRIS-Poll', '1');
+      opts = Object.assign({}, opts, { headers: h });
+    }
+    return window.fetch(url, opts).then(function (r) {
+      if (r.status === 401) onSessionLost();
+      else if (isGet && r.status >= 500) markConnection(false);
+      else if (isGet && r.ok) markConnection(true);
+      return r;
+    }, function (err) {
+      if (isGet && !(err && err.name === 'AbortError')) markConnection(false);
+      throw err;
+    });
+  }
+
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -36,9 +103,9 @@
   // the devices table from the EXISTING GET /api/onboard/jobs listing
   // (already used by the batch panel) -- the /api/devices merge itself
   // (_device_view()/latest_jobs_by_device() server-side) deliberately trims
-  // started_at and last_line off (facelift-contracts.md §8c), so this is a
-  // client-side-only cross-reference by device_id, never a server change.
-  var LAST_JOBS_BY_DEVICE = {};
+  // started_at and last_line off, so this is a client-side-only
+  // cross-reference by device_id, never a server change.
+  var LAST_JOBS_BY_DEVICE = Object.create(null);
 
   function deviceFilterState() {
     function val(id) {
@@ -408,11 +475,12 @@
   // own latest_jobs_by_device() tie-break exactly (an ACTIVE queued/running
   // job wins outright, else the most recently queued one), just kept on the
   // client so started_at and last_line survive the trip -- the server's own
-  // merge into /api/devices deliberately strips both (facelift-contracts.md
-  // §8c: "the raw data already exists... it is simply not in the trimmed
-  // latest_jobs_by_device() dict").
+  // merge into /api/devices deliberately strips both (the raw data already
+  // exists in the job listing; it is simply not in the trimmed
+  // latest_jobs_by_device() dict). Device ids are operator-chosen, so the
+  // map must not inherit anything from Object.prototype.
   function bestJobForDevice(jobs) {
-    var best = {};
+    var best = Object.create(null);
     (jobs || []).forEach(function (j) {
       var did = j.device_id, cur = best[did];
       var active = j.state === 'queued' || j.state === 'running';
@@ -427,7 +495,7 @@
   }
   // A job's freshest log line (last_line) carries a "[n/m]" step marker only
   // on the tick its install/uninstall script actually echoes one
-  // (device-install.sh etc., facelift-contracts.md §8b) -- most ticks in
+  // (device-install.sh etc. echo "[n/m] ..." per step) -- most ticks in
   // between (e.g. the guestshell-enable step, which can take several
   // minutes on a cold IOx start) show plain progress text with no bracket.
   // Remembering the newest step seen PER JOB keeps the status cell's step
@@ -476,7 +544,12 @@
       if (f.cred === '__none' ? cred !== '' : cred !== f.cred) return false;
     }
     if (f.telemetry) {
-      var tel = d.telemetry_enabled === false ? 'off' : 'on';
+      // Same tri-state as telemetryCell: "on" only when the device has
+      // actually reported telemetry (never-heartbeated devices are
+      // "unknown", not silently bucketed with "on").
+      var tel = d.telemetry_enabled === false ? 'off'
+        : (d.telemetry_enabled === true || typeof d.telemetry_stream_enabled === 'boolean') ? 'on'
+        : 'unknown';
       if (tel !== f.telemetry) return false;
     }
     if (f.peer) {
@@ -935,15 +1008,24 @@
   var imageListOk = false;
   // id -> filename, refreshed alongside imageIds -- so a picker/drawer row
   // can show which file an id actually is, the way the catalog list does.
-  var imageFilenames = {};
+  var imageFilenames = Object.create(null);
   // id -> quarantined bool, refreshed alongside imageIds (KGV / Cisco Bulk
   // Hash reconciler, Task 5) -- so the picker can visibly block a
   // quarantined image instead of only relying on the server's own
   // set_policy() refusal, which the operator would only discover at Apply.
-  var imageQuarantined = {};
+  var imageQuarantined = Object.create(null);
   var credOpts = [];
+  // Whether the LAST /api/credentials read succeeded. Mirrors imageListOk:
+  // on failure credOpts keeps its previous value and every credential
+  // picker is disabled and says so, instead of rendering the whole fleet
+  // as "no credential" (an empty option list matches nothing).
+  var credListOk = false;
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
-  var peerPolicyBusy = {};
+  // Image and device ids are operator-chosen strings (the server accepts
+  // "constructor", "toString", ...), so every id-keyed map is
+  // prototype-free; a plain {} made a device called "constructor" render
+  // pre-checked and its Quarantine button permanently disabled.
+  var peerPolicyBusy = Object.create(null);
   function peerPolicyAssigned(deviceId) {
     return (peerPolicy.quarantine_assignments || []).indexOf(deviceId) !== -1;
   }
@@ -1047,13 +1129,20 @@
     var imgs = ir.ok ? ((await ir.json()).images || []) : [];
     imageListOk = ir.ok;
     imageIds = imgs.map(function (i) { return i.id; });
-    imageFilenames = {};
-    imageQuarantined = {};
+    imageFilenames = Object.create(null);
+    imageQuarantined = Object.create(null);
     imgs.forEach(function (i) {
       imageFilenames[i.id] = i.filename || '';
       imageQuarantined[i.id] = !!i.quarantined;
     });
-    credOpts = cr.ok ? ((await cr.json()).profiles || []) : [];
+    if (cr.ok) credOpts = (await cr.json()).profiles || [];
+    if (cr.ok !== credListOk) {
+      credListOk = cr.ok;
+      if (!credListOk) {
+        devStatus.textContent = 'Credential list unavailable (' + cr.status +
+          '); credential pickers are disabled until it loads.';
+      }
+    }
     // Fix wave 1 (reviewer finding): the job listing is OPTIONAL polish on
     // top of the device rows /api/devices already returned above -- a
     // network-level rejection on it must never take the other four fetches
@@ -1142,16 +1231,22 @@
     var total = devs.length;
     devs = devs.filter(function (d) { return deviceMatchesFilters(d, filters, devNow); });
     // keep batch checkbox selections across the periodic re-render
-    var marked = {};
+    var marked = Object.create(null);
     document.querySelectorAll('#dev-rows .mark:checked').forEach(function (cb) {
       marked[cb.getAttribute('data-id')] = true;
     });
     document.getElementById('dev-rows').innerHTML = devs.length ? devs.map(function (d) {
       var rowIds = rowAssignedIds(d);
       var assignLabel = rowIds.length ? (rowIds.length + ' image(s)') : '— assign —';
-      var credSel = ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
-        return '<option value="' + esc(c.id) + '"' + (c.id === d.credential_profile_id ? ' selected' : '') + '>' + esc(c.id) + '</option>';
-      })).join('');
+      var credSel = credListOk
+        ? ['<option value="">— no credential —</option>'].concat(credOpts.map(function (c) {
+            return '<option value="' + esc(c.id) + '"' + (c.id === d.credential_profile_id ? ' selected' : '') + '>' + esc(c.id) + '</option>';
+          })).join('')
+        // profile list unavailable: show what the inventory says, read-only
+        : '<option value="' + esc(d.credential_profile_id || '') + '" selected>' +
+          (d.credential_profile_id ? esc(d.credential_profile_id) : '— no credential —') + '</option>';
+      var credAttrs = credListOk ? '' :
+        ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
       var platVal = d.platform || '';
       var platSel = [
         ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx'],
@@ -1169,13 +1264,13 @@
         : managementType === 'xr-host' ? 'XR host'
         : (managementType + managementTypeDetail);
       return '<tr data-id="' + esc(d.device_id) + '">' +
-        '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '"' +
+        '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '" aria-label="Select ' + esc(d.device_id) + '"' +
         (marked[d.device_id] ? ' checked' : '') + '></td>' +
         '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + dash(d.device_ip) + '</td>' +
         '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
-        '<td><select class="cred">' + credSel + '</select></td>' +
+        '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
         '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
@@ -1538,7 +1633,11 @@
     entry.es = es;
     es.onmessage = function (e) { isQueued = false; append(e.data); };
     es.addEventListener('end', function (e) {
-      append('— ' + e.data + ' —'); flush();
+      // "idle": the server closed a stream with no progress for its idle
+      // budget; the job itself may still be running -- reopen to continue.
+      append(e.data === 'idle'
+        ? '— stream closed: no progress for a while; the job may still be running, reopen the log to continue —'
+        : '— ' + e.data + ' —'); flush();
       es.close(); entry.es = null; abortBtn.hidden = true;
       refreshDevices().catch(function () {});
     });
@@ -1704,6 +1803,14 @@
     openModal('undeploy-modal');
   });
   document.getElementById('set-cred-selected').addEventListener('click', function () {
+    if (!credListOk) {
+      devStatus.textContent = 'Credential list unavailable; not opening the picker. ' +
+        'Retry once the profile list loads.';
+      return;
+    }
+    var msg = document.getElementById('cred-modal-msg');
+    if (msg) msg.textContent = '';
+    syncCredSelected();
     openModal('cred-modal');
   });
   wireMenu('help-btn', 'help-pop');
@@ -1817,6 +1924,7 @@
     batchTimer = setTimeout(async function run() {
       batchTimer = null;
       var active;
+      backgroundPoll = true;   // timer-driven, not operator activity
       try { active = await pollBatch(); }
       catch (e) { document.getElementById('batch-summary').textContent = 'Job refresh unavailable; retrying…'; active = true; }
       if (active && gen === batchGen) startBatchPoll(gen);
@@ -1998,13 +2106,19 @@
     var sel = document.getElementById('cred-selected');
     if (!sel) return;
     var keep = sel.value;
-    sel.innerHTML = '<option value="">— credential for selected —</option>' +
-      '<option value="">— no credential —</option>' +
+    // The resting placeholder is disabled so an untouched Apply is a no-op;
+    // clearing is an explicit, distinct choice (CRED_CLEAR) that Apply then
+    // confirms -- never the value the modal happens to open on.
+    sel.innerHTML = '<option value="" disabled>— choose a credential profile —</option>' +
+      '<option value="' + CRED_CLEAR + '">— no credential (clear the assignment) —</option>' +
       credOpts.map(function (c) {
         return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
       }).join('');
-    if (keep) sel.value = keep;
+    sel.value = keep;
+    if (sel.value !== keep) sel.selectedIndex = 0;
   }
+  // Sentinel for the bulk picker's explicit "clear" choice; posted as "".
+  var CRED_CLEAR = '__none';
   // "id — filename", both escaped -- the same two facts the catalog list
   // shows for an image, so a picker/drawer row never makes the operator go
   // find the id in the Images tab to see what it actually is. Falls back to
@@ -2064,7 +2178,7 @@
     // sets one back on right after this returns, when it applies).
     var note = document.getElementById('img-picker-note');
     if (note) note.hidden = true;
-    var checkedSet = {};
+    var checkedSet = Object.create(null);   // image ids are operator-chosen
     (currentIds || []).forEach(function (id) { checkedSet[id] = true; });
     // checked-first: the current set, in its own order, before every other
     // catalog image -- so what is already assigned is never buried below
@@ -2417,10 +2531,21 @@
     }
   });
   document.getElementById('apply-cred-selected').addEventListener('click', async function () {
+    var raw = document.getElementById('cred-selected').value;
+    var msg = document.getElementById('cred-modal-msg');
+    if (!raw) {
+      // untouched picker: nothing is applied, the modal stays open
+      if (msg) msg.textContent = 'Choose a credential profile, or "no credential" to clear.';
+      return;
+    }
+    var pid = raw === CRED_CLEAR ? '' : raw;
+    var count = document.querySelectorAll('#dev-rows .mark:checked').length;
+    if (!pid && !confirm('Clear the credential on ' + count + ' selected device(s)?\n\n' +
+        'Onboard and undeploy are refused for a device without a credential ' +
+        'until one is assigned again. Profiles themselves are not deleted.')) return;
     var ids = claimSelection();
     if (!ids) return;
     closeModal('cred-modal');
-    var pid = document.getElementById('cred-selected').value;
     await forSelected(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
       function (id) {
         return jpost('/api/devices/' + encodeURIComponent(id) + '/credential',
@@ -2580,8 +2705,10 @@
   document.getElementById('add-dev').addEventListener('click', function () {
     // populate the credential dropdown from the latest profiles
     var sel = document.getElementById('df-cred');
-    sel.innerHTML = '<option value="">— no credential —</option>' +
-      credOpts.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>'; }).join('');
+    sel.innerHTML = credListOk
+      ? '<option value="">— no credential —</option>' +
+        credOpts.map(function (c) { return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>'; }).join('')
+      : '<option value="">— credential list unavailable; assign later —</option>';
     devForm.hidden = !devForm.hidden;
     if (!devForm.hidden) { updateDeviceFields(); refreshInstallOptions(); }
   });
@@ -3051,7 +3178,10 @@
   // call the setup-status payload does not itself encode (it only ever
   // reports each card's own ok/unset), so it lives here rather than in the
   // API -- widening that response is out of scope for this task.
-  var SETUP_ITEM_OPTIONAL = { telemetry: true, image_verification: true };
+  // stage_host: console onboarding always stages locally (the server
+  // exports IRIS_STAGE_LOCAL=1 to every recipe), so the credential has no
+  // consumer and the wizard must not hold setup open on it.
+  var SETUP_ITEM_OPTIONAL = { telemetry: true, stage_host: true, image_verification: true };
 
   // M37 fold-in (carried from the KGV close-out): setup_status.py's
   // image_verification card reports ok only once a run has actually
@@ -3140,8 +3270,11 @@
   function wizardFirstIncompleteStep(status) {
     if (!status) return 0;
     for (var i = 0; i < WIZARD_STEPS.length; i++) {
-      var st = (status[WIZARD_STEPS[i].key] || {}).state;
-      if (st !== 'ok') return i;
+      var item = status[WIZARD_STEPS[i].key] || {};
+      // An optional step (the server says required: false, or the client
+      // knows it is recommended-only) never counts as outstanding.
+      if (item.required === false || SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]) continue;
+      if (item.state !== 'ok') return i;
     }
     return WIZARD_STEPS.length - 1;   // all done: rest on the last step
   }
@@ -3332,7 +3465,7 @@
     document.getElementById('setup-td-note').textContent =
       setupTelemetryNote(s.telemetry);
     document.getElementById('setup-sh-chip').innerHTML =
-      setupChip(s.stage_host.state);
+      setupItemChipHTML('stage_host', s.stage_host.state, null);
     document.getElementById('setup-pkg-chip').innerHTML =
       setupChip(s.packages.state);
     document.querySelector('#setup-pkg-table tbody').innerHTML =
@@ -3375,12 +3508,14 @@
     var shUser = document.getElementById('sh-user');
     if (shUser) shUser.value = sh.username || '';
     var shStatus = document.getElementById('sh-status');
-    if (shStatus) shStatus.textContent = sh.configured
-      ? ('Configured — onboarding will ssh to the stage host as "' + sh.username +
-         '". To change it, edit the username and/or re-enter the password below and Save.')
-      : 'Not configured — needed when the Console runs in Docker, so the onboard ' +
-        'installer can ssh to the stage host to stage per-device artifacts. ' +
-        'Stored age-encrypted; the password is never shown again.';
+    if (shStatus) shStatus.textContent = (sh.configured
+      ? ('Configured as "' + sh.username + '". To change it, edit the username ' +
+         'and/or re-enter the password below and Save. ')
+      : 'Not configured. ') +
+      'Not required: the Console and the artifact server share one container, ' +
+      'so onboarding stages per-device material locally and never opens an SSH ' +
+      'hop to a stage host; this credential is not passed to any installer. ' +
+      'Stored age-encrypted; the password is never shown again.';
     // --- Certificate (metadata only — key material never reaches this page) ---
     var gc = s.gui_cert || {};
     var certStatus = document.getElementById('cert-status');
@@ -3850,8 +3985,11 @@
     }
     var r = await jpost('/api/settings/gui-cert', body);
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
+    var certRes = await r.json().catch(function () { return {}; });
     document.getElementById('cert-form').reset();   // never leave the key in the DOM
-    msg.textContent = 'Certificate replaced. New connections use it now; reload to see it on this one.';
+    msg.textContent = certRes.applied === false
+      ? 'Certificate ' + (certRes.note || 'saved; takes effect at the next restart') + '.'
+      : 'Certificate replaced. New connections use it now; reload to see it on this one.';
     msg.classList.add('ok');
     refreshSettings();
   });
@@ -4303,7 +4441,13 @@
     var html = events.map(auditRowHtml).join('');
     tbody.innerHTML = append ? tbody.innerHTML + html : html;
     if (events.length) auditOldestTs = events[events.length - 1].ts;
+    auditExtraPages = append ? auditExtraPages + 1 : 0;
   }
+  // Pages appended by "Load older" since the table was last rebuilt. While
+  // any are on screen the periodic poll leaves the table alone (the deploy-
+  // logs pane likewise keeps its page across a poll); a range/category/
+  // brush change rebuilds it and resets the count.
+  var auditExtraPages = 0;
 
   function auditWindow() {
     var cfg = AUDIT_RANGES[auditRange] || AUDIT_RANGES['7d'];
@@ -4402,20 +4546,32 @@
     var now = body.now || Math.floor(Date.now() / 1000);
     auditDomain = domain || { since: now - auditWindow().window, until: now };
     renderHistogramBars(auditBuckets);
-    renderBrush(auditSel);
+    // a drag in progress owns the overlay; repainting the committed
+    // selection under it would briefly undo the pending one
+    if (!brushDrag) renderBrush(auditSel);
     renderWindowLabel();
   }
 
-  async function refreshAuditTable() {
+  async function refreshAuditTable(fromPoll) {
+    if (fromPoll && auditExtraPages > 0) return;   // operator is reading older pages
     var r = await fetch(auditTableUrl());
     if (!r.ok) return;
     var events = (await r.json()).events || [];
     renderAuditRows(events, false);
   }
 
-  async function refreshMonitoring() {
-    await Promise.all([refreshHistogram(), refreshAuditTable(),
+  async function refreshMonitoring(fromPoll) {
+    await Promise.all([refreshHistogram(), refreshAuditTable(!!fromPoll),
                        refreshDeployLogsAll()]);
+  }
+  // The periodic refresh: only the visible sub-pane, and never the audit
+  // table while "Load older" pages are on screen.
+  function pollMonitoring() {
+    var auditPane = document.getElementById('monitoring-pane-audit');
+    if (auditPane && !auditPane.hidden) {
+      return Promise.all([refreshHistogram(), refreshAuditTable(true)]);
+    }
+    return refreshDeployLogsAll();
   }
 
   // ---- Monitoring: persistent deployment logs pane ----
@@ -4781,6 +4937,7 @@
     el.title = '';
     try {
       var r = await fetch('/api/telemetry/health');
+      if (!r.ok) throw new Error('health proxy ' + r.status);   // unknown, never "off"
       var d = await r.json();
       if (d && d.otlp_export && d.otlp_export.signals) {
         var signals = d.otlp_export.signals;
@@ -4991,6 +5148,7 @@
       // A backgrounded tab must not keep hitting the server. The
       // visibilitychange handler restarts the poll when the tab returns.
       if (document.hidden) return;
+      backgroundPoll = true;   // see the fetch wrapper: not operator activity
       try { fn(); } catch (e) { /* a failed refresh must not kill the poll */ }
     }, VIEW_POLL_MS);
   }
@@ -5043,7 +5201,7 @@
     } else if (view === 'devices') { refreshDevices(); poll = pollDevices; }
     else if (view === 'swarm') { refreshSwarm(); poll = refreshSwarm; }
     else if (view === 'settings') { refreshSettings(); refreshSetup(); }
-    else if (view === 'monitoring') { refreshMonitoring(); poll = refreshMonitoring; }
+    else if (view === 'monitoring') { refreshMonitoring(); poll = pollMonitoring; }
     else if (view === 'setup') enterSetupWizard();
     startViewPoll(poll);
   }

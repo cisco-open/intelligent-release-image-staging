@@ -1,0 +1,18 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# sha256 of the extracted `ioxclient` executable, per pinned version, read by
+# tools/get-ioxclient.sh (format: "<sha256>  <version>"). Cisco publishes no
+# checksum for this artifact, so each line is a first-seen pin: record it
+# only after inspecting a download you trust, and never edit an existing
+# line to make a mismatch go away.
+#
+# 1.18.0.0: linux_amd64 tarball from pubhub.devnetcloud.com.
+# Provenance CONFIRMED 2026-09-03: re-downloaded from Cisco's published URL
+# (the same one get-ioxclient.sh uses) into a clean directory and hashed
+# independently -- the extracted executable matched this line exactly, as did
+# the copy already on the lab host. This is no longer a first-seen pin: it is
+# the digest of the artifact Cisco publishes. A future mismatch therefore
+# means the upstream artifact changed, which is a decision, never an edit.
+949d513b0f2777a1f2ea3baf582696b5481dc97157f7d8185c64040619d7e439  1.18.0.0

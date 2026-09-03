@@ -36,9 +36,11 @@
 #
 # CONTRACT WITH THE AGENT
 #   Writes "$3.peers.json" atomically (temp + mv) into the stage dir, which is
-#   guest-writable by construction and is NOT touched by the agent's stale
-#   artifact sweep (that only removes .bin/.torrent/.aria2). The next one-shot
-#   EEM tick folds it into the terminal report and deletes it -- see
+#   guest-writable by construction. The agent's stale-artifact sweep
+#   (iris_agent purge_others) KEEPS the sidecar of every image still assigned
+#   and removes only those of images that have left the set, so a snapshot
+#   waiting for its own image's completion tick survives the sweep. That
+#   one-shot EEM tick folds it into the terminal report and deletes it -- see
 #   telemetry_report.parse_peer_transfer_snapshot() for the reader.
 #   The RPC response body is embedded VERBATIM: this script parses no JSON, so
 #   there is nothing here to get wrong about numbers. Validation is the agent's.

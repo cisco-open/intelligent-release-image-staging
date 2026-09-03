@@ -59,6 +59,44 @@ export IRIS_AGENT_STATE="$STATE"
 # The hook resolves its RPC endpoint from this; same netns, so 127.0.0.1.
 export IRIS_RPC_PORT="$RPC_PORT"
 
+# --- 0. the stage dir must really be the harddisk: bind mount -----------------
+# Everything below assumes $STAGE_DIR IS harddisk: (the "-v /misc/disk1:
+# /hostmount" activation opt device/xr-install.sh emits). Activated without
+# it -- a manual activation, an edited docker-run-opts -- the mkdir below
+# would quietly create a container-LOCAL /hostmount: aria2c downloads there,
+# the agent's in-place attestation stat()s the same path and succeeds, and
+# the device reports an image staged to harddisk: while harddisk: holds
+# nothing; the conf and its rotated token live in the ephemeral container
+# filesystem and vanish with it (the exact loss the CONF comment above
+# guards against). Fail closed instead: refuse unless the stage dir sits on
+# a mount other than the container root. /proc/mounts field 2 is the mount
+# point (octal-escaped, so a plain path compares directly).
+# IRIS_XR_SKIP_MOUNT_CHECK=1 is for the bats suite, which runs this script
+# against a plain temporary directory; never set it on a device.
+stage_dir_is_mounted() {
+  _dir="$1"
+  while :; do
+    _hit=""
+    while read -r _dev _mnt _rest; do
+      [ "$_mnt" = "$_dir" ] || continue
+      _hit="$_mnt"; break
+    done < /proc/mounts
+    case "$_hit" in
+      "") ;;
+      /) return 1 ;;          # only the container root: not a bind mount
+      *) return 0 ;;
+    esac
+    [ "$_dir" != "/" ] || return 1
+    _dir="$(dirname "$_dir")"
+  done
+}
+if [ "${IRIS_XR_SKIP_MOUNT_CHECK:-0}" != "1" ]; then
+  if ! stage_dir_is_mounted "$STAGE_DIR"; then
+    echo "IRIS-ENTRYPOINT: FATAL: $STAGE_DIR is not a mounted filesystem -- the container was activated without the harddisk: bind mount (-v /misc/disk1:/hostmount). Refusing to stage into the container's own filesystem." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$STAGE_DIR" "$WORK_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
 
 # --- 1. config: use a dropped conf if present, else synthesize from env ---------

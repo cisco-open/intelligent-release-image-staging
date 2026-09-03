@@ -29,6 +29,24 @@ html {
   scroll-behavior: smooth;
 }
 
+/* WCAG 2.2 SC 2.2.3 / 2.3.3: a viewer who asks the OS for reduced motion gets
+   no smooth scrolling, no transitions and no animations. The background canvas
+   is stopped in app.js, which checks the same media query. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 body {
   margin: 0;
   color: var(--ink);
@@ -705,20 +723,24 @@ code {
     font-size: 1.35rem;
   }
 
+  /* One column, not three: the three-across grid is what made the
+     descriptions look like they had to go. Reflow them instead -- hiding them
+     removed the hero card's only explanation of what IRIS does from the DOM
+     (and from the accessibility tree) for every phone visitor. */
   .delivery-steps {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .delivery-steps li {
-    padding: 12px;
+    padding: 14px 16px;
   }
 
   .delivery-steps span {
-    margin-bottom: 0;
+    margin-bottom: 4px;
   }
 
   .delivery-steps p {
-    display: none;
+    font-size: 0.95rem;
   }
 }
 

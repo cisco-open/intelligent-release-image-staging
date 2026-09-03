@@ -1,0 +1,65 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Run the documented test suites (CLAUDE.md / TESTING.md "Tests") on every
+# pull request and on pushes to main. Everything here is what a fresh
+# ubuntu runner has plus `pip install -r requirements-dev.txt` and
+# `apt-get install bats mktorrent`; no docker build, no network access from
+# the tests. The Python dependency list lives in requirements-dev.txt so a
+# developer and this workflow install exactly the same thing.
+#
+# Known host-dependent cases (tracked on the scrubber board, not fixed here):
+#   #33  device/iox/tests/test_stage_iox_package.bats "fails clearly when no
+#        cert inputs are set" -- passes on a runner with no live `iris`
+#        container; on the lab host it reaches the live container.
+#   #74  device/tests/test_device_install.bats "non-local STAGE_HOST ...
+#        demands HOST_USER" -- depends on the host's own addresses.
+# Action refs are major tags for now; pin to commit SHAs once the
+# maintainers have verified them (IRIS-13-015).
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats mktorrent
+
+      - name: pytest
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m pytest -p no:cacheprovider -q \
+            server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ \
+            device/test_verify_image.py
+
+      - name: bats
+        run: |
+          bats device/test_guestshell_start.bats device/test_bootstrap.bats \
+            device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats

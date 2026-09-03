@@ -41,9 +41,12 @@ Two conditions gate that endpoint:
 * `IRIS_METRICS_PORT` must not be empty or `0`, which disables the listener
   entirely.
 
-Scraping `/metrics` directly and remote-writing it from a collector's
-`metrics/iris9101` pipeline are equally fine — the board only needs the series
-to reach Prometheus.
+Scraping `/metrics` directly and remote-writing it from a collector are
+equally fine — the board only needs the series to reach Prometheus. If you take
+the collector route, note that the `metrics/iris9101` pipeline shown in
+[Telemetry export](../telemetry-export.md) exports to Splunk HEC: it must gain
+a `prometheusremotewrite` exporter pointed at your Prometheus before the
+aggregate panels have any data.
 
 The board reads the **scrape leg**, not the OTLP push leg. The OTLP path renames
 `image` and `info_hash` to dotted resource attributes, and the swarm byte
@@ -51,17 +54,39 @@ counters exist only in `server/metrics.py`. If a collector's `metrics/iris9101`
 pipeline is removed, the aggregate panels go dark and the OTLP leg cannot
 replace them.
 
-The aggregate families the board is built on, all labelled `{image, info_hash}`
-only and all **counters** — so a finished transfer keeps its history and panels
-do not blank out when the swarm goes idle:
+The aggregate families the board is built on, all labelled
+`{image, info_hash}` only. Two are counters and three are gauges, and the
+difference decides which PromQL functions are legal on them:
 
 ```
-iris_origin_sent_bytes_total
-iris_peer_attributed_bytes_total
-iris_peer_unattributed_bytes_total
-iris_swarm_peers_attributed
-iris_swarm_peers_saturated
+iris_origin_sent_bytes_total        counter
+iris_peer_attributed_bytes_total    counter
+iris_peer_unattributed_bytes_total  GAUGE (despite the _total name)
+iris_swarm_peers_attributed         GAUGE
+iris_swarm_peers_saturated          GAUGE (0/1 flag)
 ```
+
+The two **counters** keep their history, so a finished transfer's panels do not
+blank out when the swarm goes idle, and `rate()` / `increase()` are meaningful
+on them.
+
+The three **gauges** are not cumulative and none of `rate()`, `irate()`,
+`increase()`, `deriv()` or `resets()` means anything on them:
+
+* `iris_peer_unattributed_bytes_total` keeps the historical `_total` suffix for
+  dashboard compatibility but is the difference of two counters,
+  `max(0, origin − traced)`. It steps **down** every time a device is traced
+  late; `rate()` reads that as a counter reset and invents a burst of untraced
+  bytes exactly when tracing improved. Graph the value.
+* `iris_swarm_peers_attributed` is the current count of distinct peer edges the
+  ledger has a nonzero traced total for on this torrent — a level, not an
+  accumulation.
+* `iris_swarm_peers_saturated` is a **0/1 flag**, not a count of anything: `1`
+  means the ledger's per-torrent peer cap refused new peers, so part of the
+  untraced residue went to peers the cap turned away rather than to connections
+  that ended between samples. That distinction is the only reason the flag
+  exists; reading it as "N peers stalled" points an investigation at the wrong
+  cause.
 
 **A word on `attributed`, because the boards say *traced* instead.** The origin
 seeder knows exactly how many bytes it uploaded. Saying *which device* got them
@@ -97,7 +122,7 @@ your collector writes elsewhere.
 context, then paste the file contents as the view's XML source and save. The
 `<label>` in the file supplies the display name.
 
-**Via REST** — `POST` to `data/ui/views` with the XML as the `eml` field:
+**Via REST** — `POST` to `data/ui/views` with the XML as the `eai:data` field:
 
 ```bash
 curl -sS -u "$SPLUNK_USER" \
@@ -107,8 +132,14 @@ curl -sS -u "$SPLUNK_USER" \
 ```
 
 Substitute your own app for `search` in the namespace path. To update an
-existing view, `POST` to `data/ui/views/iris_swarm_p2p` with just the `eml`
-field.
+existing view, `POST` to the view's own endpoint with just `eai:data` (no
+`name=`):
+
+```bash
+curl -sS -u "$SPLUNK_USER" \
+  https://203.0.113.20:8089/servicesNS/nobody/search/data/ui/views/iris_swarm_p2p \
+  --data-urlencode "eai:data@splunk-iris-swarm.xml"
+```
 
 One counter-naming detail is unresolved upstream: the OTel Prometheus receiver
 may or may not trim the `_total` suffix before the `splunk_hec` exporter sees
@@ -147,10 +178,46 @@ The file ships with `"version": 1` and `"id"` absent, so the first POST creates
 the board. `overwrite: true` lets a later POST update it in place under the same
 uid `iris-swarm-p2p`.
 
-Panels sourced from Loki (`Per-edge detail — who received what`, the raw
-`iris.swarm.peer_bytes` records, per-device peer share) need the OTLP log
-records to reach Loki. Without Loki those panels are empty while the aggregate
-panels above still work.
+### Prerequisite: the OTLP logs must reach Loki
+
+**Eight panels select the Loki stream `{service_name="iris-tracker"}` — and
+that includes all three headline delivery stats** (*Delivered to the fleet*,
+*Delivered peer to peer*, *Peer share of delivery*), the per-edge detail
+tables, and the per-device peer share. The collector chapter in
+[Telemetry export](../telemetry-export.md) builds only the Splunk HEC legs, so
+a Grafana-only site must add a Loki exporter and a logs pipeline of its own:
+
+```yaml
+exporters:
+  otlphttp/loki:
+    logs_endpoint: http://203.0.113.30:3100/otlp/v1/logs
+
+service:
+  pipelines:
+    logs/iris_loki:
+      receivers: [otlp]
+      exporters: [otlphttp/loki]
+```
+
+Two mapping facts the board's queries depend on, both applied by Loki's own
+OTLP ingest:
+
+* `service.name` is promoted to the stream label `service_name`. IRIS sets
+  `service.name = iris-tracker`, which is what the selector matches.
+* Every other attribute becomes **structured metadata** with dots folded to
+  underscores — `otel.log.name` → `otel_log_name`, `iris.image.id` →
+  `iris_image_id`, `iris.transfer.completed_content_bytes` →
+  `iris_transfer_completed_content_bytes`. That is why the queries read
+  `| otel_log_name="iris.device.transfer.report"` and unwrap
+  `iris_transfer_completed_content_bytes`.
+
+Structured-metadata label filtering needs **Loki 3.0 or newer**, and the board
+ships `schemaVersion: 39` with Grafana 11-era keys, so import it into
+**Grafana 11 or newer**.
+
+Without Loki those eight panels are empty while the Prometheus aggregate panels
+above still work — which reads as a swarm nobody reported on rather than as a
+missing ingestion leg.
 
 ## Reading the boards honestly
 

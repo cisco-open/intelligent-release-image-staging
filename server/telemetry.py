@@ -361,8 +361,35 @@ class ExportHealth:
         }
 
 
+# (OTLP metric name, unit, kind, stats() key) for the durable plan store.
+# The bounds this store applies are only bounds an operator can check if the
+# numbers behind them leave the process, so every counter TransferLifecycle
+# keeps is published here: occupancy against its cap, the rollout signal
+# (awaiting_report), the delivery backlog (unconfirmed) and the four ways a
+# record or a row can be lost. Flat, attribute-free gauges and sums -- plan,
+# device and image ids are high-cardinality and belong to the OTLP logs
+# pipeline (design §10.8/§10.9), never to a metric label.
+_LIFECYCLE_METRICS = (
+    ("iris.transfer.lifecycle.plans", "{plan}", "gauge", "plans"),
+    ("iris.transfer.lifecycle.plan_cap", "{plan}", "gauge", "plan_cap"),
+    ("iris.transfer.lifecycle.awaiting_report", "{plan}", "gauge",
+     "plans_awaiting_report"),
+    ("iris.transfer.lifecycle.unconfirmed", "{event}", "gauge",
+     "plans_unconfirmed"),
+    ("iris.transfer.lifecycle.dropped_unemitted", "{plan}", "sum",
+     "plans_dropped_unemitted"),
+    ("iris.transfer.lifecycle.live_evicted", "{plan}", "sum",
+     "plans_live_evicted"),
+    ("iris.transfer.lifecycle.retired_undelivered", "{event}", "sum",
+     "events_retired_undelivered"),
+    ("iris.transfer.lifecycle.promoted_recovered", "{plan}", "sum",
+     "plans_promoted_recovered"),
+)
+
+
 def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
-                   legacy_participants=None, seeder_torrents=None):
+                   legacy_participants=None, seeder_torrents=None,
+                   lifecycle=None):
     """Canonical OTLP metric points (design §10.9). OTLP dotted names, units,
     and low-cardinality image-level attrs ONLY. Ambiguous active/stalled and
     all per-device/per-peer gauges are RETIRED (high-cardinality history lives
@@ -448,6 +475,12 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
         if val is None:
             continue
         pts.append({"name": name, "unit": unit, "kind": "gauge",
+                    "value": _int(val), "attrs": {}, "ts": now})
+    for name, unit, kind, key in _LIFECYCLE_METRICS:
+        val = (lifecycle or {}).get(key)
+        if val is None:
+            continue
+        pts.append({"name": name, "unit": unit, "kind": kind,
                     "value": _int(val), "attrs": {}, "ts": now})
     return pts
 
@@ -724,12 +757,16 @@ class Telemetry:
                 principal = ("%s:%s" % (ptype, pid)) if ptype and pid else None
                 left = match.get("left")
                 try:
+                    # evictable: a sampled record (one per connection per
+                    # 2 s pass) may be dropped under pressure; it must never
+                    # evict a lifecycle/report/policy/tracker record.
                     self.log_queue.emit(otlp.build_peer_rate_record({
                         "principal": principal, "info_hash": info_hash,
                         "image_id": image_id, "ip": ip, "port": port,
                         "send_bps": bps, "left": left,
                         "role": "seeder" if left == 0 else "leecher",
-                        "ts": now, "event_id": secrets.token_hex(16)}))
+                        "ts": now, "event_id": secrets.token_hex(16)}),
+                        evictable=True)
                 except Exception:
                     pass
 
@@ -762,6 +799,7 @@ class Telemetry:
                                # render() was covered directly by tests, so
                                # nothing caught it -- test the ENDPOINT.
                                swarm_bytes=self.peer_ledger_totals(),
+                               lifecycle=self._transfer_lifecycle_numbers(),
                                image_sizes=self._image_size_metrics(),
                                seeder_torrents=self._seeder_torrent_metrics(
                                    time.time()))
@@ -937,14 +975,14 @@ class Telemetry:
             self._torrent_upload_bps = seeder.get("torrent_upload_bps", {})
         # Per-peer CURRENT send rate (measured) + the per-torrent control-state
         # uploadLength gauge, tagged with aria2's session id. The gauge is
-        # surfaced as-is on an unchanged session (increases and image-size
-        # overshoot are legitimate), and RE-BASELINED — never bridged — on a
-        # changed session id OR an observed decrease without a session change
-        # (both mean a new counter epoch / control-state loss). The DURABLE
-        # per-edge attribution built alongside it survives that reset: the
-        # ledger banks each observed delta as it happens, so an epoch that
-        # invalidates every baseline costs the bytes of one sample interval,
-        # not the accumulated history.
+        # reported VERBATIM every pass -- increases, image-size overshoot and
+        # a reset to a lower value after an aria2 restart are all simply the
+        # current reading; nothing here bridges across a counter epoch. The
+        # DURABLE per-edge attribution built alongside it is where epochs
+        # matter, and peer_ledger.observe handles them: the ledger banks each
+        # observed delta as it happens, so a session change that invalidates
+        # every baseline costs the bytes of one sample interval, not the
+        # accumulated history.
         if polls_ok:
             self._peer_up = peer_up
             self._upload_len = {}
@@ -964,17 +1002,9 @@ class Telemetry:
             self._torrent_upload_bps = {}
             self._torrent_observed_at = 0.0
             self._seeder = {"rpc_up": False}
-        new_epoch = (self._session_id is not None
-                     and session_id != self._session_id)
         self._session_id = session_id
         for info_hash, now_len in (upload_lengths or {}).items():
-            last = self._upload_len.get(info_hash)
-            # On a new session epoch, or a decrease within the same epoch,
-            # report the current counter verbatim (re-baseline). Otherwise
-            # the gauge simply tracks the counter.
             self._upload_len[info_hash] = now_len
-            if not new_epoch and last is not None and now_len < last:
-                continue            # decrease: rebaseline, do not bridge
 
     def _observe_peer_bytes(self, peer_bytes, upload_lengths, session_id, now):
         """Bank this sample's per-connection counters and queue one
@@ -1016,7 +1046,10 @@ class Telemetry:
                 if role is not None:
                     record["role"] = "seeder" if role else "leecher"
                 try:
-                    self.log_queue.emit(otlp.build_peer_bytes_record(record))
+                    # evictable: the ledger already holds these bytes
+                    # durably; the record is a chart point, not the account.
+                    self.log_queue.emit(otlp.build_peer_bytes_record(record),
+                                        evictable=True)
                 except Exception:
                     pass
         self._prune_peer_ledger(now)
@@ -1050,9 +1083,21 @@ class Telemetry:
         self.sample_seeder(now)
         if self._live_info is not None:
             try:
-                self._transfers, self._extras = aggregate_transfers(
-                    self._live_info(),
+                live_doc = self._live_info()
+                transfers, extras = aggregate_transfers(
+                    live_doc,
                     self._images_info() if self._images_info else {}, now)
+                if not isinstance(live_doc, dict):
+                    # No snapshot to read: the catalog's cumulative rejected
+                    # count is UNKNOWN, not zero. It is exported as a
+                    # monotonic sum / Prometheus counter, and a 0 here would
+                    # read as a counter reset followed by a phantom burst of
+                    # rejections when the value comes back. Carry the last
+                    # known value (a stale-but-present snapshot carries its
+                    # own last-written count, see aggregate_transfers).
+                    extras["samples_rejected_total"] = self._extras.get(
+                        "samples_rejected_total", 0)
+                self._transfers, self._extras = transfers, extras
             except Exception:
                 pass                        # telemetry never breaks on bad input
         # Latch OUTSIDE the exporter guard (see _observe_transfer_lifecycle):
@@ -1086,7 +1131,8 @@ class Telemetry:
                 export_signals=signals,
                 peer_status=self._peer_status_numbers(),
                 legacy_participants=self._legacy_participant_count(),
-                seeder_torrents=self._seeder_torrent_metrics(now)))
+                seeder_torrents=self._seeder_torrent_metrics(now),
+                lifecycle=self._transfer_lifecycle_numbers()))
             self.export_health.record(ok, "metrics", now)
 
     def _observe_transfer_lifecycle(self, now):
@@ -1589,6 +1635,30 @@ class Telemetry:
                 out["health"] = health
         return out or None
 
+    def _transfer_lifecycle_numbers(self):
+        """``TransferLifecycle.stats()`` for the metric surfaces, or None.
+
+        The store applies two hard bounds (MAX_PLANS, PLAN_RETENTION) and
+        counts every row and record they cost. Until this existed nothing read
+        those counters, so a fleet past its cap, or a collector outage long
+        enough to age out unacknowledged records, presented to an operator as
+        lifecycle events that simply never arrived -- indistinguishable from a
+        fleet that never seeded. Read fresh each pass; the store is small and
+        the tracker is its only writer.
+
+        None on any failure, and the renderers omit the whole block rather
+        than publishing zeros: an unreadable store is NOT a store with nothing
+        in it, and a fabricated zero here would read as "the bound never bit".
+        """
+        store = self.transfer_lifecycle
+        if store is None:
+            return None
+        try:
+            stats = store.stats()
+        except Exception:
+            return None
+        return stats if isinstance(stats, dict) else None
+
     def _sample_interval(self):
         """Seconds until the next pass. Fast while any connection is live —
         the per-connection counters are ephemeral, so a slow tick is bytes
@@ -1654,7 +1724,11 @@ def from_env(env=None):
 
     def _on_transition(name):
         try:
-            audit.append_event(audit_path, name, "tracker",
+            # category so the console's audit filter can find these; actor
+            # system; no device_id (the old "tracker" pseudo-device made
+            # the event look like a device's).
+            audit.append_event(audit_path, name, category="telemetry",
+                               actor="system", target="otlp-export",
                                detail="otlp export state change")
         except Exception:
             pass                            # audit must never break telemetry
@@ -2122,7 +2196,20 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
         write_interval = live_samples.SNAPSHOT_WRITE_INTERVAL
     empty = ([], {"stream_devices": 0, "samples_rejected_total": 0})
     if not isinstance(live_doc, dict):
+        # Unknown, not zero: the hub latches its last known count (sample()).
         return empty
+    # The rejected count is the catalog's cumulative counter as last WRITTEN.
+    # A stale snapshot makes the live rows unknown (they are omitted below),
+    # but the counter it carries is still the newest value anyone has -- the
+    # catalog never resets it while running and simply stops writing once
+    # the table empties -- so it is reported from a stale document too.
+    # Emitting 0 there made every wake-from-idle look like a counter reset
+    # followed by a burst of rejections that never happened.
+    try:
+        rejected = int((live_doc.get("counters") or {}).get(
+            "samples_rejected_total") or 0)
+    except (TypeError, ValueError, AttributeError):
+        rejected = 0
     try:
         written_at = float(live_doc.get("written_at", 0))
         if now - written_at > 2 * write_interval:
@@ -2139,7 +2226,8 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
                         "sampling_class_constrained": 0,
                         "zero_receive_devices": 0, "stale": True,
                         "freshness_age_seconds": int(now - written_at)})
-            return stale_rows, empty[1]
+            return stale_rows, {"stream_devices": 0,
+                                "samples_rejected_total": rejected}
     except (TypeError, ValueError):
         return empty
     counters = live_doc.get("counters") or {}
@@ -2407,7 +2495,10 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                     self._send(403, body, "application/json; charset=utf-8")
                     return
                 try:
-                    body = json.dumps(swarm_provider()).encode()
+                    # allow_nan=False: the console proxies this body to a
+                    # browser JSON.parse, which rejects NaN/Infinity tokens.
+                    body = json.dumps(swarm_provider(),
+                                      allow_nan=False).encode()
                 except Exception:
                     body = b"{}"
                 self._send(200, body, "application/json; charset=utf-8")

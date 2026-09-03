@@ -135,3 +135,21 @@ def test_audit_export_secret_persists_encrypted_path(tmp_path, monkeypatch):
     # stored under the top-level audit_export key, alongside other sections
     store = secrets_store.load(str(tmp_path / "secrets.json"))
     assert store["audit_export"]["password"] == "p"
+
+
+def test_set_rejects_non_string_values(tmp_path):
+    """IRIS-01-007: values land in a subprocess environment (strings only);
+    reject other JSON types at save time, like the stage-host route does."""
+    cs = _cs(tmp_path)
+    import pytest
+    for bad in ({"name": "x", "device_user": "u", "device_pass": 123},
+                {"name": ["x"], "device_user": "u", "device_pass": "p"},
+                {"name": "x", "device_user": {"u": 1}, "device_pass": "p"},
+                {"name": "x", "device_user": "u", "device_pass": "p",
+                 "enable_secret": 42}):
+        with pytest.raises(ValueError):
+            cs.set_profile("p", bad)
+    assert cs.list_profiles() == []
+    cs.set_profile("p", {"name": "x", "device_user": "u", "device_pass": "p",
+                         "enable_secret": None})
+    assert cs.get_secrets("p")["enable_secret"] == ""

@@ -26,22 +26,20 @@
 #      this run's output.
 #   6. copy the RPM found under RPMS/ to OUT/iris-xr.rpm.
 #
-# NOTE on the xr-appmgr-build build.yaml schema: the plan and lab notes
-# confirm two keys precisely -- name: iris-xr, release: ThinXR_7.3.15. The
-# remaining keys below (version/arch/type/image) are this script's
-# best-effort reading of the tool's shape from the lab transcript (the
-# actual produced filename was irisprobe-0.1.0-ThinXR_7.3.15.x86_64.rpm) and
-# have NOT been independently confirmed against the tool's own docs/schema.
-# Confirm/adjust against the real clone at ~/.cache/iris/xr-appmgr-build (or
-# APPMGR_BUILD_DIR) the first time this runs for real (this plan's Task 5).
+# The build.yaml schema written below (packages list; name / release /
+# target-release / version / sources / config-dir / data-dir /
+# copy_hostname / copy_ems_cert) is the one hardware-proven by the
+# 2026-08-28 spike and by every lab RPM since (Cisco 8201 and 8010-R1, see
+# docs/zensical/validation.md). Do not "adjust" a key here without
+# re-proving the RPM on real hardware.
 #
 # Inputs (env overridable):
 #   CATALOG_PEM              pinned server cert -- CERTIFICATE BLOCK ONLY.
 #                             Default: fetched from CATALOG_PEM_URL. A file
 #                             carrying a PRIVATE KEY block (the combined
 #                             cert+key shape IRIS_CERT points at server-side)
-#                             is refused outright -- see device/iox/build.sh
-#                             for the identical discipline.
+#                             is refused outright; device/iox/build.sh
+#                             applies the same refusal to the IOx package.
 #   CATALOG_PEM_URL           required when CATALOG_PEM is not supplied.
 #   CATALOG_PEM_FINGERPRINT   expected SHA-256 fingerprint of the catalog
 #                             cert (format "SHA256:AA:BB:..."). Required
@@ -80,6 +78,10 @@
 #                             executable ./appmgr_build, this script does
 #                             NOT re-clone (a mismatched pinned commit only
 #                             warns -- it does not block a local override).
+#                             The clone only ever goes into a path that does
+#                             not exist yet or is an empty directory; an
+#                             existing non-empty directory without
+#                             ./appmgr_build is refused, never deleted.
 #   APPMGR_BUILD_CMD            the build tool's entry point, run from inside
 #                             APPMGR_BUILD_DIR (default ./appmgr_build).
 set -euo pipefail
@@ -150,8 +152,8 @@ else
   echo ">> cert fingerprint verified: $got"
 fi
 grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
-# CATALOG_PEM discipline (same intent as device/iox/build.sh): bake ONLY the
-# certificate block into the image. A combined cert+key file (the shape
+# CATALOG_PEM discipline (device/iox/build.sh enforces the same): bake ONLY
+# the certificate block into the image. A combined cert+key file (the shape
 # server/setup_status.py reads for IRIS_CERT, server-side) must never be
 # handed to CATALOG_PEM -- refuse outright rather than silently shipping
 # private key material to devices.
@@ -174,7 +176,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
 >> [dry-run] would stage x86_64 aria2c + agent python + Dockerfile/entrypoint.sh into a build context
 >> [dry-run] would run: docker build --pull --platform linux/amd64 -t $IMAGE_TAG <context>
 >> [dry-run] would reuse an existing xr-appmgr-build clone at $APPMGR_BUILD_DIR
-   or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there
+   or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there (only into a
+   missing or empty directory -- an existing non-empty one is refused, never deleted)
 >> [dry-run] would run: docker save $IMAGE_TAG -o $APPMGR_BUILD_DIR/$IMAGE_TAR_NAME
 >> [dry-run] would clear $APPMGR_BUILD_DIR/RPMS/ and write $APPMGR_BUILD_DIR/build.yaml:
 packages:
@@ -189,7 +192,8 @@ packages:
 >> [dry-run] would run: (cd $APPMGR_BUILD_DIR && $APPMGR_BUILD_CMD -b build.yaml)
 >> [dry-run] would verify an RPM landed under $APPMGR_BUILD_DIR/RPMS/*.rpm -- its own
    "Done building" message is not trusted, on either exit code or output --
-   and copy that RPM to $OUT/iris-xr.rpm
+   and copy that RPM to $OUT/iris-xr.rpm (via $OUT/.iris-xr.rpm.tmp + mv, so a
+   served path is never read half-written)
 PLAN
   exit 0
 fi
@@ -261,8 +265,21 @@ docker build "$PULL_FLAG" --platform linux/amd64 -t "$IMAGE_TAG" "$CTX"
 echo ">> resolving ios-xr/xr-appmgr-build"
 mkdir -p "$(dirname "$APPMGR_BUILD_DIR")"
 if [ ! -x "$APPMGR_BUILD_DIR/appmgr_build" ]; then
+  # Never delete a path taken from the environment: APPMGR_BUILD_DIR is
+  # operator-overridable, and a typo (a parent directory, a clone whose
+  # script lost its exec bit) must not cost the operator its contents.
+  if [ -e "$APPMGR_BUILD_DIR" ]; then
+    if [ ! -d "$APPMGR_BUILD_DIR" ] || [ -n "$(ls -A "$APPMGR_BUILD_DIR" 2>/dev/null)" ]; then
+      cat >&2 <<EOF
+!! APPMGR_BUILD_DIR=$APPMGR_BUILD_DIR exists but holds no executable ./appmgr_build,
+   and it is not an empty directory -- refusing to clone over it. Point
+   APPMGR_BUILD_DIR at a fresh path (or an existing xr-appmgr-build clone),
+   or remove that directory yourself if it is disposable.
+EOF
+      exit 1
+    fi
+  fi
   echo ">> cloning $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT -> $APPMGR_BUILD_DIR"
-  rm -rf "$APPMGR_BUILD_DIR"
   git clone "$APPMGR_BUILD_REPO_URL" "$APPMGR_BUILD_DIR"
   git -C "$APPMGR_BUILD_DIR" checkout "$APPMGR_BUILD_COMMIT"
 else
@@ -341,6 +358,10 @@ EOF
 fi
 
 echo ">> found RPM: $RPM_FILE"
-cp "$RPM_FILE" "$OUT/iris-xr.rpm"
+# Placed atomically: --out artifacts/ is the SERVED directory, and
+# device/xr-install.sh scp's artifacts/iris-xr.rpm to the router -- a copy
+# in progress must never be readable as a (truncated) package.
+cp "$RPM_FILE" "$OUT/.iris-xr.rpm.tmp"
+mv -f "$OUT/.iris-xr.rpm.tmp" "$OUT/iris-xr.rpm"
 echo ">> done: $OUT/iris-xr.rpm"
 ls -la "$OUT/iris-xr.rpm"

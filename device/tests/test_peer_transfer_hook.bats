@@ -140,6 +140,7 @@ EOF
   # aria2's seeder flag means "holds a complete copy" (RpcMethodImpl.cc:1166),
   # which in a wave is every device that finished early. A comment claiming it
   # separates the origin is how a peer share ends up counting the server.
-  ! grep -q 'tells the origin apart' "$HOOK"
+  run grep -q 'tells the origin apart' "$HOOK"
+  [ "$status" -ne 0 ]
   grep -q 'service:seeder' "$HOOK"
 }

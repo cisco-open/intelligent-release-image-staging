@@ -107,7 +107,10 @@ def test_dockerfile_exposes_artifacts_seed_data_and_healthcheck():
     df = _read("Dockerfile")
     assert "EXPOSE 6969 8443 8000 6881 8080 9101" in df
     assert "EXPOSE 6800" not in df
-    assert "HEALTHCHECK" in df and "9101/healthz" in df
+    # /readyz, not /healthz: the latter is unconditional and let a container
+    # with a dead catalog/artifact listener stay `healthy` (IRIS-13-012).
+    assert "HEALTHCHECK" in df and "9101/readyz" in df
+    assert "9101/healthz" not in df
 
 
 def test_dockerfile_rejects_non_amd64_server_builds():

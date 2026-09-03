@@ -31,11 +31,62 @@ setup() {
 # the script exits right there instead of falling through into its infinite
 # aria2c/tick loop -- deterministic, no backgrounding or timeouts needed. We
 # only ever assert on the conf file written before that point.
+# IRIS_XR_SKIP_MOUNT_CHECK=1: the entrypoint refuses to run unless the stage
+# dir is a real mount (the harddisk: bind mount on a device); the suite
+# runs it against a plain temporary directory, so the check is bypassed
+# here and exercised on its own below.
 _run_entrypoint() {
-  run env -i PATH="$PATH" \
+  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
     IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" \
     "$@" \
     bash "$ENTRYPOINT"
+}
+
+# ---------------------------------------------------------------------------
+# Stage-dir mount check (review finding IRIS-12-006)
+# ---------------------------------------------------------------------------
+
+@test "entrypoint refuses a stage dir that is not a mounted filesystem" {
+  # A plain directory under the test tmpdir is on the same filesystem as
+  # the container root would be: no bind mount, so the entrypoint must stop
+  # before it creates anything or synthesizes a conf.
+  run env -i PATH="$PATH" \
+    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE/not-a-mount" \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 IRIS_DEVICE_ID=8010-r1 \
+    bash "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a mounted filesystem"* ]]
+  [[ "$output" == *"/misc/disk1:/hostmount"* ]]
+  [ ! -d "$STAGE/not-a-mount/iris-work" ]
+  [ ! -f "$CONF" ]
+}
+
+@test "entrypoint accepts a stage dir that sits under a real mount point" {
+  # A directory beneath a mount other than / (the first such mount point in
+  # /proc/mounts on this host) passes the check; the run then proceeds into
+  # conf synthesis exactly like the bypassed runs below. Skipped where no
+  # non-root mount is visible.
+  probe=""
+  while read -r mnt; do
+    mkdir -p "$mnt/.iris-xr-bats-$$" 2>/dev/null || continue
+    probe="$mnt/.iris-xr-bats-$$"; break
+  done < <(awk '$2 != "/" && $2 !~ /^\/(proc|sys|dev)(\/|$)/ { print $2 }' /proc/mounts)
+  [ -n "$probe" ] || skip "no writable non-root mount point visible in /proc/mounts"
+  run env -i PATH="$PATH" \
+    IRIS_AGENT_CONF="$probe/iris-agent.conf" IRIS_STAGE_DIR="$probe" \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    IRIS_CATALOG_TOKEN=tok123 IRIS_DEVICE_ID=8010-r1 \
+    bash "$ENTRYPOINT"
+  rc=$status; out=$output
+  rm -rf "$probe"
+  [[ "$out" != *"not a mounted filesystem"* ]]
+  [ -n "$rc" ]
+}
+
+@test "the mount check bypass is documented as test-only" {
+  grep -q 'IRIS_XR_SKIP_MOUNT_CHECK' "$ENTRYPOINT"
+  grep -q 'never set it on a device' "$ENTRYPOINT"
 }
 
 @test "entrypoint.sh has no syntax errors" {
@@ -44,10 +95,14 @@ _run_entrypoint() {
 }
 
 @test "entrypoint.sh does not reference CAF/IOx-specific paths" {
-  ! grep -q 'CAF_APP_PERSISTENT_DIR' "$ENTRYPOINT"
-  ! grep -q 'IRIS_SHARE_DIR\|IRIS_SHARE_IOS_PATH' "$ENTRYPOINT"
-  ! grep -q 'IRIS_DEVICE_SSH_' "$ENTRYPOINT"
-  ! grep -q 'IRIS_RUNTIME_MODE\|runtime_mode' "$ENTRYPOINT"
+  run grep -q 'CAF_APP_PERSISTENT_DIR' "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  run grep -q 'IRIS_SHARE_DIR\|IRIS_SHARE_IOS_PATH' "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  run grep -q 'IRIS_DEVICE_SSH_' "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  run grep -q 'IRIS_RUNTIME_MODE\|runtime_mode' "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -228,7 +283,7 @@ _run_entrypoint() {
 # container-local path re-synthesizes from the activation env (the original
 # enrollment token) and 401s forever once that token is past its TTL.
 @test "conf defaults under iris-work/ on the persistent mount, not a container-local path" {
-  run env -i PATH="$PATH" \
+  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
@@ -240,7 +295,7 @@ _run_entrypoint() {
 @test "a conf synthesized at the default path survives a from-scratch container recreation" {
   # First boot: no conf anywhere, synthesize from the activation env (the
   # original enrollment token) at the default path.
-  run env -i PATH="$PATH" \
+  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=enrollment-token \
@@ -255,7 +310,7 @@ _run_entrypoint() {
   # ORIGINAL enrollment token, the only thing appmgr ever hands the
   # container), but the SAME persistent mount. dropped-conf-wins must see
   # the conf already at the default path and keep the rotated token.
-  run env -i PATH="$PATH" \
+  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=enrollment-token \
@@ -319,7 +374,7 @@ EOF
 _run_entrypoint_real_reconcile_impl() {
   local outfile pid waited=0 secs=5
   outfile="$(mktemp)"
-  ( env -i PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
+  ( env -i PATH="$PATH" PYTHONPATH="$REPO/device/agent" IRIS_XR_SKIP_MOUNT_CHECK=1 \
         IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" IRIS_TICK_SECONDS=1 \
         "$@" \
         bash "$ENTRYPOINT" >"$outfile" 2>&1 ) &
@@ -366,7 +421,8 @@ EOF
 @test "real reconcile: a dropped conf missing stage_dir is force-corrected to the mounted stage dir, not backfilled to IOx's default path" {
   _drop_conf_missing_target_fs_and_stage_dir
   _run_entrypoint_real_reconcile
-  ! grep -q '^stage_dir = /flash/guest-share/iris$' "$CONF"
+  run grep -q '^stage_dir = /flash/guest-share/iris$' "$CONF"
+  [ "$status" -ne 0 ]
   grep -qF "stage_dir = $STAGE" "$CONF"
 }
 
@@ -393,7 +449,8 @@ EOF
 
 @test "Dockerfile installs only the runtime packages the entrypoint needs" {
   # curl (RPC health probe + peer-transfer hook) and ca-certificates; the
-  # aria2c supervisor's pgrep/pkill come from the base image's BusyBox, so
+  # aria2c supervisor owns its child by exact PID and /proc starttime (no
+  # pgrep/pkill anywhere -- test_aria2_supervision.bats pins that), so
   # procps must NOT be pulled in, and nothing may be pip-installed.
   run grep -E '^RUN apk add' "$DOCKERFILE"
   [ "$status" -eq 0 ]
@@ -408,14 +465,32 @@ EOF
   # Official python image on Alpine, pinned by INDEX digest (tag@sha256:...)
   # so a rebuild is reproducible; the tag stays for human readability.
   grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$DOCKERFILE"
-  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$DOCKERFILE"
+  run grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$DOCKERFILE"
+  [ "$status" -ne 0 ]
   [ "$(grep -c '^FROM ' "$DOCKERFILE")" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
-# Image build (skipped when docker is unavailable -- same command -v ... ||
-# skip idiom device/tests/test_gen_installers.bats uses for optional tools)
+# Image build -- OPT-IN ONLY.
+#
+# Everything above is hermetic: it reads files and runs entrypoint.sh under
+# env -i. The two tests below are different in kind -- they invoke a real
+# `docker build`, which needs a reachable daemon, pulls the pinned base image
+# over the network and takes minutes. That makes the default suite depend on
+# the machine it runs on, so a clean checkout cannot be trusted to be green.
+# They run only when an operator asks for them:
+#
+#   IRIS_TEST_HOST_INTEGRATION=1 bats device/xr/tests/test_xr_image.bats
+#
+# The docker-availability guards stay as a second gate for that opt-in run
+# (same command -v ... || skip idiom device/tests/test_gen_installers.bats
+# uses for optional tools).
 # ---------------------------------------------------------------------------
+
+_require_host_integration() {
+  [ "${IRIS_TEST_HOST_INTEGRATION:-0}" = "1" ] \
+    || skip "host-integration test: set IRIS_TEST_HOST_INTEGRATION=1 to run a real docker build"
+}
 
 _stage_build_context() {
   CTX="$BATS_TEST_TMPDIR/ctx"
@@ -439,6 +514,7 @@ _stage_build_context() {
 }
 
 @test "the XR image builds" {
+  _require_host_integration
   command -v docker >/dev/null 2>&1 || skip "docker not available"
   docker info >/dev/null 2>&1 || skip "docker daemon not reachable"
   _stage_build_context
@@ -449,6 +525,7 @@ _stage_build_context() {
 }
 
 @test "the built XR image bakes no secret-bearing env value in any layer" {
+  _require_host_integration
   command -v docker >/dev/null 2>&1 || skip "docker not available"
   docker info >/dev/null 2>&1 || skip "docker daemon not reachable"
   _stage_build_context

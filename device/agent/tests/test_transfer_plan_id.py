@@ -122,7 +122,7 @@ def make_deps(cat, sizes, **over):
     base = dict(
         catalog=cat,
         emit=lambda m, msg: rec["emitted"].append((m, msg)),
-        ios=lambda cmd: "",
+        boot_image=lambda: "running.bin",
         aria_add=_aria_add,
         file_size=lambda p: sizes.get(p),
         verify=_verify,
@@ -245,7 +245,11 @@ def test_the_adopted_id_passes_server_side_report_validation():
     iris_agent.run_once(CFG, deps, state)
     sizes.clear()
     sizes["/stage/img1.bin"] = IMG["size"]
-    deps, _ = make_deps(cat, sizes)
+    # Completion-tick stats so the report carries MEASURED content: an
+    # unmeasured completion now omits the byte fields (IRIS-10-002), a shape
+    # the server ingest tolerates separately; this test is about the id.
+    deps, _ = make_deps(cat, sizes, aria_stats=lambda p: {
+        "completedLength": str(IMG["size"]), "totalLength": str(IMG["size"])})
     iris_agent.run_once(CFG, deps, state)
 
     posted = cat.telemetry[-1]

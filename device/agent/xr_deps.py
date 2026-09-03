@@ -341,10 +341,13 @@ def build_deps(cfg, conf_path, state_path=None):
             if filename in names:
                 iris_agent._aria_drop(_rpc, gid)
 
-    def ios(cmd):
-        raise RuntimeError(
-            "no CLI transport exists in the IOS-XR appmgr container "
-            "(asked for %r)" % cmd)
+    def boot_image():
+        # No BOOT variable exists on this platform: XR's install manager owns
+        # boot state and this container has no CLI at all. "" is the POSITIVE
+        # "no separate boot target" answer — None would mean "unreadable" and
+        # refuse every reclaim forever; the running image (a recorded onboard
+        # fact) stays protected on its own.
+        return ""
 
     def target_fs():
         # Fixed prefix, free space measured NOW: XR free space varies by
@@ -356,7 +359,7 @@ def build_deps(cfg, conf_path, state_path=None):
         return (os.environ.get(env_key) or cfg.get(key) or "").strip()
 
     return iris_agent.Deps(
-        catalog=catalog, emit=emit, ios=ios, aria_add=aria_add,
+        catalog=catalog, emit=emit, boot_image=boot_image, aria_add=aria_add,
         file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
         verify=lambda p, sha: verify_image.sha256_matches(p, sha),
         free_bytes=lambda prefix=TARGET_FS: free_bytes(stage_dir),

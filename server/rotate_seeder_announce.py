@@ -397,17 +397,6 @@ def _mark(manifest, idx, status):
     manifest["torrents"][idx]["status"] = status
 
 
-def _sha256_file(path):
-    h = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                h.update(block)
-    except OSError:
-        return ""
-    return h.hexdigest()
-
-
 def _info_hash(torrent_bytes):
     """Return the canonical SHA-1 info hash from raw torrent bytes."""
     spans = torrent_personalize.scan_top_level(torrent_bytes)
@@ -739,11 +728,19 @@ def _image_dir(entry, env):
     return None
 
 
-def discover_targets(state, env, rpc):
+def discover_targets(state, env, rpc, skipped=None):
     """Discover published canonical torrents and bind each to one active aria GID.
 
     All reads and RPC preflight occur before the core writes its recovery
     manifest or changes credentials/canonical torrent bytes.
+
+    A quarantined image is not a target: its quarantine force-removed the
+    torrent from the seeder on purpose, so it can never be "uniquely active",
+    and refusing the whole rotation for it would make two security controls
+    mutually exclusive. Its canonical file keeps the rotated-out announce;
+    the release path (catalog.release_quarantine -> publish.resume_torrent_rpc)
+    re-syncs it to the then-current credential before re-adding it. When
+    *skipped* is a list, each skipped image id is appended to it.
     """
     try:
         with open(os.path.join(state, "catalog.json")) as f:
@@ -758,6 +755,10 @@ def discover_targets(state, env, rpc):
     candidates = []
     for image_id in sorted(images):
         entry = images[image_id]
+        if isinstance(entry, dict) and entry.get("quarantined"):
+            if skipped is not None:
+                skipped.append(str(image_id))
+            continue
         torrent = os.path.join(state, "torrents", "%s.torrent" % image_id)
         if not isinstance(entry, dict) or not os.path.isfile(torrent):
             raise ValueError("canonical torrent unavailable")
@@ -771,7 +772,8 @@ def discover_targets(state, env, rpc):
             raise ValueError("canonical torrent unavailable")
         candidates.append((str(image_id), torrent, image_dir, info_hash))
     if not candidates:
-        raise ValueError("no published torrent targets")
+        raise ValueError("no published torrent targets: every published image "
+                         "is quarantined")
 
     try:
         active = rpc("aria2.tellActive", [["gid", "infoHash"]]) or []
@@ -934,6 +936,18 @@ def recover_rotation(manifest_path, state, rpc):
     return True
 
 
+def _refusal_reason(exc):
+    """Nonsecret text for a preflight refusal: the message of a ValueError or
+    RotationError when it is a plain literal, else the exception class name."""
+    if isinstance(exc, (ValueError, RotationError)):
+        text = str(exc)
+        if (text and "://" not in text and "=" not in text
+                and "token" not in text.lower()
+                and "\n" not in text and len(text) <= 200):
+            return "%s: %s" % (exc.__class__.__name__, text)
+    return exc.__class__.__name__
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="rotate-seeder-announce",
@@ -983,16 +997,27 @@ def main(argv=None):
         enc_path = os.environ.get("IRIS_SECRETS_ENC", "")
         if not recipients.strip() or not enc_path.strip():
             raise ValueError("durable encrypted secrets configuration unavailable")
-        targets = discover_targets(args.state, os.environ, rpc)
+        skipped = []
+        targets = discover_targets(args.state, os.environ, rpc, skipped=skipped)
+        if skipped:
+            print("rotate-seeder-announce: skipping %d quarantined image(s) "
+                  "(not seeded; re-synced to the current credential on "
+                  "release): %s" % (len(skipped), ", ".join(skipped)),
+                  file=sys.stderr)
         tracker_base = _tracker_announce_base(os.environ)
         remove, add = _seeder_rpc_ops(rpc)
         deps = production_deps(remove, add, recipients, enc_path)
         result = rotate_seeder_announce(args.secrets, manifest, targets,
                                         tracker_base, deps)
     except Exception as exc:
-        # RPC and URL exceptions can include request/token material: never echo.
+        # RPC and URL exceptions can include request/token material: never
+        # echo those. This module's own preflight refusals are fixed literals
+        # (ValueError / RotationError with nothing interpolated), and an
+        # operator diagnosing a refused maintenance-window operation needs
+        # them -- so they are printed, gated by a shape check that falls back
+        # to the class name if any URL- or credential-like text slipped in.
         print("rotate-seeder-announce: refused (%s); maintenance remains frozen"
-              % exc.__class__.__name__, file=sys.stderr)
+              % _refusal_reason(exc), file=sys.stderr)
         return 2
     if result.served_claimed and not result.hard_no_go:
         _atomic_write_bytes(os.path.join(args.state,

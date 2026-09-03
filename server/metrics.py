@@ -76,9 +76,45 @@ def _ledger_rows(swarm_bytes):
     return [row for row in swarm_bytes if isinstance(row, dict)]
 
 
+# (Prometheus family, type, TransferLifecycle.stats() key, HELP) for the
+# durable plan store. Flat and unlabelled on purpose: plan/device/image ids
+# are high-cardinality and live in the OTLP logs pipeline, not here.
+_LIFECYCLE_FAMILIES = (
+    ("iris_transfer_lifecycle_plans", "gauge", "plans",
+     "Plan rows currently held in the durable transfer-lifecycle store"),
+    ("iris_transfer_lifecycle_plan_cap", "gauge", "plan_cap",
+     "Hard row cap of the transfer-lifecycle store (MAX_PLANS)"),
+    ("iris_transfer_lifecycle_awaiting_report", "gauge",
+     "plans_awaiting_report",
+     "Plans this tracker has watched seed for which no terminal report "
+     "bearing that plan's transfer_id has arrived (0 = every seeding device "
+     "is reporting)"),
+    ("iris_transfer_lifecycle_unconfirmed", "gauge", "plans_unconfirmed",
+     "Lifecycle events queued for export but never acknowledged by a send "
+     "(a steady non-zero value is a collector problem, not a fleet one)"),
+    ("iris_transfer_lifecycle_dropped_unemitted_total", "counter",
+     "plans_dropped_unemitted",
+     "Plan rows evicted by the size bound while still owing an event that "
+     "had never reached the export queue"),
+    ("iris_transfer_lifecycle_live_evicted_total", "counter",
+     "plans_live_evicted",
+     "Rows of STILL-ASSIGNED plans evicted because the live set alone "
+     "exceeds the cap (non-zero means MAX_PLANS is too small for this fleet)"),
+    ("iris_transfer_lifecycle_retired_undelivered_total", "counter",
+     "events_retired_undelivered",
+     "Lifecycle events lost: queued, never acknowledged, and their row "
+     "retired by retention or the size bound before an acknowledgement came"),
+    ("iris_transfer_lifecycle_promoted_recovered_total", "counter",
+     "plans_promoted_recovered",
+     "Promotions that rebuilt a lost store row and therefore replayed the "
+     "durable instant rather than the tracker's own seeder observation"),
+)
+
+
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            extras=None, otlp_health=None, peer_status=None,
-           seeder_torrents=None, swarm_bytes=None, image_sizes=None):
+           seeder_torrents=None, swarm_bytes=None, image_sizes=None,
+           lifecycle=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -183,13 +219,19 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
         for row in rows:
             out.append("iris_peer_attributed_bytes_total%s %d"
                        % (_row_labels(row), _int(row.get("attributed"))))
-        family("iris_peer_unattributed_bytes_total", "counter",
+        # A GAUGE, not a counter, though the name keeps its historical
+        # _total suffix for dashboard compatibility: the residue is the
+        # difference of two counters and steps DOWN whenever a device is
+        # traced late. Declared as a counter, Prometheus rate()/increase()
+        # and any cumulative-to-delta pipeline read each step-down as a reset
+        # and invent a burst of untraced bytes exactly when tracing improved.
+        family("iris_peer_unattributed_bytes_total", "gauge",
                "Origin bytes whose recipient we could not identify: the "
                "connection opened and closed between two samples, or the peer "
                "was refused at the ledger's cap. The bytes did leave the "
                "origin; only the recipient is unknown. Difference of two "
-               "counters, so tracing a device late can step it down -- graph "
-               "the value, not rate()")
+               "counters, so tracing a device late can step it down -- a "
+               "gauge: graph the value, never rate()")
         for row in rows:
             # Prefer the ledger's own residue; a hand-built row that omits it
             # still gets the honest difference rather than a silent zero.
@@ -283,6 +325,16 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
                "migrated)")
         out.append("iris_legacy_announce_participants %d"
                    % _int(extras.get("legacy_announce_participants")))
+    if lifecycle is not None:
+        # Omitted entirely when the store is absent or unreadable: a missing
+        # store is not a store with nothing in it, and a zero here would read
+        # as "the bound never bit".
+        for name, mtype, key, help_text in _LIFECYCLE_FAMILIES:
+            val = lifecycle.get(key)
+            if val is None:
+                continue
+            family(name, mtype, help_text)
+            out.append("%s %d" % (name, _int(val)))
     if peer_status is not None:
         for name, key, help_text in (
             ("iris_peer_policy_revision", "policy_revision",

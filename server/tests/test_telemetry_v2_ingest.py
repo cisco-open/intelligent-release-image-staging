@@ -539,3 +539,140 @@ class TestV2SeenReportLedger:
         with open(s.report_ledger_path) as f:
             led = _json.load(f)
         assert "dev-1" not in led
+
+
+# ---------------------------------------------------------------------------
+# IRIS-02-005 / F5 (IRIS-10-002): id anchoring and optional window/content
+# ---------------------------------------------------------------------------
+
+class TestV2IdsAndOptionalBlocks:
+    @pytest.mark.parametrize("field", ["report_id", "transfer_id"])
+    def test_hex32_ids_with_trailing_newline_are_rejected(self, field):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(**{field: "a" * 32 + "\n"}))
+
+    def test_image_id_with_trailing_newline_is_rejected(self):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(image_id="img1\n"))
+
+    def test_report_request_id_with_trailing_newline_is_rejected(self):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(
+                event="pull", report_request_id="b" * 32 + "\n"))
+
+    @pytest.mark.parametrize("shape", ["absent", None])
+    def test_window_and_content_may_be_absent_or_null(self, shape):
+        rep = _v2_report()
+        if shape == "absent":
+            del rep["window"]
+            del rep["content"]
+        else:
+            rep["window"] = None
+            rep["content"] = None
+        out = catalog._sanitize_report(rep)
+        assert out["schema"] == "v2"
+        assert "window" not in out          # not measured is not zero
+        assert "content" not in out
+
+    def test_present_window_and_content_are_still_validated_strictly(self):
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(window={"start": 5.0,
+                                                        "end": 1.0,
+                                                        "complete": True}))
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(content="10"))
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(_v2_report(
+                content={"completed_content_bytes": 11,
+                         "total_content_bytes": 10}))
+
+    def test_transfer_records_without_a_window_bound_by_report_only(self):
+        rep = _v2_report(report_created_at=50.0)
+        del rep["window"]
+        rep["peer_transfer_records"] = {
+            "source": "aria2_session_counters", "captured_at": 10.0,
+            "complete": True, "rows": [], "rows_total": 0, "rows_omitted": 0,
+            "bytes_from_all_senders_total": 0,
+            "bytes_from_all_senders_omitted": 0}
+        out = catalog._sanitize_report(rep)
+        assert out["peer_transfer_records"]["captured_at"] == 10.0
+        rep["peer_transfer_records"]["captured_at"] = 51.0   # after the report
+        with pytest.raises(ValueError):
+            catalog._sanitize_report(rep)
+
+
+# --------------------------------------------------------------------------
+# Builder -> validator integration (IRIS-20-001)
+#
+# The device agent and the catalog validator are written and tested on
+# opposite sides of one wire contract, and nothing in either suite crossed
+# it. When the agent learned to omit unmeasured fields, the validator still
+# demanded them whole-or-absent, so exactly the reports the change existed to
+# produce were rejected with 400 -- retried under backoff, then dropped, with
+# the transfer never converging server-side and no error an operator sees.
+# These drive the REAL builder into the REAL sanitizer.
+# --------------------------------------------------------------------------
+
+def _build_v2(monkeypatch, tmp_path, **tele):
+    """Build a terminal report with the agent's own builder."""
+    import importlib.util
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    path = os.path.join(here, "device", "agent", "telemetry_report.py")
+    spec = importlib.util.spec_from_file_location("_tr_for_ingest", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    state = {"img1": {"content_sha256_state": "verified",
+                      "tele": dict(tele)}}
+    cfg = {"device_id": "d1", "runtime_mode": "guestshell"}
+    return mod.build_report_v2(
+        cfg=cfg, state=state, img_id="img1", event="staging-complete", now=2000.0,
+        transfer_id=TID, report_id="b" * 32,
+        report_request_id=None, window_start=None, window_complete=True)
+
+
+def test_agent_report_with_no_measured_window_start_is_accepted(monkeypatch,
+                                                                tmp_path):
+    """An image adopted in place has no observed opening edge: the agent
+    omits window.start. The validator must store the window open-ended
+    rather than reject the report."""
+    built = _build_v2(monkeypatch, tmp_path, done_ts=1900.0)
+    assert "start" not in built["window"]          # the shape under test
+    out = catalog._sanitize_report_v2(built)
+    assert out["window"]["end"] == 1900.0
+    assert "start" not in out["window"]            # not invented as 0
+    assert out["window"]["complete"] is False      # no start => not complete
+
+
+def test_agent_report_with_unmeasured_content_is_accepted(monkeypatch,
+                                                          tmp_path):
+    """No aria2 reading at the completion tick means content is {}. That is
+    'not measured', which must not be rejected and must not be stored as a
+    measured zero."""
+    built = _build_v2(monkeypatch, tmp_path, done_ts=1900.0, started_ts=1000.0)
+    assert built["content"] == {}                  # the shape under test
+    out = catalog._sanitize_report_v2(built)
+    assert "content" not in out                    # absent, not 0/0
+    assert out["window"]["start"] == 1000.0
+
+
+def test_agent_report_with_full_measurement_still_validates(monkeypatch,
+                                                            tmp_path):
+    """The measured path is unchanged: both edges and both byte counts."""
+    built = _build_v2(monkeypatch, tmp_path, done_ts=1900.0, started_ts=1000.0,
+                      completed_content_bytes=512, total_content_bytes=512)
+    out = catalog._sanitize_report_v2(built)
+    assert out["window"] == {"start": 1000.0, "end": 1900.0, "complete": True}
+    assert out["content"] == {"completed_content_bytes": 512,
+                              "total_content_bytes": 512}
+
+
+def test_window_start_after_end_is_still_refused():
+    """Relaxing an optional key must not relax the ordering check."""
+    with pytest.raises(ValueError):
+        catalog._sanitize_report_v2({
+            "v": 2, "report_id": "c" * 32, "transfer_id": TID,
+            "report_created_at": 2000.0, "image_id": "img1", "event": "staging-complete",
+            "window": {"start": 1900.0, "end": 1000.0, "complete": False},
+            "content_sha256": {"state": "unknown"}})

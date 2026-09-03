@@ -15,6 +15,10 @@ on:
       - "zensical.toml"
   workflow_dispatch:
 
+# This job writes to gh-pages with `contents: write`, so the three action
+# refs below should be pinned to full commit SHAs rather than mutable major
+# tags (IRIS-13-015). Left as tags here because the SHAs must be verified
+# against the upstream repositories by a maintainer, not copied blind.
 permissions:
   contents: write
 

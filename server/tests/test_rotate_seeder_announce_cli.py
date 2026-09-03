@@ -202,3 +202,93 @@ def test_announce_base_refuses_addresses_no_peer_could_dial():
     for host in ("127.0.0.1", "169.254.1.1", "0.0.0.0", "224.0.0.1"):
         with pytest.raises(ValueError):
             rot._tracker_announce_base({"IRIS_HOST_IP": host})
+
+
+# ---------------------------------------------------------------------------
+# Quarantine and rotation are both security controls and must not be
+# mutually exclusive: a quarantined image is deliberately not active in the
+# seeder, so it is skipped rather than refusing the whole rotation.
+# ---------------------------------------------------------------------------
+
+def _quarantine(state, name):
+    catalog_path = state / "catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    catalog["images"][name]["quarantined"] = True
+    catalog["images"][name]["quarantine_actions_complete"] = True
+    catalog_path.write_text(json.dumps(catalog))
+
+
+def test_discover_targets_skips_quarantined_images(tmp_path):
+    state, hashes = _state(tmp_path, ("a", "q"))
+    _quarantine(state, "q")
+    skipped = []
+    # aria2 holds only the non-quarantined torrent, as a quarantine leaves it
+    targets = rot.discover_targets(
+        str(state), {}, lambda method, params: [{"gid": "g-a", "infoHash": hashes["a"]}],
+        skipped=skipped)
+    assert [t.image_id for t in targets] == ["a"]
+    assert skipped == ["q"]
+
+
+def test_discover_targets_refuses_when_every_image_is_quarantined(tmp_path):
+    state, _ = _state(tmp_path, ("q",))
+    _quarantine(state, "q")
+    with pytest.raises(ValueError, match="every published image is quarantined"):
+        rot.discover_targets(str(state), {}, lambda *args: pytest.fail("RPC called"))
+
+
+def test_cli_rotates_past_a_quarantined_image_and_says_so(tmp_path, monkeypatch, capsys):
+    state, hashes = _state(tmp_path, ("a", "q"))
+    _quarantine(state, "q")
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "age1recipient")
+    monkeypatch.setenv("IRIS_SECRETS_ENC", str(tmp_path / "s.age"))
+    monkeypatch.setenv("IRIS_RPC_SECRET", "secret-value")
+    monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.1")
+    monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller", lambda *a: lambda m, p: [
+        {"gid": "g-a", "infoHash": hashes["a"]}])
+    monkeypatch.setattr(rot, "production_deps", lambda *a: object())
+    seen = {}
+
+    def core(secrets_path, manifest, targets, base, deps):
+        seen["targets"] = [t.image_id for t in targets]
+        return type("Result", (), {"served_claimed": True, "hard_no_go": False})()
+    monkeypatch.setattr(rot, "rotate_seeder_announce", core)
+    assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 0
+    assert seen["targets"] == ["a"]
+    output = capsys.readouterr().err
+    assert "skipping 1 quarantined image(s)" in output and "q" in output
+    assert "secret-value" not in output and "http://" not in output
+
+
+# ---------------------------------------------------------------------------
+# A refusal must name its (nonsecret, fixed-literal) reason: nine different
+# preflight conditions all raise ValueError, and "refused (ValueError)" left
+# the operator diagnosing a maintenance-window operation blind.
+# ---------------------------------------------------------------------------
+
+def test_cli_refusal_prints_the_preflight_reason_without_secrets(tmp_path, monkeypatch, capsys):
+    state, hashes = _state(tmp_path, ("a",))
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "age1recipient")
+    monkeypatch.setenv("IRIS_SECRETS_ENC", str(tmp_path / "s.age"))
+    monkeypatch.setenv("IRIS_RPC_SECRET", "secret-value")
+    monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.1")
+    # the seeder holds nothing: the image is not uniquely active
+    monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller", lambda *a: lambda m, p: [])
+    monkeypatch.setattr(rot, "rotate_seeder_announce",
+                        lambda *a: pytest.fail("core called"))
+    assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 2
+    err = capsys.readouterr().err
+    assert "refused (ValueError: canonical torrent is not uniquely active)" in err
+    assert "secret-value" not in err and "http://" not in err
+    assert "token" not in err.lower()
+
+
+def test_refusal_reason_falls_back_to_class_name_for_unsafe_text():
+    assert rot._refusal_reason(ValueError("catalog unavailable")) == \
+        "ValueError: catalog unavailable"
+    assert rot._refusal_reason(rot.RotationError("would evict")) == \
+        "RotationError: would evict"
+    assert rot._refusal_reason(ValueError("http://h/announce?announce_token=x")) == "ValueError"
+    assert rot._refusal_reason(ValueError("bad token value")) == "ValueError"
+    assert rot._refusal_reason(RuntimeError("aria2 RPC error: anything")) == "RuntimeError"
+    assert rot._refusal_reason(ValueError("")) == "ValueError"

@@ -299,7 +299,7 @@ def test_ssl_context_trusts_installed_ca_end_to_end(trust_env, tmp_path):
         srv.shutdown()
 
 
-def test_ssl_context_survives_corrupt_bundle(trust_env):
+def test_ssl_context_survives_corrupt_bundle(trust_env, capsys):
     tdir, bundle = trust_env
     os.makedirs(os.path.dirname(bundle), exist_ok=True)
     with open(bundle, "w") as f:
@@ -307,6 +307,68 @@ def test_ssl_context_survives_corrupt_bundle(trust_env):
                 "-----END CERTIFICATE-----\n")
     ctx = trust.ssl_context()                 # must not raise
     assert isinstance(ctx, ssl.SSLContext)
+    # ...but the degradation is reported (IRIS-01-001), never silent
+    assert "system roots ONLY" in capsys.readouterr().err
+
+
+def test_add_pem_rejects_non_certificate_block_and_keeps_installed_trust(
+        trust_env, tmp_path):
+    """IRIS-01-001: a CERTIFICATE block whose body is valid base64 but not an
+    X.509 certificate used to be accepted, after which OpenSSL rejected the
+    whole bundle and ssl_context() silently fell back to system roots --
+    every installed private CA gone. Now: rejected before any write, and the
+    installed CA keeps verifying."""
+    tdir, bundle = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "keepme")
+    trust.add_pem(_read(crt))
+    with pytest.raises(ValueError) as ei:
+        trust.add_pem("-----BEGIN CERTIFICATE-----\nAAAA\n"
+                      "-----END CERTIFICATE-----\n")
+    assert "not a valid X.509 certificate" in str(ei.value)
+    assert len(trust.list_entries()) == 1
+    # multi-block upload with one bad block is rejected whole
+    with pytest.raises(ValueError):
+        trust.add_pem(_read(crt) + "-----BEGIN CERTIFICATE-----\nAAAA\n"
+                      "-----END CERTIFICATE-----\n")
+    assert len(trust.list_entries()) == 1
+    srv = _tls_server(combined, _OkHandler)
+    try:
+        with urllib.request.urlopen("https://127.0.0.1:%d/" % srv.server_address[1],
+                                    context=trust.ssl_context(), timeout=5) as r:
+            assert r.status == 200
+    finally:
+        srv.shutdown()
+
+
+def test_rebuild_bundle_skips_non_certificate_store_file(trust_env, tmp_path,
+                                                          capsys):
+    """A store file OpenSSL would reject (hand-placed, or from a release that
+    validated less) must not poison the runtime bundle for every other CA:
+    it is skipped with a warning and the good CA still verifies."""
+    tdir, bundle = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "goodca")
+    trust.add_pem(_read(crt))
+    with open(os.path.join(tdir, "poison.pem"), "w") as f:
+        f.write("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+    assert trust.rebuild_bundle() == 1
+    assert "poison.pem" in capsys.readouterr().err
+    assert _read(bundle).count("BEGIN CERTIFICATE") == 1
+    assert trust.is_certificate(_read(bundle))
+    srv = _tls_server(combined, _OkHandler)
+    try:
+        with urllib.request.urlopen("https://127.0.0.1:%d/" % srv.server_address[1],
+                                    context=trust.ssl_context(), timeout=5) as r:
+            assert r.status == 200
+    finally:
+        srv.shutdown()
+
+
+def test_is_certificate():
+    assert not trust.is_certificate("")
+    assert not trust.is_certificate("this is not a pem")
+    assert not trust.is_certificate(
+        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
+    assert not trust.is_certificate(None)
 
 
 # --- download_bundle ---------------------------------------------------------
@@ -613,3 +675,25 @@ def test_download_bundle_tampered_cms_signature_rejects_whole_bundle(
             assert signer_block not in f.read()
     if os.path.exists(bundle):
         assert signer_block not in _read(bundle)
+
+
+def test_download_bundle_rejects_non_certificate_block(trust_env, tmp_path):
+    """The downloader applies the add_pem rule: one non-certificate block in
+    a plain-PEM bundle rejects the download and keeps the previous file."""
+    tdir, bundle = trust_env
+    crt, _, combined = _throwaway_cert(tmp_path, "dlbad")
+    trust.add_pem(_read(crt))
+    prev = os.path.join(tdir, trust.DOWNLOADED_BUNDLE)
+    with open(prev, "w") as f:
+        f.write(_read(crt))
+    trust.rebuild_bundle()
+    payload = (_read(crt) + "-----BEGIN CERTIFICATE-----\nAAAA\n"
+               "-----END CERTIFICATE-----\n").encode()
+    srv = _serve_tls(combined, payload=payload)
+    try:
+        res = trust.download_bundle("https://127.0.0.1:%d/bundle.pem"
+                                    % srv.server_address[1])
+    finally:
+        srv.shutdown()
+    assert res["ok"] is False and "not an X.509" in res["error"]
+    assert _read(prev) == _read(crt)

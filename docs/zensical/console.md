@@ -36,9 +36,11 @@ own controls on the right — which walks the other four in order:
    health are published. Already satisfied if the deployment environment sets
    `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
    shows as done rather than being hidden.
-2. **Stage host** — the credentials IRIS uses to reach the Docker host that
-   builds and serves device onboarding material. Without them, onboarding over
-   the Docker path cannot start.
+2. **Stage host** — optional, and never required to onboard. The Console and
+   the artifact server share one container, so onboarding stages per-device
+   material locally and never opens an SSH hop to a stage host; the
+   credential stored here is not passed to any installer. The step reports
+   `required: false` and the wizard does not hold setup open on it.
 3. **Device packages** — whether each served IOx package still pins the
    certificate this server hands to devices, plus the IOS-XR agent RPM
    (`iris-xr.rpm`), checked differently — see below.
@@ -269,7 +271,7 @@ filtered on `deployed` (rendered `Staged`) can still have gone quiet.
 | Undeploy selected | Runs record-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
 | Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
-| *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
+| *Set credential…* + **Apply** | Assigns one credential profile to every checked device. The picker opens on a disabled placeholder, so Apply with nothing chosen does nothing; choosing *no credential (clear the assignment)* clears it instead. The modal does not open while the profile list has failed to load. | Only when clearing — a dialog naming the device count |
 | Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
 
 A device can have up to ten images assigned at once, staged and transferred in
@@ -287,7 +289,9 @@ says so and **Apply** asks you to confirm before it posts. Applying an empty pic
 deliberate unassign and confirms first, whether for one device or for the
 whole selection: unchecking an image stops its torrent and frees the staging
 copy, but leaves any already-staged file on the device's boot filesystem,
-still tracked by IRIS.
+still tracked by IRIS — see
+[Unassigned image park](device-agents.md#unassigned-image-park) for what
+reclaims that space and when.
 
 The **Adopt** dialog names the whole selection. It warns that you should only
 adopt a device whose inventory row matches what is really on the box, points at
@@ -316,6 +320,12 @@ just rescued. It behaves the same on every platform, including a router, which
 has no other way to clear an agent with no deployment record — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
+
+One refusal is **not** a case for Force or for adopt: an Undeploy that answers
+`503` naming an unreadable `deployment_records.json`. The records exist and
+cannot be parsed, so nothing yet knows whether IRIS deployed this device.
+Repair or remove that file — adopting the device instead would write a
+deployment record asserting a deployment nobody verified.
 
 Once a forced teardown succeeds, every deployment record the device still held is marked
 `abandoned` — only on success, because failing to reach a device is not proof
@@ -416,8 +426,9 @@ admin card links to Settings › General; the telemetry, stage-host, and image
 verification cards all open the setup flow (`#setup`), which hosts those
 controls as steps 1, 2, and 4. The telemetry card also names the endpoint in
 effect and whether it is a console override or the deployment default. Every
-card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown`, plus a
-sixth reading unique to image verification — a schedule that is configured
+card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown` (the
+stage-host card also carries `required: false` and is shown as optional), plus
+a sixth reading unique to image verification — a schedule that is configured
 but has not yet produced a successful run, worded distinctly ("Configured —
 no successful run yet") from one never configured at all. `absent` and
 `unknown` both mean the server could not determine the state; a failed or

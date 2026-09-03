@@ -20,7 +20,10 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CSV="${1:-$REPO/fleet/devices.csv}"
 OUT="${OUT:-$REPO/fleet/dist}"
-[ -f "$CSV" ] || { echo "no CSV inventory: $CSV (copy fleet/devices.csv.example)" >&2; exit 1; }
+# Do NOT point at fleet/devices.csv.example here: that is CSV v2, which the
+# header check below refuses. This generator takes the legacy positional format
+# only, and no template for it ships -- new deployments use the Console.
+[ -f "$CSV" ] || { echo "no CSV inventory: $CSV -- this generator takes the LEGACY positional format (device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip); CSV v2 inventories onboard through the Console" >&2; exit 1; }
 if IFS= read -r first_line < "$CSV" && \
    { [[ "$first_line" == *"management_type"* ]] || \
      [[ "$first_line" == *"network_attachment"* ]]; }; then
@@ -63,11 +66,10 @@ mint_enrollment() {  # mint_enrollment <device_id> -> prints a fresh enrollment 
   printf '%s' "$tok"
 }
 
-# ---------- generate ----------
-mkdir -p "$OUT"
-ALL="$OUT/install-all.sh"
-{ echo "#!/usr/bin/env bash"; echo "set -e"; echo 'HERE="$(cd "$(dirname "$0")" && pwd)"'; } > "$ALL"
-
+# ---------- parse + validate the WHOLE inventory first ----------
+# Nothing is minted and nothing is written until every row has passed: a bad
+# row 40 must not leave 39 installers (each carrying a freshly minted
+# enrollment token) on disk next to a truncated install-all.sh.
 trim() { echo "$1" | tr -d ' \r'; }
 validate_ipv4() {
   local value="$1" field="$2"
@@ -85,8 +87,11 @@ validate_field() {
   [[ "$value" =~ $re ]] || { echo "ERROR: $field has an invalid format" >&2; exit 1; }
 }
 shell_literal() { printf '%q' "$1"; }
-n=0
+
+R_ID=(); R_IP=(); R_VLAN=(); R_SVI_IP=(); R_SVI_MASK=(); R_GUEST_IP=(); R_TOK=()
+lineno=0
 while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token _rest || [ -n "$device_id" ]; do
+  lineno=$((lineno + 1))
   device_id="$(trim "$device_id")"
   [ -z "$device_id" ] && continue
   [ "$device_id" = "device_id" ] && continue
@@ -94,6 +99,10 @@ while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token 
   device_ip="$(trim "$device_ip")"; vlan="$(trim "$vlan")"
   svi_ip="$(trim "$svi_ip")"; svi_mask="$(trim "$svi_mask")"; guest_ip="$(trim "$guest_ip")"
   tok="$(trim "${csv_token:-}")"
+  if [ -n "$(trim "${_rest:-}")" ]; then
+    echo "ERROR: line $lineno: expected 6 columns (device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip[,token]), got more" >&2
+    exit 1
+  fi
   validate_field "$device_id" device_id '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
   validate_ipv4 "$device_ip" device_ip
   validate_field "$vlan" vlan '^[0-9]{1,4}$'
@@ -105,10 +114,44 @@ while IFS=, read -r device_id device_ip vlan svi_ip svi_mask guest_ip csv_token 
   if [ -n "$tok" ]; then
     validate_field "$tok" csv_token '^[A-Fa-f0-9]{32}$'
   fi
+  for seen in ${R_ID[@]+"${R_ID[@]}"}; do
+    [ "$seen" = "$device_id" ] && { echo "ERROR: line $lineno: duplicate device_id '$device_id'" >&2; exit 1; }
+  done
+  R_ID+=("$device_id"); R_IP+=("$device_ip"); R_VLAN+=("$vlan")
+  R_SVI_IP+=("$svi_ip"); R_SVI_MASK+=("$svi_mask"); R_GUEST_IP+=("$guest_ip"); R_TOK+=("$tok")
+done < "$CSV"
+[ "${#R_ID[@]}" -gt 0 ] || { echo "ERROR: no device rows in $CSV" >&2; exit 1; }
+
+# ---------- generate (every row is valid) ----------
+# Installers embed an enrollment token and the server cert, so they are
+# written 0700 into a private staging directory and only renamed over the
+# output directory once ALL of them exist. The output directory is replaced
+# wholesale so installers for devices no longer in the CSV cannot linger; to
+# keep that safe, only a directory holding nothing but generator output is
+# ever replaced.
+umask 077
+if [ -d "$OUT" ]; then
+  foreign="$(find "$OUT" -mindepth 1 ! -name 'install-*.sh' ! -name 'install-all.sh' -print -quit)"
+  if [ -n "$foreign" ]; then
+    echo "ERROR: refusing to replace $OUT: it holds files this generator did not create (e.g. $foreign)" >&2
+    exit 1
+  fi
+fi
+mkdir -p "$(dirname "$OUT")"
+STAGE="$(mktemp -d "$(dirname "$OUT")/.dist.tmp.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+ALL="$STAGE/install-all.sh"
+{ echo "#!/usr/bin/env bash"; echo "set -e"; echo 'HERE="$(cd "$(dirname "$0")" && pwd)"'; } > "$ALL"
+
+n=0
+for i in "${!R_ID[@]}"; do
+  device_id="${R_ID[$i]}"; device_ip="${R_IP[$i]}"; vlan="${R_VLAN[$i]}"
+  svi_ip="${R_SVI_IP[$i]}"; svi_mask="${R_SVI_MASK[$i]}"; guest_ip="${R_GUEST_IP[$i]}"
+  tok="${R_TOK[$i]}"
   [ -n "$tok" ] || tok="$(mint_enrollment "$device_id")"
   validate_field "$tok" enrollment_token '^[A-Fa-f0-9]{32}$'
 
-  f="$OUT/install-$device_id.sh"
+  f="$STAGE/install-$device_id.sh"
   cat > "$f" <<EOF
 #!/usr/bin/env bash
 # IRIS installer for device $device_id  (GENERATED — re-run the generator to change)
@@ -130,10 +173,21 @@ IRIS_PEM
 export IRIS_CRT_FILE
 bash "\$REPO/device/device-install.sh" "\$@"
 EOF
-  chmod +x "$f"
+  chmod 0700 "$f"
   echo "\"\$HERE/install-$device_id.sh\" \"\$@\"" >> "$ALL"
-  echo "  generated $f"
+  echo "  generated $OUT/install-$device_id.sh"
   n=$((n + 1))
-done < "$CSV"
-chmod +x "$ALL"
+done
+chmod 0700 "$ALL"
+
+# publish: swap the staged directory over the output directory
+if [ -d "$OUT" ]; then
+  OLD="$(dirname "$OUT")/.dist.old.$$"
+  mv "$OUT" "$OLD"
+  mv "$STAGE" "$OUT"
+  rm -rf "$OLD"
+else
+  mv "$STAGE" "$OUT"
+fi
+trap - EXIT
 echo "Done: $n per-device installer(s) in $OUT/  (run one, or fleet/dist/install-all.sh)"

@@ -18,7 +18,27 @@ anywhere Python runs:
     outer IOx package tar
       package.yaml / artifacts.mf / .package.metadata / package.mf
       envelope_package.tar.gz      (copies of the above four)
-      artifacts.tar.gz -> rootfs.tar   (an OCI image archive)
+      artifacts.tar.gz
+        rootfs.tar                 (the image archive, one of two layouts)
+        iris-catalog.pem           (the PINNED-CERT PROBE MEMBER: the same
+                                    cert-only bytes baked at
+                                    opt/iris/iris-catalog.pem, re-added by
+                                    build.sh for the freshness readers)
+        package.yaml               (whatever else ioxclient tarred)
+
+rootfs.tar comes in two layouts, both handled:
+
+  CLASSIC docker-archive (what build.sh exports via `skopeo copy
+  docker-archive:` since 2026-08-20 -- the only layout IE3x00 CAF's legacy
+  dockerd can load):
+        manifest.json  [{Config: <cfg>.json, Layers: [<layer>.tar ...]}]
+        repositories
+        <cfg>.json                 (config: rootfs.diff_ids)
+        <digest>.tar               (plain layer tars; skopeo also writes
+        <id>/layer.tar              legacy <id>/{VERSION,json,layer.tar}, the
+                                    last a symlink to ../<digest>.tar)
+
+  OCI layout (what the old `ioxclient docker package` produced):
         index.json -> manifest blob -> config blob (rootfs.diff_ids)
                                     -> layer blobs (plain tar or tar+gzip)
         manifest.json / repositories    (docker-save compat views)
@@ -27,7 +47,10 @@ rebake() swaps the given container paths for new file contents inside every
 layer that carries them, then recomputes the ENTIRE hash chain bottom-up
 (layer digests + diff_ids -> config -> manifest -> index/manifest.json/
 repositories -> rootfs.tar -> artifacts.mf/.tar.gz -> package.mf + metadata
-sizes, inner and outer), preserving member order and tar attributes. aria2c
+sizes, inner and outer), preserving member order and tar attributes. A
+top-level probe member in artifacts.tar.gz whose basename matches a replaced
+container path (iris-catalog.pem <-> opt/iris/iris-catalog.pem) is replaced
+with the same bytes, so the freshness readers keep telling the truth. aria2c
 and every other binary stay byte-identical — only the named files change, so
 the aarch64 parts never need rebuilding.
 
@@ -53,6 +76,11 @@ import tarfile
 
 class RebakeError(Exception):
     pass
+
+
+# Top-level artifacts.tar.gz members that duplicate a baked container path
+# (build.sh's pinned-cert probe member): replaced alongside the layer copy.
+_PROBE_MEMBERS = {"iris-catalog.pem": "opt/iris/iris-catalog.pem"}
 
 
 def _sha(b):
@@ -110,9 +138,125 @@ def _rewrite_layer(blob, replacements, hit):
 
 
 def _rebake_rootfs(rootfs, replacements, hit):
-    """Rewrite the OCI archive: patch layers, then recompute digest chain."""
+    """Rewrite the image archive (either layout): patch layers, then
+    recompute the digest chain."""
     members = _read_tar(rootfs)
     byname = {ti.name: (ti, data) for ti, data in members}
+    if "index.json" in byname:
+        new = _rebake_rootfs_oci(members, byname, replacements, hit)
+    elif "manifest.json" in byname:
+        new = _rebake_rootfs_classic(members, byname, replacements, hit)
+    else:
+        raise RebakeError("rootfs.tar is neither a classic docker-archive "
+                          "(manifest.json) nor an OCI layout (index.json)")
+    # nothing changed: hand back the ORIGINAL bytes, never a re-serialisation
+    return rootfs if new is None else new
+
+
+def _emit_tar(members, byname):
+    """Re-emit in the original member order (renamed members keep their
+    slot); anything new goes last."""
+    return _write_tar([byname[ti.name] for ti, _ in members
+                       if ti.name in byname] +
+                      [v for k, v in byname.items()
+                       if k not in {ti.name for ti, _ in members}])
+
+
+def _rebake_rootfs_classic(members, byname, replacements, hit):
+    """CLASSIC docker-archive: manifest.json[0].Layers name the layer tars
+    directly (plain tar; diff_id == sha256 of the member), Config names the
+    config json. Rewrite matching layers, recompute rootfs.diff_ids, rename
+    the config and every layer member (and legacy symlink) that carried the
+    old digest in its name, and refresh manifest.json / repositories."""
+    manifest_list = json.loads(byname["manifest.json"][1])
+    if not manifest_list:
+        raise RebakeError("manifest.json lists no image")
+    manifest = manifest_list[0]
+    cfg_name = manifest["Config"]
+    if cfg_name not in byname:
+        raise RebakeError("manifest.json Config %s missing from rootfs.tar" % cfg_name)
+    config = json.loads(byname[cfg_name][1])
+
+    renames = {}                      # old digest hex -> new digest hex
+    new_layer_paths = []
+    for layer_path in manifest["Layers"]:
+        if layer_path not in byname:
+            raise RebakeError("manifest.json layer %s missing from rootfs.tar" % layer_path)
+        ti, blob = byname[layer_path]
+        if ti.issym() or ti.islnk():
+            # skopeo's legacy <id>/layer.tar entries are symlinks to the real
+            # <digest>.tar; manifest.json normally names the real file, but
+            # resolve a link just in case.
+            target = ti.linkname
+            if target.startswith("../"):
+                target = target[3:]
+            ti, blob = byname[target]
+            layer_path = target
+        if blob[:2] == b"\x1f\x8b":
+            raise RebakeError("classic layer %s is gzip-compressed; CAF cannot "
+                              "load that and this tool does not rewrite it" % layer_path)
+        old_dig = _sha(blob)
+        new_blob, changed = _rewrite_layer(blob, replacements, hit)
+        if not changed:
+            new_layer_paths.append(layer_path)
+            continue
+        new_dig = _sha(new_blob)
+        renames[old_dig] = new_dig
+        new_path = layer_path.replace(old_dig, new_dig)
+        ti.name = new_path
+        del byname[layer_path]
+        byname[new_path] = (ti, new_blob)
+        new_layer_paths.append(new_path)
+
+    if not renames:
+        return None
+
+    config["rootfs"]["diff_ids"] = [
+        "sha256:" + renames.get(d.split(":", 1)[1], d.split(":", 1)[1])
+        for d in config["rootfs"]["diff_ids"]]
+    new_config = json.dumps(config, separators=(",", ":")).encode()
+    old_cdig = cfg_name[:-len(".json")] if cfg_name.endswith(".json") else cfg_name
+    new_cdig = _sha(new_config)
+    renames[old_cdig] = new_cdig
+    new_cfg_name = cfg_name.replace(old_cdig, new_cdig)
+    cti = byname[cfg_name][0]
+    cti.name = new_cfg_name
+    del byname[cfg_name]
+    byname[new_cfg_name] = (cti, new_config)
+
+    manifest["Config"] = new_cfg_name
+    manifest["Layers"] = new_layer_paths
+    for src in (manifest.get("LayerSources") or {}).values():
+        dig = src.get("digest", "").split(":", 1)[-1]
+        if dig in renames:
+            src["digest"] = "sha256:" + renames[dig]
+            blob = byname.get(renames[dig] + ".tar")
+            if blob is not None:
+                src["size"] = len(blob[1])
+    byname["manifest.json"] = (byname["manifest.json"][0],
+                               json.dumps(manifest_list, separators=(",", ":")).encode())
+
+    # Legacy symlinks (<id>/layer.tar -> ../<digest>.tar) follow the rename;
+    # <id>/json and <id>/VERSION are docker-save compat metadata that a
+    # manifest.json-driven load never consults, so they stay as they are.
+    for name, (ti, data) in list(byname.items()):
+        if ti.issym() or ti.islnk():
+            for old, new in renames.items():
+                if old in ti.linkname:
+                    ti.linkname = ti.linkname.replace(old, new)
+    # repositories maps repo:tag -> the top legacy layer id (a digest-string
+    # rename if it happens to carry a layer digest, else untouched).
+    if "repositories" in byname:
+        txt = byname["repositories"][1].decode()
+        for old, new in renames.items():
+            txt = txt.replace(old, new)
+        byname["repositories"] = (byname["repositories"][0], txt.encode())
+
+    return _emit_tar(members, byname)
+
+
+def _rebake_rootfs_oci(members, byname, replacements, hit):
+    """OCI layout: index.json -> manifest blob -> config blob + layer blobs."""
     idx = json.loads(byname["index.json"][1])
     mdig = idx["manifests"][0]["digest"].split(":", 1)[1]
     manifest = json.loads(byname["blobs/sha256/" + mdig][1])
@@ -140,7 +284,7 @@ def _rebake_rootfs(rootfs, replacements, hit):
         byname["blobs/sha256/" + ldig] = (ti, new_blob)
 
     if not renames:
-        return rootfs
+        return None
 
     config["rootfs"]["diff_ids"] = [
         "sha256:" + diff_renames.get(d.split(":", 1)[1], d.split(":", 1)[1])
@@ -226,9 +370,17 @@ def rebake(in_path, out_path, replacements):
             if m.isfile():
                 outer[m.name] = (m, t2.extractfile(m).read())
 
+    # artifacts.tar.gz holds rootfs.tar plus whatever else ioxclient tarred
+    # from build.sh's packaging dir (package.yaml, and the pinned-cert probe
+    # member iris-catalog.pem). Keep every member, in order.
     with tarfile.open(fileobj=io.BytesIO(outer["artifacts.tar.gz"][1]),
                       mode="r:gz") as t:
-        rootfs = t.extractfile("rootfs.tar").read()
+        art_members = [(m, t.extractfile(m).read() if m.isfile() else None)
+                       for m in t]
+    art_by_name = {ti.name: data for ti, data in art_members if data is not None}
+    if "rootfs.tar" not in art_by_name:
+        raise RebakeError("artifacts.tar.gz carries no rootfs.tar")
+    rootfs = art_by_name["rootfs.tar"]
 
     hit = {}
     new_rootfs = _rebake_rootfs(rootfs, contents, hit)
@@ -236,14 +388,30 @@ def rebake(in_path, out_path, replacements):
     if missing:
         raise RebakeError("not found in any layer: %s" % ", ".join(sorted(missing)))
 
-    # artifacts.tar.gz + artifacts.mf
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as t:
-        ti = tarfile.TarInfo("rootfs.tar")
-        ti.size = len(new_rootfs)
-        t.addfile(ti, io.BytesIO(new_rootfs))
-    art_gz = gzip.compress(buf.getvalue(), mtime=0)
-    art_mf = ("SHA256(rootfs.tar)= %s\n" % _sha(new_rootfs)).encode()
+    # The probe member must carry the same bytes as the baked file it stands
+    # for, or the freshness readers (server/setup_status.py,
+    # tools/check-package-freshness.sh) would keep reporting the OLD cert.
+    by_basename = {}
+    for path, data in contents.items():
+        by_basename.setdefault(path.rsplit("/", 1)[-1], data)
+    new_art = []
+    for ti, data in art_members:
+        if ti.name == "rootfs.tar":
+            data = new_rootfs
+        elif data is not None and ti.name in _PROBE_MEMBERS \
+                and ti.name in by_basename:
+            data = by_basename[ti.name]
+            hit.setdefault(_PROBE_MEMBERS[ti.name], "replaced")
+        new_art.append((ti, data))
+    art_files = [(ti.name, data) for ti, data in new_art if data is not None]
+
+    # artifacts.tar.gz + artifacts.mf (the manifest keeps its original scope
+    # and line order; a member it never listed is not added to it)
+    art_gz = gzip.compress(_write_tar(new_art), mtime=0)
+    art_present = [n for n, _ in art_files]
+    art_mf = _mf([(n, dict(art_files)[n])
+                  for n in _mf_order(outer["artifacts.mf"][1], art_present)])
+    uncompressed = sum(len(d) for _, d in art_files)
 
     # inner envelope: refresh metadata sizes + manifest, keep member order
     with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"][1]),
@@ -253,7 +421,7 @@ def rebake(in_path, out_path, replacements):
     env["artifacts.tar.gz"] = art_gz
     env["artifacts.mf"] = art_mf
     env[".package.metadata"] = _update_metadata(env[".package.metadata"],
-                                                len(art_gz), len(new_rootfs))
+                                                len(art_gz), uncompressed)
     inner_named = [n for n in env if n != "package.mf"]
     env["package.mf"] = _mf([(n, env[n]) for n in
                              _mf_order(env["package.mf"], inner_named)])
@@ -271,7 +439,7 @@ def rebake(in_path, out_path, replacements):
     new_outer["artifacts.mf"] = art_mf
     new_outer["envelope_package.tar.gz"] = envelope
     new_outer[".package.metadata"] = _update_metadata(
-        new_outer[".package.metadata"], len(art_gz), len(new_rootfs))
+        new_outer[".package.metadata"], len(art_gz), uncompressed)
     outer_named = [n for n in new_outer if n != "package.mf"]
     new_outer["package.mf"] = _mf([(n, new_outer[n]) for n in
                                    _mf_order(new_outer["package.mf"], outer_named)])

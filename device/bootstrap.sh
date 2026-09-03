@@ -49,8 +49,19 @@ if [ -f "$STAGE/bundle.tgz" ]; then
     || { echo "IRIS-BOOTSTRAP: failed to unpack $STAGE/bundle.tgz" >&2; exit 1; }
   rm -f "$STAGE/bundle.tgz"
   # The bundle ships a (possibly newer) bootstrap — do not hide a failed update.
-  cp -f "$STAGE/bootstrap.sh" "$SRC/bootstrap.sh" \
-    || { echo "IRIS-BOOTSTRAP: failed to update $SRC/bootstrap.sh" >&2; exit 1; }
+  # $SRC/bootstrap.sh is THIS script, still being read by the running bash.
+  # `cp -f` rewrites the same inode, so the interpreter would continue at its
+  # old byte offset inside the NEW content and execute whatever token lands
+  # there (reproduced: a comment fragment as a command, then a mid-file
+  # re-run). Write beside it and rename over it instead: rename swaps the
+  # directory entry to a new inode and this process keeps reading the old one
+  # untouched. Same idiom guestshell-start.sh uses for the hook.
+  if [ -f "$STAGE/bootstrap.sh" ]; then
+    cp -f "$STAGE/bootstrap.sh" "$SRC/bootstrap.sh.new" \
+      && mv -f "$SRC/bootstrap.sh.new" "$SRC/bootstrap.sh" \
+      || { rm -f "$SRC/bootstrap.sh.new"
+           echo "IRIS-BOOTSTRAP: failed to update $SRC/bootstrap.sh" >&2; exit 1; }
+  fi
   bundle_updated=1
 fi
 

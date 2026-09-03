@@ -360,3 +360,45 @@ def test_select_cli_container_mode_no_known_hosts_key_stays_legacy():
     assert execute.__self__._hostkey_options() == [
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null"]
+
+
+def test_sshcli_stops_escalating_once_a_crlf_transcript_shows_a_privileged_prompt(
+        monkeypatch):
+    """IRIS-10-006: the un-learn anchor is end-of-line, and real `-tt`
+    transcripts are CRLF — `...#enable\\r` never matched, so a process that
+    started escalated (IRIS_DEVICE_ENABLE_ALWAYS=1) sent the pair on EVERY
+    session to a priv-15 box: the secret executed as a hostname lookup, +48 s
+    per call. One privileged prompt next to our own `enable` must turn it off."""
+    monkeypatch.setenv("IRIS_DEVICE_ENABLE_ALWAYS", "1")
+    scripts = []
+
+    def fake_runner(script):
+        scripts.append(script)
+        if "enable" in script:
+            return ("3400-1#enable\r\n3400-1#REDACTED-PW\r\n"
+                    "3400-1#terminal length 0\r\n3400-1#show clock\r\n"
+                    "10:00:00.000 UTC Tue Aug 25 2026\r\n3400-1#exit\r\n")
+        return ("3400-1#terminal length 0\r\n3400-1#show clock\r\n"
+                "10:00:00.000 UTC Tue Aug 25 2026\r\n3400-1#exit\r\n")
+
+    cli = cli_ssh.SSHCli(host="h", user="u", password="pw", enable="en",
+                         runner=fake_runner)
+    assert cli._needs_enable is True
+    assert "10:00:00.000" in cli.execute("show clock")
+    assert "enable" in scripts[0]              # started escalated, as asked
+    assert cli._needs_enable is False          # ...and learned it was pointless
+    cli.execute("show clock")
+    assert "enable" not in scripts[1]          # the pair is gone next session
+
+
+def test_sshcli_keeps_escalating_when_the_device_still_answers_at_user_exec(
+        monkeypatch):
+    # The un-learn branch must not fire on `>enable`: that box needs it.
+    monkeypatch.setenv("IRIS_DEVICE_ENABLE_ALWAYS", "1")
+    cli = cli_ssh.SSHCli(host="h", user="u", password="pw", enable="en",
+                         runner=lambda s: "3400-1>enable\r\nPassword: \r\n"
+                                          "3400-1#terminal length 0\r\n"
+                                          "3400-1#show clock\r\n10:00\r\n"
+                                          "3400-1#exit\r\n")
+    cli.execute("show clock")
+    assert cli._needs_enable is True

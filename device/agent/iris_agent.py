@@ -76,12 +76,20 @@ ROOT_COPY_RUNNING_IMAGE_UNKNOWN = object()
 # therefore TRUTHY, so any success branch must exclude it explicitly first.
 ROOT_COPY_NOT_ATTEMPTED = object()
 
+# `boot_image` took the slot of the old `ios` field, an arbitrary IOS-exec
+# passthrough that no production path ever called — the one seam through which
+# any IOS command at all could have been issued. What replaced it is the single
+# read-only fact the reclaim paths were missing:
+#   boot_image() -> basename of the file the BOOT variable names (`show boot`),
+#                   "" when IOS positively reports no BOOT target, None when
+#                   the read failed. None is "unknown", and every destructive
+#                   reclaim treats it exactly like an unknown running image.
 Deps = collections.namedtuple(
-    "Deps", "catalog emit ios aria_add file_size verify free_bytes version "
-            "copy_to_root purge_others reclaim root_present remove_stage "
-             "aria_remove detect_mode target_fs running_image reclaimable "
-             "reclaim_bundle model refresh aria_stats aria_peers io_transfer "
-             "checkpoint aria_session copy_in_place")
+    "Deps", "catalog emit boot_image aria_add file_size verify free_bytes "
+            "version copy_to_root purge_others reclaim root_present "
+            "remove_stage aria_remove detect_mode target_fs running_image "
+            "reclaimable reclaim_bundle model refresh aria_stats aria_peers "
+            "io_transfer checkpoint aria_session copy_in_place")
 
 
 def _atomic_write_state(state_path, state):
@@ -333,31 +341,6 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now):
         return None, None
 
 
-def _maybe_sample(cfg, deps, state, img_id, stage, phase, now):
-    """Build (sample, peers) BEFORE the heartbeat POST (spec section 5.2) —
-    the heartbeat is otherwise the last step of the tick and the live sample
-    must ride inside it. Best-effort, never raises. Returns the getPeers rows
-    too so _telemetry_tick reuses them: aria2 is sampled at most once per
-    tick. peers None means 'not fetched this tick' (cadence not due)."""
-    try:
-        if not telemetry_report.stream_enabled(cfg):
-            return None, None
-        if phase not in ("downloading", "seeding-only"):
-            return None, None
-        st = state.setdefault(img_id, {})
-        tele = st.setdefault("tele", {})
-        tier = telemetry_report.classify(state, tele.get("avg_bps"))
-        if not telemetry_report.should_sample(state, tele, tier, now):
-            return None, None
-        stats = deps.aria_stats(stage)
-        peers = deps.aria_peers(stage)
-        sample = telemetry_report.build_sample(img_id, phase, stats, tier)
-        tele["stream_last_ts"] = now
-        return sample, peers
-    except Exception:
-        return None, None
-
-
 def _send_frozen_report(cfg, deps, state, img_id, now):
     """Send the completion/seeding v2 report, freezing it on the first attempt.
 
@@ -423,12 +406,19 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                 telemetry_report.record_rtt(state, r)
         # A failed heartbeat is a live link-quality signal (the spec's
         # "heartbeat-failure streak"): count it toward the bad-tier streak.
-        # Deliberately NO record_success on a good heartbeat — only a
-        # delivered REPORT resets the streak (_send_report), so a new agent
-        # talking to an old server (heartbeats fine, report POSTs 404) still
-        # backs off instead of resetting the streak every tick.
+        # A DELIVERED heartbeat resets it: the streak measures the catalog
+        # link, and a 200 on that same link is the proof it is back. It used
+        # to be reset only by a delivered REPORT, so one three-tick catalog
+        # outage left the tier `bad` for the life of the state file and every
+        # later terminal report was deferred behind it until the 60-attempt
+        # give-up — nothing but a console pull could clear it. The old-server
+        # case that rule guarded (heartbeats fine, report POSTs 404) is carried
+        # by the SEPARATE report_fail_streak and the report's own attempt
+        # backoff, both untouched here.
         if hb_resp is None:
             telemetry_report.record_failure(state)
+        else:
+            telemetry_report.record_success(state)
         # Streaming directives ride every heartbeat response; overwrite-always
         # persistence with 3-tick freshness (spec section 5.4).
         telemetry_report.store_directives(state, hb_resp, now)
@@ -646,6 +636,25 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
                   "refusing destructive delete"
                   % (fname, target_prefix, running))
         return
+    # ---- Layer 2b: the BOOT variable, same rule, same footing ----
+    # Even when what sits at this name is provably THIS attempt's partial,
+    # BOOT pointing at the name means the device boots it next: deleting it
+    # leaves BOOT dangling and the next reload in rommon. The partial stays
+    # for the operator, who already has ROOTCOPY-GIVEUP in the log. An
+    # unreadable BOOT variable refuses for the reason an unknown running
+    # image does: no protect set can be built, so no delete may run.
+    boot = _boot_target(deps)
+    if boot is None:
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: BOOT variable unknown — refusing a "
+                  "delete that cannot be proven safe" % (fname, target_prefix))
+        return
+    if _is_boot_target(boot, fname):
+        deps.emit("ROOTCOPY-RECLAIM-REFUSED",
+                  "%s left in place at %s: it is the BOOT target — refusing "
+                  "destructive delete; the failed copy at this name is left "
+                  "for the operator" % (fname, target_prefix))
+        return
     try:
         deps.reclaim_bundle(target_prefix, [fname])
     except Exception as e:
@@ -660,6 +669,53 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
 
 def _ios_basename(path):
     return (path or "").rsplit(":", 1)[-1].rsplit("/", 1)[-1]
+
+
+def _boot_target(deps):
+    """Basename of the file the device boots NEXT — the BOOT variable — or
+    None when it cannot be known. This is NOT the running image: staging
+    exists so an operator can point BOOT at a placed image for a later
+    maintenance window, and that image may since have left the assigned set
+    (parked, root copy deliberately reclaimable) or never have been IRIS's at
+    all. Deleting it strands the next reload in rommon without a single boot
+    or install command being issued, which is the stage-only invariant's
+    outcome by another road. deps.boot_image answers "" when IOS reports no
+    BOOT target; a raise or None is folded into None, which every caller
+    treats exactly like an unknown running image: no destructive work."""
+    try:
+        boot = deps.boot_image()
+    except Exception:
+        return None
+    if boot is None:
+        return None
+    return _ios_basename(str(boot))
+
+
+def _is_boot_target(boot, fname):
+    return bool(boot) and boot.casefold() == (fname or "").casefold()
+
+
+def install_reclaim_refused(output):
+    """True when IOS refused to START `install remove inactive`.
+
+    A device that already holds the install lock answers the command itself
+    with "FAILED: cannot start new install operation, some operation is
+    already running" and does nothing. `show install summary` does NOT report
+    that state -- verified on a C9300 stack running IOS-XE 17.18.3 whose
+    summary listed only committed packages and an inactive auto-abort timer
+    while the very next `install remove inactive` was refused -- so the
+    pre-check cannot see it and the refusal is only visible in the output of
+    the attempt.
+
+    That matters because the caller's once-guard is burned on a True return:
+    treating a refusal as a successful reclaim permanently disables reclaim
+    for that image, which is exactly what _reclaim_for_mode's contract says
+    must never happen. Pure and matched loosely (case-insensitive, on the two
+    stable halves of the message) so a version's punctuation drift cannot
+    turn a refusal back into a false success."""
+    low = (output or "").casefold()
+    return ("cannot start new install operation" in low
+            or "operation is already running" in low)
 
 
 def _reclaim_for_mode(deps, mode, target_prefix, image, state):
@@ -677,17 +733,35 @@ def _reclaim_for_mode(deps, mode, target_prefix, image, state):
                        safety: never delete when the running image is unknown.)
       unknown(None) -> skip (never run a destructive op when mode is uncertain).
 
+    Bundle mode protects the BOOT variable's target on the same footing as the
+    running image (_boot_target): it is the file the device boots NEXT, and a
+    parked image's root copy — deliberately reclaimable — is exactly what an
+    operator may have pointed BOOT at for a later maintenance window. An
+    unreadable BOOT variable skips like an unknown running image does.
+
     A skip/no-op returns False so the next tick retries once the transient
     clears."""
     if mode == "install":
-        deps.reclaim()
-        return True
+        # Report what actually happened. A device that already holds the
+        # install lock refuses the command outright, and returning True there
+        # burns the caller's once-guard on a no-op -- permanently disabling
+        # reclaim for that image on a device whose lock will clear by itself.
+        # deps.reclaim() returns False on a refusal, None on older Deps.
+        return deps.reclaim() is not False
     if mode == "bundle":
         running = deps.running_image()
         if running is None:
             return False
+        boot = _boot_target(deps)
+        if boot is None:
+            deps.emit("RECLAIM-DEFERRED",
+                      "bundle reclaim skipped: BOOT variable unreadable, so "
+                      "no safe protect set can be built")
+            return False
         protect = _protect_set(image, state)
         protect.add(running)
+        if boot:
+            protect.add(boot)
         names = deps.reclaimable(target_prefix, protect)
         if names:
             deps.reclaim_bundle(target_prefix, names)
@@ -1394,9 +1468,26 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             if protected not in deletable:
                 deps.emit("ROOTCOPY-KEPT",
                           "left in place: operator-adopted %s" % protected)
+        # The BOOT target is never on the delete list either: a replaced root
+        # copy the operator has since pointed BOOT at is the file the device
+        # boots next. Resolved out of the queue like an adopted file (a retry
+        # could never change what BOOT says); an unreadable BOOT variable
+        # keeps the whole queue for the next tick and deletes nothing now.
+        boot = _boot_target(deps)
+        if boot is None:
+            deps.emit("CLEANUP-PENDING",
+                      "replaced-image cleanup deferred: BOOT variable "
+                      "unreadable; will retry")
+            deletable = []
+            still = list(doomed)
+        else:
+            still = []
+            for kept in [n for n in deletable if _is_boot_target(boot, n)]:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: %s is the BOOT target" % kept)
+                deletable.remove(kept)
         if deletable:
             deps.reclaim_bundle(fs, deletable)
-        still = []
         for old_root in deletable:
             if deps.root_present(old_root, fs):
                 still.append(old_root)
@@ -1636,6 +1727,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         state.setdefault(img_id, {}).setdefault("tele", {})[
             "content_sha256_state"] = "mismatch"
         deps.remove_stage(stage)          # drop the bad file so the next tick re-downloads
+        # ...and the torrent it came from. Bytes that hash wrong are exactly
+        # what a stale torrent delivers (a same-id republish regenerates it),
+        # so the next tick re-fetches the catalog's current torrent — a few
+        # hundred KB — instead of re-adding this one and looping.
+        deps.remove_stage(os.path.join(stage_dir, img_id + ".torrent"))
+        state[img_id].pop("torrent_id", None)
         return "bad-sha"
 
     # need to download — media-aware flash pre-check + mode-gated reclaim.
@@ -1678,9 +1775,49 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # means a download is already in progress; the 60 s EEM timer must NOT
     # re-addTorrent it (that would duplicate/corrupt the download).
     torrent = os.path.join(stage_dir, img_id + ".torrent")
-    if deps.file_size(torrent) is None:
-        deps.catalog.download_torrent(img_id, torrent)
+    st = state.setdefault(img_id, {})
+    torrent_id = _torrent_identity(image)
     have = deps.file_size(stage)
+    # A SAME-ID REPUBLISH regenerates the torrent (server/publish.py writes a
+    # new info hash under the unchanged id), and nothing on the device ever
+    # removed `<id>.torrent` — not remove_stage, not park, not purge_others —
+    # so the OLD torrent was re-added on every tick and the device fetched
+    # the old content forever (or sat at 0 % once the old swarm was gone).
+    # The identity the torrent was fetched FOR is recorded per image; when the
+    # catalog's identity has moved, the on-disk torrent, its control file and
+    # whatever it delivered are stale together. An older state file that never
+    # recorded one only re-fetches the torrent (below), touching no download.
+    torrent_stale = (deps.file_size(torrent) is not None
+                     and st.get("torrent_id") not in (None, torrent_id))
+    # More bytes than the catalog declares can only be an earlier content's
+    # download, never progress.
+    if torrent_stale or (have is not None and have > size):
+        deps.emit("RECHECK",
+                  "%s catalog torrent changed under image id %s; discarding "
+                  "the stale torrent and download" % (image["filename"], img_id))
+        deps.remove_stage(stage)
+        deps.remove_stage(stage + ".aria2")
+        deps.remove_stage(torrent)
+        have = None
+    if deps.file_size(torrent) is None or st.get("torrent_id") != torrent_id:
+        try:
+            deps.catalog.download_torrent(img_id, torrent)
+        except Exception as e:
+            # One image's torrent GET failing — 404 when the file is missing,
+            # 503 while the deployment gate is closed, 500 without an announce
+            # credential — used to unwind the WHOLE tick: no set heartbeat, no
+            # telemetry replay, and main() never saved the done/copied work of
+            # the siblings processed before it. Report it as THIS image's
+            # error and let the set carry on; the next tick retries.
+            deps.emit("TORRENT-UNAVAILABLE",
+                      "%s torrent not available from the catalog: %s"
+                      % (image["filename"], e))
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="catalog torrent unavailable: %s" % e)
+            return "torrent-unavailable"
+        st["torrent_id"] = torrent_id
     if have is None:
         # clear any stale/phantom aria2 entry (e.g. a completed seed whose staged
         # file was deleted) so addTorrent actually re-downloads instead of being a
@@ -1768,6 +1905,18 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     tick.telemetry(cfg, deps, state, img_id, stage, "downloading",
                    hb, time.time(), peers=peers)
     return "downloading"
+
+
+def _torrent_identity(image):
+    """What `<id>.torrent` on disk was fetched FOR: the catalog's info hash
+    when the image record carries one (server/publish.py writes
+    info_hash_hex), else the content sha256. Either moves whenever the
+    catalog regenerates the torrent under an unchanged id, which is the
+    ordinary republish event (ids derive from filenames)."""
+    ih = image.get("info_hash_hex")
+    if isinstance(ih, str) and ih.strip():
+        return "ih:" + ih.strip().lower()
+    return "sha:" + str(image.get("sha256") or "")
 
 
 def run_once(cfg, deps, state):
@@ -1983,13 +2132,25 @@ def _refresh_impl(cfg, conf_path, catalog, emit_fn):
     # swallowed into a best-effort TOKEN-REFRESH-FAIL every tick.
     try:
         bag = refresh_token_fn(sid)
+        # A 200 whose body lacks the bag is a server-shape skew, not a
+        # rotation: it belongs in the same best-effort branch as a failed
+        # POST. Read outside the try it escaped run_once as a KeyError before
+        # any catalog work, silencing the device on every tick. Nothing
+        # secret reaches the emit: the token is never formatted, only tested.
+        if not isinstance(bag, dict):
+            raise ValueError("token-refresh body is not an object")
+        token = bag["catalog_token"]
+        expires_at = bag["expires_at"]
+        if not isinstance(token, str) or not token:
+            raise ValueError("token-refresh body has no usable catalog_token")
+        int(float(expires_at))
     except Exception as e:
         emit_fn("TOKEN-REFRESH-FAIL", "%s refresh POST failed: %s" % (sid, e))
         return None
-    catalog.token = bag["catalog_token"]
+    catalog.token = token
     new_cfg = dict(cfg)
-    new_cfg["catalog_token"] = bag["catalog_token"]
-    new_cfg["token_expires_at"] = str(bag["expires_at"])
+    new_cfg["catalog_token"] = token
+    new_cfg["token_expires_at"] = str(expires_at)
     # announce_token + rpc_secret are returned as-is (not rotated here); persist
     # them so aria2's NEXT launch picks them up.
     if bag.get("announce_token") is not None:
@@ -2587,6 +2748,7 @@ def _share_settings(cfg):
 # seeds from the CAF-persistent stage_dir copy, never from the share.
 _SHARE_PREFIX = "iris-"
 _SHARE_PROBE = "iris-probe.txt"
+_SHARE_PROBE_BODY = "iris"      # the probe's exact bytes; `dir` must report len()
 _SHARE_STAGE = "iris-staged.bin"
 
 
@@ -2638,9 +2800,16 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     probe = os.path.join(share_dir, _SHARE_PROBE)
     try:
         with open(probe, "w") as stream:
-            stream.write("iris")
+            stream.write(_SHARE_PROBE_BODY)
         listing = cli_execute_fn("dir %s/%s" % (share_ios_path, _SHARE_PROBE))
-        if _SHARE_PROBE not in (listing or ""):
+        # A parsed `dir` row of the probe's exact size — never a substring
+        # test. IOS answers a missing file with `%Error opening
+        # <path>/iris-probe.txt (No such file or directory)`, which ECHOES the
+        # name and passed the old check: the multi-GB share copy then ran, the
+        # IOS copy failed from an unreadable source, and the scp fallback
+        # stayed suppressed — the exact wedge this probe exists to prevent.
+        if (not listing or "%Error" in listing or "No such file" in listing
+                or _dir_size_of(listing, _SHARE_PROBE) != len(_SHARE_PROBE_BODY)):
             raise OSError("IOS cannot read %s" % share_ios_path)
     except Exception as e:
         emit_fn("SHARE-FALLBACK",
@@ -2833,11 +3002,18 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # 17.18; AAA nodes need `authorization bypass`). Stage-only: this reclaims
         # inactive packages only — it never install add/activate/commit or reload.
         # Defensive: if an install op is already running, don't stack onto it.
+        # This pre-check catches the versions that DO advertise a running
+        # operation in the summary. It is not sufficient on its own: a C9300
+        # on 17.18.3 was observed refusing `install remove inactive` while
+        # `show install summary` showed only committed packages and an
+        # inactive auto-abort timer, so the refusal is caught again below,
+        # where IOS actually reports it. Returns False, never None, so the
+        # caller does not burn its once-guard on a skip.
         try:
             summ = cli_execute("show install summary")
             if "operation" in summ.lower() and "progress" in summ.lower():
                 emit("RECLAIM", "install op already in progress; skipping reclaim")
-                return
+                return False
         except Exception:
             pass
         cli_configure([
@@ -2848,10 +3024,26 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             'action 020 cli command "install remove inactive" pattern "[y/n]"',
             'action 030 cli command "y"',
         ])
-        cli_execute("event manager run IRIS-RECLAIM")
+        out = cli_execute("event manager run IRIS-RECLAIM")
+        if install_reclaim_refused(out):
+            # The device holds the install lock. Nothing was freed, and the
+            # lock clears on its own, so report the no-op and let the next
+            # tick try again rather than spending the image's one attempt.
+            emit("RECLAIM", "install op already running; reclaim did not run")
+            return False
+        return True
 
-    def ios(cmd):
-        return cli_execute(cmd)
+    def boot_image():
+        # Basename of the BOOT variable's target from `show boot` (read-only),
+        # for the reclaim protect sets. "" when IOS reports no BOOT target;
+        # None when the read itself failed (_show folds a raise into "", and a
+        # real `show boot` is never empty), so callers refuse destructive work
+        # rather than guess.
+        sb = _show("show boot")
+        if not sb.strip():
+            return None
+        path = flash_target.boot_path(sb)
+        return _ios_basename(path) if path else ""
 
     def aria_add(torrent_path, dest_dir):
         rpc = "http://127.0.0.1:%s/jsonrpc" % cfg["rpc_port"]
@@ -3061,7 +3253,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # after a checkpointed POST restarts with the frozen id/sequence.
         _atomic_write_state(state_path, state)
 
-    return Deps(catalog=catalog, emit=emit, ios=ios, aria_add=aria_add,
+    return Deps(catalog=catalog, emit=emit, boot_image=boot_image,
+                aria_add=aria_add,
                 file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
                 verify=lambda p, sha: verify_image.sha256_matches(p, sha),
                 free_bytes=free_bytes, version=version, copy_to_root=copy_to_root,

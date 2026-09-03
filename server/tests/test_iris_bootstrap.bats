@@ -9,9 +9,12 @@
 # Strategy: stub age / age-keygen so the test never needs the real binaries,
 # and stub openssl so the test does not require rsa:4096 generation time.
 # The fake age (same pattern as test_entrypoint_secretfs.bats): encrypt
-# prepends AGEFAKE, decrypt strips it.  The fake openssl generates a tiny
-# placeholder file so the bootstrap's -x509 step succeeds instantly.
-# The fake age-keygen writes a deterministic identity file.
+# prepends an "AGEFAKE <recipients>" header line, decrypt strips it — but only
+# when the identity file's "# public key:" is one of the recorded recipients,
+# so the bootstrap's post-write round-trip check behaves like real age.
+# The fake openssl generates a tiny placeholder file so the bootstrap's -x509
+# step succeeds instantly.  The fake age-keygen writes a deterministic
+# identity file.
 
 setup() {
   TMP="$(mktemp -d)"
@@ -22,17 +25,21 @@ setup() {
   cat > "$TMP/fake-age" <<'EOFA'
 #!/usr/bin/env bash
 set -euo pipefail
-mode="$1"; shift
-out=""; inp=""; recipients=()
+mode="$1"; [ "$mode" = "-d" ] && shift
+out=""; inp=""; ident=""; recipients=()
 if [ "$mode" = "-d" ]; then
   while [ "$#" -gt 0 ]; do case "$1" in
-    -i) shift 2 ;; -o) out="$2"; shift 2 ;; *) inp="$1"; shift ;; esac; done
-  head -n1 "$inp" | grep -q '^AGEFAKE$' || { echo "fake-age: bad ciphertext" >&2; exit 1; }
+    -i) ident="$2"; shift 2 ;; -o) out="$2"; shift 2 ;; *) inp="$1"; shift ;; esac; done
+  hdr="$(head -n1 "$inp" || true)"
+  case "$hdr" in AGEFAKE*) ;; *) echo "fake-age: bad ciphertext" >&2; exit 1 ;; esac
+  pub="$(grep '^# public key:' "$ident" | awk '{print $NF}')"
+  recs="${hdr#AGEFAKE}"; recs="${recs# }"
+  case ",$recs," in *",$pub,"*) ;; *) echo "fake-age: no identity matched" >&2; exit 1 ;; esac
   tail -n +2 "$inp" > "$out"
 else
   while [ "$#" -gt 0 ]; do case "$1" in
     -r) recipients+=("$2"); shift 2 ;; -o) out="$2"; shift 2 ;; *) inp="$1"; shift ;; esac; done
-  { echo "AGEFAKE"; cat "$inp"; } > "$out"
+  { echo "AGEFAKE $(IFS=,; echo "${recipients[*]}")"; cat "$inp"; } > "$out"
 fi
 EOFA
   chmod +x "$TMP/fake-age"
@@ -172,19 +179,209 @@ run_bootstrap() {
 }
 
 # ---------------------------------------------------------------------------
-# Test: --force overwrites existing .age files
+# Test: --force is disaster recovery and needs --yes
 # ---------------------------------------------------------------------------
-@test "--force overwrites existing .age files" {
+# Rewritten for IRIS-13-003: --force alone used to wipe every device token and
+# rotate the pinned certificate silently; it now refuses until --yes is given.
+@test "--force without --yes refuses, names what it would destroy, and changes nothing" {
   run_bootstrap
   [ "$status" -eq 0 ]
-  # Corrupt one file to confirm --force regenerates
-  printf 'CORRUPTED\n' > "$IRIS_CONFIG/secrets.json.age"
+  before="$(cat "$IRIS_CONFIG/secrets.json.age" "$IRIS_CONFIG/rpc-secret.age" "$IRIS_CONFIG/tls/key.pem.age" "$IRIS_CONFIG/tls/crt.pem" | sha256sum)"
   run_bootstrap --force
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--yes"* ]]
+  [[ "$output" == *"device catalog token"* ]]
+  [[ "$output" == *"certificate"* ]]
+  [[ "$output" == *"--rekey"* ]]
+  after="$(cat "$IRIS_CONFIG/secrets.json.age" "$IRIS_CONFIG/rpc-secret.age" "$IRIS_CONFIG/tls/key.pem.age" "$IRIS_CONFIG/tls/crt.pem" | sha256sum)"
+  [ "$before" = "$after" ]
+}
+
+@test "--force --yes overwrites existing .age files" {
+  run_bootstrap
   [ "$status" -eq 0 ]
+  # Corrupt one file to confirm --force --yes regenerates
+  printf 'CORRUPTED\n' > "$IRIS_CONFIG/secrets.json.age"
+  run_bootstrap --force --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING"* ]]
   # secrets.json.age must now be valid again
   "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/secrets2.json" \
     "$IRIS_CONFIG/secrets.json.age"
   python3 -c "import json; d=json.load(open('$TMP/secrets2.json')); assert 'seeder' in d"
+}
+
+# ---------------------------------------------------------------------------
+# Helpers for the re-key / repair / corruption tests
+# ---------------------------------------------------------------------------
+PRIMARY_PUB="age1fakerecipient000000000000000000000000000000000000000000"
+BREAKGLASS_PUB="age1breakglass0000000000000000000000000000000000000000000000"
+
+# Bootstrap, then mint a device token with the real secrets_store so the store
+# holds fleet state that a wipe would destroy.
+seed_store_with_device() {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/plain.json" "$IRIS_CONFIG/secrets.json.age"
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$TMP/plain.json" <<'PY'
+import sys, time, secrets_store
+s = secrets_store.load(sys.argv[1])
+secrets_store.mint(s, "switch-01", "catalog_token", int(time.time()))
+secrets_store.save(s, sys.argv[1])
+PY
+  "$TMP/fake-age" -r "$PRIMARY_PUB" -o "$IRIS_CONFIG/secrets.json.age" "$TMP/plain.json"
+  rm -f "$TMP/plain.json"
+}
+
+decrypted_devices() {
+  "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/out.json" "$IRIS_CONFIG/secrets.json.age"
+  python3 -c "import json; d=json.load(open('$TMP/out.json')); print(sorted(d.get('devices', {}).keys()))"
+}
+
+# ---------------------------------------------------------------------------
+# Test: --rekey adds a recipient and preserves every secret (IRIS-13-003)
+# ---------------------------------------------------------------------------
+@test "--rekey re-encrypts existing state to the new recipient set without regenerating anything" {
+  seed_store_with_device
+  rpc_before="$(tail -n +2 "$IRIS_CONFIG/rpc-secret.age")"
+  key_before="$(tail -n +2 "$IRIS_CONFIG/tls/key.pem.age")"
+  crt_before="$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"
+  # A console-written GUI key must ride along too.
+  printf 'GUI-KEY\n' > "$TMP/gui-key.pem"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" -o "$IRIS_CONFIG/tls/gui-key.pem.age" "$TMP/gui-key.pem"
+
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$PRIMARY_PUB,$BREAKGLASS_PUB" bash "$BOOTSTRAP" --rekey
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"generating"* ]]
+  [[ "$output" != *"minting"* ]]
+
+  # Every file now names both recipients and still holds the SAME plaintext.
+  for f in secrets.json.age rpc-secret.age tls/key.pem.age tls/gui-key.pem.age; do
+    hdr="$(head -n1 "$IRIS_CONFIG/$f")"
+    [[ "$hdr" == *"$BREAKGLASS_PUB"* ]] || { echo "$f not re-encrypted to break-glass: $hdr"; return 1; }
+    [[ "$hdr" == *"$PRIMARY_PUB"* ]]    || { echo "$f lost the primary recipient: $hdr"; return 1; }
+    [ ! -e "$IRIS_CONFIG/$f.rekey.tmp" ]
+  done
+  [ "$(decrypted_devices)" = "['switch-01']" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/rpc-secret.age")"  = "$rpc_before" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/tls/key.pem.age")" = "$key_before" ]
+  [ "$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"    = "$crt_before" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/tls/gui-key.pem.age")" = "GUI-KEY" ]
+}
+
+@test "--add-recipient is an alias for --rekey" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$PRIMARY_PUB,$BREAKGLASS_PUB" bash "$BOOTSTRAP" --add-recipient
+  [ "$status" -eq 0 ]
+  [[ "$(head -n1 "$IRIS_CONFIG/rpc-secret.age")" == *"$BREAKGLASS_PUB"* ]]
+}
+
+@test "--rekey to a recipient set that excludes the identity fails closed and leaves the old files intact" {
+  seed_store_with_device
+  before="$(cat "$IRIS_CONFIG/secrets.json.age" "$IRIS_CONFIG/rpc-secret.age" "$IRIS_CONFIG/tls/key.pem.age" | sha256sum)"
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$BREAKGLASS_PUB" bash "$BOOTSTRAP" --rekey
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS_AGE_RECIPIENTS"* ]]
+  after="$(cat "$IRIS_CONFIG/secrets.json.age" "$IRIS_CONFIG/rpc-secret.age" "$IRIS_CONFIG/tls/key.pem.age" | sha256sum)"
+  [ "$before" = "$after" ]
+  [ -z "$(ls "$IRIS_CONFIG" "$IRIS_CONFIG/tls" | grep '\.rekey\.tmp$' || true)" ]
+}
+
+@test "bootstrap guidance recommends --rekey, not --force, for the break-glass recipient" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"iris-bootstrap --rekey"* ]]
+  [[ "$output" != *"iris-bootstrap --force"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test: partial state is refused, --repair regenerates one file (IRIS-13-004)
+# ---------------------------------------------------------------------------
+@test "a missing rpc-secret.age with the other files present refuses instead of regenerating everything" {
+  seed_store_with_device
+  crt_before="$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"
+  rm -f "$IRIS_CONFIG/rpc-secret.age"
+  run_bootstrap
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"partial state"* ]]
+  [[ "$output" == *"missing: rpc-secret"* ]]
+  [[ "$output" == *"--repair"* ]]
+  [[ "$output" == *"device catalog token"* ]]
+  [ ! -e "$IRIS_CONFIG/rpc-secret.age" ]
+  [ "$(decrypted_devices)" = "['switch-01']" ]
+  [ "$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")" = "$crt_before" ]
+}
+
+@test "--repair rpc-secret regenerates only that file" {
+  seed_store_with_device
+  crt_before="$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"
+  key_before="$(sha256sum < "$IRIS_CONFIG/tls/key.pem.age")"
+  rm -f "$IRIS_CONFIG/rpc-secret.age"
+  run_bootstrap --repair rpc-secret
+  [ "$status" -eq 0 ]
+  [ -s "$IRIS_CONFIG/rpc-secret.age" ]
+  "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/rpc" "$IRIS_CONFIG/rpc-secret.age"
+  [ -s "$TMP/rpc" ]
+  [ "$(decrypted_devices)" = "['switch-01']" ]
+  [ "$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"     = "$crt_before" ]
+  [ "$(sha256sum < "$IRIS_CONFIG/tls/key.pem.age")" = "$key_before" ]
+}
+
+@test "--repair refuses when the named file already exists" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  before="$(sha256sum < "$IRIS_CONFIG/rpc-secret.age")"
+  run_bootstrap --repair rpc-secret
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already exists"* ]]
+  [ "$(sha256sum < "$IRIS_CONFIG/rpc-secret.age")" = "$before" ]
+}
+
+@test "--repair with an unknown file name returns exit code 2" {
+  run env IRIS_CONFIG="$IRIS_CONFIG" bash "$BOOTSTRAP" --repair crt.pem
+  [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Test: corrupt state is named, not reported as "nothing to do" (IRIS-13-013)
+# ---------------------------------------------------------------------------
+@test "an empty .age file is an error naming the file, not 'nothing to do'" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  : > "$IRIS_CONFIG/secrets.json.age"
+  run_bootstrap
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"secrets.json.age"* ]]
+  [[ "$output" == *"empty"* ]]
+  [[ "$output" != *"nothing to do"* ]]
+}
+
+@test "an .age file the mounted identity cannot decrypt is an error naming the file" {
+  run_bootstrap
+  [ "$status" -eq 0 ]
+  printf 'GARBAGE\n' > "$IRIS_CONFIG/tls/key.pem.age"
+  run_bootstrap
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"tls/key.pem.age"* ]]
+  [[ "$output" == *"cannot be decrypted"* ]]
+  [[ "$output" != *"nothing to do"* ]]
+}
+
+@test "a fresh bootstrap whose recipients exclude the identity fails with a clear message" {
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$BREAKGLASS_PUB" bash "$BOOTSTRAP"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not decrypt with"* ]]
+  [[ "$output" == *"IRIS_AGE_RECIPIENTS"* ]]
+  [[ "$output" != *"Bootstrap complete"* ]]
 }
 
 # ---------------------------------------------------------------------------

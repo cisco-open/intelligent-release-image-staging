@@ -60,20 +60,41 @@ SEEDER_PREV_CAP = 2
 # Load / save
 # ---------------------------------------------------------------------------
 
+class StoreCorruptError(ValueError):
+    """The store file at *path* exists but could not be read or parsed.
+
+    Raised by load() instead of returning the empty skeleton. An empty store
+    and an unreadable one must never look alike: every writer does
+    load -> mutate -> persist_store, and persist_store encrypts durable-first,
+    so a skeleton returned for a truncated/unreadable tmpfs copy would be
+    re-encrypted over the only durable copy of every device and seeder
+    credential. The message names the path and the failure class only --
+    never file content."""
+
+
 def load(path):
-    """Load the store from *path*; return skeleton on missing/corrupt file."""
+    """Load the store from *path*.
+
+    A MISSING file is the empty store (first run) and returns the skeleton.
+    A present-but-unreadable or unparsable file raises StoreCorruptError so
+    that no caller can mistake it for a fresh install: readers fail closed
+    and writers never persist the emptiness over the durable ciphertext."""
     try:
         with open(path) as f:
             data = json.load(f)
         # Minimal shape guard
         if not isinstance(data, dict):
             raise ValueError("not a dict")
-        data.setdefault("devices", {})
-        data.setdefault("seeder", {})
-        _prune_previous_on_load(data)
-        return data
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {"devices": {}, "seeder": {}}
+    except (OSError, ValueError) as exc:
+        raise StoreCorruptError(
+            "secrets store %s is unreadable (%s)"
+            % (path, exc.__class__.__name__)) from exc
+    data.setdefault("devices", {})
+    data.setdefault("seeder", {})
+    _prune_previous_on_load(data)
+    return data
 
 
 def _prune_previous_on_load(store):

@@ -101,7 +101,11 @@ bound are about markers the store owes, and a row that has been queued has
 done everything this module can do about it. A collector down for longer than
 PLAN_RETENTION therefore loses the event -- by then the record is long gone
 from the 1000-slot queue anyway, and holding rows forever would trade a
-bounded loss for an unbounded store.
+bounded loss for an unbounded store. That loss is COUNTED, never silent:
+every retirement of a row still holding an unacknowledged marker adds to
+``events_retired_undelivered`` (:meth:`TransferLifecycle._note_dropped`),
+which is exported alongside ``plans_unconfirmed`` -- the standing backlog and
+the records that backlog has already cost.
 
 The guarantee is exactly-once in every normal path INCLUDING process restart,
 degrading to at-least-once-with-a-stable-``event.id`` in three windows: a
@@ -176,7 +180,12 @@ carries its rationale at its definition. Eviction prefers rows that are both
 terminal and fully emitted, and an eviction that drops a row with a pending
 emission is counted in ``plans_dropped_unemitted`` rather than disappearing
 silently -- the ``peer_ledger`` discipline that a bound the store applies is a
-bound the store reports.
+bound the store reports. REPORTS means exported, not merely counted:
+:meth:`TransferLifecycle.stats` is read every sample pass by
+``Telemetry._transfer_lifecycle_numbers`` and published as
+``iris.transfer.lifecycle.*`` metric points and the matching
+``iris_transfer_lifecycle_*`` Prometheus families. A counter nothing reads is
+a bound nobody can check.
 
 NEITHER BOUND MAY TOUCH A LIVE ROW. A plan still backed by an assignment is
 re-opened by the very next ``observe()`` pass, with a fresh, empty marker map:
@@ -459,6 +468,21 @@ def seeder_facts(live, snapshot, images, now=None):
     row carrying neither. Earliest, because a device that reconnects gets a
     fresh peer_id and therefore a fresh row: the first moment it seeded is the
     honest answer, not the moment of its latest reconnection.
+
+    EVERY candidate is bounded below by the plan's own ``planned_at``. The
+    registry row belongs to a PEER, not to a plan: a device already seeding an
+    image when a NEW plan for it is minted (an unassign and re-assign inside
+    one agent tick, so aria2 never stops and the row keeps its old
+    ``completed_at``; or an operator-adopted pre-staged image) still carries
+    the PREVIOUS transfer's instant. Latching it would publish
+    ``tracker_seeder_at`` BEFORE ``planned_at`` -- the tracker claiming it saw
+    this plan seed before the plan existed -- and the observability page tells
+    operators to read those two against ``checksum_verified_at`` to see which
+    precondition was the laggard. A candidate that predates the plan is
+    therefore not this plan's evidence and falls through to the next one; with
+    every candidate behind the plan (only reachable if the server clock ran
+    backwards) the plan yields no fact at all, which is this function's
+    standing rule: no honest join, no event, never a guess.
     """
     by_image = {}
     for image_id, entry in (images or {}).items():
@@ -473,6 +497,7 @@ def seeder_facts(live, snapshot, images, now=None):
         info_hash = by_image.get(plan["image_id"]) or plan.get("info_hash")
         if not info_hash:
             continue
+        floor = _ts(plan.get("planned_at"))
         rows = (snapshot or {}).get(info_hash)
         if not isinstance(rows, list):
             continue
@@ -485,11 +510,13 @@ def seeder_facts(live, snapshot, images, now=None):
                 continue
             if row.get("is_seeder") is not True:
                 continue
-            at = _ts(row.get("completed_at"))
-            if at is None:
-                at = _ts(row.get("last_seen"))
-            if at is None:
-                at = _ts(fallback)
+            at = None
+            for candidate in (row.get("completed_at"), row.get("last_seen"),
+                              fallback):
+                at = _ts(candidate)
+                if at is not None and (floor is None or at >= floor):
+                    break
+                at = None
             if at is None:
                 continue
             if plan_id not in out or at < out[plan_id]:
@@ -613,6 +640,36 @@ class TransferLifecycle:
         emitted = row.get("emitted")
         emitted = emitted if isinstance(emitted, dict) else {}
         return all(event in emitted for event in cls._wanted_events(row))
+
+    @classmethod
+    def _undelivered(cls, row):
+        """The events this row put on the queue that no send ever
+        acknowledged. Retiring such a row LOSES those records: by then they are
+        long gone from the 1000-slot LogQueue, and nothing re-queues an event
+        whose row no longer exists. The number is the whole point -- see
+        :meth:`_note_dropped`."""
+        emitted = cls._markers(row, "emitted")
+        delivered = cls._markers(row, "delivered")
+        return [event for event in cls._wanted_events(row)
+                if event in emitted and event not in delivered]
+
+    @classmethod
+    def _note_dropped(cls, data, row):
+        """Count what dropping *row* costs, before it is deleted.
+
+        ``events_retired_undelivered`` is the loss retention CANNOT avoid:
+        ``_retirable`` is keyed on ``emitted`` and deliberately not on
+        ``delivered`` (requiring delivery would hold every row forever
+        whenever the collector is down), so a collector outage longer than
+        PLAN_RETENTION retires rows whose records were queued and never
+        acknowledged. That trade is defensible only while it is VISIBLE: the
+        counter is exported next to ``plans_unconfirmed``, so an outage shows
+        up as a rising number rather than as terminal records that quietly
+        never arrived. It counts EVENTS, not rows -- one row can lose both.
+        """
+        count = len(cls._undelivered(row))
+        if count:
+            cls._counter(data, "events_retired_undelivered", count)
 
     @classmethod
     def _retirable(cls, row):
@@ -838,6 +895,7 @@ class TransferLifecycle:
             if plan_id in live_plans:
                 continue
             if self._retirable(row) and (row.get("updated_at") or 0) < cutoff:
+                self._note_dropped(data, row)
                 del data["plans"][plan_id]
                 self._counter(data, "plans_pruned")
                 removed = True
@@ -859,7 +917,9 @@ class TransferLifecycle:
         on the dashboard rather than as events that quietly never arrived. A
         live row evicted because the LIVE SET ALONE exceeds the cap is counted
         separately in ``plans_live_evicted`` -- that one means the cap itself
-        is wrong for this fleet, not that a row aged out.
+        is wrong for this fleet, not that a row aged out -- and records the
+        eviction took off the queue unacknowledged are counted in
+        ``events_retired_undelivered`` (see :meth:`_note_dropped`).
         """
         plans = data["plans"]
         excess = len(plans) - MAX_PLANS
@@ -872,8 +932,16 @@ class TransferLifecycle:
                               item[1].get("updated_at") or 0,
                               item[0]))
         for plan_id, row in ordered[:excess]:
+            live = plan_id in live_plans
+            if not live:
+                # A LIVE row is re-opened from policy.json on the very next
+                # pass and its outstanding records are re-queued under the
+                # same event.id, so its unacknowledged markers are a replay,
+                # not a loss. Only a row that can never come back costs
+                # records, and only that is counted as one.
+                self._note_dropped(data, row)
             del plans[plan_id]
-            if plan_id in live_plans:
+            if live:
                 self._counter(data, "plans_live_evicted")
             if self._retirable(row):
                 self._counter(data, "plans_pruned")
@@ -1047,10 +1115,17 @@ class TransferLifecycle:
         of presenting as a silent absence of events.
 
         ``plans_unconfirmed`` counts events queued but never acknowledged by a
-        send: a steady non-zero number is a collector problem, not a fleet one.
-        ``plans_live_evicted`` is the saturation signal for MAX_PLANS -- see
-        BOUNDS in the module docstring; anything but 0 means the cap is too
-        small for this fleet.
+        send: a steady non-zero number is a collector problem, not a fleet one,
+        and ``events_retired_undelivered`` is its terminal end -- events whose
+        row was retired before any acknowledgement arrived, i.e. records that
+        are gone (see :meth:`_note_dropped`). ``plans_live_evicted`` is the
+        saturation signal for MAX_PLANS -- see BOUNDS in the module docstring;
+        anything but 0 means the cap is too small for this fleet.
+
+        Every number here is exported:
+        ``Telemetry._transfer_lifecycle_numbers`` feeds them to the OTLP metric
+        points and the Prometheus exposition on :9101, which is what makes a
+        bound this store applies a bound an operator can actually read.
         """
         data = self._read()
         plans = [row for row in data["plans"].values() if isinstance(row, dict)]
@@ -1079,11 +1154,13 @@ class TransferLifecycle:
                 "plans_live_evicted": int(
                     counters.get("plans_live_evicted") or 0),
                 "plans_dropped_unemitted": int(
-                    counters.get("plans_dropped_unemitted") or 0)}
+                    counters.get("plans_dropped_unemitted") or 0),
+                "events_retired_undelivered": int(
+                    counters.get("events_retired_undelivered") or 0)}
 
     # --- retention ---------------------------------------------------------
 
-    def prune(self, before_ts):
+    def prune(self, before_ts, live_plans=()):
         """Drop rows that owe nothing and were last touched before *before_ts*.
 
         Only terminal, fully-emitted rows go: a row still carrying a pending
@@ -1091,12 +1168,21 @@ class TransferLifecycle:
         an event the backend has never been told about. Returns the dropped
         plan ids.
 
-        This manual hook has no live set, so it CAN drop a row whose plan is
-        still assigned (a `seeding` row is terminal while its assignment
-        stands) -- observe() would then re-open it empty and re-emit both
-        events. Nothing in the tracker calls it; observe() applies
-        PLAN_RETENTION itself, with the live set in hand. Any future caller
-        must pass a cutoff old enough that no live plan can be behind it.
+        *live_plans* is any container of currently-assigned plan ids, and rows
+        in it are NEVER dropped -- the same correctness rule ``_retain`` and
+        ``_bound`` obey (see BOUNDS in the module docstring), not a courtesy.
+        A `seeding` row is terminal while its assignment still stands, so
+        without the guard age alone retires a LIVE plan, observe() re-opens it
+        from policy.json with an empty marker map, and both events are
+        re-emitted -- every time this is called, for as long as the plan stays
+        assigned. The argument defaults to empty because a caller with no live
+        set at hand is exactly the caller that must supply one; nothing in the
+        tracker calls this today (observe() applies PLAN_RETENTION itself,
+        with the live set in hand), so a future caller reading only the
+        signature now sees the parameter it has to fill in.
+
+        Records this drop takes off the queue unacknowledged are counted in
+        ``events_retired_undelivered`` (see :meth:`_note_dropped`).
         """
         dropped = []
         with secrets_store.store_lock(self.path):
@@ -1104,8 +1190,11 @@ class TransferLifecycle:
             for plan_id, row in list(data["plans"].items()):
                 if not isinstance(row, dict):
                     continue
+                if plan_id in live_plans:
+                    continue
                 if self._retirable(row) \
                         and (row.get("updated_at") or 0) < before_ts:
+                    self._note_dropped(data, row)
                     del data["plans"][plan_id]
                     self._counter(data, "plans_pruned")
                     dropped.append(plan_id)

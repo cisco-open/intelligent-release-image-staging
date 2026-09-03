@@ -57,7 +57,10 @@ def _atomic_write_json(path, obj):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".live-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, sort_keys=True)
+            # allow_nan=False: the snapshot feeds the tracker's /swarm JSON
+            # and, through the console, a browser JSON.parse -- a bare NaN
+            # token there breaks the swarm map for every operator.
+            json.dump(obj, f, sort_keys=True, allow_nan=False)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -98,7 +101,7 @@ def sanitize_sample(data, approved_image_id):
     if data.get("v") != 1:
         raise ValueError("unknown sample version")
     image_id = data.get("image_id")
-    if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
+    if not isinstance(image_id, str) or not _IMAGE_RE.fullmatch(image_id):
         raise ValueError("bad image_id")
     if image_id not in _approved_ids(approved_image_id):
         raise ValueError("image_id is not one of the device's assigned images")
@@ -146,17 +149,22 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
     if isinstance(observed_at, bool) or not isinstance(observed_at,
                                                        (int, float)):
         raise ValueError("bad observed_at")
+    # Mirror the ``progress`` check: NaN / inf (``1e999`` parses as inf) would
+    # be copied verbatim into the swarm document as a token no browser JSON
+    # parser accepts. A negative instant is equally meaningless.
+    if not math.isfinite(observed_at) or observed_at < 0:
+        raise ValueError("bad observed_at")
     out = {"v": 2, "schema": "v2", "obs_state": obs_state,
            "observed_at": float(observed_at)}
 
     tid = data.get("transfer_id")
     if tid is not None:
-        if not isinstance(tid, str) or not _HEX32.match(tid):
+        if not isinstance(tid, str) or not _HEX32.fullmatch(tid):
             raise ValueError("bad transfer_id")
         out["transfer_id"] = tid
     image_id = data.get("image_id")
     if image_id is not None:
-        if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
+        if not isinstance(image_id, str) or not _IMAGE_RE.fullmatch(image_id):
             raise ValueError("bad image_id")
         if image_id not in _approved_ids(approved_image_id):
             raise ValueError("image_id is not one of the device's assigned images")
@@ -185,7 +193,7 @@ def sanitize_observation(data, approved_image_id, configured_max_peers):
     out["sampling_class"] = sampling_class
     sid = data.get("aria_session_id")
     if sid is not None:
-        if not isinstance(sid, str) or not re.match(r"^[a-f0-9]{1,64}$", sid):
+        if not isinstance(sid, str) or not re.fullmatch(r"[a-f0-9]{1,64}", sid):
             raise ValueError("bad aria_session_id")
         out["aria_session_id"] = sid
 

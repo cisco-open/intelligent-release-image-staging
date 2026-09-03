@@ -304,3 +304,58 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$IOX_DIR/Dockerfile"
   ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$IOX_DIR/Dockerfile"
 }
+
+# ---------------------------------------------------------------------------
+# IRIS-12-005 -- values that ride inside the quoted run-opts lines are
+# validated before anything touches the device (the XR installer already did
+# this; the IOx one pasted them blind, IOS dropped the malformed line, and
+# the app died on its entrypoint's required-env guard AFTER [1/9] had torn
+# down the working app).
+# ---------------------------------------------------------------------------
+
+@test "install.sh rejects a DEVICE_SSH_PASS containing a double quote" {
+  DEVICE_SSH_PASS='pa"ss' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+}
+
+@test "install.sh rejects a DEVICE_SSH_PASS containing a newline" {
+  DEVICE_SSH_PASS=$'pa\nss' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+}
+
+@test "install.sh allows whitespace inside DEVICE_SSH_PASS (it stays quoted)" {
+  DEVICE_SSH_PASS='pass with spaces' run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
+@test "install.sh rejects a CATALOG_TOKEN with a double quote, and whitespace" {
+  CATALOG_TOKEN='to"k' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_TOKEN must not contain"* ]] || return 1
+  CATALOG_TOKEN='to k' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_TOKEN contains whitespace"* ]]
+}
+
+@test "install.sh rejects CATALOG_URL, DEVICE_ID and DEVICE_SSH_USER that would break the run-opts quoting" {
+  CATALOG_URL='https://x:8443/"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_URL"* ]] || return 1
+  DEVICE_ID='sw "1"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"DEVICE_ID"* ]] || return 1
+  DEVICE_SSH_USER=$'dn\nac' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"DEVICE_SSH_USER"* ]]
+}
+
+@test "install.sh's quoting guard runs before the first device session" {
+  # structural: the guard precedes the [1/9] teardown AND the identity probe
+  guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"
+  probe="$(grep -n "printf 'show version" "$INSTALL" | head -1 | cut -d: -f1)"
+  step1="$(grep -n '\[1/9\] teardown' "$INSTALL" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$probe" ] && [ -n "$step1" ]
+  [ "$guard" -lt "$probe" ] && [ "$guard" -lt "$step1" ]
+}

@@ -185,9 +185,17 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
 fi
 
 echo "[2/5] scp push $XR_RPM_FILE -> harddisk: (hardware-proven inbound-scp path)"
-if ! SSHPASS="$DEVICE_PASS" sshpass -e scp \
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
-      "$XR_RPM_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/$SOURCE_NAME.rpm"; then
+# The router's identity is verified with the same policy the transport uses
+# (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
+# host merely answering at the address.
+# shellcheck source=lab/iris-ssh-policy.sh
+. "$HERE/../lab/iris-ssh-policy.sh" || { echo "ERROR: cannot load lab/iris-ssh-policy.sh" >&2; exit 1; }
+iris_ssh_policy "$DEVICE_IP" || exit 1
+scp_rc=0
+SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+      "$XR_RPM_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
+iris_ssh_cleanup
+if [ "$scp_rc" -ne 0 ]; then
   echo "ERROR: scp of $XR_RPM_FILE to $DEVICE_IP:/harddisk:/$SOURCE_NAME.rpm failed" >&2
   exit 1
 fi

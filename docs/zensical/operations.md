@@ -17,7 +17,7 @@ This page collects the actions operators perform after the first deployment.
 | Publish image | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<path>/<image>.bin` |
 | Show images and assignments | `docker compose -f server/docker-compose.yml exec iris iris-assign` |
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
-| Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` |
+| Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` — a reset also ends every live console session ([Console sessions](security.md#console-sessions)) |
 
 `apply-assignments.sh` and `gen-device-installers.sh`
 ([Prepare devices](getting-started.md#prepare-devices)) require the running
@@ -65,8 +65,9 @@ already at privileged EXEC (`#`) executes the secret as a command, which IOS may
 try to resolve as a hostname and can delay every session by tens of seconds. A
 device that genuinely needs enable fails its first unprivileged session loudly,
 is learned from the prompt, and succeeds on retry. Set
-`IRIS_DEVICE_ENABLE_ALWAYS=1` only to restore the old unconditional behavior for
-a known environment.
+`IRIS_DEVICE_ENABLE_ALWAYS=1` only for a known environment that must start
+escalated; even then the pair is dropped for the rest of that process as soon
+as a session shows a privileged prompt.
 
 ## Bulk device actions
 
@@ -131,17 +132,35 @@ The same route separates its other refusals, and they mean different things:
 
 An authenticated announce from an attributable principal records the peer's
 address in `peer-endpoints.json` under `IRIS_STATE`, aged out by
-`IRIS_ENDPOINT_TTL`. If that durable write fails, the entry is queued in memory
-and retried on the following reconcile passes rather than being dropped — the
+`IRIS_ENDPOINT_TTL` (seconds; a non-positive or non-numeric value falls back
+to the 900 s default rather than disabling enforcement). The address recorded
+for a **device** is always the announce's socket source; the BEP3 `ip=`
+override is honoured only for the service seeder, whose container source is
+loopback. If that durable write fails, the entry is queued in memory and
+retried on the following reconcile passes rather than being dropped — the
 device keeps participating in the swarm meanwhile, but the reported enforcement
 status degrades until the write lands, because the derived deny set is computed
 from durable state.
 
-A corrupt or unreadable `peer-endpoints.json` is treated as fail-closed rather
-than empty: the reconcile pass stops before deriving or applying anything,
-existing blocks stay in place, and the recorded state is forced to `fail_closed`.
-Peer discovery is unaffected — the announce path reads the policy files
-independently.
+Rows belonging to a quarantined or revoked device are **not** aged out by the
+TTL: the seeder block for a device that has stopped announcing stays in place
+until the device is un-quarantined or re-onboarded (which clears its rows), not
+merely until the TTL lapses.
+
+A corrupt or unreadable `peer-endpoints.json` — unparseable JSON, a wrong
+schema, or a malformed endpoint row — is treated as fail-closed rather than
+empty: the reconcile pass stops before deriving or applying anything, existing
+blocks stay in place, and the recorded state is forced to `fail_closed`. Peer
+discovery for device and service principals continues (the announce still
+returns its peer list; the endpoint it could not write waits in the retry
+queue), while a legacy-token announce gets no peers until the store is readable
+again, because the tracker cannot tell whether its address belongs to a
+quarantined device.
+
+If a reconcile pass fails for any other reason (for example the state volume is
+full when the status file is written), the loop records `degraded` with the
+exception type in `last_error` where it can and retries on the next poll; it
+never stops.
 
 ## Retiring a device
 
@@ -246,6 +265,20 @@ it only permits assignment despite the mismatch — and re-running the check
 later and getting that same mismatch again does not re-quarantine an
 overridden image; a genuinely different mismatch does.
 
+Either kind of release also puts the image back into the origin seeder: the
+quarantine had force-removed its torrent from aria2, and a released image with
+no origin would otherwise leave every device assigned it waiting at 0% until the
+next container restart. The re-add happens from the image's recorded
+`source_dir`, after re-syncing the canonical torrent's announce to the current
+seeder credential (a quarantine can outlive an announce rotation, which skips
+quarantined images); the `info` byte span, and so the info hash, is unchanged.
+The response carries `seeding_resumed`, and a re-add that fails — aria2
+unreachable, or a `source_dir` that no longer exists (IRIS never guesses a
+directory by basename) — is audited as
+`image_quarantine_release_seeding` with `result=fail` while the release itself
+stays in force. A container restart re-seeds every catalogued, non-quarantined
+torrent, so it repairs that case too.
+
 ## Scaling notes
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
@@ -306,13 +339,11 @@ in `lab/xr-run.sh`; a value exported in the server's environment always
 takes precedence over that default, `0` disables the bound entirely, and an
 invalid value falls back to the default with a logged warning), so a
 wedged router fails the job with a real exit code instead of hanging it. The
-150-second default sits at the top of a recon-derived 120-150-second band:
-every healthy session measured or inferred from recovered `.20` job logs ran
-~15-20 seconds, so 150s carries 6-10x headroom over that ceiling for both
-install and teardown alike — the install Up-poll is 30 short,
-client-looped sessions rather than one long one, so it shares the same
-bound safely without a separate knob
-(`agentinfo/xr-support/teardown-speed-recon.md`, section 1.4). Undeploy
+150-second default sits at the top of a measured 120-150-second band:
+every healthy session in the lab runs ~15-20 seconds, so 150s carries
+6-10x headroom over that ceiling for both install and teardown alike — the
+install Up-poll is 30 short, client-looped sessions rather than one long
+one, so it shares the same bound safely without a separate knob. Undeploy
 composes at most two bounded sessions per run — a read-only probe and
 deactivate session, then a destructive uninstall/remove/sweep/verify
 session — so a completely unresponsive router
@@ -326,21 +357,14 @@ honestly leave an empty `iris-work/` directory behind on harddisk: rather
 than failing over it — a later onboarding simply reuses that same directory
 (it only ever ensures the directory exists, never requires it be absent).
 
-`.20` operators: its `server/docker-compose.override.yml` still carries
-`IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900
-seconds and per-teardown session counts ran six to eleven. That override was
-always a per-session cap, not a total-teardown one: at that same 300-second
-override, live runs recovered from the old design still took 929-964
-seconds end to end (`agentinfo/xr-support/teardown-speed-recon.md`, section
-1.2 — roughly three stalled-to-the-bound sessions each), not 300 seconds.
-It is now redundant for teardown — Task 2's at-most-two-session composite
-plus the tracked 150-second default already keep a stalled teardown's
-worst case to a comfortable 300 seconds without any override in play — but
-leaving it in place is harmless: it only widens the per-session bound back
-out to 300s (a 600s worst case across two stalls) rather than
-reintroducing the old multi-hour exposure. Removing it tightens the worst
-case back down to the tracked default; that edit is the operator's to
-make, not something this change makes for them. Undeploy itself never touches a bare
+If your deployment carries an `IRIS_XR_SESSION_TIMEOUT` override from an
+earlier release — 300 seconds was a common one, set back when the tracked
+default was 900 seconds and a teardown ran six to eleven sessions — it is now
+redundant, and leaving it is harmless. That override was always a *per-session*
+cap, not a total-teardown one: at 300 seconds a stalled teardown's worst case
+is 600 seconds across the two sessions the current design uses, against 300
+seconds at the tracked default. Removing it tightens the worst case back to
+the default; that edit is the operator's to make. Undeploy itself never touches a bare
 image filename and reports, in one summary line, that any operator-staged
 image was left in place. Undeploy never unassigns an image, so it never
 produces the agent's own per-file record on its own: that line — the file
@@ -466,8 +490,21 @@ credential. It requires `--maintenance-frozen`, which acknowledges a freeze the
 operator has already put in place — the command never creates one. Preflight
 binds every published image's canonical torrent to exactly one active aria2 GID
 and refuses before touching anything if an image has no canonical torrent, is not
-uniquely active, the announce base is not a private HTTP URL, durable encrypted
-secrets are missing, or a recovery manifest from an earlier run is still on disk.
+uniquely active, the announce base is not a usable HTTP IPv4 endpoint (loopback,
+link-local, unspecified and multicast addresses are refused; any routable
+address is accepted), durable encrypted secrets are missing, or a recovery
+manifest from an earlier run is still on disk. A refusal names its reason on
+stderr (`refused (ValueError: canonical torrent is not uniquely active)`); the
+reasons are fixed phrases that never carry a URL or credential.
+
+A quarantined image is skipped, not a refusal: its quarantine removed the
+torrent from the seeder on purpose, so it cannot be "uniquely active" and must
+not block rotating the credential for the rest of the fleet. The command lists
+the skipped ids. Their canonical torrents keep the rotated-out announce until
+the quarantine is released, which re-syncs the announce to the then-current
+credential before re-adding the torrent (see
+[Releasing a quarantine](#releasing-a-quarantine)). If every published image is
+quarantined there is nothing active to rotate and the command refuses.
 
 Each replacement rewrites only the outer announce and keeps the `info` byte span
 identical, so info hashes do not move. Credential values are never accepted on

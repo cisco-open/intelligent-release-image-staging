@@ -33,13 +33,37 @@
 #   would strand the device against its own next onboard, which preflight
 #   refuses while any of it is present.
 # Deliberately LEFT IN PLACE (both modes): `iox`, `file prompt quiet`, the
-# AppGig trunk (the installer re-applies idempotently on the next onboard), any
-# staged image at flash root (a delivered artifact, never IRIS machinery),
-# and staged images at the filesystem root. Successful cleanup is persisted to
-# startup-config so a reload cannot restore IRIS configuration.
+# AppGig trunk itself (`switchport mode trunk`; the installer re-applies it
+# idempotently on the next onboard), any staged image at flash root (a
+# delivered artifact, never IRIS machinery), and staged images at the
+# filesystem root. A record-driven routed teardown does remove the IRIS VLAN
+# from the trunk's allowed list (`switchport trunk allowed vlan remove`) --
+# that VLAN is record-owned, and the installer only ever ADDED it, so other
+# apps' VLANs on the same uplink are untouched in both directions. Successful
+# cleanup is persisted to startup-config so a reload cannot restore IRIS
+# configuration.
 #
 # Env (same contract as device-install.sh):
 #   DEVICE_IP DEVICE_USER DEVICE_PASS [DEVICE_ENABLE] VLAN
+#   APP_INTF (optional) -- the AppGigabitEthernet app-hosting port; derived from
+#     the model (`show version`) like the installer does when unset.
+#   EXPECTED_DEVICE_IDENTITY (optional) -- the processor board ID recorded at
+#     onboard. When set, the FIRST device session is a read-only `show version`
+#     and the teardown aborts before any destructive command unless the live
+#     board ID matches (same guard as router-uninstall.sh: a rebuilt or
+#     re-addressed box must never be torn down against another device's
+#     record). When unset the probe still runs (it must succeed) but no
+#     identity is compared.
+#
+# The first session is ALWAYS read-only: it lets lab/device-run.sh learn
+# whether this device needs `enable` before any config write, so step 1 can
+# no longer run silently unprivileged and leave the applets in place while
+# the later, privileged steps destroy the guest.
+#
+# The verify is marker-gated and fails CLOSED: a dropped or truncated verify
+# session is "could not verify", never "clean" -- treating an empty response
+# as empty residue is what let a device be recorded clean with the applets,
+# trustpoint and SVI still on it.
 # Usage:  device-uninstall.sh [--dry-run]
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -63,6 +87,17 @@ IOS_ROOT="${IOS_FS}guest-share"
 # See header: force preserves only the operator's VLAN/SVI network. Everything
 # carrying IRIS's own name is still removed regardless of MANAGEMENT_TYPE.
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
+# The app-hosting port, same model rule as device-install.sh (IE-3x00 vs 9300).
+# APP_INTF_IN keeps an explicit override; a live run re-derives from the model
+# the identity probe reads.
+APP_INTF_IN="${APP_INTF:-}"
+app_intf_for_model() {
+  case "$(printf '%s' "${1:-}" | tr 'a-z' 'A-Z')" in
+    IE-3*) echo "AppGigabitEthernet1/1" ;;
+    *)     echo "AppGigabitEthernet1/0/1" ;;
+  esac
+}
+APP_INTF="${APP_INTF_IN:-$(app_intf_for_model "${MODEL:-}")}"
 
 config_teardown() {
 # Every EEM applet the agent may have left in running-config: the 60s bootstrap
@@ -101,6 +136,9 @@ cat <<EOF
 no app-hosting appid guestshell
 no interface Vlan$VLAN
 no vlan $VLAN
+interface $APP_INTF
+ switchport trunk allowed vlan remove $VLAN
+exit
 no logging buffered discriminator IRISQ
 no logging console discriminator IRISQ
 no logging monitor discriminator IRISQ
@@ -123,7 +161,7 @@ if [ "$DRY" -eq 1 ]; then
   config_cleanup
   echo "===== [5/5] delete /force /recursive $IOS_ROOT ====="
    echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
-   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, flash-root image ====="
+   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk mode (only the IRIS VLAN is removed from its allowed list in routed mode), flash-root image ====="
   exit 0
 fi
 
@@ -142,9 +180,32 @@ else
     "missing its vlan); refusing to guess — set the vlan on the device and retry" >&2; exit 1; }
 fi
 RUN="$HERE/../lab/device-run.sh"
+EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
+
+echo "[pre] read-only identity probe on $DEVICE_IP"
+VERSION_OUT="$(printf 'show version\n' | "$RUN" "$DEVICE_IP")" \
+  || { echo "ERROR: could not read 'show version' from $DEVICE_IP -- the device session failed; refusing to start the teardown" >&2; exit 1; }
+[ -n "$(printf '%s' "$VERSION_OUT" | tr -d '[:space:]')" ] \
+  || { echo "ERROR: 'show version' on $DEVICE_IP returned nothing (session cut short); refusing to start the teardown" >&2; exit 1; }
+LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
+  | sed -nE 's/^[Pp]rocessor board ID[[:space:]]+([^[:space:]]+).*/\1/p' | head -1)"
+LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
+  | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
+[ -n "$APP_INTF_IN" ] || APP_INTF="$(app_intf_for_model "${LIVE_MODEL:-${MODEL:-}}")"
+if [ -n "$EXPECTED_DEVICE_IDENTITY" ]; then
+  if [ -z "$LIVE_IDENTITY" ] || [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
+    echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
+    echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '${LIVE_IDENTITY:-none}'" >&2
+    echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
+    echo "  (removes the IRIS-named footprint only), or delete and re-add it in the Console." >&2
+    exit 1
+  fi
+  echo "  identity verified: board ID $LIVE_IDENTITY"
+fi
 
 echo "[1/5] remove EEM applets on $DEVICE_IP (stops the 60s bootstrap timer)"
-{ echo "configure terminal"; config_teardown; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
+{ echo "configure terminal"; config_teardown; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null \
+  || { echo "ERROR: the applet-removal session on $DEVICE_IP failed; refusing to continue with the timer possibly still armed" >&2; exit 1; }
 
 echo "[2/5] guestshell disable"
 printf 'guestshell disable\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
@@ -196,8 +257,42 @@ else
   verify_filter="applet IRIS-|interface Vlan$VLAN|crypto pki trustpoint IRIS|discriminator IRISQ"
   artifact_re="^guestshell|^event manager applet IRIS-|^interface Vlan$VLAN|^crypto pki trustpoint IRIS *\$|IRISQ|guest-share"
 fi
-out="$(printf 'terminal width 512\nshow app-hosting list\nshow running-config | include %s\ndir %s | include guest-share\n' \
-         "$verify_filter" "$IOS_FS" | "$RUN" "$DEVICE_IP" | grep -v "#" || true)"
+# Marker-gated, same as router-uninstall.sh: every section must come back or
+# the undeploy fails closed -- an empty response is "could not verify".
+VERIFY_MARKER="__IRIS_VERIFY_"
+verify_request() {
+cat <<EOF
+terminal width 512
+echo ${VERIFY_MARKER}APPS__
+show app-hosting list
+echo ${VERIFY_MARKER}RUNNING__
+show running-config | include $verify_filter
+echo ${VERIFY_MARKER}FILES__
+dir $IOS_FS | include guest-share
+EOF
+}
+verify_section() {
+  python3 -c 'import re, sys
+marker = "__IRIS_VERIFY_"
+name = sys.argv[1]
+text = sys.stdin.read()
+start = marker + name + "__"
+match = re.search(re.escape(start) + r"\r?\n?(.*?)(?=" + re.escape(marker) + r"[A-Z_]+__|\Z)", text, re.DOTALL)
+if not match:
+    sys.exit(1)
+sys.stdout.write(match.group(1))' "$1"
+}
+verify_rc=0
+VERIFY_OUT="$(verify_request | "$RUN" "$DEVICE_IP")" || verify_rc=$?
+[ "$verify_rc" -eq 0 ] \
+  || { echo "ERROR: the undeploy verify session on $DEVICE_IP failed (rc=$verify_rc); refusing to declare the device clean" >&2; exit 1; }
+out=""
+for section in APPS RUNNING FILES; do
+  section_raw="$(printf '%s' "$VERIFY_OUT" | verify_section "$section")" \
+    || { echo "ERROR: undeploy verify did not return its $section section (session cut short); refusing to declare the device clean" >&2; exit 1; }
+  out="$out
+$(printf '%s\n' "$section_raw" | grep -v "#" || true)"
+done
 left="$(printf '%s\n' "$out" | grep -E "$artifact_re" || true)"
 if [ -n "$left" ]; then
   echo "ERROR: artifacts still present after undeploy:" >&2

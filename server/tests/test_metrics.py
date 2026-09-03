@@ -242,7 +242,10 @@ class TestSwarmByteAttribution:
         text = self._render()
         for name, mtype in (("iris_origin_sent_bytes_total", "counter"),
                             ("iris_peer_attributed_bytes_total", "counter"),
-                            ("iris_peer_unattributed_bytes_total", "counter"),
+                            # gauge (IRIS-05-004): the residue steps DOWN when
+                            # a device is traced late, so a counter type
+                            # would make rate() invent bursts.
+                            ("iris_peer_unattributed_bytes_total", "gauge"),
                             ("iris_swarm_peers_attributed", "gauge"),
                             ("iris_swarm_peers_saturated", "gauge")):
             assert "# HELP %s " % name in text, name
@@ -262,10 +265,23 @@ class TestSwarmByteAttribution:
         # so these are counters and never reset to a gauge-shaped zero.
         text = self._render()
         for name in ("iris_origin_sent_bytes_total",
-                     "iris_peer_attributed_bytes_total",
-                     "iris_peer_unattributed_bytes_total"):
+                     "iris_peer_attributed_bytes_total"):
             assert "# TYPE %s counter" % name in text, name
             assert "# TYPE %s gauge" % name not in text, name
+
+    def test_residue_is_a_gauge_because_it_steps_down(self):
+        # Rewritten from the counter assertion (IRIS-05-004): the residue is
+        # origin minus attributed, and tracing a device late lowers it. As a
+        # counter, Prometheus rate()/increase() and cumulative-to-delta
+        # pipelines read every step-down as a reset and invent untraced
+        # bytes exactly when tracing improved. The name keeps its _total
+        # suffix so existing dashboards keep resolving.
+        text = self._render()
+        assert "# TYPE iris_peer_unattributed_bytes_total gauge" in text
+        assert "# TYPE iris_peer_unattributed_bytes_total counter" not in text
+        help_line = [ln for ln in text.splitlines()
+                     if ln.startswith("# HELP iris_peer_unattributed_bytes_total")][0]
+        assert "never rate()" in help_line
 
     def test_no_per_peer_labels_on_any_new_family(self):
         # The design rule at the top of metrics.py: per-device/per-peer detail

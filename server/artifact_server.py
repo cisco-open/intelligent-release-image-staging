@@ -129,6 +129,25 @@ _inflight_lock = threading.Lock()
 # TLS clients on a management network, not browsers.
 HANDSHAKE_TIMEOUT_SECONDS = 30
 
+# Socket INACTIVITY timeout for a connection that has completed its
+# handshake (the request line, headers, and each send of the body). Without
+# it a client that handshakes and then never sends a request line holds its
+# worker thread and file descriptor forever. An inactivity timeout does not
+# cut a slow-but-healthy transfer: bytes flowing in either direction reset
+# it, only a stall this long ends the connection.
+REQUEST_IDLE_TIMEOUT_SECONDS = 120
+
+
+def redact_log_path(path):
+    """The access-log form of a request path. A staging path IS the
+    per-device credential capability (the high-entropy basename is the only
+    authorization), so it is never written to stdout -- the prefix survives
+    so the log still shows that a staging fetch happened."""
+    stripped = str(path).lstrip("/")
+    if stripped.startswith("staging/") or stripped == "staging":
+        return "/staging/<redacted>"
+    return path
+
 
 class _Server(ThreadingHTTPServer):
     """ThreadingHTTPServer that completes TLS in the WORKER thread.
@@ -183,6 +202,8 @@ class _Server(ThreadingHTTPServer):
 
 def make_server(host, port, directory, certfile=None):
     class Handler(SimpleHTTPRequestHandler):
+        timeout = REQUEST_IDLE_TIMEOUT_SECONDS
+
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=directory, **kwargs)
 
@@ -214,13 +235,22 @@ def make_server(host, port, directory, certfile=None):
                 # onboarding job's wall clock, which is why the [5/7] share of
                 # a slow fleet onboard could only ever be inferred.
                 print("artifacts %s %s -> %s in %.3fs (inflight %d)"
-                      % (self.command, self.path,
+                      % (self.command, redact_log_path(self.path),
                          getattr(self, "_status", "?"),
                          time.time() - started, peak),
                       flush=True)
 
         def _do_GET(self):
             resolved = self.translate_path(self.path)
+            # translate_path strips dotted segments but never resolves
+            # symlinks: a link inside the artifacts root would be followed
+            # to any readable file outside it. Containment is decided on
+            # the real path (the gui_server._read_deploy_log idiom).
+            root = os.path.realpath(directory)
+            real = os.path.realpath(resolved)
+            if real != root and not real.startswith(root + os.sep):
+                self.send_error(404, "Not Found")
+                return
             # Sweep staging/ for expired files before serving — this limits
             # credential exposure without breaking retries within the window.
             if (os.path.isfile(resolved) and

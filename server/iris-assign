@@ -62,4 +62,13 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except catalog.StateFileError as exc:
+        # A state file under IRIS_STATE exists but cannot be read. Fail
+        # closed with the same one-line diagnosis the other credential and
+        # assignment CLIs give, rather than a traceback: the operator needs
+        # to know WHICH file to repair, and nothing must be written over a
+        # file whose contents are still recoverable.
+        print("error: %s" % exc, file=sys.stderr)
+        sys.exit(1)

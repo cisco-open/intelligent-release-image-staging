@@ -14,8 +14,9 @@
        Phosphor (MIT-licensed) bold-weight glyphs, referenced by
        <use href="#i-..."> in app.js's statusPillHTML(); the pill's own text
        label carries the accessible name, so this whole sprite is inert to
-       assistive tech. Icon-to-symbol mapping and any substitutions are
-       documented in .superpowers/sdd/task-4-report.md. -->
+       assistive tech. Each symbol id is "i-<phosphor glyph name>" and
+       statusPillHTML() maps one status level to one symbol; the glyph
+       paths are vendored unmodified. -->
   <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
     <symbol id="i-check-circle" viewBox="0 0 256 256" fill="currentColor">
       <path d="M176.49,95.51a12,12,0,0,1,0,17l-56,56a12,12,0,0,1-17,0l-24-24a12,12,0,1,1,17-17L112,143l47.51-47.52A12,12,0,0,1,176.49,95.51ZM236,128A108,108,0,1,1,128,20,108.12,108.12,0,0,1,236,128Zm-24,0a84,84,0,1,0-84,84A84.09,84.09,0,0,0,212,128Z"/>
@@ -59,8 +60,8 @@
          anchor's own state color (default/hover/.active), same vendoring
          convention as the status-pill symbols above. Referenced via
          <use href="#i-nav-..."> from each .nav anchor's leading <svg
-         class="nav-icon"> and from #nav-toggle. Evidence and per-icon
-         sourcing in .superpowers/sdd/wave-b-report.md. -->
+         class="nav-icon"> and from #nav-toggle. Every glyph is a vendored
+         Phosphor (MIT) bold-weight path, unmodified. -->
     <symbol id="i-nav-gauge" viewBox="0 0 256 256" fill="currentColor">
       <path d="M209.88,69.83A115.19,115.19,0,0,0,128,36h-.41C63.85,36.22,12,88.76,12,153.13V176a20,20,0,0,0,20,20H224a20,20,0,0,0,20-20V152A115.25,115.25,0,0,0,209.88,69.83ZM220,172H127.32l46.44-65A12,12,0,1,0,154.24,93L97.82,172H36V153.13c0-1.72,0-3.43.14-5.13H56a12,12,0,0,0,0-24H40.62c10.91-33.39,40-58.52,75.38-63.21V80a12,12,0,0,0,24,0V60.8A92,92,0,0,1,215.66,124H200a12,12,0,0,0,0,24h19.9c.06,1.33.1,2.66.1,4Z"/>
     </symbol>
@@ -92,6 +93,7 @@
     <span class="product-suite">Console</span>
     <span class="spacer"></span>
     <span class="who" id="who"></span>
+    <span class="muted conn-state" id="conn-state" role="status" aria-live="polite" hidden></span>
     <div class="menu-wrap">
       <button class="btn ghost icon" id="help-btn" aria-expanded="false" aria-label="Help" title="Help">?</button>
       <div class="menu right" id="help-pop" hidden>
@@ -312,6 +314,7 @@
                   <option value="">Telemetry: any</option>
                   <option value="on">on</option>
                   <option value="off">off</option>
+                  <option value="unknown">unknown (no heartbeat yet)</option>
                 </select>
                 <select id="dev-filter-peer" aria-label="Filter by peer policy">
                   <option value="">Peer policy: any</option>
@@ -469,7 +472,7 @@
         <div class="devices-table-wrap">
         <div class="table-scroll">
         <table class="tbl dense" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all" aria-label="Select all devices"></th><th>Device</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         </div>
@@ -592,8 +595,9 @@
             </div>
             <div class="modal-body">
               <label class="field" for="cred-selected"><span class="field-label">Credential profile</span>
-                <select id="cred-selected"><option value="">— credential for selected —</option></select>
+                <select id="cred-selected"><option value="" disabled selected>— choose a credential profile —</option></select>
               </label>
+              <p class="err" id="cred-modal-msg" aria-live="polite"></p>
             </div>
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="cred-modal-cancel">Cancel</button>
@@ -643,11 +647,11 @@
           <h2 class="page-title">Finish setting up this server</h2>
         </div>
         <p class="muted" id="wz-progress" role="status" aria-live="polite"></p>
-        <!-- Magnetic Stepper anatomy: left step panel (~320px), content area
-             right, Next/Back right-aligned at the content column's own
-             bottom -- captured in agentinfo/facelift-2026-08-30-visual-
-             direction.md lines 63-70. wz-* ids stay on the same functionally
-             equivalent elements; only the surrounding layout changed. -->
+        <!-- Stepper anatomy (Cisco Magnetic design system): left step panel
+             ~320px (200-400px range), content area right, Next/Back
+             right-aligned at the content column's own bottom. wz-* ids stay
+             on the same functionally equivalent elements; only the
+             surrounding layout changed. -->
         <div class="wz-layout">
           <div class="wz-panel">
             <div id="wz-steplist" role="list"></div>
@@ -669,9 +673,11 @@
 
             <div class="wz-step" id="wz-step-stagehost" hidden>
               <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
-              <p class="muted">Credentials IRIS uses to reach the Docker host that
-                builds and serves device onboarding material. Without them, onboarding
-                a device over the Docker path cannot start.</p>
+              <p class="muted">Optional. The Console and the artifact server share one
+                container, so onboarding stages per-device material locally and never
+                opens an SSH hop to a stage host; this credential is not passed to any
+                installer. Skip this step unless you have a reason to keep a stage-host
+                login on file.</p>
               <div class="form-mount" id="wz-sh-mount"></div>
             </div>
 
@@ -739,10 +745,10 @@
           </div>
 
           <div class="card">
-          <h3>Stage host (Docker onboarding) <span id="setup-sh-chip"></span></h3>
-          <p class="muted">Credentials IRIS uses to reach the Docker host that
-            builds and serves device onboarding material. Without them,
-            onboarding a device over the Docker path cannot start.</p>
+          <h3>Stage host (optional) <span id="setup-sh-chip"></span></h3>
+          <p class="muted">Not required: onboarding stages per-device material
+            locally inside the server container and never opens an SSH hop to a
+            stage host, so this credential is not passed to any installer.</p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
           </div>
 
@@ -793,7 +799,7 @@
                until cloned into #sh-mount (mountSettingsForm, app.js), so it
                stays outside the card entirely. -->
           <div class="card">
-          <h3>Stage host (Docker onboarding)</h3>
+          <h3>Stage host (optional)</h3>
           <div class="form-mount" id="sh-mount"></div>
           </div>
           <template id="tpl-sh-form">

@@ -2895,3 +2895,354 @@ def test_a_legacy_row_with_no_plans_key_reads_back_and_gains_plans_on_the_next_a
     assert _is_hex32(_plans(store, "d1")["img-a"]["transfer_id"])
     assert set(store.device_policy_view("d1")["plans"]["img-a"]) == {
         "plan_id", "transfer_id"}
+
+
+# ===========================================================================
+# Review wave: shard 02 (catalog protocol) regressions
+# ===========================================================================
+
+# --- IRIS-02-001: a corrupt/unreadable state file fails closed -------------
+
+def test_corrupt_policy_json_is_not_read_as_empty_and_is_never_rewritten(tmp_path):
+    """Reviewer probe P1: a trailing comma in policy.json used to make every
+    device's policy read as the empty set (a fleet-wide unassign the agent
+    acts on) and the next set_policy rewrote the file with a single row,
+    losing every other assignment and its plan ids for good."""
+    s = _store_with_images(tmp_path, ["img-a", "img-b"])
+    s.set_policy("dev-1", approved_image_ids=["img-a"])
+    s.set_policy("dev-2", approved_image_ids=["img-b"])
+    good = open(s.policy_path).read()
+    with open(s.policy_path, "w") as f:
+        f.write(good.rstrip().rstrip("}") + ",}\n")
+    corrupt = open(s.policy_path).read()
+    for call in (lambda: s.get_policy("dev-2"),
+                 lambda: s.device_policy_view("dev-2"),
+                 lambda: s.list_policies(),
+                 lambda: s.set_policy("dev-1", approved_image_ids=["img-a"])):
+        with pytest.raises(catalog.StateFileError):
+            call()
+    assert open(s.policy_path).read() == corrupt      # untouched
+    # Repairing the file restores everything that was there.
+    with open(s.policy_path, "w") as f:
+        f.write(good)
+    assert s.get_policy("dev-2")["approved_image_ids"] == ["img-b"]
+
+
+def test_missing_state_file_is_still_the_empty_store(tmp_path):
+    s = catalog.CatalogStore(str(tmp_path))
+    assert s.get_policy("nobody") == {"approved_image_id": None,
+                                      "approved_image_ids": []}
+    assert s.list_devices() == []
+    assert s.get_device("nobody") is None
+
+
+def test_state_file_that_is_not_an_object_or_is_unreadable_fails_closed(tmp_path):
+    s = catalog.CatalogStore(str(tmp_path))
+    with open(s.devices_path, "w") as f:
+        f.write("[]")
+    with pytest.raises(catalog.StateFileError):
+        s.list_devices()
+    with pytest.raises(catalog.StateFileError):
+        s.record_heartbeat("sw-1", {"model": "x"})
+    assert open(s.devices_path).read() == "[]"
+    os.remove(s.devices_path)
+    os.mkdir(s.devices_path)                 # exists, unreadable as a file
+    with pytest.raises(catalog.StateFileError):
+        s.list_devices()
+
+
+def test_corrupt_policy_json_is_503_on_the_wire_not_an_empty_policy(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        s = catalog.CatalogStore(str(tmp_path))
+        s.set_policy("sw-9", approved_image_ids=["img1"])
+        with open(s.policy_path, "w") as f:
+            f.write("{not json")
+        status, _, body = _req(port, "GET", "/v1/devices/sw-9/policy",
+                               token="tok")
+        assert status == 503
+        assert json.loads(body) == {"error": "state unavailable"}
+        # The heartbeat consults the policy for the live-sample gate: the
+        # heartbeat itself must not be lost to a 500 with no body either.
+        status, _, body = _req(port, "POST", "/v1/devices/sw-9/heartbeat",
+                               token="tok", body=json.dumps({"model": "x"}))
+        assert status in (200, 503)
+        assert json.loads(body)
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-002 / IRIS-02-004: heartbeat and report ingest validation -----
+
+def _hand_post(port, path, body, token="tok", extra_headers=""):
+    """POST with a hand-built request so the header set is exactly ours."""
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    req = ("POST %s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n"
+           "Content-Type: application/json\r\n%s" % (path, token, extra_headers))
+    if body is not None:
+        req += "Content-Length: %d\r\n" % len(body)
+    c.sendall(req.encode() + b"\r\n" + (body or b""))
+    data = b""
+    try:
+        while True:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if b"\r\n\r\n" in data:
+                head, _, rest = data.partition(b"\r\n\r\n")
+                clen = [ln for ln in head.split(b"\r\n")
+                        if ln.lower().startswith(b"content-length:")]
+                if clen and len(rest) >= int(clen[0].split(b":")[1]):
+                    break
+    except socket.timeout:
+        pass
+    c.close()
+    if not data:
+        return None, b""
+    head, _, rest = data.partition(b"\r\n\r\n")
+    return int(head.split(b" ")[1]), rest
+
+
+def test_heartbeat_rejects_nan_and_infinity_literals(tmp_path):
+    """Reviewer probe P2b: NaN/Infinity parsed, were stored verbatim and
+    re-emitted as bare tokens in devices.json and /api/devices, which no
+    browser JSON parser accepts -- one device broke the fleet view."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, body = _hand_post(
+            port, "/v1/devices/sw-1/heartbeat",
+            b'{"free_flash_bytes": NaN, "version": Infinity}')
+        assert status == 400
+        assert json.loads(body) == {"error": "bad json"}
+        status, _ = _hand_post(port, "/v1/devices/sw-1/telemetry",
+                              b'{"event": "pull", "ts": NaN}')
+        assert status == 400
+    finally:
+        srv.shutdown()
+    assert catalog.CatalogStore(str(tmp_path)).get_device("sw-1") is None
+
+
+def test_heartbeat_fields_are_typed_and_capped(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        body = json.dumps({
+                "current_image_id": "img1",
+                "version": 7,                       # wrong type
+                "model": {"nested": [1, 2, 3]},     # wrong type
+                "stage_state": 12345,
+                "stage_error": "E" * 40000,
+                "target_fs": "flash:",
+                "telemetry_enabled": "yes",
+                "staged_image_ids": ["S" * 20000],
+                "errored_image_ids": ["img1", "bad id"]})
+        # 1e999 is a legal JSON number that Python parses as inf (it is not
+        # one of the literals parse_constant refuses).
+        body = body[:-1] + ', "free_flash_bytes": 1e999}'
+        status, _, _ = _req(port, "POST", "/v1/devices/sw-1/heartbeat",
+                            token="tok", body=body)
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["current_image_id"] == "img1"
+    assert rec["free_flash_bytes"] is None
+    assert rec["version"] is None
+    assert rec["model"] is None
+    assert rec["stage_state"] is None
+    assert len(rec["stage_error"]) == 1024
+    assert rec["target_fs"] == "flash:"
+    assert rec["telemetry_enabled"] is None
+    assert rec["staged_image_ids"] is None       # not an image id shape
+    assert rec["errored_image_ids"] is None      # rejected wholesale
+    assert "NaN" not in open(os.path.join(str(tmp_path), "devices.json")).read()
+
+
+def test_heartbeat_well_typed_fields_round_trip_unchanged(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        _req(port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+             body=json.dumps({"current_image_id": "img1",
+                              "free_flash_bytes": 123456789,
+                              "version": "17.18.1", "model": "C9300-48P",
+                              "stage_state": "ready", "stage_error": None,
+                              "target_fs": "flash:", "telemetry_enabled": True,
+                              "telemetry_stream_enabled": False,
+                              "staged_image_ids": ["img1"],
+                              "errored_image_ids": []}))
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["free_flash_bytes"] == 123456789
+    assert rec["version"] == "17.18.1" and rec["model"] == "C9300-48P"
+    assert rec["telemetry_enabled"] is True
+    assert rec["telemetry_stream_enabled"] is False
+    assert rec["staged_image_ids"] == ["img1"]
+    assert rec["errored_image_ids"] == []
+
+
+def test_v1_report_with_non_finite_float_is_400(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        rep = {"event": "pull", "ts": 1e999, "transfer": {"total_bytes": 5}}
+        status, _ = _post(port, "/v1/devices/sw-9/telemetry", "tok",
+                          json.dumps(rep).encode())
+        assert status == 400
+    finally:
+        srv.shutdown()
+    assert catalog.CatalogStore(str(tmp_path)).get_telemetry("sw-9") == []
+
+
+def test_state_writer_and_json_response_refuse_nan(tmp_path):
+    with pytest.raises(ValueError):
+        catalog._atomic_write_json(str(tmp_path / "x.json"),
+                                   {"v": float("nan")})
+    assert not os.path.exists(str(tmp_path / "x.json"))
+    with pytest.raises(ValueError):
+        catalog.Catalog._json(200, {"v": float("inf")})
+
+
+def test_heartbeat_non_object_or_deeply_nested_body_is_400(tmp_path):
+    """Reviewer probe P2a / nest.py: a list/null/string body raised
+    AttributeError and a 60 KiB nest of brackets RecursionError -- both
+    escaped the handler and closed the socket with no status line."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        for body in (b"[]", b"null", b'"x"',
+                     b"[" * 30000 + b"]" * 30000):
+            status, resp = _hand_post(port, "/v1/devices/sw-1/heartbeat", body)
+            assert status == 400, body[:10]
+            assert json.loads(resp) == {"error": "bad json"}
+        status, resp = _hand_post(port, "/v1/devices/sw-1/telemetry",
+                                 b"[" * 30000 + b"]" * 30000)
+        assert status == 400
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-006: a length-less (chunked) POST is 411, not an empty body ---
+
+def test_chunked_post_is_411_and_does_not_blank_the_heartbeat(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        _req(port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+             body=json.dumps({"current_image_id": "img1", "model": "C9300"}))
+        status, resp = _hand_post(
+            port, "/v1/devices/sw-1/heartbeat", None,
+            extra_headers="Transfer-Encoding: chunked\r\n")
+        assert status == 411
+        assert json.loads(resp) == {"error": "content-length required"}
+        status, _ = _hand_post(port, "/v1/devices/sw-1/heartbeat", None)
+        assert status == 411                   # no length header at all
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["current_image_id"] == "img1" and rec["model"] == "C9300"
+
+
+# --- IRIS-02-003: the handler has a socket timeout -------------------------
+
+def test_handler_socket_timeout_releases_a_stalled_connection(tmp_path):
+    """Reviewer probe P4: six stalled clients pinned six handler threads
+    forever. With the handler timeout, the server hangs up on its own and
+    the thread count returns to baseline."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    assert srv.RequestHandlerClass.timeout == catalog.HANDLER_TIMEOUT
+    assert catalog.handler_timeout({"IRIS_HTTP_TIMEOUT": "-1"}) == \
+        catalog.HANDLER_TIMEOUT
+    assert catalog.handler_timeout({"IRIS_HTTP_TIMEOUT": "12"}) == 12.0
+    srv.RequestHandlerClass.timeout = 0.5
+    try:
+        base = threading.active_count()
+        stalled = []
+        for i in range(2):
+            c = socket.create_connection(("127.0.0.1", port), timeout=5)
+            if i == 0:
+                c.sendall(b"POST /v1/devices/sw-1/heart")     # partial line
+            else:
+                c.sendall(b"POST /v1/devices/sw-1/heartbeat HTTP/1.1\r\n"
+                          b"Host: x\r\nAuthorization: Bearer tok\r\n"
+                          b"Content-Length: 5000\r\n\r\n{\"a\":")  # short body
+            stalled.append(c)
+        for c in stalled:
+            assert c.recv(16) == b""       # server closed it on its own
+            c.close()
+        deadline = time.time() + 5
+        while threading.active_count() > base and time.time() < deadline:
+            time.sleep(0.05)
+        assert threading.active_count() <= base
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-005: plan rows are matched whole -------------------------------
+
+def test_plan_row_with_trailing_newline_is_not_served_and_is_re_minted(tmp_path):
+    s = _store_with_images(tmp_path, ["img-a"])
+    s.set_policy("d1", approved_image_ids=["img-a"])
+    rows = s.list_policies()
+    rows["d1"]["plans"]["img-a"]["transfer_id"] = "c" * 32 + "\n"
+    _write_policy_json(s, rows)
+    assert s.device_policy_view("d1")["plans"] == {}
+    s.set_policy("d1", approved_image_ids=["img-a"])
+    tid = s.list_policies()["d1"]["plans"]["img-a"]["transfer_id"]
+    assert catalog._HEX32.fullmatch(tid)
+
+
+# --- IRIS-02-009: stage-only wording -----------------------------------------
+
+def test_module_prose_no_longer_describes_an_install_approval():
+    src = open(catalog.__file__).read()
+    assert "install-approval flag" not in src
+    assert "install-approval gate" not in src
+
+
+def test_catalog_tls_handshake_is_not_on_the_accept_thread(tmp_path):
+    """The device-facing listener must not hand its whole accept loop to one
+    silent client, and must not use the stdlib backlog of 5.
+
+    Wrapping the LISTENING socket makes socketserver run the TLS handshake
+    inside accept() on the single serve_forever thread, so a client that
+    connects and never sends a ClientHello (a port scan, a TCP health check,
+    a stalled NAT'd agent) stalls every device in the fleet. The handshake
+    belongs in the worker thread, as it already does for the console and the
+    artifact server.
+    """
+    import ssl as _ssl
+    import subprocess
+    key = str(tmp_path / "k.pem")
+    crt = str(tmp_path / "c.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=iris"],
+        check=True, capture_output=True)
+    combined = str(tmp_path / "combined.pem")
+    with open(combined, "w") as out:
+        for part in (crt, key):
+            with open(part) as f:
+                out.write(f.read())
+
+    state = str(tmp_path / "state")
+    os.makedirs(state, exist_ok=True)
+    store = catalog.CatalogStore(state)
+    srv = catalog.make_server("127.0.0.1", 0, store,
+                              str(tmp_path / "secrets.json"),
+                              certfile=combined)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert srv.request_queue_size >= 128        # not the stdlib 5
+        assert not isinstance(srv.socket, _ssl.SSLSocket)  # listener stays plain
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)
+        time.sleep(0.3)                              # never sends a ClientHello
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", port, context=ctx,
+                                           timeout=5)
+        conn.request("GET", "/v1/does-not-exist")    # served, so TLS completed
+        assert conn.getresponse().status in (401, 404)
+        conn.close()
+        idle.close()
+    finally:
+        srv.shutdown()

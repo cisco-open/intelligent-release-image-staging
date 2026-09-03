@@ -72,13 +72,25 @@ INPUT="$RUN_DIR/seeder.input"
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 python3 "$SCRIPT_DIR/reseed_input.py" "$IRIS_STATE" "$IRIS_IMAGES_DIR:$IMAGES_ROOT" "$IMAGES_DIR" > "$INPUT" 2>/dev/null || : > "$INPUT"
 
+# The RPC secret goes through a mode-0600 aria2 conf file, never the argv:
+# `--rpc-secret=...` on the command line is visible to every local user on
+# the Docker host via /proc/<pid>/cmdline (`docker top iris`, `ps`), which
+# undoes the tmpfs-only discipline the entrypoint keeps for the plaintext.
+# aria2 reads --conf-path before the remaining options, so everything else
+# stays on the command line where the tests and operators can see it.
+CONF="$RUN_DIR/seeder.aria2.conf"
+( umask 077; printf 'rpc-secret=%s\n' "$RPC_SECRET" > "$CONF" ) \
+  || { echo "FATAL: cannot write $CONF" >&2; exit 1; }
+chmod 0600 "$CONF"
+unset RPC_SECRET
+
 exec "$ARIA2" \
+  --conf-path="$CONF" \
   --listen-port="$LISTEN_PORT" \
   ${EXT_FLAG:+"$EXT_FLAG"} \
   --enable-rpc=true \
   --rpc-listen-all=false \
   --rpc-listen-port="$RPC_PORT" \
-  --rpc-secret="$RPC_SECRET" \
   --enable-dht=false \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \

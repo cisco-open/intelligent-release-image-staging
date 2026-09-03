@@ -52,9 +52,34 @@ setup() {
   [[ "$output" == *"ip address 100.92.9.125 255.255.255.252"* ]]
 }
 
-@test "dry-run emits ip router isis" {
+# IRIS-11-005: `ip router isis` used to be unconditional (this test asserted
+# it). It is now opt-in per record via SVI_IGP=isis, so IRIS never injects its
+# subnet into an IGP -- or creates a `router isis` process -- unasked.
+@test "dry-run does NOT emit ip router isis unless SVI_IGP=isis" {
   run bash "$INSTALL" --dry-run
-  [[ "$output" == *"ip router isis"* ]]
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"ip router isis"* ]]
+}
+
+@test "dry-run emits ip router isis on the SVI when SVI_IGP=isis" {
+  SVI_IGP=isis run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *$'ip address 100.92.9.125 255.255.255.252\n ip router isis'* ]]
+}
+
+@test "an unknown SVI_IGP is refused" {
+  SVI_IGP=ospf run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"SVI_IGP must be"* ]]
+}
+
+@test "routed dry-run trunks the AppGig ADDITIVELY, never with the bare (replacing) form" {
+  # The bare form replaces the allowed list on the switch's single app-hosting
+  # uplink, dropping every other IOx app's VLAN.
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"switchport trunk allowed vlan add 666"* ]] || return 1
+  ! grep -Eq 'switchport trunk allowed vlan [0-9]' <<<"$output"
 }
 
 @test "dry-run emits app-hosting appid guestshell" {
@@ -372,10 +397,15 @@ run_with_timeout() {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
+  # STAGE_HOST must be an address this machine CANNOT own: device-install.sh
+  # decides locality with `ip -o addr | grep -qw "$STAGE_HOST"`, so a real lab
+  # address makes the test take the local-staging branch (and silently stop
+  # proving anything) on the very host that owns it. 192.0.2.10 is TEST-NET-1
+  # (RFC 5737), reserved for documentation and never assigned to an interface.
   run_with_timeout 5 env IRIS_ARTIFACTS_DIR="$ARTDIR" \
     DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
     GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 \
-    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=100.92.9.3 STAGE_HOST=192.0.2.10 \
     IRIS_CRT_FILE="$CRTFILE" \
     bash "$STUBDIR/device/device-install.sh"
 

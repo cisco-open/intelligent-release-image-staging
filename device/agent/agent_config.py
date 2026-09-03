@@ -55,20 +55,50 @@ def load(path):
     return cfg
 
 
+def _file_keys(path):
+    """Keys physically present in the conf at `path` (empty set when there is
+    no file). Same line grammar as load(), no validation."""
+    keys = set()
+    try:
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                keys.add(s.split("=", 1)[0].strip())
+    except OSError:
+        pass
+    return keys
+
+
 def write_conf(path, cfg):
     """Atomically rewrite the agent conf as sorted `key = value` lines.
     Writes a sibling tmp file then os.replace()s it over `path` so a crash
     mid-write never leaves a half-written conf the next tick would fail to
     parse. Only `key = value` lines are written — comments in the original
     file are NOT preserved (this is a machine-managed file; comment-stripping
-    is intentional). Stdlib only."""
+    is intentional).
+
+    A DEFAULTS key that was not in the file and still carries its default
+    value is NOT written. load() backfills every DEFAULTS key into the dict
+    it returns, so writing that dict back froze the agent's defaults into
+    each device conf on its first token refresh — a later agent release that
+    changes a default (max_peers, telemetry_stream, ...) never reached a
+    deployed device. Keys the file already had, values that differ from the
+    default, REQUIRED keys and keys outside DEFAULTS (catalog_ca, tokens) are
+    always written, so an explicit setting — including one explicitly set to
+    the default value — survives every round-trip. Stdlib only."""
+    present = _file_keys(path)
+    rows = {k: v for k, v in cfg.items()
+            if k in present or k in REQUIRED or k not in DEFAULTS
+            or str(v) != DEFAULTS[k]}
     directory = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(
         dir=directory, prefix=".%s-" % os.path.basename(path), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            for k in sorted(cfg):
-                f.write("%s = %s\n" % (k, cfg[k]))
+            for k in sorted(rows):
+                f.write("%s = %s\n" % (k, rows[k]))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)

@@ -139,7 +139,13 @@ enrollment.
 
 A `legacy` participant is visible, answered, and counted, but it carries no
 device identity: it is never written to the durable endpoint map, never joined to
-a device row, and cannot be quarantined individually.
+a device row, and cannot be quarantined individually. Because every device that
+ever received a torrent carrying a previous seeder token still holds it, the
+tracker treats a legacy announce from an address that a durable endpoint
+attributes to a quarantined or revoked device as that device: it receives no
+peers and is handed to nobody. Retire previous seeder tokens once every device
+torrent has been personalised; that retirement, not the address hint, is the
+real boundary.
 
 **Duplicate credential ownership** fails closed. The announce and catalog
 authorization indexes are built strictly: if two records share a credential
@@ -321,9 +327,11 @@ itself. Any fetch, signature, or parse failure leaves every stored
 verification verdict untouched: a broken or tampered feed can never
 quarantine an image.
 
-A sha512 mismatch quarantines the image: seeding stops, it can no longer be
-newly assigned, and it is auto-unassigned from every device that already had
-it approved. `DEFERRAL_STATUS` on a matched feed row surfaces as a console
+A sha512 mismatch quarantines the image: seeding stops and stays stopped
+across container restarts (the startup re-seed only re-seeds torrents the
+catalog holds and has not quarantined), it can no longer be newly assigned, and
+it is auto-unassigned from every device that already had it approved. Releasing
+the quarantine is what resumes seeding. `DEFERRAL_STATUS` on a matched feed row surfaces as a console
 warning and never quarantines — an image Cisco has deferred is not treated
 as tampered. See [Image verification](operations.md#image-verification) for
 the schedule, the offline path for air-gapped servers, and how an operator
@@ -339,7 +347,67 @@ with `openssl pkey`, its passphrase piped over stdin and never passed as an
 argument or written to a log, and the key is stored age-encrypted at rest
 either way.
 
+The console **fails closed to TLS**. At start it resolves `IRIS_GUI_CERT`
+(the imported override, when its file exists) and then `IRIS_CERT`; if
+neither loads, `iris-gui` exits with a message naming both paths instead of
+serving plain HTTP. The old silent fallback accepted the admin password in
+cleartext and then could not even keep a session, because browsers discard
+a `Secure` cookie set over `http://` anywhere but `localhost`. Set
+`IRIS_GUI_ALLOW_PLAINTEXT=1` to opt into a plaintext console deliberately —
+loopback or an isolated lab network only. With the opt-in the session
+cookie drops its `Secure` attribute (it keeps `HttpOnly` and
+`SameSite=Strict`), a warning is printed at start, and a certificate
+uploaded through Settings is saved but reported as not applied until the
+next restart. The listener completes the TLS handshake in the
+per-connection worker thread, so a client that connects and never sends a
+ClientHello ties up only its own connection.
+
+The console's trust store (Settings → TLS & trust → Trusted CAs) accepts
+only blocks that OpenSSL parses as X.509 certificates, whether pasted or
+downloaded. One `CERTIFICATE` block that is not a certificate would make
+OpenSSL reject the whole runtime bundle — and every private CA in it — so
+such input is refused before anything is written; a store file that fails
+to load is skipped and named on stderr when the bundle is rebuilt, and a
+degraded `ssl_context()` (system roots only) is logged rather than silent.
+
+### Console sessions
+
+Sessions live in the console process and expire on idle. The console's
+periodic view refreshers mark themselves with `X-IRIS-Poll: 1` (GET only);
+the server validates the session for those without refreshing its idle
+clock, so a console left open on a polled view still reaches the idle
+timeout Settings advertises — only operator input and mutations count as
+activity. The break-glass reset (`iris-gui-admin`) runs in another process
+and reaches those sessions through the store: it stamps a floor into the
+admin record and the console drops every session created at or before it
+on that session's next request. The in-console password change keeps its
+caller's session and revokes the others.
+
 ## Device SSH host keys
+
+### Server-side sessions (console, installers, lab transports)
+
+Every SSH session the server or an operator's installer opens -- the device
+transports `lab/device-run.sh` and `lab/xr-run.sh`, the stage-host push in
+`device/device-install.sh` / `device/router-install.sh`, and the RPM `scp` in
+`device/xr-install.sh` -- verifies the peer through one shared policy,
+`lab/iris-ssh-policy.sh`:
+
+| Environment | Behaviour |
+| --- | --- |
+| `IRIS_SSH_HOST_KEY="<type> <base64>"` | Pin exactly that key for the peer (`StrictHostKeyChecking=yes` against a private temporary `known_hosts`). |
+| `IRIS_SSH_KNOWN_HOSTS=<path>` | Strict verification against that file; an unreadable path refuses to connect rather than falling back. |
+| neither (default) | `StrictHostKeyChecking=accept-new` against a **persistent** `known_hosts` under `$IRIS_SSH_STATE_DIR` (default `$IRIS_STATE/ssh`, i.e. the server's state volume; `~/.iris/ssh` outside the container). First contact records the key; every later session must present the same one. `/dev/null` is never used. |
+| `IRIS_SSH_LEGACY=1` | Opt in to the SHA-1 KEX, `ssh-rsa` and CBC-cipher additions old IOS-XE images need. Off by default. |
+
+ssh's own diagnostics are forwarded (redacted) on stderr instead of being
+discarded, so "connection refused", "no matching key exchange method" and
+"host key changed" can be told apart. A changed key is reported with the
+`known_hosts` path and the `ssh-keygen -R <ip> -f <file>` command to clear it
+when a device was legitimately re-imaged -- and a note to treat it as a
+possible interception otherwise.
+
+### On-device agent sessions
 
 The agent's IOS control channel supports optional host-key pinning through the
 `device_ssh_known_hosts` agent config key, mirroring the verify-if-present

@@ -181,6 +181,14 @@ are contract:
 | `iris_peer_enforcement_applied_revision` | `iris.peer.enforcement.applied_revision` | `1` | — |
 | `iris_peer_enforcement_desired_ips` | `iris.peer.enforcement.desired_ips` | `{ip}` | — |
 | `iris_peer_enforcement_health` | `iris.peer.enforcement.health` | `1` | — |
+| `iris_transfer_lifecycle_plans` | `iris.transfer.lifecycle.plans` | `{plan}` | — |
+| `iris_transfer_lifecycle_plan_cap` | `iris.transfer.lifecycle.plan_cap` | `{plan}` | — |
+| `iris_transfer_lifecycle_awaiting_report` | `iris.transfer.lifecycle.awaiting_report` | `{plan}` | — |
+| `iris_transfer_lifecycle_unconfirmed` | `iris.transfer.lifecycle.unconfirmed` | `{event}` | — |
+| `iris_transfer_lifecycle_dropped_unemitted_total` | `iris.transfer.lifecycle.dropped_unemitted` | `{plan}` | — (counter) |
+| `iris_transfer_lifecycle_live_evicted_total` | `iris.transfer.lifecycle.live_evicted` | `{plan}` | — (counter) |
+| `iris_transfer_lifecycle_retired_undelivered_total` | `iris.transfer.lifecycle.retired_undelivered` | `{event}` | — (counter) |
+| `iris_transfer_lifecycle_promoted_recovered_total` | `iris.transfer.lifecycle.promoted_recovered` | `{plan}` | — (counter) |
 | `iris_origin_sent_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
 | `iris_peer_attributed_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
 | `iris_peer_unattributed_bytes_total` | — (Prometheus only) | `By` | `image`, `info_hash` |
@@ -189,7 +197,27 @@ are contract:
 
 Throughput and progress are **omitted** for an image with no currently fresh
 device rather than published as a zero, and the freshness age is exported so the
-omission is explainable.
+omission is explainable. The `iris_transfer_lifecycle_*` block is omitted whole
+when the durable plan store is absent or unreadable, for the same reason: a
+missing store is not a store with nothing in it, and a fabricated `0` would
+read as "the bound never bit".
+
+Those eight are the durable plan store's own bookkeeping, and they answer the
+questions no other signal can. `plans` against `plan_cap` says whether the
+store is near the hard row limit; `dropped_unemitted` and `live_evicted` are
+non-zero only once it has been exceeded, which means lifecycle events are
+being discarded before they ever reach the queue — raise `MAX_PLANS`.
+`awaiting_report` counts plans this tracker has watched seed for which no
+terminal report bearing that plan's `transfer_id` has arrived (a fleet still
+running agents too old to adopt the server's plan sits there, visibly, instead
+of presenting as an absence of events). `unconfirmed` is the export backlog: a
+steady non-zero value is a collector problem, not a fleet one, and
+`retired_undelivered` is where that backlog ends up if the outage outlasts the
+retention window — records that were queued, never acknowledged, and are now
+gone. `promoted_recovered` counts promotions that rebuilt a lost store row and
+therefore replayed the durable instant rather than this tracker's own seeder
+observation, which is what explains a `seeding_started_at` a backend already
+holds a different value for.
 
 !!! note "Which throughput number to trust"
     `iris.transfer.throughput` is reported **by the devices**, and a device
@@ -427,7 +455,10 @@ the tracker fact — it never talks to the tracker; only its aria2 announces. Th
 two attributes let an operator see **which** condition was the laggard:
 `tracker_seeder_at` well before `checksum_verified_at` is the ordinary case
 (the device was hashing); the reverse ordering means the swarm, not the device,
-was the wait.
+was the wait. Neither is ever earlier than `iris.transfer.planned_at`: a peer
+row outlives the plan it was observed under, so a re-assignment of an image the
+device is already seeding would otherwise export a `tracker_seeder_at` from the
+*previous* transfer and make that comparison read as nonsense.
 
 Each condition is latched **durably and independently** at first observation,
 because neither is durable in itself: a peer row is pruned after 60 seconds,

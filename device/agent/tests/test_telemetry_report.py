@@ -258,25 +258,6 @@ def test_build_report_runtime_mode_env_then_conf(monkeypatch):
     assert rep["agent"]["runtime_mode"] == "container"
 
 
-# ---- trim_report(): constrained-tier payload ----
-
-def test_trim_report_drops_peers_marks_trimmed_copies():
-    full = {"ts": 1, "image_id": "i", "event": "pull",
-            "transfer": {"total_bytes": 9},
-            "link": {"tier": "constrained", "rtt_ms_median": 300,
-                     "rtt_samples": 8, "hb_failures": 0, "trimmed": False},
-            "peers": [{"ip": "10.0.0.1"}], "peers_total": 5,
-            "agent": {"version": "unknown", "runtime_mode": "guestshell"}}
-    trimmed = telemetry_report.trim_report(full)
-    assert trimmed["peers"] == []
-    assert trimmed["peers_total"] == 5   # participation summary survives trim
-    assert trimmed["link"]["trimmed"] is True
-    assert trimmed["link"]["tier"] == "constrained"
-    assert trimmed["transfer"] == full["transfer"]
-    # the ORIGINAL stays intact (a later pull can still send full detail)
-    assert full["peers"] == [{"ip": "10.0.0.1"}]
-
-
 # ---- pull_requested(): garbage-tolerant heartbeat-response parsing ----
 
 @pytest.mark.parametrize("resp", [None, "ok", "", [], {}, 42,
@@ -406,36 +387,6 @@ class TestShouldSample:
         telemetry_report.store_directives(state, {"stream_every": 10}, 1000.0)
         tele = {"stream_last_ts": 1000.0}
         assert not telemetry_report.should_sample(state, tele, "good", 1120.0)
-
-
-class TestBuildSample:
-    STATS = {"completedLength": "447741952", "downloadSpeed": "2914000",
-             "uploadSpeed": "187000", "connections": "6"}
-
-    def test_downloading_full_shape(self):
-        s = telemetry_report.build_sample("img-1", "downloading",
-                                          dict(self.STATS), "good")
-        assert s == {"v": 1, "image_id": "img-1", "phase": "downloading",
-                     "done_bytes": 447741952, "down_bps": 2914000,
-                     "up_bps": 187000, "peers": 6, "tier": "good"}
-
-    def test_seeding_only_maps_to_wire_seeding(self):
-        s = telemetry_report.build_sample("img-1", "seeding-only",
-                                          dict(self.STATS), "constrained")
-        assert s["phase"] == "seeding" and s["tier"] == "constrained"
-
-    def test_seeder_with_no_takers_is_silent(self):
-        stats = dict(self.STATS, connections="0")
-        assert telemetry_report.build_sample(
-            "i", "seeding-only", stats, "good") is None
-
-    def test_none_on_wrong_phase_tier_or_missing_stats(self):
-        assert telemetry_report.build_sample(
-            "i", "steady", dict(self.STATS), "good") is None
-        assert telemetry_report.build_sample(
-            "i", "downloading", dict(self.STATS), "bad") is None
-        assert telemetry_report.build_sample(
-            "i", "downloading", None, "good") is None
 
 
 class TestConfDefault:

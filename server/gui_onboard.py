@@ -11,11 +11,12 @@ runner and the token minter are INJECTED so orchestration is unit-testable witho
 a device. Stage-only invariant preserved: device-install.sh only sets up the agent
 + enrollment; it never installs/activates/reloads. Stdlib only.
 
-Note: onboarding passes DEVICE_PASS (and, when configured in the store, the
-stage-host HOST_USER/HOST_PASS) to the installer via the environment (consumed
-by lab/device-run.sh's SSHPASS and the installer's sshpass). The streamed job
-lines are the installer's stdout, which echoes neither password (sshpass reads
-them from the env)."""
+Note: onboarding passes DEVICE_PASS to the installer via the environment
+(consumed by lab/device-run.sh's SSHPASS and the installer's sshpass). The
+streamed job lines are the installer's stdout, which never echoes the password
+(sshpass reads it from the env). The stage-host HOST_USER/HOST_PASS pair is
+deliberately NOT exported: the console always stages locally
+(IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
 import inspect
 import ipaddress
 import os
@@ -34,6 +35,11 @@ _JOB_TTL = 3600  # seconds a terminal onboard job is retained before eviction
 # undeploy for it is refused. Comfortably above the slowest real recipe (the
 # router guestshell wait plus copy retries, ~7-10 min).
 _JOB_DEADLINE = int(os.environ.get("IRIS_ONBOARD_JOB_TIMEOUT") or 7200)
+# How long reap_overdue_jobs waits after signalling an overdue installer
+# before escalating (SIGTERM -> SIGKILL -> mark failed). The recipe's ssh
+# child normally exits within seconds of SIGTERM; the grace only matters for a
+# process that ignores it.
+_REAP_GRACE = int(os.environ.get("IRIS_ONBOARD_REAP_GRACE") or 60)
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
 # A fleet action may legitimately be large, but a request storm must not retain
@@ -758,17 +764,18 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
     return evidence
 
 
-def apply_iox_preflight(resolved, evidence):
-    """Return renderer input bound to validated live IOx device identity --
-    the IOx counterpart of apply_router_preflight. Fails closed: a missing
-    or unsafe identity, or a mismatch against an identity already bound to
-    this job, raises rather than letting an empty/stale value through to
-    _build_env's EXPECTED_DEVICE_IDENTITY export."""
+def _apply_identity_preflight(resolved, evidence, label):
+    """Return renderer input bound to a validated live device identity -- the
+    Guest Shell / IOx counterpart of apply_router_preflight. Fails closed: a
+    missing or unsafe identity, or a mismatch against an identity already
+    bound to this job, raises rather than letting an empty/stale value
+    through to _build_env's EXPECTED_DEVICE_IDENTITY export."""
     if evidence.get("status") != "passed":
-        raise ValueError("iox preflight did not pass")
+        raise ValueError("%s preflight did not pass" % label)
     identity = str(evidence.get("device_identity") or "").strip()
     if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
-        raise ValueError("iox preflight did not return a safe device identity")
+        raise ValueError("%s preflight did not return a safe device identity"
+                         % label)
     result = dict(resolved)
     bound_identity = str(result.get("device_identity") or "").strip()
     if bound_identity and bound_identity != identity:
@@ -778,6 +785,50 @@ def apply_iox_preflight(resolved, evidence):
     if detected_model:
         result["model"] = detected_model
     return result
+
+
+def apply_iox_preflight(resolved, evidence):
+    """IOx: bind the live processor board ID (and model) into the plan."""
+    return _apply_identity_preflight(resolved, evidence, "iox")
+
+
+def apply_guestshell_preflight(resolved, evidence):
+    """Guest Shell: bind the live processor board ID (and model) into the
+    plan, exactly like IOx. The evidence used to be discarded, so a Guest
+    Shell record never carried the identity of the box it was written for
+    and its teardown could not be checked against the device answering at
+    the address."""
+    return _apply_identity_preflight(resolved, evidence, "guestshell")
+
+
+def apply_xr_preflight(resolved, evidence):
+    """IOS-XR: the appmgr recipes consume no board identity (see
+    _default_xr_preflight), so only the detected model is bound; the evidence
+    itself is what the caller persists on the record."""
+    if evidence.get("status") != "passed":
+        raise ValueError("xr preflight did not pass")
+    result = dict(resolved)
+    detected_model = str(evidence.get("detected_model") or "").strip()
+    if detected_model:
+        result["model"] = detected_model
+    return result
+
+
+def bind_preflight(resolved, evidence, platform=None):
+    """Bind a platform's execution-time preflight evidence into its resolved
+    plan: one entry point for every platform, so a caller that persists the
+    bound plan onto the deployment record (gui_server's pre_apply) cannot
+    do it for routers and forget the rest."""
+    platform = platform or (resolved or {}).get("platform")
+    if platform == "router":
+        return apply_router_preflight(resolved, evidence)
+    if platform == "iox":
+        return apply_iox_preflight(resolved, evidence)
+    if platform == "guestshell":
+        return apply_guestshell_preflight(resolved, evidence)
+    if platform == _XR_PLATFORM:
+        return apply_xr_preflight(resolved, evidence)
+    raise ValueError("no preflight binding for platform %r" % (platform,))
 
 
 # The names device/xr-install.sh gives IRIS's two artifacts on the router
@@ -921,6 +972,12 @@ class OnboardService:
                 # wakeups provide periodic maintenance without another thread.
                 with self._lock:
                     self._evict_old(self._now())
+                # The reaper's SIGTERM -> SIGKILL escalation must advance even
+                # when no operator submits anything for hours.
+                try:
+                    self.reap_overdue_jobs()
+                except Exception:
+                    pass
                 continue
             try:
                 work()
@@ -952,8 +1009,12 @@ class OnboardService:
         management_type = target["management_type"]
         if management_type == "legacy_routed":
             management_type = "routed"
-        target_ip = (target.get("device_ip")
-                     if management_type in ("router-routed", "router-nat") else None)
+        # The address comes from the RESOLVED target for every management
+        # type: on undeploy that is the deployment record, so an inventory
+        # edit after deployment cannot retarget the teardown at another box.
+        # Only the router path used to be bound this way; Guest Shell and IOx
+        # teardowns followed the live fleet row.
+        target_ip = target.get("device_ip")
         env.update({
             "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
@@ -975,7 +1036,8 @@ class OnboardService:
             "ROUTER_RESOURCES_OWNED": str(target.get("router_resources_owned", "0")),
             # inband IOx reaches IOS at the switch's management IP by default
             "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
-                             or (dev["device_ip"] if management_type == "inband" else "")),
+                             or ((target_ip or dev["device_ip"])
+                                 if management_type == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
@@ -994,16 +1056,13 @@ class OnboardService:
         })
         if target.get("model"):
             env["MODEL"] = target["model"]
-        # Stage-host SSH login for the installer's remote-STAGE_HOST branch (in
-        # Docker the container's netns never owns STAGE_HOST, so artifact staging
-        # goes over ssh). The age-encrypted store beats any inherited process env;
-        # unset leaves the plain passthrough (and the on-host local path needs
-        # neither). getattr: injected test doubles may predate stage-host support.
-        stage_host_fn = getattr(self.creds, "stage_host_secrets", None)
-        sh = stage_host_fn() if callable(stage_host_fn) else None
-        if sh:
-            env["HOST_USER"] = sh["username"]
-            env["HOST_PASS"] = sh["password"]
+        # IRIS_STAGE_LOCAL=1 above makes the recipes' remote-STAGE_HOST ssh
+        # branch -- the only reader of HOST_USER/HOST_PASS -- unreachable, so
+        # the stage-host credential from the store is never exported here and
+        # an inherited pair is dropped: a password no recipe can use has no
+        # business in the environment of every installer and its ssh children.
+        env.pop("HOST_USER", None)
+        env.pop("HOST_PASS", None)
         # Console-driven feature flags (e.g. the telemetry checkboxes) applied
         # last: explicit operator intent beats any inherited process env.
         if env_extra:
@@ -1080,6 +1139,29 @@ class OnboardService:
             env["DEVICE_SSH_PASS"] = env["DEVICE_PASS"]
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
+
+    def _bind_evidence(self, job_id, device_id, action, job, pre_apply,
+                       evidence, platform, dev, env, script):
+        """Bind a platform preflight's evidence into the job's resolved plan
+        and rebuild the installer env from it. With a pre_apply hook (the
+        console's record-backed onboard) the hook persists the bound plan and
+        the evidence onto the deployment record first; without one (embedded
+        / degraded, no record store) the plan is bound in memory only.
+        Returns the refreshed (dev, env, platform, script)."""
+        resolved = job.get("resolved") or dev
+        final_resolved = (pre_apply(evidence) if pre_apply else
+                          bind_preflight(resolved, evidence, platform=platform))
+        if final_resolved is None:
+            return dev, env, platform, script
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is not None:
+                current["resolved"] = final_resolved
+        dev, env = self._build_env(device_id, mint=False,
+                                   resolved=final_resolved,
+                                   env_extra=job.get("env_extra"))
+        platform, script = self._resolve(device_id, dev, env, action)
+        return dev, env, platform, script
 
     def _persist_os_family(self, device_id, dev, prior_family):
         """Best-effort cache of a freshly classified os_family onto the
@@ -1234,10 +1316,18 @@ class OnboardService:
                     # carrying IRIS config was refused as a router and
                     # silently accepted here.
                     try:
-                        self._guestshell_preflight(
+                        evidence = self._guestshell_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
                         raise ValueError("preflight failed: %s" % exc)
+                    # The evidence used to be discarded here. Bind it (board
+                    # ID, model) into the plan and, through pre_apply, onto
+                    # the deployment record -- the same as every other
+                    # platform -- so the record names the box it describes
+                    # and its teardown exports EXPECTED_DEVICE_IDENTITY.
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
                 if action == "onboard" and platform == "router":
                     # The router preflight classifies os_family from the
                     # banner it just read (_default_router_preflight), same
@@ -1277,11 +1367,15 @@ class OnboardService:
                     # the router/iox flows -- see _persist_os_family.
                     prior_family = dev.get("os_family")
                     try:
-                        self._xr_preflight(dev, env, j.get("resolved") or dev)
+                        evidence = self._xr_preflight(
+                            dev, env, j.get("resolved") or dev)
                     except Exception as exc:
                         self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
                     self._persist_os_family(device_id, dev, prior_family)
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
                 elif action == "onboard" and platform == "iox":
                     # The console never supplies device_identity for IOx
                     # devices (unlike router, there is no separate
@@ -1301,17 +1395,13 @@ class OnboardService:
                         self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
                     self._persist_os_family(device_id, dev, prior_family)
-                    final_resolved = apply_iox_preflight(
-                        j.get("resolved") or dev, evidence)
-                    with self._lock:
-                        current = self._jobs.get(job_id)
-                        if current is not None:
-                            current["resolved"] = final_resolved
-                    dev, env = self._build_env(
-                        device_id, mint=False, resolved=final_resolved,
-                        env_extra=j.get("env_extra"))
-                    platform, script = self._resolve(
-                        device_id, dev, env, action)
+                    # Bound onto the RECORD as well as the job (pre_apply),
+                    # not just into this job's env as before: the persisted
+                    # record used to say preflight "not-required" and carry
+                    # no identity for a check that had in fact run.
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
                 # record must not become teardown authority: another actor
@@ -1492,13 +1582,23 @@ class OnboardService:
                 self._append_locked(j, "[abort requested by operator]")
                 return True
             self._append_locked(j, "[abort requested by operator]")
+        return self._signal_group(proc, signal.SIGTERM)
+
+    @staticmethod
+    def _signal_group(proc, sig):
+        """Deliver *sig* to the installer's whole process group -- the
+        recipe's ssh child is what holds the pipe, so signalling only the
+        shell leaves the job hung. Falls back to the Popen handle when the
+        group cannot be resolved (already gone, or a test double without a
+        pid). Returns True if something was signalled."""
         try:
-            # Signal the whole group: the recipe's ssh child is what holds the
-            # pipe, so terminating only the shell leaves the job hung.
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                os.killpg(os.getpgid(proc.pid), sig)
             except (OSError, AttributeError, ProcessLookupError):
-                proc.terminate()
+                if sig == signal.SIGKILL:
+                    proc.kill()
+                else:
+                    proc.terminate()
         except Exception:
             return False
         return True
@@ -1521,7 +1621,13 @@ class OnboardService:
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
                 action = j.get("action", "onboard")
-                dur = _fmt_dur(j["finished_at"] - j["started_at"])
+                # A job can finish without ever starting (a reaper or cancel
+                # path); measure from the queue stamp then, never crash.
+                base = j.get("started_at")
+                if base is None:
+                    base = j.get("queued_at")
+                dur = (_fmt_dur(j["finished_at"] - base)
+                       if base is not None else "?")
                 platform = j.get("platform")
                 if state == "done":
                     detail = "job %s %s platform=%s rc=0" % (job_id, dur, platform)
@@ -1691,37 +1797,84 @@ class OnboardService:
         return n
 
     def reap_overdue_jobs(self):
-        """Fail every job past its deadline, with the SAME bookkeeping an
-        ordinary finish gets.
+        """Stop every RUNNING job past its deadline and return the ids acted
+        on.
 
-        The old inline version wrote a ``rc`` key that no reader looks at (they
-        all read ``returncode``), never went through _finish, and so left the
-        installer handle in self._procs, wrote no persisted log, and emitted no
-        ``*_finished`` audit event — a job could fail with nothing anywhere
-        saying so. Going through _finish fixes all four.
+        A running installer is signalled like an operator abort -- SIGTERM to
+        its process group, SIGKILL if it is still there _REAP_GRACE later --
+        and the job stays ``running`` until its worker returns, so the busy
+        guard keeps refusing the opposite action while the recipe may still
+        be touching the device, abort() stays reachable, and the worker
+        thread is freed instead of leaking for good. The worker then finishes
+        the job the ordinary way (record -> needs-reconcile, real rc, log,
+        audit). The old version dropped the Popen handle without a signal:
+        the installer kept running, the busy guard opened (an undeploy could
+        interleave with the still-running install), abort() went dead, and
+        the blocked worker was never replaced.
 
-        Takes the lock itself and does the log/audit I/O outside it, so start()
-        can call this before its busy guard.
+        Only when nothing can be signalled -- a runner that never reports its
+        process, or a group that survived SIGKILL -- is the job marked failed
+        outright, with the SAME bookkeeping an ordinary finish gets (going
+        through _finish: returncode, persisted log, *_finished audit). Such a
+        worker may still return later and finish the job a second time; the
+        second finish records the real outcome, and recording it twice beats
+        a job that stays non-terminal forever.
 
-        A genuinely hung worker may still return later and finish the job a
-        second time. That is deliberate and predates this: the second finish
-        records the real outcome, and recording it twice beats a job that stays
-        non-terminal forever."""
+        Queued jobs are deliberately never reaped: a deep queue wait is
+        legitimate (a large batch behind a small pool), cancel_queued /
+        cancel_device bound it, and failing one here used to run the job
+        anyway later, or drop it with its planned record orphaned.
+
+        Takes the lock itself and does the signalling and log/audit I/O
+        outside it, so start() can call this before its busy guard."""
+        to_signal = []
+        to_finish = []
         with self._lock:
-            overdue = self._reap_overdue(self._now())
-            for jid in overdue:
-                # Claim it while still holding the lock: _reap_overdue only
-                # considers jobs with no finished_at, so stamping one here stops
-                # a concurrent reap from failing the same job twice. _finish
-                # overwrites this with the real stamp a moment later.
-                self._jobs[jid]["finished_at"] = int(self._now())
-                self._append_locked(
-                    self._jobs[jid],
-                    "[job exceeded %ds deadline; marked failed so the device is "
-                    "not left permanently busy]" % _JOB_DEADLINE)
-        for jid in overdue:
+            now = self._now()
+            acted = self._reap_overdue(now)
+            for jid in acted:
+                j = self._jobs[jid]
+                proc = self._procs.get(jid)
+                stage = j.get("_reap_stage", 0)
+                if not self._run_supports_proc:
+                    stage = 2   # nothing to signal: straight to marking failed
+                if stage == 0:
+                    j["_reap_stage"] = 1
+                    j["_reap_signalled_at"] = now
+                    # Covers the pre-spawn window exactly like abort(): the
+                    # worker stops before launching the installer, or
+                    # _register_proc terminates it on registration.
+                    j["_abort_requested"] = True
+                    self._append_locked(
+                        j, "[job exceeded %ds deadline; terminating the "
+                        "installer]" % _JOB_DEADLINE)
+                    if proc is not None:
+                        to_signal.append((proc, signal.SIGTERM))
+                elif stage == 1:
+                    j["_reap_stage"] = 2
+                    j["_reap_signalled_at"] = now
+                    self._append_locked(
+                        j, "[installer still running %ds after SIGTERM; "
+                        "killing its process group]" % _REAP_GRACE)
+                    if proc is not None:
+                        to_signal.append((proc, signal.SIGKILL))
+                else:
+                    # Claim it while still holding the lock: _reap_overdue
+                    # only considers jobs with no finished_at, so stamping
+                    # one here stops a concurrent reap from failing the same
+                    # job twice. _finish overwrites it a moment later.
+                    j["_reap_stage"] = 3
+                    j["finished_at"] = int(now)
+                    self._append_locked(
+                        j, "[job exceeded %ds deadline and its installer "
+                        "could not be stopped; marked failed so the device "
+                        "is not left permanently busy]" % _JOB_DEADLINE)
+                    to_finish.append(jid)
+        for proc, sig in to_signal:
+            self._signal_group(proc, sig)
+        for jid in to_finish:
             self._finish(jid, "error", -1)
-        return overdue
+        return acted
 
     def cancel_device(self, device_id):
         """Stop everything in flight for *device_id*: queued jobs are
@@ -1757,20 +1910,26 @@ class OnboardService:
         return {"cancelled": cancelled, "aborted": aborted}
 
     def _reap_overdue(self, now):
-        """Fail any job that has been running past the deadline.
+        """Ids of the RUNNING jobs whose deadline (measured from started_at,
+        never from the queue stamp) has passed and whose reaping is due:
+        never signalled yet, or signalled more than _REAP_GRACE ago.
 
         A hung recipe is indistinguishable from a slow one from here, so the
-        bound is deliberately generous. What matters is that the job becomes
-        TERMINAL: that releases the busy guard, lets the job record be
-        evicted, and leaves the deployment record in a state teardown can
-        read -- turning a permanent strand into an ordinary failure. Caller
-        must hold self._lock."""
+        bound is deliberately generous. Queue wait is not run time: a job
+        still ``queued`` has touched nothing and is bounded by cancel, and
+        counting its wait used to fail (and then run, or orphan) the tail of
+        every large batch. Caller must hold self._lock."""
         overdue = []
         for jid, j in self._jobs.items():
-            if j.get("state") not in _TERMINAL and j.get("finished_at") is None:
-                started = j.get("started_at") or j.get("queued_at")
-                if started is not None and now - started > _JOB_DEADLINE:
-                    overdue.append(jid)
+            if j.get("state") != "running" or j.get("finished_at") is not None:
+                continue
+            started = j.get("started_at")
+            if started is None or now - started <= _JOB_DEADLINE:
+                continue
+            signalled = j.get("_reap_signalled_at")
+            if signalled is not None and now - signalled <= _REAP_GRACE:
+                continue
+            overdue.append(jid)
         return overdue
 
     def _evict_old(self, now):

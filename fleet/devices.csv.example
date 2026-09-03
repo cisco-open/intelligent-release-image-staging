@@ -1,7 +1,9 @@
 device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
 # One row per device — NETWORK INFO ONLY. Tokens and secrets are handled
 # automatically by the Console/API onboarding flow (see the Management Type
-# and VLAN Ownership doc). Comment lines (#) and the header are ignored on import.
+# and VLAN Ownership doc). Comment lines (#) and the header are ignored on import,
+# so EVERY example row below is inert until you uncomment it. Addresses are
+# TEST-NET-1 (192.0.2.0/24, RFC 5737) placeholders -- replace them with yours.
 #
 # management_type (required): 'routed', 'inband', 'router-routed', 'router-nat', or 'xr-host'.
 #   routed  = IRIS creates a dedicated VLAN + SVI. Fill iris_vlan, svi_ip,
@@ -27,12 +29,12 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 #   (device_ip) by default; set this only to override it. Blank for Guest Shell.
 #
 # Routed example (dedicated IRIS VLAN/SVI):
-100.92.9.3,100.92.9.3,routed,666,100.92.9.125,255.255.255.252,100.92.9.126,255.255.255.252,100.92.9.125,,,C9300-48UXM,,,guestshell
+# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,guestshell
 # Inband Guest Shell example (existing management VLAN 120, static address):
-100.92.9.1,100.92.9.1,inband,,,,100.92.9.121,255.255.255.0,100.92.9.1,120,,C9300-48UXM,,,guestshell
-# Inband IOx example (IE-3400, app SSHes to the existing management SVI 100.90.168.98):
-100.90.168.99,100.90.168.99,inband,,,,100.90.168.97,255.255.255.0,100.90.168.98,120,100.90.168.98,IE-3400,,,iox
+# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,guestshell
+# Inband IOx example (IE-3400, app SSHes to the existing management SVI 192.0.2.1):
+# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,iox
 # C8000v router NAT example (VPG 10; use an operator-selected outside interface):
-# 100.92.9.40,100.92.9.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router
+# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router
 # Cisco 8201 IOS-XR example (no app-network fields):
-# 192.0.2.50,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr
+# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr

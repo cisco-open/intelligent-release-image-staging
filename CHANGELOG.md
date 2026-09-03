@@ -12,6 +12,264 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- **The transfer-lifecycle store's bounds are now numbers an operator can
+  read.** The durable plan store counts every row and record its two bounds
+  (`MAX_PLANS`, a week of retention) cost, but nothing read those counters, so
+  a fleet past the cap — or a collector outage long enough to age out
+  unacknowledged records — looked exactly like a fleet that never seeded:
+  lifecycle events for some transfers and silence for others, with nothing
+  anywhere saying rows were being discarded. Eight flat, unlabelled figures now
+  ride both metric surfaces on every sample pass, as
+  `iris.transfer.lifecycle.*` OTLP points and `iris_transfer_lifecycle_*`
+  Prometheus families on `:9101`: store occupancy against its cap, plans
+  watched seeding with no matching report yet, the unacknowledged export
+  backlog, and the four ways a row or a record can be lost. The block is
+  omitted whole when the store is absent or unreadable rather than published as
+  zeros — a missing store is not an empty one. Names and meanings are in
+  [Observability → Metrics names](docs/zensical/observability.md#metrics-names-operator-contract).
+
+### Fixed
+- **Install-mode flash reclaim no longer spends its one attempt on a refusal.**
+  A device that already holds the install lock answers `install remove
+  inactive` with "cannot start new install operation" and does nothing, and
+  `show install summary` does not report that state, so the pre-check could
+  not see it. The agent treated the refusal as a successful reclaim and burned
+  the per-image once-guard, permanently disabling reclaim for that image on a
+  device whose lock would have cleared by itself. The refusal is now
+  recognised in the command's own output, reported as a no-op, and retried on
+  the next tick. Observed on a Catalyst 9300 running IOS-XE 17.18.3.
+- **`tools/check-package-freshness.sh` no longer claims to have verified a
+  package that is not there.** An absent IOx tar was reported as `absent` and
+  then swept into the "verified: both IOx tars pin the live catalog
+  certificate" summary, exiting 0 having inspected nothing. Absent packages
+  are now named in a `NOT STAGED` block, block the verified verdict, and exit
+  non-zero, so the check an operator runs before a rollout cannot be green
+  because it found nothing to look at.
+- **A lifecycle event that a collector never acknowledged is no longer lost
+  silently.** A plan row is retired once its records have been *accepted by the
+  export queue*, not once the collector has confirmed them — requiring
+  confirmation would hold every row forever whenever a collector is down. The
+  consequence is real and unavoidable: an outage longer than the retention
+  window retires rows whose records were never acknowledged, and by then the
+  bounded in-memory queue no longer holds them. Nothing recorded that. The
+  store now counts those records in `events_retired_undelivered` and exports it
+  next to the standing backlog, so an outage that has already cost terminal
+  records is visible instead of being indistinguishable from a quiet fleet.
+  Rows of still-assigned plans are excluded — those are rebuilt and re-queued
+  under the same `event.id`, so they are a replay, not a loss.
+- **`iris.transfer.tracker_seeder_at` can no longer predate
+  `iris.transfer.planned_at`.** A peer registry row belongs to a peer, not to a
+  plan. Unassigning and re-assigning an image the device is already seeding
+  (both inside one agent tick, so aria2 never stops) leaves a row carrying the
+  *previous* transfer's completion instant, and the new plan latched it — the
+  tracker reporting it had watched a plan seed over an hour before that plan
+  existed. Since the observability guide tells operators to read that attribute
+  against `checksum_verified_at` to see which precondition was the laggard, the
+  comparison returned nonsense for exactly the re-assignment case. Any candidate
+  instant older than the plan is now skipped in favour of the next one, ending
+  at the tracker's own observation on the pass. The promotion instant itself is
+  unchanged (it was already floored at `planned_at`).
+- **`TransferLifecycle.prune()` no longer drops a live plan.** The manual
+  retention hook took no live plan set, so it could delete the row of a plan
+  that was still assigned — a `seeding` row is terminal while its assignment
+  stands — after which the next observation pass rebuilt it with an empty
+  marker map and re-emitted both events. Nothing in the tracker calls it today,
+  so this was latent, but the signature is what a future caller reads: it now
+  takes the live set and skips those rows, the same correctness rule the
+  automatic retention and size bound already obey.
+- **The test suite is green on a clean checkout, whatever machine runs it.**
+  Three tests silently depended on the host. The IOx staging test
+  (`device/iox/tests/test_stage_iox_package.bats`) asserted that
+  `tools/stage-iox-package.sh` fails fast when no catalog certificate is
+  configured, but on a host running the IRIS stack the helper found the live
+  `iris` container, copied the certificate out of it and ran a full package
+  build instead — so the assertion was never reached and the test failed. Docker
+  is now stubbed to "no such container", so the fast-fail path is exercised the
+  same way everywhere. The `device/tests/test_device_install.bats` remote-SSH
+  test used a real lab address as its "non-local" `STAGE_HOST`, which made the
+  build host that owns that address take the local-staging branch; it now uses a
+  TEST-NET-1 (RFC 5737) documentation address no machine can own. And
+  `device/agent/tests/test_report_v2.py` inherited `IRIS_RUNTIME_MODE` from the
+  environment, so it failed whenever the agent suite ran inside the IOx image,
+  which sets that variable; the test now clears it.
+- **The Compose project name is declared, not derived — and a deployment made
+  before this needs a one-time migration.** `server/docker-compose.yml` now sets
+  `name: iris`. Compose used to name the project after the compose file's parent
+  directory, which is always `server`, so a second checkout of this repository
+  on a host already running IRIS resolved to the *same* project and the *same*
+  named volumes as the live deployment: `up` adopted the production container,
+  `run --rm iris iris-bootstrap` re-bootstrapped production state, and
+  `down -v` deleted the state, the encrypted config and the published images.
+  **Migration:** an existing deployment's volumes are `server_iris-state`,
+  `server_iris-config` and `server_iris-images`; Compose will not find them under
+  the new name and will create empty ones instead (the old volumes are left
+  intact). Either keep the old project by adding `COMPOSE_PROJECT_NAME=server` to
+  `server/.env`, or copy the three volumes across with the stack down — both
+  paths are written out in [Server → Compose project
+  name](docs/zensical/server.md#compose-project-name). `container_name` is now
+  `${IRIS_CONTAINER:-iris}`, so a second stack can take a container name of its
+  own (names are host-global) with the same variable the helpers under `tools/`
+  already honour; the default is unchanged, so `docker exec iris …` keeps
+  working.
+- **`tools/start-compose-server.sh` talks to the container it just started.**
+  The health poll and the XR RPM freshness check addressed the literal name
+  `iris`, so run from a second checkout beside a live deployment they read the
+  *production* container: the script reported the new stack healthy because the
+  live one was, and compared the RPM against the live catalog certificate. Both
+  now use the container resolved from the script's own Compose project, with
+  `IRIS_CONTAINER` as the override the rest of `tools/` accepts, and an
+  unresolvable container fails the bring-up instead of reaching across the
+  deployment boundary.
+- **`server/docker-compose.override.yml` is gitignored.** The box-local Compose
+  override carries host IPs, ports and tuning and was documented as untracked,
+  but only escaped tracking because nobody had run `git add` on it. It now sits
+  next to the existing `server/.env` rule.
+- **Twelve Bats guards now actually fail when the thing they guard breaks.** A
+  negative assertion written as a bare `! cmd` in the middle of a test body is
+  exempt from `set -e`, so it reported `ok` whatever the code did. Each is now
+  `run cmd` plus an explicit status check, and each was re-verified by breaking
+  the guarded code in a throwaway copy and confirming the test goes red. Three
+  covered properties nothing else tests: that the IOS-XR entrypoint carries no
+  IOx/Guest Shell staging paths or device-SSH credentials, that the seeder
+  never puts the RPC secret on the aria2c command line or picks up a stale
+  on-volume one, and that the peer-transfer hook makes no claim to identify the
+  origin of a share. All twelve pass against the current code — no regression
+  had slipped in behind them.
+  secrets ciphertext (`secrets.json.age`, the only copy that outlives a
+  container restart) is written with the same `fsync` discipline the device
+  agent already uses: the bytes are flushed before the rename and the
+  containing directory after it. Previously the write was atomic but not
+  durable, so a power loss seconds after a device-token rotation the console
+  had already reported complete could come back up with the previous
+  ciphertext — and the device would then authenticate with a token the server
+  no longer held.
+- **`IRIS_AUDIT_MAX_EVENTS` and `IRIS_AUDIT_RETENTION_DAYS` now read the same
+  way.** `0` used to disable the entry cap entirely on one knob while
+  discarding the whole trail on the other. Both now treat a missing,
+  non-integer or non-positive value as "use the default" — the rule
+  `IRIS_HTTP_TIMEOUT` and `IRIS_ENDPOINT_TTL` already follow. For an
+  effectively unbounded audit trail, set a large number.
+- **Undeploy no longer tells you to adopt a device IRIS already owns.** When
+  the deployment record store is present but unparseable, the console answers
+  `503` naming the unreadable file instead of `409 "no deployment record for
+  this device; adopt it first"` — advice that would have written a record
+  asserting an unverified deployment on top of a repairable one. A device that
+  genuinely has no record still gets the adopt/force guidance.
+- **The Python test dependencies are declared.** `requirements-dev.txt`
+  (`pytest`, `PyYAML`) is what both `TESTING.md` and CI install, and it ships
+  in the release tarball beside `TESTING.md`. The Kubernetes manifest and
+  `docker-compose.yml` security tests now import `yaml` directly instead of
+  skipping themselves, so a clean machine running the documented command gets
+  the same result as CI rather than ten checks quietly fewer.
+- **Catalog state files fail closed.** An existing but unreadable or
+  unparseable state file under `IRIS_STATE` (for example a hand-edited
+  `policy.json` with a trailing comma) is no longer read as empty. Device
+  routes answer `503 {"error": "state unavailable"}` and writers refuse
+  instead of replacing the file with a single row, so a corrupt `policy.json`
+  can no longer read as a fleet-wide unassign or lose every other device's
+  assignment and plan ids. A genuinely missing file is still the empty store.
+- **Device POST bodies are validated at the door.** The catalog refuses the
+  non-standard `NaN`/`Infinity` JSON literals, non-object heartbeat bodies,
+  pathologically nested bodies (400 rather than a dropped connection) and
+  length-less/chunked POSTs (411). Heartbeat fields are typed and capped
+  (strings 64-1024 chars, `free_flash_bytes` a finite non-negative int,
+  booleans strict, image-id lists image-id-shaped); a wrong-typed field
+  stores as absent. State files and JSON responses are written with
+  `allow_nan=False`, so one device can no longer break the console's
+  `/api/devices` or swarm JSON for every operator. Report, transfer, request
+  and image ids are matched whole (a trailing newline no longer passes).
+- **v2 terminal reports may omit `window` and `content`.** An agent that
+  measured nothing may leave them out or send `null`; the stored report then
+  omits the key rather than inventing zeros. This extends per key: a report
+  whose opening edge was never observed (an image adopted in place, or one
+  whose start time was lost with a state file) omits `window.start` and is
+  stored open-ended, and an empty `content` block reads as "not measured"
+  rather than a measured zero. Previously the catalog accepted these blocks
+  only whole, so exactly the unmeasured reports were rejected, retried under
+  backoff and then dropped, leaving the transfer unconverged with nothing an
+  operator could see.
+- **`iris-assign` fails closed on an unreadable state file,** matching
+  `iris-revoke` and `iris-mint-enrollment`: one line naming the file, exit 1,
+  no traceback and nothing written over recoverable content.
+- **Device-facing listeners survive a fleet burst.** The catalog and tracker
+  servers kept the standard library's accept backlog of five connections, so
+  a rollout in which the whole fleet announces or heartbeats at once
+  overflowed the queue and the kernel answered with resets — an agent saw a
+  connection reset rather than a slow answer. Both now queue 128. The
+  catalog also completes its TLS handshake in the worker thread instead of
+  on the accept thread, so one client that connects and never speaks can no
+  longer stall every other device.
+- **HTTP handler socket timeout.** The catalog and tracker handlers close a
+  connection that stalls mid-request after `IRIS_HTTP_TIMEOUT` seconds
+  (default 30) instead of pinning a thread for the life of the server.
+- **Tracker enforcement loop survives a failed pass.** An exception in one
+  reconcile pass (a full state volume, a malformed endpoint row) no longer
+  ends enforcement silently behind a frozen `enforced` status: the pass is
+  recorded as `degraded` with the exception type and the loop retries.
+  Malformed rows in `peer-endpoints.json` are store corruption (fail
+  closed), and a corrupt store no longer aborts device announces without a
+  response — discovery continues while the endpoint waits in the retry queue.
+- **Quarantine cannot be escaped with a previous seeder token.** A legacy
+  announce from an address a durable endpoint attributes to a quarantined or
+  revoked device receives no peers and is handed to nobody.
+- **The `ip=` announce override is honoured only for the service seeder.** A
+  device's durable endpoint is always its socket source, so a device can no
+  longer plant an endpoint on another device's address (which lifted that
+  device's seeder block through the shared permit/deny conflict) or have
+  arbitrary fleet addresses blocked.
+- **Seeder blocks for quarantined/revoked devices no longer lapse on
+  `IRIS_ENDPOINT_TTL`.** Their endpoint rows are retained until the device is
+  un-quarantined or re-onboarded. Expired rows of other devices are now
+  actually pruned from `peer-endpoints.json` by the maintenance pass, and a
+  non-positive `IRIS_ENDPOINT_TTL` falls back to the default instead of
+  silently emptying the blocklist.
+- **Telemetry export.** Sampled per-connection `iris.swarm.peer_rate` /
+  `peer_bytes` records are evicted first when the OTLP log queue overflows
+  during a multi-torrent wave, so they can no longer push tracker peer,
+  policy, lifecycle or device report records out of the queue.
+  `iris_telemetry_samples_rejected_total` / `iris.telemetry.samples.rejected`
+  no longer drop to 0 while the live snapshot is stale or unreadable (which
+  read as a counter reset and a phantom burst of rejections on every
+  wake-from-idle). `iris_peer_unattributed_bytes_total` is declared a gauge
+  (it steps down when a device is traced late; the name is unchanged).
+  `otlp-export-degraded` / `otlp-export-recovered` audit events now carry
+  `category: telemetry` and `actor: system`. A scheduled audit export that
+  raises is recorded as a failed attempt (status line, audit trail, daily
+  retry) instead of being silently retried every hour.
+
+### Added
+- **SSH host identity for every server-side device session.** `lab/device-run.sh`,
+  `lab/xr-run.sh`, the installers' stage-host push and the XR RPM `scp` now
+  share one trust policy (`lab/iris-ssh-policy.sh`): pin a key with
+  `IRIS_SSH_HOST_KEY`, verify strictly against `IRIS_SSH_KNOWN_HOSTS`, or (the
+  default) record on first contact into a persistent `known_hosts` under
+  `$IRIS_STATE/ssh` and refuse a changed key thereafter -- `/dev/null` is never
+  used. Legacy SHA-1/ssh-rsa/CBC algorithms are now opt-in (`IRIS_SSH_LEGACY=1`,
+  also a compose variable), ssh's diagnostics are forwarded redacted instead of
+  discarded, and the enable-escalation marker moved off a predictable `/tmp` name.
+- **`EXPECTED_DEVICE_IDENTITY` guard in `device/device-uninstall.sh`.** The
+  Guest Shell teardown now opens with a read-only `show version` and, when the
+  record supplies a board ID, refuses to touch a device that reports a
+  different one (same contract as the router scripts). The first session being
+  read-only also lets the transport learn the enable requirement before any
+  config write. Its verify is marker-gated and fails closed: a dropped or
+  truncated verify session is "could not verify", never "clean".
+- **`SVI_IGP` for routed Guest Shell installs.** `ip router isis` on the IRIS
+  SVI is now opt-in per record (`SVI_IGP=isis`); the default injects nothing
+  into the operator's IGP. Routed mode also trunks the AppGig port additively
+  (`allowed vlan add`) and teardown removes only the IRIS VLAN from the list.
+- **CI runs the test suites on every pull request.** New
+  `.github/workflows/tests.yml` installs `pytest`, `pyyaml`, `bats` and
+  `mktorrent` on a stock Ubuntu runner and runs the two documented test
+  commands (pytest + bats) on pull requests and pushes to `main`.
+- **`tools/get-ioxclient.sh` pins the ioxclient binary.** The extracted
+  `ioxclient` executable is verified against a new `tools/ioxclient.sha256`
+  (first-seen sha256 per version) and the install is refused on a mismatch or
+  an unrecorded version; `IOXCLIENT_SKIP_VERIFY=1` is the explicit one-off
+  escape hatch that prints the sha256 to pin.
+- **`tools/apply-assignments.sh --dry-run`** validates the whole CSV
+  (including every `image_id` against the server's published list) and applies
+  nothing.
 - **Transfer lifecycle telemetry.** Every assignment now mints a *plan*: the
   server writes a `plan_id`, `transfer_id`, `planned_at` and the image's
   torrent info hash into the device's `policy.json` row, in the same atomic
@@ -62,6 +320,114 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   contract is unchanged.
 
 ### Changed
+- **Real-`docker build` tests are opt-in.** The two image-build tests in
+  `device/xr/tests/test_xr_image.bats` need a reachable Docker daemon, pull the
+  pinned base image and take minutes, which made the default suite depend on the
+  machine running it. They are now skipped unless `IRIS_TEST_HOST_INTEGRATION=1`
+  is set, so a clean checkout is green and an operator can still run them
+  deliberately before a release or after touching `device/xr/Dockerfile`. See
+  [Validation](docs/zensical/validation.md#opt-in-host-integration-tests).
+- **A `constrained` link means a slower telemetry cadence, and only that.** The
+  agent's tier comment promised a trimmed payload on a constrained link; the
+  trimming function it referred to had no caller, so a constrained device
+  always sent the full report and stamped `link.trimmed: false` on it. v2
+  retired both the trimming and the whole `link` section, so the function and
+  the promise are gone rather than re-wired — a constrained link is sampled
+  every 4th tick, as [Observability](docs/zensical/observability.md) already
+  documented. Three other unreachable helpers were removed with it (a
+  superseded live-sample builder in the agent, a peer-policy quarantine
+  self-repair that policy validation rejects before it can run, and an unused
+  hash helper in the announce-rotation tool) along with the nine tests that
+  were the only thing exercising them. No wire field, route or operator
+  behaviour changes.
+- **The console refuses to serve plain HTTP unless told to.** When no usable
+  console certificate exists (`IRIS_GUI_CERT` and `IRIS_CERT` both absent or
+  unloadable) `iris-gui` now exits with a clear message instead of silently
+  falling back to `http://` — a fallback that accepted the admin password in
+  cleartext and then could not keep a session, because browsers discard a
+  `Secure` cookie set over plain HTTP. `IRIS_GUI_ALLOW_PLAINTEXT=1` opts into
+  plaintext deliberately (loopback or an isolated lab only); the session
+  cookie then drops its `Secure` attribute so sign-in works, and a warning is
+  logged. `POST /api/settings/gui-cert` reports `applied: false` with a note
+  when the listener is not serving TLS. See
+  [Security](docs/zensical/security.md#tls-and-certificates).
+- **`iris-gui-admin` ends every live console session.** The break-glass reset
+  stamps a session floor into the admin record; the running console drops
+  any session created at or before it on its next request, so a
+  suspected-compromised session dies with the credential. The in-console
+  password change keeps its caller's session and revokes the others, as
+  before.
+- **Background polling no longer keeps a console session alive.** The
+  console's periodic refreshers send `X-IRIS-Poll: 1` (GET only); the server
+  validates the session for those without refreshing its idle clock, so a
+  console left open on Devices, Overview, Swarm or Monitoring reaches the
+  idle timeout Settings advertises. Operator input still counts.
+- **The bulk *Set credential* modal opens on a disabled placeholder.** Apply
+  with nothing chosen is a no-op; clearing the credential is a distinct
+  entry that asks for confirmation. A failed `/api/credentials` read now
+  keeps the last good profile list, disables the pickers and says so,
+  instead of rendering every device as "no credential".
+- **Trust-store uploads and downloads are validated as X.509.** A
+  `CERTIFICATE` block that is not a certificate is rejected before anything
+  is written (previously one such block made OpenSSL reject the whole
+  runtime bundle and every private CA silently stopped being trusted);
+  `rebuild_bundle` skips and reports a store file that fails to load, and
+  `ssl_context()` logs when it degrades to system roots.
+- **`tools/make-release.sh` assembles from tracked files only, atomically, with
+  a manifest.** The release is built from `git ls-files` under an explicit
+  allowlist instead of `cp -R` of the live tree, so gitignored material under
+  `server/` and `device/` (`server/.env` with a collector bearer token, private
+  keys under `server/certs/`, the licensed console typeface, the Compose
+  override, `device/xr/out/iris-xr.rpm`) can no longer ship. It builds under a
+  temp dir and only replaces `release/` on success, writes
+  `release/iris.tgz.sha256` and a per-member `MANIFEST.txt` (inside the tree
+  and beside the tarball), and produces a reproducible archive (sorted
+  members, fixed owner and mtime, no gzip timestamp) on GNU tar.
+- **`.dockerignore` secret patterns are recursive.** `.env`, `*.env`, `*.pem`,
+  `*.key`, `*.crt`, `*.p12`, `*.bin`, `*.torrent`, `*.aria2` and `*.rpm` now
+  use `**/` so nested files under `server/` and `device/` stay out of image
+  layers; `server/docker-compose.override.yml`, the licensed
+  `SharpSans-Bold.woff2`, `device/xr/out/` and `device/xr/tests/` are excluded
+  too (the public `server/certs/cisco_bulkhash_verify.pem` is re-included). A
+  new `server/tests/test_dockerignore.py` evaluates the file with Docker's
+  matching rules against a planted tree. Note: the Sharp Sans typeface is no
+  longer baked into the image; a lab host that wants it must bind-mount it.
+- **`tools/gen-device-installers.sh` validates the whole CSV before minting.**
+  Rows are parsed and checked (format, duplicate `device_id`, column count)
+  before any enrollment token is minted; installers are written `0700` into a
+  private staging directory and renamed over `fleet/dist/` as a complete set,
+  so a bad row leaves no partial output and stale installers do not linger.
+  The generator refuses to replace an output directory holding files it did
+  not create.
+- **`tools/apply-assignments.sh` really is all-or-nothing.** Every row is
+  validated (shape, identifier format, duplicates, published image ids) before
+  the first assignment is written; an apply-time refusal is reported per row
+  with an honest "applied N of M" summary.
+- **`tools/make-torrent.sh` requires an announce credential.** The tracker
+  rejects a credential-less announce, so the helper now needs
+  `ANNOUNCE_TOKEN` (embedded as `/announce?announce_token=...`) or a full
+  `ANNOUNCE_URL` and fails with a clear message otherwise.
+- **`tools/build-xr-package.sh` never deletes `APPMGR_BUILD_DIR`.** The
+  xr-appmgr-build clone only goes into a missing or empty directory; an
+  existing non-empty one without `./appmgr_build` is refused. The RPM is
+  placed in `--out` via a temp name + `mv`, and `device/xr/out/` and `*.rpm`
+  are gitignored.
+- **The Compose `HEALTHCHECK` probes `/readyz`** (12 s timeout) instead of the
+  unconditional `/healthz`, so a container whose catalog or artifact listener
+  died no longer reports `healthy`, matching the Kubernetes probes.
+- **Kubernetes ConfigMap is generated from `kubernetes/iris-seed-server.env`**
+  (kustomize `configMapGenerator`, hash-suffixed name) so edits roll the pod on
+  re-apply; `kubernetes/configmap.yaml` is gone. Both containers pull with
+  `imagePullPolicy: Always` because the tag is a mutable placeholder, and
+  `kubectl -n iris rollout restart deployment/iris-seed-server` is documented
+  for same-tag rebuilds.
+- **The seeder's RPC secret leaves the command line.** `server/seed-launch.sh`
+  writes a mode-0600 `seeder.aria2.conf` under `IRIS_RUN` and passes
+  `--conf-path`, so the secret is no longer readable in
+  `/proc/<pid>/cmdline` by every local user on the Docker host.
+- **`tools/stage-iox-package.sh`** places the package atomically in the
+  `docker cp` branch too, and checks `/proc/sys/fs/binfmt_misc/qemu-aarch64`
+  for arm64 emulation before falling back to pulling a probe image.
 - **The IOS-XR agent image moves to Alpine.** `device/xr/Dockerfile` now builds
   from `python:3.12-alpine3.24`, pinned by index digest, with only `curl` and
   `ca-certificates` added. `iris-xr.rpm` drops from 51.6 MB to 26.4 MB
@@ -120,6 +486,335 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   publishing "seeding" on the strength of a checksum computed for some other
   transfer. Silence, not a wrong answer — and the tracker counts those plans in
   `plans_awaiting_report` so the rollout gap is visible rather than inferred.
+- **`iris-bootstrap` no longer destroys fleet state by accident.** A new
+  `--rekey` (alias `--add-recipient`) mode re-encrypts every existing `.age`
+  file — including the console's `gui-key.pem.age` — to the current
+  `IRIS_AGE_RECIPIENTS`, verifying each rewritten file round-trips with the
+  mounted identity before it replaces the original; no token, key, or the
+  pinned `tls/crt.pem` changes. The printed break-glass guidance now names
+  `--rekey`: it used to recommend `--force`, which wiped every device catalog
+  token and rotated the certificate every device pins. `--force` is now
+  disaster recovery only and refuses without an explicit `--yes`, printing what
+  it destroys. A volume holding only some of the three `.age` files is refused
+  with the missing names instead of being silently regenerated on the next
+  bring-up; `--repair <secrets.json|rpc-secret|tls/key.pem>` regenerates
+  exactly the one named missing file. An empty or undecryptable `.age` file is
+  reported by name rather than as "nothing to do", and a fresh bootstrap whose
+  recipient list omits the identity's own public key fails at bootstrap time
+  with a message naming `IRIS_AGE_RECIPIENTS` instead of at the next `up` with
+  "bad master key?".
+
+### Fixed
+- **Console HTTP hardening.** `POST` with a negative `Content-Length` is
+  refused before any read (it used to read until EOF with no cap, pre-auth);
+  session and CSRF are checked *before* a POST body is buffered, so an
+  unauthenticated connection can no longer make the console hold up to
+  8 MiB per request; the TLS handshake runs in the per-connection worker
+  thread, so one idle TCP connection to port 8080 no longer freezes the
+  console for every operator; `/api/*` responses carry
+  `Cache-Control: private, no-store` and the static assets revalidate with
+  `Last-Modified`/`304`.
+- **A corrupt live secrets store is no longer mistaken for an empty one.**
+  `secrets_store.load` raises for a present-but-unreadable file (a missing
+  file is still the empty store), every writer refuses to persist, and the
+  console answers 503 instead of showing the first-run wizard — previously
+  any mutation would have re-encrypted the empty skeleton over the only
+  durable copy of the fleet's credentials.
+- The onboard log stream (SSE) counts a job's queued→running transition as
+  progress and ends an idle-expired stream with `event: end` / `data: idle`
+  rather than closing silently; a password check that finds both scrypt
+  slots busy answers 503 + `Retry-After` instead of "invalid credentials"
+  (which penalised the login limiter and audited a failure that never
+  happened); credential profiles reject non-string values at save time.
+- The artifact server no longer follows a symlink out of its root, redacts
+  `/staging/<capability>` paths from its access log, and drops a connection
+  that completes the handshake but never sends a request after 120 s.
+- Web console: session loss after load (restart, revocation, idle expiry)
+  now redirects to sign-in from any view instead of freezing the last data
+  on screen; a failed poll shows "live data unavailable since …" in the
+  header; the embedded swarm map treats the proxy's `error` answer as a
+  failed poll instead of "Live" with an empty swarm; the Monitoring poll no
+  longer discards "Load older" audit pages or repaints the brush mid-drag
+  and polls only the visible pane; the Telemetry filter gains an
+  `unknown` bucket; id-keyed maps are prototype-free (a device or image
+  named `constructor` rendered pre-selected); the login page distinguishes
+  throttling (with the retry delay) and network errors from a wrong
+  password.
+- **Forced router-nat undeploy no longer records NAT residue as clean.** The
+  force path now unwinds the IRIS static mapping, clears only translations
+  inside the IRIS VPG subnet, retries the overload no-form with a settle, then
+  removes the ACL and VPG -- each in its own session -- and its verify fails
+  closed if any object it chose to reclaim survives.
+- **`device/bootstrap.sh` no longer overwrites its own executing file** during
+  a bundle upgrade; the new bootstrap is written beside it and renamed into
+  place, so the upgrade tick finishes on the old script's logic instead of
+  resuming at a stale byte offset inside the new one.
+- **`lab/iris-diag.py` / `lab/iris-add.py`** send the `iris` placeholder token
+  when the RPC secret file is missing or empty (what the daemon actually runs
+  on), exit non-zero on a failed probe or RPC error, and `iris-add.py` follows
+  `STAGE_DIR` for the download directory.
+- **Device reclaim never deletes the file the `BOOT` variable names.** Bundle-mode
+  space reclaim, the failed-placement reclaim and the legacy replaced-root
+  cleanup now protect the `show boot` target on the same footing as the
+  running image (an operator points `BOOT` at a staged image for a later
+  window; a parked image's kept root copy was otherwise fair game). When
+  `show boot` cannot be read the agent skips the delete instead of guessing.
+  The agent's `Deps` contract drops the never-called arbitrary `ios` exec
+  seam; `boot_image` (read-only `show boot`) takes its slot.
+- **A same-id republish now refreshes the device's `.torrent`.** The agent
+  records which catalog torrent identity (`info_hash_hex`, else the sha256)
+  the on-disk `<id>.torrent` was fetched for; when the catalog's identity
+  moves it discards the stale torrent, control file and partial and fetches
+  the current torrent, and a sha mismatch drops the torrent along with the
+  bad file. Previously the old torrent was re-added every tick and the
+  device could never converge on republished content.
+- **One image's un-servable torrent no longer aborts the whole tick.** A torrent
+  the catalog refuses (404, 503 behind the deployment gate, 500) is reported
+  as that image's `error` (`TORRENT-UNAVAILABLE`, new status
+  `torrent-unavailable`); the set heartbeat still goes out and the siblings'
+  progress is saved.
+- **The C9k share probe rejects IOS's error transcript.** The probe now
+  requires a parsed `dir` row of the probe's exact size; the
+  `%Error opening .../iris-probe.txt` reply echoed the name and used to pass,
+  suppressing the scp fallback behind a multi-GB copy and a 15-minute stall.
+- **A short catalog outage no longer blocks every later terminal report.** A
+  delivered heartbeat resets the heartbeat failure streak, so the `bad` tier
+  clears when the link recovers instead of deferring reports until the
+  60-attempt give-up. The outage tiering and the separate report streak are
+  unchanged.
+- **Terminal reports no longer invent measurements.** When no aria2 stats were
+  taken at completion (an adopted image, an RPC hiccup) the v2 report omits
+  the content byte fields, and an unrecorded transfer start leaves
+  `window.start` absent with `window.complete = false`, instead of a
+  measured-looking 0/0 over a zero-length complete window.
+- **`rotate-logs.sh` trims `aria2c.log` in place.** The rename-over rotation
+  left the running daemon writing to an unlinked inode (invisible, unbounded,
+  never trimmed again) while the visible file froze; copy-truncate keeps
+  aria2c's open descriptor on the file operators see.
+- A `200` token-refresh body without `catalog_token`/`expires_at` is now a
+  logged best-effort failure (`TOKEN-REFRESH-FAIL`) instead of a `KeyError`
+  that silenced the device every tick; the SSH privilege un-learn matches
+  CRLF transcripts, so `IRIS_DEVICE_ENABLE_ALWAYS=1` stops sending `enable`
+  once a session proves the login is privileged; `write_conf` no longer
+  freezes backfilled defaults into the device conf.
+- **A failing `mktorrent` no longer leaks the seeder's announce token.** The
+  announce URL is only accepted on `mktorrent`'s command line, and a non-zero
+  exit used to surface that whole command line — token included — in the
+  console's publish job status, in the exported `image_publish_finished` audit
+  detail, and in `iris-publish`'s traceback. `publish.make_torrent` now reports
+  only the exit status, the console and audit paths redact any
+  `announce_token=` / `key=` value defensively, and `iris-publish` prints a
+  one-line redacted error (exit 1) instead of a traceback.
+- **A quarantined image stays out of the origin seeder across restarts, and a
+  released one is seeded again.** The startup re-seed used to hand every
+  `state/torrents/*.torrent` to aria2, so any container restart silently
+  resumed seeding an image the Bulk Hash check had quarantined, and nothing
+  ever re-applied the stop; it is now catalog-authoritative and skips
+  quarantined torrents and torrents with no catalog entry. Releasing a
+  quarantine now re-adds the torrent to the seeder from its recorded
+  `source_dir` (re-syncing the canonical announce to the current credential
+  first, with the info hash unchanged); the response carries
+  `seeding_resumed` and a failed re-add is audited as
+  `image_quarantine_release_seeding`. Previously a released-then-assigned image
+  had no origin until the next restart.
+- **`rotate-seeder-announce` names its refusal reason and skips quarantined
+  images.** Every preflight refusal used to print `refused (ValueError)`; the
+  fixed, credential-free reason is now included. A quarantined image — by
+  design not active in the seeder — no longer makes fleet-wide credential
+  rotation impossible; it is listed as skipped and re-synced when released.
+- **A publish that fails after the torrent is built rolls the `.torrent` back**
+  (seeder unreachable, state volume full), so no orphan torrent without a
+  catalog entry is left for the restart re-seed.
+- **Image delete stops the seeder before unlinking the file, and says when it
+  could not.** The stop used to run last and swallow every failure while the
+  audit row said `deleted`; the `DELETE /api/images/<id>` response now carries
+  `warnings` and the audit detail records a failed stop (class name only).
+- **The canonical torrent's announce honours `IRIS_TRACKER_PORT` /
+  `IRIS_TRACKER_ANNOUNCE`** the same way per-device personalization and the
+  rotation CLI already did, instead of a hard-coded `:6969`; both variables are
+  now documented in the reference.
+- **Console onboarding's deadline reaper no longer fails queued jobs or
+  abandons a running installer.** The 2-hour job deadline is measured from the
+  moment a job starts running, never from the time it was queued: the tail of
+  a large batch behind the worker pool used to be marked failed by the next
+  start() for any device (which itself crashed with no JSON body), and then
+  either ran the installer anyway or vanished with its planned record
+  orphaned. A running job past the deadline is now stopped like an operator
+  abort — SIGTERM to the recipe's process group, SIGKILL after
+  `IRIS_ONBOARD_REAP_GRACE` seconds (default 60) — and stays `running` until
+  its worker returns, so the device stays busy (an undeploy can no longer
+  interleave with the still-running install), abort remains available, the
+  pool worker is freed, and the record moves to `needs-reconcile` with the
+  real exit status. Only an installer that cannot be signalled at all is
+  marked failed outright.
+- **Guest Shell and IOx teardowns are bound to the deployment record.** Every
+  platform's execution-time preflight evidence (processor board ID, detected
+  model) is now persisted onto the planned record before apply — records used
+  to say preflight `not-required` for a check that had run — and a recorded
+  undeploy renders `DEVICE_IP` and `EXPECTED_DEVICE_IDENTITY` from that record
+  for every management type, not just routers. An inventory IP edit after
+  deployment can no longer retarget a Guest Shell or IOx teardown at whatever
+  answers at the new address. Records adopted before this release carry no
+  identity, so their teardown still exports an empty
+  `EXPECTED_DEVICE_IDENTITY`.
+- **A CSV re-import keeps each device's credential profile.** The
+  export → edit → re-import round trip used to drop `credential_profile_id`
+  (the only key lost), so every later onboard/undeploy for the re-imported
+  fleet failed with "device has no credential profile". A CSV that repeats a
+  `device_id` is now rejected as a whole, naming both rows, instead of
+  silently keeping the last one and mis-counting the import.
+- **The stage-host credential is optional and is no longer handed to
+  installers.** Console onboarding always stages per-device material locally
+  (`IRIS_STAGE_LOCAL=1`), so no recipe could ever use the stage-host SSH
+  password; the setup wizard and the Settings › Setup card no longer report
+  it as required or claim onboarding cannot start without it, the
+  setup-status API marks it `required: false`, and `HOST_USER`/`HOST_PASS`
+  (stored or inherited) are no longer exported into any install/uninstall
+  recipe's environment.
+- **A corrupt `fleet.json` or `deployment_records.json` is refused, not
+  emptied.** A file that is present but unparseable used to read as an empty
+  store, and the next write replaced it — one device upsert rewrote the whole
+  inventory as a one-device fleet at revision 1; one record transition erased
+  every device's teardown authority. Writes now fail with an error naming the
+  file (reads still degrade to an empty view); a missing file is still an
+  empty store.
+- **Activating a deployment record retires stale recoverable siblings.** A
+  record left `unknown`, `drifted` or `needs-reconcile` survived a successful
+  re-onboard and resurfaced as teardown authority once the newer record was
+  removed; it is now `abandoned` with the reason recorded. `POST
+  /api/devices` also ignores a client-supplied `os_family` (machine-determined
+  from the device banner) and `registered_at`.
+- **IOx package freshness checks find the pinned certificate again.** The
+  2026-09-02 packaging slimming dropped the top-level `iris-catalog.pem` from
+  `artifacts.tar.gz`, the one member `tools/check-package-freshness.sh` and
+  the console's Setup "device packages" card read, so every freshly built
+  package reported "no pinned cert" and `--rebuild` could never converge.
+  `device/iox/build.sh` now packages that cert-only pem next to
+  `rootfs.tar` again as the pinned-cert probe member, and both readers also
+  fall back to the cert baked inside the image's layer tars, so packages
+  built in between still report what they really pin.
+- **`device/iox/build.sh` refuses a `CATALOG_PEM` that carries a private
+  key.** Pointing it at the server's combined cert+key file (`IRIS_CERT`)
+  used to bake the catalog/console TLS private key into every layer of a
+  package served to, and left on, every device. The build now fails closed
+  with the same message the XR build already used, and only CERTIFICATE
+  blocks reach the image.
+- **`device/iox/rebake_iris_tar.py` accepts the packages the current build
+  produces.** It expected the old OCI layout (`index.json`) and raised
+  `KeyError` on every package built since 2026-08-20; it now rewrites the
+  classic docker-archive layout (`manifest.json` + plain layer tars, with
+  the config renamed and `rootfs.diff_ids` recomputed), keeps every other
+  member of `artifacts.tar.gz`, and replaces the top-level probe pem
+  alongside the baked one.
+- **IOx undeploy verifies the device it is about to tear down.** When the
+  console passes `EXPECTED_DEVICE_IDENTITY`, `device/iox/uninstall.sh` opens
+  with a read-only `show version` and refuses to send any destructive
+  command unless the live processor board ID matches the deployment
+  record (a session that returns no board ID also aborts), the same guard
+  the router uninstaller and the IOx installer already apply. Force
+  undeploy is unaffected.
+- **IOx onboard validates the values it pastes into `run-opts`.** A
+  double quote or newline in the device SSH password, catalog token, URL,
+  device id or SSH user used to be silently dropped by IOS, so the app
+  started without that variable, died on its entrypoint guard, and the
+  installer timed out after tearing down the working app. The installer
+  now rejects such values before touching the device, as the XR installer
+  already did.
+- **The XR container refuses to start without its `harddisk:` bind
+  mount.** Activated without `-v /misc/disk1:/hostmount`, the entrypoint
+  used to create a container-local `/hostmount` and report images staged
+  to `harddisk:` that were never on it; it now checks `/proc/mounts` and
+  fails closed with the missing activation option named.
+- **Twelve documented environment knobs now actually reach the container.**
+  Compose injects only what `server/docker-compose.yml`'s `environment:` block
+  names, so `IRIS_METRICS_HOST`, `IRIS_METRICS_PORT`, `IRIS_SWARM_URL`,
+  `IRIS_SWARM_PUBLIC`, `IRIS_OTLP_HEADERS`, `IRIS_OTLP_HEADERS_FILE`,
+  `IRIS_OTLP_DEVICE_METRICS`, `IRIS_EVENTS_URL_TEMPLATE`,
+  `IRIS_REQUIRE_IDENTITY_GATE`, `IRIS_ONBOARD_CONCURRENCY`,
+  `IRIS_XR_SESSION_TIMEOUT` and `IRIS_DEVICE_ENABLE_ALWAYS` were silent no-ops
+  when set in `server/.env` or the shell — including `IRIS_METRICS_HOST`,
+  which the security page names as *the* hard control for the per-device swarm
+  surface, and `IRIS_OTLP_HEADERS`, the only way to authenticate to a
+  collector. All of them, plus `IRIS_HTTP_TIMEOUT`, `IRIS_TRACKER_PORT`,
+  `IRIS_TRACKER_ANNOUNCE`, `IRIS_ENDPOINT_TTL`, `IRIS_GUI_ALLOW_PLAINTEXT`,
+  `IRIS_HEALTH_LISTENERS`, `IRIS_AUDIT_RETENTION_DAYS`,
+  `IRIS_AUDIT_MAX_EVENTS`, `IRIS_ENROLL_TTL`, `IRIS_ONBOARD_JOB_TIMEOUT`,
+  `IRIS_ONBOARD_REAP_GRACE`, `IRIS_SSH_HOST_KEY`, `IRIS_SSH_KNOWN_HOSTS` and
+  `SEED_MAX_CONCURRENT`, are
+  now passed through. The reference states the mechanism, and a new gate
+  (`test_documented_env_vars_reach_the_compose_container`) fails if a
+  documented variable is neither passed through nor explicitly classified as
+  host-side or one-shot.
+- **Documentation: the replaced-image cleanup that no longer happens.** Three
+  pages described the agent deleting the previous image's storage-root copy on
+  reassignment; the agent deliberately does the opposite (it parks the image,
+  keeps the root copy, and lets a later placement's reclaim gate free the
+  space). Rewritten as "Unassigned image park" with the storage-planning
+  consequence carried into the management-type sizing guidance, so a fleet
+  reassigned twice on a 2×-image budget no longer stalls silently.
+- **Documentation corrections.** `server.md` no longer places the audit trail
+  on the state volume or calls `/etc/iris` wholly encrypted — `audit.jsonl` is
+  plaintext there, and the page says so. `reference.md` gains the peer-policy
+  routes (including the API's only compare-and-set write and its refusal
+  codes), `GET /api/install-options`, and 14 previously undocumented
+  environment knobs with their real defaults and parser behaviour.
+  `operations.md` drops citations to an untracked internal file and a
+  lab-host-specific paragraph. `kubernetes.md`, `containers.md` and
+  `kubernetes/README.md` gain `--pull` and the `/readyz` distinction.
+  `fleet/README.md`, `images/README.md` and `device/iox/README.md` were
+  rewritten against current behaviour.
+- **`fleet/*.csv.example` no longer import phantom devices.** Three example
+  rows in `devices.csv.example` were uncommented and carried live lab
+  addresses, so the documented `cp` + import added three real inventory rows
+  pointed at addresses the operator does not own. Every example row in both
+  templates is now commented and addressed in the RFC 5737 documentation
+  range, matching the console's own generated template; new gates in
+  `test_docs_map.py` keep the two from diverging.
+- **`fleet/iris-fleet.conf.example` is gone.** Nothing read it — the generator
+  takes its inputs from the command line and environment only — yet it
+  instructed operators to write an aria2 RPC secret and a host SSH password
+  into a plaintext file, and it shipped in every release tarball.
+- **Dashboards.** Four Splunk panels filtered device reports with
+  `where "iris.image.id"==...`, which compares a string *literal* in eval
+  syntax and silently returned zero rows the moment an operator narrowed to a
+  single image — the board's whole delivery story went blank and read as "no
+  device reported". The Grafana board no longer applies `rate()` to
+  `iris_peer_unattributed_bytes_total` (a gauge that steps down, so `rate()`
+  rendered a spike exactly when tracing improved), its hidden catalog-id
+  picker is visible so narrowing an image narrows both legs rather than
+  inflating every derived peer share, and its suffix-strip regex passes
+  `.iso`/`.tar`/`.rpm` images through instead of dropping them. Both boards'
+  prose no longer teaches `image size × completed devices`, a derivation no
+  panel implements and panel 33 forbids. New tests parse both files and
+  enforce these rules.
+- **Telemetry documentation.** The OTLP log-record table listed four record
+  names IRIS never emits and labelled the legacy v1 projection as the terminal
+  report; it now lists the seven real names and marks the legacy one.
+  `iris_swarm_peers_saturated` is described as the 0/1 cap flag it is rather
+  than a peer count, the counter/gauge split is stated where alert rules are
+  written from, and the collector chapter documents the Loki leg that eight
+  Grafana panels — including all three headline delivery stats — depend on.
+- **Attribution and licensing.** `NOTICE` now attributes every third-party
+  program the server image installs and invokes, including GPLv2 `sshpass`;
+  the SIL OFL 1.1 text ships beside the Inter WOFF2 binaries as
+  `server/webroot/fonts/Inter-OFL.txt`, as that licence requires; the
+  documentation site's Mermaid import is pinned to an exact version instead of
+  a floating `@11` range resolved at request time; and
+  `tools/aria2c-patches/README.md` carries the build description NOTICE
+  promises, including that a locally built binary cannot reproduce the pinned
+  checksums.
+- **Public site accessibility.** The landing page's full-viewport particle
+  animation and its smooth scrolling now honour `prefers-reduced-motion`
+  (WCAG 2.2 SC 2.2.2, Level A), its ARIA tablists gained the panels,
+  `aria-controls`, arrow-key navigation and roving `tabindex` the roles
+  promised, and the delivery-step descriptions reflow to one column on a phone
+  instead of being removed from the DOM below 700px.
+- **The terminology guard no longer pins line numbers.**
+  `server/tests/test_terminology.py` allowlisted absolute line numbers in 22
+  other files, so an unrelated edit anywhere above one failed a *vocabulary*
+  test with a stale-entry assertion (one entry had been re-pinned seven times
+  by CSS work alone). Entries are now anchored on line content; the guard
+  keeps its fail-loud property and an anchor that grows too broad still fails.
 
 ## [2026.09.01]
 

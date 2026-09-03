@@ -786,3 +786,189 @@ def test_ack_watermark_survives_status_only_write_after_audit_disabled(tmp_path)
     rec.run_once()
     st = peer_enforcement.read_status(p["enforcement"])
     assert st["last_operation_exported_revision"] == acked
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-001: the sole reconcile loop survives a failed pass
+# ---------------------------------------------------------------------------
+
+def test_loop_survives_write_status_failure_and_recovers(tmp_path, monkeypatch):
+    """ENOSPC (any OSError) from write_status used to unwind the reconciler
+    thread for good while peer-enforcement.json kept its last `enforced`
+    claim. The loop must live on and apply the next change once the disk is
+    writable again."""
+    aria = FakeAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
+    rec.run_once()
+    assert peer_enforcement.read_status(p["enforcement"])["state"] == "enforced"
+
+    def enospc(path, status):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(tracker._peer_enforcement, "write_status", enospc)
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    rec._safe_run()                    # what _loop calls: must not raise
+    assert rec._next_maintenance is None       # next poll retries
+    assert rec._poll_should_run(waked=False) is True
+    monkeypatch.undo()
+    rec._safe_run()
+    status = peer_enforcement.read_status(p["enforcement"])
+    assert status["state"] == "enforced"
+    assert status["desired_ip_count"] == 1
+    assert aria.calls[-1] == ["10.0.0.9"]
+
+
+def test_failed_pass_is_recorded_as_degraded_with_error_type(tmp_path,
+                                                            monkeypatch):
+    """When the failure is not in the status writer itself the degraded
+    status (last_error = exception TYPE, never its text) reaches the file, so
+    the console does not keep showing a frozen `enforced`."""
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    rec.run_once()
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret-bearing rpc text")
+    monkeypatch.setattr(tracker._reconciler, "derive_denied_set", boom)
+    rec._safe_run()
+    status = peer_enforcement.read_status(p["enforcement"])
+    assert status["state"] == "degraded"
+    assert status["last_error"] == "RuntimeError"
+    with open(p["enforcement"]) as f:
+        assert "secret-bearing" not in f.read()
+    monkeypatch.undo()
+    assert rec._safe_run() is None
+    assert peer_enforcement.read_status(p["enforcement"])["state"] == "enforced"
+
+
+def test_loop_thread_stays_alive_across_a_failing_pass(tmp_path, monkeypatch):
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria)
+    calls = {"n": 0}
+    real = tracker._reconciler.derive_denied_set
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("first pass breaks")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(tracker._reconciler, "derive_denied_set", flaky)
+    rec.start()
+    try:
+        deadline = time.time() + 5
+        while calls["n"] < 2 and time.time() < deadline:
+            rec.wake()
+            time.sleep(0.05)
+        assert calls["n"] >= 2
+        assert rec._thread.is_alive()
+    finally:
+        rec.stop()
+
+
+def test_entry_level_corrupt_endpoint_file_is_fail_closed_not_a_crash(tmp_path):
+    """A schema-valid endpoint file whose ROW is malformed (missing ipv4, a
+    string observed_at, a non-IPv4 rule) used to escape run_once as
+    KeyError / TypeError / AddressValueError. It is store corruption and
+    takes the fail_closed path like unparseable JSON."""
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    _quarantine(p["policy"], p["lkg"], "x", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("x"),
+                                   "10.0.0.9", 6881, 1000.0)
+    rec.run_once()
+    assert aria.calls == [["10.0.0.9"]]
+    for row in ({"port": 6881, "observed_at": 1000.0},
+                {"ipv4": "10.0.0.1", "port": 6881, "observed_at": "now"},
+                {"ipv4": "fe80::1", "port": 6881, "observed_at": 1000.0}):
+        with open(p["endpoints"], "w") as f:
+            json.dump({"schema": 1, "updated_at": 0.0, "principals": {
+                "device:x": {"principal_type": "device", "principal_id": "x",
+                             "updated_at": 0.0, "endpoints": [row]}}}, f)
+        status = rec.run_once()
+        assert status["state"] == "fail_closed"
+        assert status["last_error"] == "EndpointStoreError"
+        assert aria.calls == [["10.0.0.9"]]      # never cleared
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-005: a quarantined/revoked device's block does not lapse on TTL
+# ---------------------------------------------------------------------------
+
+def test_quarantined_device_block_survives_endpoint_ttl(tmp_path):
+    aria = FakeAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("good"),
+                                   "10.0.0.8", 6881, 1000.0)
+    assert rec.run_once()["desired_ip_count"] == 1
+    clock.t = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    rec._next_maintenance = None          # a maintenance-driven pass (prunes)
+    status = rec.run_once()
+    assert status["desired_ip_count"] == 1
+    assert aria.calls[-1] == ["10.0.0.9"]
+    # The permitted device's expired row was pruned; the denied one was kept.
+    with open(p["endpoints"]) as f:
+        assert list(json.load(f)["principals"]) == ["device:bad"]
+
+
+def test_revoked_device_block_survives_endpoint_ttl(tmp_path):
+    aria = FakeAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(
+        tmp_path, aria, clock=clock, revoked_provider=lambda: {"device:gone"})
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("gone"),
+                                   "10.0.0.7", 6881, 1000.0)
+    assert rec.run_once()["desired_ip_count"] == 1
+    clock.t = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    assert rec.run_once()["desired_ip_count"] == 1
+    assert aria.calls[-1] == ["10.0.0.7"]
+
+
+def test_unquarantined_device_row_then_ages_out(tmp_path):
+    aria = FakeAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
+    _quarantine(p["policy"], p["lkg"], "bad", 1000.0)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("bad"),
+                                   "10.0.0.9", 6881, 1000.0)
+    clock.t = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    assert rec.run_once()["desired_ip_count"] == 1
+
+    def unassign(doc):
+        doc["assignments"].pop("bad", None)
+    peer_policy.commit_mutation(p["policy"], p["lkg"], "unassign", "bad",
+                                "op", clock.t, unassign)
+    status = rec.run_once()
+    assert status["desired_ip_count"] == 0
+    assert aria.calls[-1] == []
+
+
+# ---------------------------------------------------------------------------
+# IRIS-04-006: the maintenance pass prunes the durable map; wakes only read
+# ---------------------------------------------------------------------------
+
+def test_maintenance_pass_prunes_expired_rows_but_wake_pass_does_not(tmp_path):
+    aria = FakeAria()
+    clock = Clock(1000.0)
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=clock)
+    peer_endpoints.record_endpoint(p["endpoints"], _dev("a"),
+                                   "10.0.0.1", 6881, 1000.0)
+    rec.run_once()
+    clock.t = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    # Wake-driven pass (deadline still in the future): read only.
+    rec._next_maintenance = clock.t + 30
+    before = os.stat(p["endpoints"]).st_mtime_ns
+    rec.run_once()
+    assert os.stat(p["endpoints"]).st_mtime_ns == before
+    with open(p["endpoints"]) as f:
+        assert "device:a" in json.load(f)["principals"]
+    # Maintenance-driven pass: the expired row leaves the file.
+    rec._next_maintenance = clock.t - 1
+    rec.run_once()
+    with open(p["endpoints"]) as f:
+        assert json.load(f)["principals"] == {}

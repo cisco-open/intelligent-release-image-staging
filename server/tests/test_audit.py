@@ -511,3 +511,60 @@ def test_concurrent_appends_lose_nothing(tmp_path):
     assert len(lines) == n
     assert {ev["device_id"] for ev in lines} == {"dev-%d" % i
                                                  for i in range(n)}
+
+
+# ---------------------------------------------------------------------------
+# Knob semantics: both bounding knobs parse identically, and 0 is not a
+# secret third meaning on either of them (issue #98).
+# ---------------------------------------------------------------------------
+
+def test_retention_zero_days_keeps_the_default_window(tmp_path, monkeypatch):
+    """IRIS_AUDIT_RETENTION_DAYS=0 used to expire everything older than 'now',
+    wiping the trail an operator most likely meant to keep unbounded. A
+    non-positive value now falls back to the 90-day default."""
+    monkeypatch.setenv("IRIS_AUDIT_RETENTION_DAYS", "0")
+    p = str(tmp_path / "audit.jsonl")
+    now = 20_000_000_000
+    audit.append_event(p, "mint", "dev-yesterday", ts=now - 86400)
+    audit.append_event(p, "mint", "dev-now", ts=now - 60)
+    audit.prune(p, now=now)
+    devs = [ev["device_id"] for ev in _read_lines(p)]
+    assert devs == ["dev-yesterday", "dev-now"]
+
+
+def test_max_events_zero_keeps_the_default_cap(tmp_path, monkeypatch):
+    """IRIS_AUDIT_MAX_EVENTS=0 used to DISABLE the cap (kept[-0:] is the whole
+    list), letting the file grow without bound. It now falls back to the
+    compiled default, proved here with a small stand-in default."""
+    monkeypatch.setattr(audit, "AUDIT_MAX_EVENTS", 5)
+    monkeypatch.setenv("IRIS_AUDIT_MAX_EVENTS", "0")
+    p = str(tmp_path / "audit.jsonl")
+    for i in range(8):
+        audit.append_event(p, "mint", "dev-%d" % i)
+    audit.prune(p)
+    devs = [ev["device_id"] for ev in _read_lines(p)]
+    assert devs == ["dev-%d" % i for i in range(3, 8)]
+
+
+def test_bounding_knobs_share_one_parse_rule(monkeypatch):
+    """Missing, empty, garbage and non-positive all mean 'use the default' on
+    BOTH knobs -- the rule catalog.handler_timeout/peer_endpoints.endpoint_ttl
+    already use."""
+    for raw in (None, "", "  ", "abc", "0", "-1", "-50000"):
+        for name, fn, default in (
+                ("IRIS_AUDIT_MAX_EVENTS", audit._max_events,
+                 audit.AUDIT_MAX_EVENTS),
+                ("IRIS_AUDIT_RETENTION_DAYS", audit._retention_seconds,
+                 audit.AUDIT_RETENTION_DAYS * 86400)):
+            if raw is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, raw)
+            assert fn() == default, "%s=%r" % (name, raw)
+
+
+def test_bounding_knobs_honor_positive_values(monkeypatch):
+    monkeypatch.setenv("IRIS_AUDIT_MAX_EVENTS", "7")
+    monkeypatch.setenv("IRIS_AUDIT_RETENTION_DAYS", "3")
+    assert audit._max_events() == 7
+    assert audit._retention_seconds() == 3 * 86400

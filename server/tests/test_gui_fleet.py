@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import json
+import os
 
 import gui_fleet
 import pytest
@@ -814,3 +815,73 @@ def test_empty_existing_fleet_record_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="non-empty object"):
         fs.upsert(dict(_ROUTED))
+
+
+def test_csv_reimport_keeps_the_credential_profile(tmp_path):
+    """The CSV deliberately has no credential column, so the profile assigned
+    in the Console after the first import must survive the documented
+    export -> edit -> re-import cycle. It used to be the ONE key lost on the
+    round trip, and the loss surfaced only later, per device, as an
+    onboard/undeploy job failing with 'device has no credential profile'."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, credential_profile_id="lab"))
+    before = fs.get_device("d1")
+    stats = fs.import_csv(fs.export_csv())
+    assert stats["updated"] == 1
+    after = fs.get_device("d1")
+    assert after["credential_profile_id"] == "lab"
+    assert set(before) - set(after) == set(), "keys lost on the round trip"
+
+
+def test_csv_import_does_not_invent_a_credential_profile(tmp_path):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
+    fs.import_csv(header + "\n" + row + "\n")
+    assert not fs.get_device("d1").get("credential_profile_id")
+
+
+def test_import_csv_rejects_duplicate_device_rows_atomically(tmp_path):
+    """Two rows for one device used to collapse silently -- last row wins,
+    stats claiming one new AND one updated device -- so a conflicting
+    duplicate in the sheet was never surfaced."""
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    row_a = "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,guestshell"
+    row_b = "d1,10.0.0.9,routed,667,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,guestshell"
+    with pytest.raises(ValueError, match=r"data row 2 repeats device_id d1 from data row 1"):
+        fs.import_csv("\n".join([header, row_a, row_b]) + "\n")
+    assert fs.list_devices() == []                 # all-or-nothing
+
+
+def test_unparseable_fleet_file_refuses_writes_and_is_left_intact(tmp_path):
+    """A present-but-corrupt fleet.json (hand edit, truncated restore) used
+    to read as an EMPTY fleet, and the next upsert rewrote it as a fresh
+    one-device fleet at revision 1 -- turning a repairable corruption into
+    silent, permanent loss of the whole inventory."""
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED))
+    path = os.path.join(str(tmp_path), "fleet.json")
+    with open(path, "w") as stream:
+        stream.write("{not json")
+    for write in (lambda: fs.upsert({"device_id": "new1", "device_ip": "10.0.0.5"}),
+                  lambda: fs.delete("d1"),
+                  lambda: fs.import_csv(",".join(gui_fleet.CSV_V2_COLS) + "\n"
+                                        + "x,10.0.0.7,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,guestshell\n")):
+        with pytest.raises(ValueError, match="unreadable"):
+            write()
+    with open(path) as stream:
+        assert stream.read() == "{not json"       # the evidence survives
+    # reads degrade to an empty view rather than raising
+    assert fs.list_devices() == [] and fs.get_device("d1") is None
+    # a MISSING file is still an empty fleet that writes can create
+    os.unlink(path)
+    assert fs.upsert({"device_id": "new1", "device_ip": "10.0.0.5"})["device_id"] == "new1"
+
+
+def test_malformed_fleet_file_refuses_writes(tmp_path):
+    fs = _fs(tmp_path)
+    with open(os.path.join(str(tmp_path), "fleet.json"), "w") as stream:
+        stream.write('{"revision": "not-a-number", "devices": {}}')
+    with pytest.raises(ValueError, match="malformed"):
+        fs.upsert({"device_id": "new1", "device_ip": "10.0.0.5"})

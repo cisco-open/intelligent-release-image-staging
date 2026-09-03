@@ -96,8 +96,24 @@ CFG="$DIR/eem-iris-copyroot.cfg"
   grep -qE 'maxrun 900' "$DIR/eem-iris-agent.cfg"
 }
 
-@test "agent timer applet invokes iris_agent.py with --once" {
-  grep -qE 'iris_agent.py --once' "$DIR/eem-iris-agent.cfg"
+@test "agent timer applet runs bootstrap.sh in Guest Shell (the action, not the comment)" {
+  # The former assertion grepped 'iris_agent.py --once', which only the prose
+  # comment satisfies: the applet runs bootstrap.sh, which execs the agent.
+  # Assert the ACTION on non-comment lines so deleting it fails the suite.
+  grep -v '^!' "$DIR/eem-iris-agent.cfg" \
+    | grep -qF 'action 200 cli command "guestshell run bash /flash/guest-share/bootstrap.sh"'
+}
+
+@test "agent timer applet reference equals the block device-install.sh installs" {
+  # device-install.sh is documented to mirror this file; compare the applet
+  # block structurally (non-comment lines) against a routed dry-run.
+  ref="$(grep -v '^!' "$DIR/eem-iris-agent.cfg" | sed '/^[[:space:]]*$/d')"
+  run env DEVICE_IP=100.92.9.3 VLAN=666 SVI_IP=100.92.9.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=100.92.9.126 CATALOG_URL=https://100.90.168.20:8443 CATALOG_TOKEN=deadbeef \
+    DEVICE_ID=100.92.9.3 STAGE_HOST=100.90.168.20 bash "$DIR/device-install.sh" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  installed="$(printf '%s\n' "$output" | sed -n '/^event manager applet IRIS-AGENT/,/^!/p' | sed '/^!/d')"
+  [ "$ref" = "$installed" ]
 }
 
 @test "bundle reclaim applet uses authorization bypass + event none" {
