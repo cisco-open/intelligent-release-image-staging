@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Grantless visit (deep link, stale tab): bounce to the login page, where the
-// default iris credential mints the grant that authorizes this form.
+// documented first-run credential mints the grant that authorizes this form.
 if (!window.sessionStorage.getItem('iris_setup_grant')) {
   window.location.replace('/login.html');
 }
@@ -18,7 +18,7 @@ document.getElementById('setup-form').addEventListener('submit', async function 
   if (p.length < 8) { err.textContent = 'Password must be at least 8 characters.'; return; }
   if (p !== p2) { err.textContent = 'Passwords do not match.'; return; }
   // The grant was handed back by /api/v1/login after the operator entered the
-  // default iris / irisisgreat! credential, and passed here via
+  // documented first-run credential, and passed here via
   // sessionStorage -- never the URL, so it never lands in browser history or
   // a referrer header.
   var grant = window.sessionStorage.getItem('iris_setup_grant');

@@ -14,6 +14,13 @@ def test_webroot_assets_exist():
         assert os.path.isfile(os.path.join(gui_server.WEBROOT, name)), name
 
 
+def test_login_page_does_not_disclose_first_run_credentials():
+    with open(os.path.join(gui_server.WEBROOT, "login.html")) as f:
+        html = f.read()
+    assert gui_server.DEFAULT_SETUP_USER not in html
+    assert gui_server.DEFAULT_SETUP_PASS not in html
+
+
 def test_no_orphaned_control_ids():
     """Owner constraint for the toolbar rework: every element id referenced
     from app.js must exist in index.html. A relocated-but-unwired control

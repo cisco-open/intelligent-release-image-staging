@@ -24,7 +24,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   ten-minute setup grant rather than a session; creating the administrator
   permanently ends that special behavior. Because the first caller who can
   reach a fresh Console can claim it, keep the Console on a trusted network
-  and complete setup immediately after deployment.
+  and complete setup immediately after deployment. The login page does not
+  display the default credential; it remains in the operator documentation.
 - **The unified IOx/XR agent no longer puts tracker credentials in announce
   URLs, and registered non-probe APIs authenticate before disclosing resource
   existence.** Aria2 supplies its resource-bound announce bearer as a request
