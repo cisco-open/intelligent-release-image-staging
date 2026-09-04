@@ -11,9 +11,10 @@ This is the ONLY supported way to rotate the seeder announce credential
 
 1. Write a nonsecret recovery manifest FIRST (paths, digests, GIDs, phase — no
    URLs, no tokens).
-2. ``rotate_announce`` under the store lock: keep the current record as a valid
-   non-expiring *previous* and mint a fresh current. Durable persist happens
-   BEFORE any canonical torrent mutation (via the injected ``persist``).
+2. ``rotate_announce`` under the store lock: retire previous records that are
+   revoked or past ``secrets_store.SEEDER_PREV_TTL``, keep the current record as
+   a *previous* valid for that bounded window, and mint a fresh current. Durable
+   persist happens BEFORE any canonical torrent mutation (via ``persist``).
 3. For each seeder torrent, prepare a raw-span-verified canonical replacement
    whose outer announce carries ``announce_token=<current>`` and whose ``info``
    byte span is SHA-1 identical to the old canonical (via torrent_personalize).
@@ -127,19 +128,29 @@ def _atomic_write_json(path, obj):
 
 def rotate_announce(store, now):
     """Prepend the current seeder announce record into ``announce_token_previous``
-    (stamped ``rotated_at`` + fresh nonsecret ``record_id``), then mint a fresh
-    current ``announce_token``. Returns the new current value.
+    (stamped ``rotated_at``, a fresh nonsecret ``record_id`` and an
+    ``expires_at`` of ``now + secrets_store.SEEDER_PREV_TTL``), then mint a
+    fresh current ``announce_token``. Returns the new current value.
+
+    Every pass first RETIRES previous records that are revoked or past their
+    expiry: the overlap is a bounded recovery window for a device that did not
+    receive the new token, not a second permanent credential, and no shipped
+    command retires one by hand.
 
     Refuses (RotationError) any rotation that would leave more than
     ``SEEDER_PREV_CAP`` still-valid previous records — the operator must revoke
-    an old previous (P1) first, so a credential a device still relies on is
-    never silently dropped."""
+    an old previous (P1) first, or wait for it to expire, so a credential a
+    device still relies on is never silently dropped."""
     seeder = store.setdefault("seeder", {})
     prev = seeder.get("announce_token_previous")
     if not isinstance(prev, list):
         prev = []
-    # Count still-valid (non-revoked) previous records.
-    valid_prev = [r for r in prev if not r.get("revoked")]
+    seeder["announce_token_previous"] = prev
+    # Retire first, then count: the cap bounds LIVE credentials, so an expired
+    # previous never blocks a rotation it has no business blocking.
+    secrets_store.retire_expired_previous(store, now)
+    prev = seeder["announce_token_previous"]
+    valid_prev = [r for r in prev if secrets_store.valid(r, now, 0)]
     if len(valid_prev) >= SEEDER_PREV_CAP:
         raise RotationError(
             "cannot rotate: %d valid previous credentials already exist "
@@ -150,6 +161,10 @@ def rotate_announce(store, now):
         record = dict(current)
         record["rotated_at"] = int(now)
         record["record_id"] = secrets.token_hex(8)
+        record.setdefault("revoked", False)
+        # Bounded from here: the retired credential is not a permanent key.
+        record["expires_at"] = max(
+            1, int(now) + secrets_store.SEEDER_PREV_TTL)
         prev.insert(0, record)
     seeder["announce_token_previous"] = prev
 
@@ -395,17 +410,6 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
 
 def _mark(manifest, idx, status):
     manifest["torrents"][idx]["status"] = status
-
-
-def _sha256_file(path):
-    h = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                h.update(block)
-    except OSError:
-        return ""
-    return h.hexdigest()
 
 
 def _info_hash(torrent_bytes):
@@ -673,12 +677,6 @@ def _http_swarm_sender(url, timeout):
 # CLI (nonsecret only — no token/value argv or output, no revoke option)
 # ---------------------------------------------------------------------------
 
-# Non-routable fleet address space. MUST stay identical to tracker._OVERRIDE_NETS
-# (RFC1918 plus RFC 6598 carrier-grade NAT); a drift test asserts the two match.
-_FLEET_NETS = tuple(ipaddress.ip_network(n) for n in (
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
-
-
 def _tracker_announce_base(env):
     """Return the token-free HTTP announce base without ever echoing it."""
     value = env.get("IRIS_TRACKER_ANNOUNCE")
@@ -739,11 +737,19 @@ def _image_dir(entry, env):
     return None
 
 
-def discover_targets(state, env, rpc):
+def discover_targets(state, env, rpc, skipped=None):
     """Discover published canonical torrents and bind each to one active aria GID.
 
     All reads and RPC preflight occur before the core writes its recovery
     manifest or changes credentials/canonical torrent bytes.
+
+    A quarantined image is not a target: its quarantine force-removed the
+    torrent from the seeder on purpose, so it can never be "uniquely active",
+    and refusing the whole rotation for it would make two security controls
+    mutually exclusive. Its canonical file keeps the rotated-out announce;
+    the release path (catalog.release_quarantine -> publish.resume_torrent_rpc)
+    re-syncs it to the then-current credential before re-adding it. When
+    *skipped* is a list, each skipped image id is appended to it.
     """
     try:
         with open(os.path.join(state, "catalog.json")) as f:
@@ -758,6 +764,10 @@ def discover_targets(state, env, rpc):
     candidates = []
     for image_id in sorted(images):
         entry = images[image_id]
+        if isinstance(entry, dict) and entry.get("quarantined"):
+            if skipped is not None:
+                skipped.append(str(image_id))
+            continue
         torrent = os.path.join(state, "torrents", "%s.torrent" % image_id)
         if not isinstance(entry, dict) or not os.path.isfile(torrent):
             raise ValueError("canonical torrent unavailable")
@@ -771,7 +781,8 @@ def discover_targets(state, env, rpc):
             raise ValueError("canonical torrent unavailable")
         candidates.append((str(image_id), torrent, image_dir, info_hash))
     if not candidates:
-        raise ValueError("no published torrent targets")
+        raise ValueError("no published torrent targets: every published image "
+                         "is quarantined")
 
     try:
         active = rpc("aria2.tellActive", [["gid", "infoHash"]]) or []
@@ -934,6 +945,18 @@ def recover_rotation(manifest_path, state, rpc):
     return True
 
 
+def _refusal_reason(exc):
+    """Nonsecret text for a preflight refusal: the message of a ValueError or
+    RotationError when it is a plain literal, else the exception class name."""
+    if isinstance(exc, (ValueError, RotationError)):
+        text = str(exc)
+        if (text and "://" not in text and "=" not in text
+                and "token" not in text.lower()
+                and "\n" not in text and len(text) <= 200):
+            return "%s: %s" % (exc.__class__.__name__, text)
+    return exc.__class__.__name__
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="rotate-seeder-announce",
@@ -983,16 +1006,27 @@ def main(argv=None):
         enc_path = os.environ.get("IRIS_SECRETS_ENC", "")
         if not recipients.strip() or not enc_path.strip():
             raise ValueError("durable encrypted secrets configuration unavailable")
-        targets = discover_targets(args.state, os.environ, rpc)
+        skipped = []
+        targets = discover_targets(args.state, os.environ, rpc, skipped=skipped)
+        if skipped:
+            print("rotate-seeder-announce: skipping %d quarantined image(s) "
+                  "(not seeded; re-synced to the current credential on "
+                  "release): %s" % (len(skipped), ", ".join(skipped)),
+                  file=sys.stderr)
         tracker_base = _tracker_announce_base(os.environ)
         remove, add = _seeder_rpc_ops(rpc)
         deps = production_deps(remove, add, recipients, enc_path)
         result = rotate_seeder_announce(args.secrets, manifest, targets,
                                         tracker_base, deps)
     except Exception as exc:
-        # RPC and URL exceptions can include request/token material: never echo.
+        # RPC and URL exceptions can include request/token material: never
+        # echo those. This module's own preflight refusals are fixed literals
+        # (ValueError / RotationError with nothing interpolated), and an
+        # operator diagnosing a refused maintenance-window operation needs
+        # them -- so they are printed, gated by a shape check that falls back
+        # to the class name if any URL- or credential-like text slipped in.
         print("rotate-seeder-announce: refused (%s); maintenance remains frozen"
-              % exc.__class__.__name__, file=sys.stderr)
+              % _refusal_reason(exc), file=sys.stderr)
         return 2
     if result.served_claimed and not result.hard_no_go:
         _atomic_write_bytes(os.path.join(args.state,

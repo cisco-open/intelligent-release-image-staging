@@ -6,6 +6,7 @@ import http.client
 import os
 import ssl
 import subprocess
+import sys
 import threading
 import urllib.request
 
@@ -414,3 +415,185 @@ def test_staging_ttl_outlives_the_install_that_has_to_use_it():
         "expiring mid-install makes the device's own GET sweep the file it is "
         "asking for."
         % (artifact_server.STAGING_MAX_AGE_SECONDS, budget))
+
+
+def _tls_get_raw(port, crt, path):
+    ctx = ssl.create_default_context(cafile=crt)
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=5)
+    conn.request("GET", path)
+    r = conn.getresponse()
+    body = r.read()
+    conn.close()
+    return r.status, body
+
+
+def _tls_head_raw(port, crt, path):
+    ctx = ssl.create_default_context(cafile=crt)
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=5)
+    conn.request("HEAD", path)
+    r = conn.getresponse()
+    r.read()
+    conn.close()
+    return r.status
+
+
+def test_symlink_inside_root_cannot_escape_it(tmp_path):
+    """IRIS-06-008: translate_path strips dotted segments but follows
+    symlinks; containment is decided on the real path."""
+    served = tmp_path / "artifacts"
+    served.mkdir()
+    (served / "inside.txt").write_text("INSIDE\n")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE-THE-ROOT\n")
+    os.symlink(str(outside), str(served / "link.txt"))
+    os.symlink(str(tmp_path), str(served / "dirlink"))
+    crt, combined = _throwaway_cert(tmp_path)
+    srv = artifact_server.make_server("127.0.0.1", 0, str(served), certfile=combined)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        assert _tls_get_raw(port, crt, "/inside.txt") == (200, b"INSIDE\n")
+        assert _tls_get_raw(port, crt, "/link.txt")[0] == 404
+        assert _tls_get_raw(port, crt, "/dirlink/outside-secret.txt")[0] == 404
+    finally:
+        srv.shutdown()
+
+
+def test_head_applies_same_symlink_containment_as_get(tmp_path):
+    """IRIS-118: HEAD used to fall straight through to the stock
+    SimpleHTTPRequestHandler.do_HEAD and skip the containment check GET
+    applies -- a HEAD against a path escaping the root through a symlink
+    answered 200 (with headers for the OUTSIDE file) where GET would have
+    404'd. No body ever crossed (HEAD never sends one), but existence and
+    metadata (Content-Length, Last-Modified) did."""
+    served = tmp_path / "artifacts"
+    served.mkdir()
+    (served / "inside.txt").write_text("INSIDE\n")
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE-THE-ROOT\n")
+    os.symlink(str(outside), str(served / "link.txt"))
+    crt, combined = _throwaway_cert(tmp_path)
+    srv = artifact_server.make_server("127.0.0.1", 0, str(served), certfile=combined)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        assert _tls_head_raw(port, crt, "/inside.txt") == 200
+        assert _tls_head_raw(port, crt, "/link.txt") == 404
+    finally:
+        srv.shutdown()
+
+
+def test_head_applies_same_staging_permission_check_as_get(
+        tls_server, tmp_path, monkeypatch):
+    """IRIS-118: HEAD against a foreign-owned, loose-permission staging/
+    file must 403 like GET does, not silently answer 200 with headers for a
+    credential file a GET would have refused to serve. The file is created
+    AFTER the server (and its startup sweep) is already running -- same
+    setup as test_staging_file_403_when_foreign_owned_and_mode_loose --
+    so only the per-request check is exercised, not the startup sweep."""
+    srv, port, crt = tls_server
+    served_dir = tmp_path / "artifacts"
+    staging = served_dir / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    conf = staging / ("iris-agent-HEAD-" + "h" * 32 + ".conf")
+    conf.write_text("catalog_token=HEADTOKEN\n")
+    os.chmod(str(conf), 0o644)          # loose
+
+    real_chmod = os.chmod
+    conf_path = os.path.abspath(str(conf))
+
+    def fake_chmod(path, mode, *args, **kwargs):
+        if os.path.abspath(path) == conf_path:
+            raise PermissionError(1, "Operation not permitted")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(artifact_server.os, "chmod", fake_chmod)
+
+    assert _tls_head_raw(
+        port, crt, "/staging/iris-agent-HEAD-" + "h" * 32 + ".conf") == 403
+
+
+def test_staging_path_is_redacted_in_access_log(tls_server, tmp_path, capsys):
+    """IRIS-06-007: the staging basename IS the device's credential
+    capability; it must never reach stdout (docker logs)."""
+    srv, port, crt = tls_server
+    served = tmp_path / "artifacts"
+    (served / "staging").mkdir(exist_ok=True)
+    cap = "iris-agent-d1-" + "ab" * 16 + ".conf"
+    (served / "staging" / cap).write_text("secret=1\n")
+    os.chmod(str(served / "staging" / cap), 0o600)
+    status, _ = _tls_get_raw(port, crt, "/staging/" + cap)
+    assert status == 200
+    out = capsys.readouterr().out
+    assert cap not in out
+    assert "/staging/<redacted>" in out
+    assert artifact_server.redact_log_path("/bootstrap.sh") == "/bootstrap.sh"
+    assert artifact_server.redact_log_path("/staging/x.conf") == "/staging/<redacted>"
+
+
+def test_idle_post_handshake_connection_is_released(tmp_path, monkeypatch):
+    """IRIS-06-008: a client that completes the handshake and never sends a
+    request line must not hold its worker thread and socket forever."""
+    monkeypatch.setattr(artifact_server, "REQUEST_IDLE_TIMEOUT_SECONDS", 1)
+    served = tmp_path / "artifacts"
+    served.mkdir()
+    crt, combined = _throwaway_cert(tmp_path)
+    srv = artifact_server.make_server("127.0.0.1", 0, str(served), certfile=combined)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        import socket
+        ctx = ssl.create_default_context(cafile=crt)
+        raw = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=5)
+        tls = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+        tls.settimeout(5)
+        try:
+            data = tls.recv(16)          # server closes after the idle timeout
+        except (ssl.SSLError, OSError):
+            data = b""
+        assert data == b""
+        tls.close()
+    finally:
+        srv.shutdown()
+
+
+_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_main_refuses_plaintext_without_opt_in_then_serves_with_it(tmp_path):
+    """IRIS-105: artifact_server.main() used to silently fall back to plain
+    HTTP whenever no certificate was found -- staging URLs are the ONLY
+    authorization on capability-bearing enrollment files, so a plaintext
+    artifact server serves them in the clear. Now it fails CLOSED (exit 2,
+    naming the opt-in) exactly like the console's IRIS_GUI_ALLOW_PLAINTEXT
+    contract and the catalog's IRIS_CATALOG_ALLOW_PLAINTEXT, unless
+    IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1 opts in explicitly; port 0 so no fixed
+    port is ever bound."""
+    host = "127.0.0.1"
+    served = tmp_path / "artifacts"
+    served.mkdir()
+    env = dict(os.environ)
+    env["IRIS_ARTIFACTS_HOST"] = host
+    env["IRIS_ARTIFACTS_PORT"] = "0"
+    env["IRIS_ARTIFACTS_DIR"] = str(served)
+    env["IRIS_CERT"] = str(tmp_path / "nonexistent-cert.pem")
+    env.pop("IRIS_ARTIFACTS_ALLOW_PLAINTEXT", None)
+    refused = subprocess.run([sys.executable, "artifact_server.py"],
+                             cwd=_SERVER_DIR, env=env, capture_output=True,
+                             timeout=30)
+    assert refused.returncode == 2
+    assert b"IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1" in refused.stderr
+
+    env["IRIS_ARTIFACTS_ALLOW_PLAINTEXT"] = "1"
+    proc = subprocess.Popen([sys.executable, "artifact_server.py"],
+                            cwd=_SERVER_DIR, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    try:
+        line = proc.stdout.readline()
+        assert b"artifacts on http://" in line, (line, proc.stderr.read())
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)

@@ -123,7 +123,7 @@ def _v2_report():
                     "total_content_bytes": 1288490188},
         "content_sha256": {"state": "verified", "algo": "sha256"},
         "ios_copy_verify": {"state": "ok"},
-        "peers": [{"ip": "100.92.100.14"}], "peers_total": 3,
+        "peers": [{"ip": "198.51.100.14"}], "peers_total": 3,
         "observed_at": 1755743190.0,
         "window": {"start": 1755743180.0, "end": 1755743195.0},
         "received_at": 1755743200.0,
@@ -168,7 +168,7 @@ def test_v2_report_uses_transfer_report_name_and_received_at_event_time():
     assert attrs["iris.transfer.peers_total"] == {"intValue": "3"}
     # network.peer.address is the participation list
     row = attrs["network.peer.address"]
-    assert row["arrayValue"]["values"][0] == {"stringValue": "100.92.100.14"}
+    assert row["arrayValue"]["values"][0] == {"stringValue": "198.51.100.14"}
     # retired ambiguous v1 attrs never appear on a v2 record
     assert "iris.transfer.throughput_avg" not in attrs
     assert "iris.link.tier" not in attrs
@@ -310,7 +310,7 @@ class TestPolicyAndTrackerEvents:
         # design §10.8: iris.tracker.peer with a random in-process event.id.
         ev = {"event": "join", "event_id": "beef1234",
               "principal": "device:iris8kv-1", "info_hash": "aa11",
-              "role": "leecher", "ip": "100.92.100.14",
+              "role": "leecher", "ip": "198.51.100.14",
               "received_at": 1755743190.0}
         rec = otlp.build_tracker_record(ev)
         assert rec["eventName"] == "iris.tracker.peer"
@@ -321,7 +321,7 @@ class TestPolicyAndTrackerEvents:
         assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
         assert attrs["iris.principal"] == {"stringValue": "device:iris8kv-1"}
         assert attrs["iris.peer.role"] == {"stringValue": "leecher"}
-        assert attrs["network.peer.address"] == {"stringValue": "100.92.100.14"}
+        assert attrs["network.peer.address"] == {"stringValue": "198.51.100.14"}
         assert attrs["iris.torrent.info_hash"] == {"stringValue": "aa11"}
 
 
@@ -490,7 +490,7 @@ def test_peer_bytes_record_carries_the_attributed_edge():
     either without re-deriving one from the other."""
     rec = otlp.build_peer_bytes_record({
         "info_hash": "abc", "image_id": "cat9k_iosxe.26.01.01",
-        "ip": "100.92.100.2", "device_id": "rtr-04", "role": "seeder",
+        "ip": "198.51.100.2", "device_id": "rtr-04", "role": "seeder",
         "peer_sent_bytes": 429_496_729, "peer_sent_delta_bytes": 1_048_576,
         "ts": 1787000000.0, "event_id": "e7"})
     attrs = {k: list(v.values())[0] for k, v in _attrs(rec).items()}
@@ -501,7 +501,7 @@ def test_peer_bytes_record_carries_the_attributed_edge():
     assert attrs["iris.image.id"] == "cat9k_iosxe.26.01.01"
     # a single address, as on peer_rate -- never an array like the report
     # records use, so a backend groups by one string.
-    assert attrs["network.peer.address"] == "100.92.100.2"
+    assert attrs["network.peer.address"] == "198.51.100.2"
     assert attrs["iris.device.id"] == "rtr-04"
     assert attrs["iris.peer.role"] == "seeder"
     assert attrs["event.id"] == "e7"
@@ -565,7 +565,7 @@ def test_peer_transfer_record_is_a_separate_name_from_the_sampled_estimate():
     a lossy one and double-count the transfer, so the names are disjoint by
     construction."""
     rec = otlp.build_peer_transfer_record({
-        "ip": "100.92.100.2", "session_bytes_from_peer": 429_496_729,
+        "ip": "198.51.100.2", "session_bytes_from_peer": 429_496_729,
         "captured_at": 1787000000.0})
     assert rec["eventName"] == "iris.device.peer_transfer_record"
     assert rec["eventName"] != "iris.swarm.peer_bytes"
@@ -578,20 +578,20 @@ def test_peer_transfer_record_is_a_separate_name_from_the_sampled_estimate():
 def test_peer_transfer_record_carries_the_measured_edge():
     rec = otlp.build_peer_transfer_record({
         "device_id": "rtr-04", "image_id": "cat9k.26.01.01",
-        "transfer_id": "t1", "ip": "100.92.100.7", "port": 6881,
+        "transfer_id": "t1", "ip": "198.51.100.7", "port": 6881,
         "peer_device_id": "rtr-07", "peer_attribution": "device",
         "has_complete_file": True, "session_bytes_from_peer": 281_474_976,
         "session_bytes_to_peer": 1_048_576, "captured_at": 1787000000.0,
         "source": "aria2_session_counters", "capture_complete": True,
-        "event_id": "r1:100.92.100.7"})
+        "event_id": "r1:198.51.100.7"})
     attrs = _attrs(rec)
     flat = {k: list(v.values())[0] for k, v in attrs.items()}
     assert flat["device.id"] == "rtr-04"          # the RECEIVING device
     assert flat["iris.peer.device.id"] == "rtr-07"
     assert flat["iris.peer.attribution"] == "device"
-    assert flat["network.peer.address"] == "100.92.100.7"
+    assert flat["network.peer.address"] == "198.51.100.7"
     assert flat["iris.transfer_record.source"] == "aria2_session_counters"
-    assert flat["event.id"] == "r1:100.92.100.7"
+    assert flat["event.id"] == "r1:198.51.100.7"
     assert attrs["network.peer.port"] == {"intValue": "6881"}
     assert attrs["iris.transfer_record.capture_complete"] == {"boolValue": True}
     # int64 rides the OTLP/JSON wire as a STRING, as on peer_bytes.
@@ -608,7 +608,7 @@ def test_peer_transfer_record_never_calls_an_unclassified_peer_a_device():
     'device' -- that fold is what would report a wave as ~100% peer-delivered
     when the origin fed most of it."""
     rec = otlp.build_peer_transfer_record({
-        "ip": "100.90.168.20", "session_bytes_from_peer": 9})
+        "ip": "192.0.2.10", "session_bytes_from_peer": 9})
     assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "unknown"}
     # no resolution, no name -- but the bytes are still exported.
     assert "iris.peer.device.id" not in _attrs(rec)
@@ -626,7 +626,7 @@ def test_peer_transfer_record_marks_the_origin_as_origin():
     are the figure the peer share is measured AGAINST, so they must be
     separable at query time rather than absent."""
     rec = otlp.build_peer_transfer_record({
-        "ip": "100.90.168.20", "peer_attribution": "origin",
+        "ip": "192.0.2.10", "peer_attribution": "origin",
         "session_bytes_from_peer": 691_167_232})
     assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "origin"}
     assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
@@ -681,10 +681,10 @@ def test_peer_transfer_record_tolerates_garbage():
 
 def test_peer_transfer_records_fan_out_one_record_per_row():
     report = _transfer_record_report([
-        {"ip": "100.92.100.7", "session_bytes_from_peer": 200,
+        {"ip": "198.51.100.7", "session_bytes_from_peer": 200,
          "session_bytes_to_peer": 0, "peer_attribution": "device",
          "peer_device_id": "rtr-07"},
-        {"ip": "100.90.168.20", "session_bytes_from_peer": 800,
+        {"ip": "192.0.2.10", "session_bytes_from_peer": 800,
          "session_bytes_to_peer": 0, "peer_attribution": "origin"},
     ])
     recs = otlp.build_peer_transfer_records(report, "rtr-04")
@@ -702,7 +702,7 @@ def test_peer_transfer_records_fan_out_one_record_per_row():
     # same report does not look like new bytes.
     ids = [{k: list(v.values())[0] for k, v in _attrs(r).items()}["event.id"]
            for r in recs]
-    assert ids == ["r1:100.92.100.7", "r1:100.90.168.20"]
+    assert ids == ["r1:198.51.100.7", "r1:192.0.2.10"]
     assert otlp.build_peer_transfer_records(report, "rtr-04")[0][
         "attributes"] == recs[0]["attributes"]
     # the origin/device split survives the fan-out
@@ -718,16 +718,16 @@ def test_peer_transfer_records_take_the_sender_class_from_the_server():
     identity rule drifts, and the copy that drifts is the one a peer share gets
     read off."""
     report = _transfer_record_report([
-        {"ip": "100.90.168.20", "session_bytes_from_peer": 700,
+        {"ip": "192.0.2.10", "session_bytes_from_peer": 700,
          "session_bytes_to_peer": 0},
-        {"ip": "100.92.100.7", "session_bytes_from_peer": 289,
+        {"ip": "198.51.100.7", "session_bytes_from_peer": 289,
          "session_bytes_to_peer": 0},
         {"ip": "192.0.2.9", "session_bytes_from_peer": 11,
          "session_bytes_to_peer": 0},
     ])
-    classes = {"100.90.168.20": "origin", "100.92.100.7": "device"}
-    enrich = {"peer_devices": {"100.92.100.7": "rtr-07",
-                               "100.90.168.20": "rtr-20"}}
+    classes = {"192.0.2.10": "origin", "198.51.100.7": "device"}
+    enrich = {"peer_devices": {"198.51.100.7": "rtr-07",
+                               "192.0.2.10": "rtr-20"}}
     recs = otlp.build_peer_transfer_records(
         report, "rtr-04", enrich=enrich,
         classify=lambda ip: classes.get(ip, "unknown"))
@@ -874,3 +874,399 @@ def test_peer_transfer_records_ride_the_logs_payload_unchanged():
     sent = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
     assert sent == recs
     assert json.loads(json.dumps(payload))  # serialises as-is
+
+
+# --- transfer lifecycle (iris.transfer.lifecycle, server-side plan events) ---
+
+def _plan_row(**over):
+    """A promoted (state ``seeding``) transfer_lifecycle store row.
+
+    Both instants are server-clock epochs minted inside the tracker container,
+    which is what makes ``seeding_started_at - planned_at`` a single-clock
+    subtraction; ``observed_at`` is the DEVICE's clock off the attesting
+    report's ``window.end`` and is deliberately a different number."""
+    row = {
+        "plan_id": "9b0c1d2e3f405162738495a6b7c8d9e0",
+        "transfer_id": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4",
+        "device_id": "iris8kv-1",
+        "image_id": "cat9k_iosxe.17.15.01.SPA.bin",
+        "info_hash": "a" * 40,
+        "planned_at": 1755743200.482,
+        "state": "seeding",
+        "checksum_verified_at": 1755743450.0,
+        "tracker_seeder_at": 1755743380.25,
+        "seeding_started_at": 1755743500.75,
+        "observed_at": 1755743495.0,
+        "report_created_at": 1755743448.5,
+    }
+    row.update(over)
+    return row
+
+
+def test_planned_record_carries_the_lifecycle_name_and_the_four_correlation_ids():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "planned")
+    assert rec["eventName"] == "iris.transfer.lifecycle"
+    attrs = _attrs(rec)
+    assert attrs["otel.log.name"] == {
+        "stringValue": "iris.transfer.lifecycle"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["event"] == {"stringValue": "planned"}
+    # The four correlation ids. iris.plan.id is the join key an operator groups
+    # on; the transfer id is what the device's own reports carry.
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+    assert attrs["iris.transfer.id"] == {
+        "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+    assert attrs["iris.image.id"] == {
+        "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
+    assert attrs["iris.torrent.info_hash"] == {"stringValue": "a" * 40}
+    # BOTH device-id spellings ride, so a join against
+    # iris.device.transfer.report (device.id) or against iris.swarm.peer_bytes
+    # (iris.device.id) can be written without a coalesce.
+    assert attrs["device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.transfer.planned_at"] == {
+        "stringValue": "2025-08-21T02:26:40.482Z"}
+
+
+def test_planned_record_omits_the_seeding_instants_it_cannot_yet_know():
+    """A plan is ``planned`` before any precondition has latched, and the store
+    may hand the builder a row that already carries latches (the pair is
+    emitted in order, so ``planned`` can be built after promotion). The planned
+    record must still describe only the planning decision -- shipping a seeding
+    timestamp on it would date the transfer's completion to its assignment."""
+    attrs = _attrs(otlp.build_transfer_lifecycle_record(_plan_row(), "planned"))
+    for gone in ("iris.transfer.seeding_started_at",
+                 "iris.transfer.checksum_verified_at",
+                 "iris.transfer.report_received_at",
+                 "iris.transfer.tracker_seeder_at",
+                 "iris.device.observed_at",
+                 "iris.device.report_created_at"):
+        assert gone not in attrs, gone
+
+
+def test_seeding_started_record_carries_the_four_correlation_ids_and_both_timestamps():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "seeding_started")
+    assert rec["eventName"] == "iris.transfer.lifecycle"
+    attrs = _attrs(rec)
+    assert attrs["otel.log.name"] == {
+        "stringValue": "iris.transfer.lifecycle"}
+    assert attrs["iris.telemetry.schema.version"] == {"intValue": "2"}
+    assert attrs["event"] == {"stringValue": "seeding_started"}
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+    assert attrs["iris.transfer.id"] == {
+        "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+    assert attrs["device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.device.id"] == {"stringValue": "iris8kv-1"}
+    assert attrs["iris.image.id"] == {
+        "stringValue": "cat9k_iosxe.17.15.01.SPA.bin"}
+    # planned_at is repeated here on purpose: the duration is then computable
+    # from this record alone, without joining back to a planned record a
+    # bounded queue may have dropped.
+    assert attrs["iris.transfer.planned_at"] == {
+        "stringValue": "2025-08-21T02:26:40.482Z"}
+    assert attrs["iris.transfer.seeding_started_at"] == {
+        "stringValue": "2025-08-21T02:31:40.750Z"}
+    # The two preconditions ride separately so an operator can see WHICH one
+    # was the laggard -- the device's sha256 or the swarm.
+    assert attrs["iris.transfer.checksum_verified_at"] == {
+        "stringValue": "2025-08-21T02:30:50.000Z"}
+    assert attrs["iris.transfer.tracker_seeder_at"] == {
+        "stringValue": "2025-08-21T02:29:40.250Z"}
+    # The device's own clock, a float epoch named exactly as the v2 report
+    # names it, and never subtracted from the server instants above.
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743495.0
+
+
+def test_the_ingest_instant_also_ships_under_the_name_that_says_ingest():
+    """iris.transfer.checksum_verified_at is the server's received_at for the
+    attesting report -- the first moment the SERVER knew the checksum had
+    verified, not the moment the DEVICE verified it. The device reports no
+    verification instant, so none is invented; the same value ships again as
+    iris.transfer.report_received_at, which is the name that says what it is.
+    The old name keeps shipping because an exported attribute cannot be
+    withdrawn."""
+    attrs = _attrs(
+        otlp.build_transfer_lifecycle_record(_plan_row(), "seeding_started"))
+    assert attrs["iris.transfer.report_received_at"] == {
+        "stringValue": "2025-08-21T02:30:50.000Z"}
+    assert attrs["iris.transfer.report_received_at"] \
+        == attrs["iris.transfer.checksum_verified_at"]
+    # Absent, not defaulted, when the row never latched one.
+    row = _plan_row(checksum_verified_at=None)
+    gone = _attrs(otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+    assert "iris.transfer.report_received_at" not in gone
+    assert "iris.transfer.checksum_verified_at" not in gone
+
+
+def test_the_devices_own_report_instant_makes_the_delivery_lag_visible():
+    """The correction to a plan-to-seed duration inflated by report-delivery
+    backoff. The agent arms a terminal report at completion and then defers
+    the whole send on a bad link, backing off to ~16 minutes, so the ingest
+    instant can sit that far behind the physical one. Shipping the device's
+    own report_created_at beside its observed_at makes that gap visible
+    instead of leaving it read as transfer time. Both are DEVICE-clock float
+    epochs, named as iris.device.transfer.report names them, and neither is
+    ever subtracted from a server instant as though it were exact."""
+    attrs = _attrs(
+        otlp.build_transfer_lifecycle_record(_plan_row(), "seeding_started"))
+    assert attrs["iris.device.observed_at"]["doubleValue"] == 1755743495.0
+    assert attrs["iris.device.report_created_at"]["doubleValue"] == \
+        1755743448.5
+    # Absent, never a stand-in, when the report carried no such instant.
+    row = _plan_row()
+    del row["report_created_at"]
+    assert "iris.device.report_created_at" not in _attrs(
+        otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+
+
+def test_a_recovered_promotion_says_so_on_the_wire():
+    """A row rebuilt from a LOST store takes its seeding_started_at from the
+    durable pair alone -- the peer registry is in memory, so no rebuild can
+    reproduce an original instant that came from tracker_seeder_at. The replay
+    therefore carries a possibly EARLIER value under an IDENTICAL event.id,
+    and the tracker_seeder_at riding with it is a post-loss re-announce, so
+    recomputing max() over these attributes does not reproduce the promotion
+    instant. The flag is what lets a backend attribute that difference to a
+    recovery instead of silently holding two disagreeing values; a
+    process-wide counter cannot, because it is not on the record."""
+    attrs = _attrs(otlp.build_transfer_lifecycle_record(
+        _plan_row(recovered_promotion=True), "seeding_started"))
+    assert attrs["iris.transfer.recovered_promotion"] == {"boolValue": True}
+    # ABSENT, never false, on an ordinary promotion -- and never on `planned`,
+    # whose instant comes from policy.json and replays identically regardless.
+    assert "iris.transfer.recovered_promotion" not in _attrs(
+        otlp.build_transfer_lifecycle_record(_plan_row(), "seeding_started"))
+    assert "iris.transfer.recovered_promotion" not in _attrs(
+        otlp.build_transfer_lifecycle_record(
+            _plan_row(recovered_promotion=True), "planned"))
+    # A truthy non-True value is not the flag: the store writes True or
+    # nothing, and anything else came from a hand-edited row.
+    assert "iris.transfer.recovered_promotion" not in _attrs(
+        otlp.build_transfer_lifecycle_record(
+            _plan_row(recovered_promotion="yes"), "seeding_started"))
+
+
+def test_lifecycle_event_time_is_the_source_instant_not_the_emit_instant():
+    """timeUnixNano is the instant the SERVER minted or observed -- planned_at
+    for planned, seeding_started_at for seeding_started -- never the moment the
+    record was queued or ingested. Timing off the emit would report a queue
+    delay as a transfer fact, and a crash-replay would then move an instant a
+    backend already holds under an identical event.id. This is the deliberate
+    departure from iris.device.transfer.report, which times off the server's
+    received_at because arrival is the only thing it knows for certain."""
+    row = _plan_row()
+    planned = otlp.build_transfer_lifecycle_record(row, "planned")
+    seeding = otlp.build_transfer_lifecycle_record(row, "seeding_started")
+    assert planned["timeUnixNano"] == str(int(1755743200.482 * 1e9))
+    assert seeding["timeUnixNano"] == str(int(1755743500.75 * 1e9))
+
+
+def test_rfc3339_is_utc_milliseconds_with_a_literal_z():
+    """Stands in for the operator-facing Splunk extraction
+    ``%Y-%m-%dT%H:%M:%S.%N%Z``: %N needs a fractional field that is always
+    present and always three digits, and %Z matches a zone NAME, so it will not
+    consume a numeric +00:00 offset. The strptime round-trip below is the
+    machine-checkable proxy for that pattern."""
+    import datetime
+    value = otlp._rfc3339_millis(1755743200.482)
+    assert value == "2025-08-21T02:26:40.482Z"
+    assert datetime.datetime.strptime(
+        value, "%Y-%m-%dT%H:%M:%S.%fZ") == datetime.datetime(
+            2025, 8, 21, 2, 26, 40, 482000)
+    # A whole-second instant still renders three fractional digits: a bare
+    # "...:50Z" would fail the pattern outright.
+    assert otlp._rfc3339_millis(1755743450) == "2025-08-21T02:30:50.000Z"
+    assert otlp._rfc3339_millis(0) == "1970-01-01T00:00:00.000Z"
+    # UTC via time.gmtime, never the container's local zone.
+    assert value.endswith("Z") and "+" not in value
+
+
+def test_rfc3339_rounding_carry_rolls_the_second():
+    # 1.9996s rounds to 2000 millis: it must become ...:02.000Z, never
+    # ...:01.1000Z, which is four fractional digits and breaks the pattern.
+    assert otlp._rfc3339_millis(1.9996) == "1970-01-01T00:00:02.000Z"
+    assert otlp._rfc3339_millis(0.9999) == "1970-01-01T00:00:01.000Z"
+
+
+def test_rfc3339_returns_none_for_anything_it_cannot_honestly_render():
+    # None means the caller DROPS the attribute pair; an absent instant is
+    # honest where a fabricated one is not. bool is rejected explicitly
+    # because it is an int subclass and would render True as ...:01.000Z.
+    for bad in (None, True, False, "nope", {}, [], float("nan"),
+                float("inf"), -float("inf"), -1.0):
+        assert otlp._rfc3339_millis(bad) is None, repr(bad)
+
+
+def test_event_id_is_stable_across_a_repeat_build():
+    """The id is DERIVED from the plan, never minted per emission, so a replay
+    after a crash between the queue accepting a record and its durable marker
+    landing carries a byte-identical record."""
+    row = _plan_row()
+    rec = otlp.build_transfer_lifecycle_record(row, "seeding_started")
+    again = otlp.build_transfer_lifecycle_record(dict(row), "seeding_started")
+    assert rec["attributes"] == again["attributes"]
+    assert rec == again
+    assert _attrs(rec)["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.seeding_started"}
+
+
+def test_planned_and_seeding_started_carry_different_event_ids():
+    """They MUST differ: LogQueue.emit refuses a key already in
+    _keys/_inflight_keys, so a shared event.id would make the second record of
+    a plan vanish silently rather than fail loudly."""
+    row = _plan_row()
+    planned = _attrs(otlp.build_transfer_lifecycle_record(row, "planned"))
+    seeding = _attrs(
+        otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+    assert planned["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.planned"}
+    assert seeding["event.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0.seeding_started"}
+    assert planned["event.id"] != seeding["event.id"]
+
+
+def test_event_id_is_an_attribute_not_a_top_level_key():
+    rec = otlp.build_transfer_lifecycle_record(_plan_row(), "planned")
+    assert "event.id" not in rec
+    assert _attrs(rec)["event.id"]["stringValue"].endswith(".planned")
+
+
+def test_lifecycle_record_omits_what_it_does_not_know():
+    """An absent attribute means NOT KNOWN. Nothing is defaulted: an empty
+    string info_hash or a fabricated instant is worse than a missing one."""
+    row = _plan_row()
+    del row["info_hash"]
+    del row["observed_at"]
+    row["tracker_seeder_at"] = None
+    attrs = _attrs(otlp.build_transfer_lifecycle_record(row, "seeding_started"))
+    for gone in ("iris.torrent.info_hash", "iris.device.observed_at",
+                 "iris.transfer.tracker_seeder_at"):
+        assert gone not in attrs, gone
+    # ...and the ones it does know are unaffected by the omissions.
+    assert attrs["iris.transfer.seeding_started_at"] == {
+        "stringValue": "2025-08-21T02:31:40.750Z"}
+    assert attrs["iris.transfer.checksum_verified_at"] == {
+        "stringValue": "2025-08-21T02:30:50.000Z"}
+
+
+def test_lifecycle_record_never_labels_a_transfer_id_as_device_reported():
+    """There is exactly ONE promotion path: a plan promotes only on a terminal
+    report bearing that plan's own transfer_id. No divergent / mixed-fleet
+    fallback exists, so no attribute may claim one -- even if a row somehow
+    carries such keys, they never reach the wire. An attribute cannot be
+    withdrawn additively, so shipping one would be permanent."""
+    row = _plan_row(id_source="device_divergent",
+                    device_reported_id="ffffffffffffffffffffffffffffffff")
+    for event in ("planned", "seeding_started"):
+        attrs = _attrs(otlp.build_transfer_lifecycle_record(row, event))
+        assert "iris.transfer.id_source" not in attrs
+        assert "iris.transfer.device_reported_id" not in attrs
+        # the plan's own transfer id is the only one exported
+        assert attrs["iris.transfer.id"] == {
+            "stringValue": "3f0a9c1d8e2b4a6f9017c3d5e7b1a2c4"}
+
+
+def test_lifecycle_record_tolerates_garbage():
+    # A builder never raises on bad input (the house rule); _ts_nano yields
+    # "0" rather than blowing up, and every uncoercible value drops its pair.
+    for row in (None, "total garbage", 7, [], {}):
+        rec = otlp.build_transfer_lifecycle_record(row, "planned")
+        assert rec["timeUnixNano"] == "0"
+        assert rec["eventName"] == "iris.transfer.lifecycle"
+        attrs = _attrs(rec)
+        assert attrs["otel.log.name"] == {
+            "stringValue": "iris.transfer.lifecycle"}
+        assert "iris.plan.id" not in attrs
+        assert "iris.transfer.planned_at" not in attrs
+    junk = _plan_row(planned_at="soon", seeding_started_at=float("nan"),
+                     observed_at="later")
+    rec = otlp.build_transfer_lifecycle_record(junk, "seeding_started")
+    assert rec["timeUnixNano"] == "0"
+    attrs = _attrs(rec)
+    assert "iris.transfer.planned_at" not in attrs
+    assert "iris.transfer.seeding_started_at" not in attrs
+    assert "iris.device.observed_at" not in attrs
+    assert attrs["iris.plan.id"] == {
+        "stringValue": "9b0c1d2e3f405162738495a6b7c8d9e0"}
+
+
+def test_lifecycle_records_ride_the_logs_payload_unchanged():
+    """build_logs_payload discriminates solely on the presence of
+    timeUnixNano, so a pre-built lifecycle record passes through untouched --
+    which is why the builder needs no registration anywhere."""
+    recs = [otlp.build_transfer_lifecycle_record(_plan_row(), "planned"),
+            otlp.build_transfer_lifecycle_record(_plan_row(),
+                                                 "seeding_started")]
+    payload = otlp.build_logs_payload(recs, {"service.name": "iris-tracker"})
+    sent = payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    assert sent == recs
+    assert json.loads(json.dumps(payload))  # serialises as-is
+
+
+def test_existing_report_record_attributes_are_unchanged_by_the_lifecycle_addition():
+    """The lifecycle event is PURELY ADDITIVE: no existing builder gained an
+    attribute, and in particular the device report is NOT given a plan id.
+    plan_id never travels device -> server at all, so a report cannot honestly
+    carry one; the server owns the transfer_id -> plan_id mapping."""
+    for rec in (otlp.build_report_record(_v2_report(), "iris8kv-1"),
+                otlp.build_report_record(_v1_report(), "d1")):
+        attrs = _attrs(rec)
+        for gone in ("iris.plan.id", "iris.transfer.planned_at",
+                     "iris.transfer.seeding_started_at",
+                     "iris.transfer.checksum_verified_at",
+                     "iris.transfer.tracker_seeder_at", "event"):
+            assert gone not in attrs, gone
+        assert rec["eventName"] != "iris.transfer.lifecycle"
+    # the report event time and schema version are untouched by this change
+    v2 = otlp.build_report_record(_v2_report(), "iris8kv-1")
+    assert v2["timeUnixNano"] == str(int(1755743200.0 * 1e9))   # received_at
+    assert _attrs(v2)["iris.telemetry.schema.version"] == {"intValue": "2"}
+
+
+# ---------------------------------------------------------------------------
+# IRIS-05-002: sampled (evictable) records never evict durable-intent ones
+# ---------------------------------------------------------------------------
+
+def test_evictable_records_are_dropped_before_durable_ones():
+    q = otlp.LogQueue(max_queue=3)
+    assert q.emit({"n": "lifecycle-1"}) is True
+    assert q.emit({"n": "sample-1"}, evictable=True) is True
+    assert q.emit({"n": "sample-2"}, evictable=True) is True
+    # Full. A durable record evicts the OLDEST SAMPLED one, not lifecycle-1.
+    assert q.emit({"n": "lifecycle-2"}) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-1", "sample-2",
+                                              "lifecycle-2"]
+    # A sampled record likewise evicts a sampled one first.
+    assert q.emit({"n": "sample-3"}, evictable=True) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-1", "lifecycle-2",
+                                              "sample-3"]
+    # Nothing evictable left after this: only then does the oldest go.
+    assert q.emit({"n": "lifecycle-3"}) is True
+    assert q.emit({"n": "lifecycle-4"}) is True
+    assert [e["n"] for e in q.snapshot()] == ["lifecycle-2", "lifecycle-3",
+                                              "lifecycle-4"]
+    assert q.dropped_total == 4
+
+
+def test_flush_after_mid_batch_eviction_removes_all_sent_events():
+    """An in-flight batch can lose an evictable record from its MIDDLE (not
+    only its head). After a successful send every retained sent event must
+    leave the queue and later emits stay queued in order."""
+    q = otlp.LogQueue(max_queue=4)
+    q.emit({"n": "a"})
+    q.emit({"n": "s"}, evictable=True)
+    q.emit({"n": "b"})
+    seen = []
+
+    def send(batch):
+        seen.append([e["n"] for e in batch])
+        q.emit({"n": "c"})                 # concurrent emits during send
+        q.emit({"n": "d"})                 # -> queue full, evicts "s"
+        q.emit({"n": "e"})                 # -> nothing evictable: drops "a"
+    assert q.flush(send) == 3
+    assert seen == [["a", "s", "b"]]
+    assert [e["n"] for e in q.snapshot()] == ["c", "d", "e"]
+    # "s" and "a" were delivered, not lost: their provisional drops undone.
+    assert q.dropped_total == 0

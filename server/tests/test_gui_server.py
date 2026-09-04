@@ -170,8 +170,13 @@ def test_bulk_row_actions_wired():
     assert "'adopt-selected'" in js and "'delete-selected'" in js
     assert "'apply-cred-selected'" in js
     assert "/adopt'" in js and "acknowledge_adopt: true" in js
-    # bulk assign reuses the per-device credential route
+    # the per-row credential dropdown still uses the single-device route...
     assert "'/credential'" in js or "+ '/credential'" in js
+    # ...but the bulk credential action (issue #125) posts ONE request
+    # carrying every selected id, not one per-device request each --
+    # see bulkApply and gui_server.py's /api/devices/bulk-credential.
+    assert "'/api/devices/bulk-credential'" in js
+    assert "function bulkApply(" in js
     # the single delete path confirms first
     assert "function delWarning(" in js
     assert js.count("confirm(delWarning(") == 1
@@ -369,7 +374,7 @@ def test_audit_message_composer_wired():
         js = f.read()
     assert "function auditVerb(" in js
     # verb coverage: console + legacy broker events
-    for ev in ("login_fail", "password_change_fail", "stage_host_clear",
+    for ev in ("login_fail", "password_change_fail", "revoke_other_sessions",
                "device_csv_import", "device_credential_change",
                "onboard_finished", "credential_profile_delete",
                "image_publish_finished", "request_report",
@@ -623,7 +628,11 @@ def test_login_sets_cookie_and_returns_csrf(tmp_path):
         assert "iris_sid=" in headers.get("Set-Cookie", "")
         assert "HttpOnly" in headers["Set-Cookie"]
         assert "SameSite=Strict" in headers["Set-Cookie"]
-        assert "Secure" in headers["Set-Cookie"]
+        # Rewritten (IRIS-06-003): this fixture serves plain HTTP, and a
+        # Secure cookie set over http:// is discarded by every browser except
+        # on localhost -- the old assertion encoded a login loop. Secure is
+        # asserted over TLS in test_login_cookie_is_secure_over_tls.
+        assert "Secure" not in headers["Set-Cookie"]
         assert "Path=/" in headers["Set-Cookie"]
         assert json.loads(body)["csrf"]
     finally:
@@ -767,6 +776,16 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
     env["IRIS_IMAGES_DIR"] = str(tmp_path / "images")
     env["IRIS_CERT"] = "/nonexistent-so-plain-http"
     env["IRIS_GUI_CERT"] = "/nonexistent-so-plain-http-too"
+    # With no usable certificate main() now fails CLOSED (IRIS-06-003):
+    # exit 2 with a message naming the opt-in, and nothing listening.
+    env.pop("IRIS_GUI_ALLOW_PLAINTEXT", None)
+    refused = subprocess.run([sys.executable, "gui_server.py"], cwd=_SERVER_DIR,
+                             env=env, capture_output=True, timeout=30)
+    assert refused.returncode == 2
+    assert b"IRIS_GUI_ALLOW_PLAINTEXT=1" in refused.stderr
+    assert not _wait_for_port(host, port, timeout=0.5)
+    # The explicit opt-in is what this plain-HTTP harness needs.
+    env["IRIS_GUI_ALLOW_PLAINTEXT"] = "1"
 
     proc = subprocess.Popen(
         [sys.executable, "gui_server.py"],
@@ -1109,6 +1128,7 @@ def test_upload_rejects_truncated_body(tmp_path):
 import gui_fleet
 import gui_creds
 import catalog as catalog_mod
+import keyed_state
 import peer_enforcement
 
 
@@ -1205,6 +1225,61 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         stop()
 
 
+def test_peer_policy_enforcement_stale_flag(tmp_path):
+    """IRIS-99: the tracker reconciler can freeze (its degraded-pass write
+    itself failing, or the process dying) with peer-enforcement.json's last
+    recorded state left at "enforced" -- looking healthy forever. The
+    console must say so via enforcement.stale rather than showing a frozen
+    claim as current, whether the frozen state is "enforced" or anything
+    else, and whether last_reconciled_at is old or altogether absent."""
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    creds = gui_creds.CredentialStore(secrets_path)
+    cat = catalog_mod.CatalogStore(state)
+    now_box = {"t": 1_000_000.0}
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, creds=creds, catalog=cat,
+        certfile=None, now_fn=lambda: now_box["t"])
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", port)
+        headers = {"Cookie": cookie}
+
+        # No enforcement file at all -- never proven current -> stale.
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        assert status == 200
+        e = json.loads(raw)["enforcement"]
+        assert e["last_reconciled_at"] is None
+        assert e["stale"] is True
+
+        # A fresh "enforced" pass, recorded at the current now_fn() time.
+        enforcement_path = os.path.join(cat.state_dir, "peer-enforcement.json")
+        peer_enforcement.write_status(enforcement_path, peer_enforcement.build_status(
+            "enforced", "sess-1", "hash-1", 1, 0, now_box["t"]))
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        e = json.loads(raw)["enforcement"]
+        assert e["state"] == "enforced"
+        assert e["stale"] is False
+
+        # Time advances well past the staleness threshold with NO further
+        # reconcile pass (the frozen-reconciler scenario): the same
+        # "enforced" status must now read stale, not healthy.
+        now_box["t"] += gui_server._PEER_POLICY_STALE_AFTER + 1
+        status, _, raw = _req("127.0.0.1", port, "GET", "/api/peer-policy",
+                              headers=headers)
+        e = json.loads(raw)["enforcement"]
+        assert e["state"] == "enforced"      # the frozen claim is unchanged
+        assert e["stale"] is True            # but the console now flags it
+    finally:
+        srv.shutdown()
+
+
 def test_peer_policy_rejects_unknown_device_and_bad_csrf(tmp_path):
     host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
     try:
@@ -1241,6 +1316,32 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         assert st == 200
         assert json.loads(_req(host, port, "GET", "/api/devices",
                                headers={"Cookie": ck})[2])["devices"] == []
+    finally:
+        stop()
+
+
+def test_device_upsert_ignores_machine_determined_fields(tmp_path):
+    """os_family is classified from the device's own banner and registered_at
+    is the store's own stamp; a client body carrying either used to be
+    merged as-is (a wrong os_family wedged planning until hand-corrected)."""
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "model": "C9300", "os_family": "xr",
+                         "registered_at": 7}, headers=hh)
+        assert st == 200
+        saved = json.loads(b)["device"]
+        assert "os_family" not in saved
+        assert saved["registered_at"] != 7
+        # a cached classification survives an edit that tries to change it
+        fleet.upsert({"device_id": "d1", "os_family": "xe"})
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "os_family": "xr"}, headers=hh)
+        assert st == 200
+        assert json.loads(b)["device"]["os_family"] == "xe"
     finally:
         stop()
 
@@ -1332,7 +1433,7 @@ def test_csv_import_export(tmp_path):
         assert b.decode().splitlines()[0] == \
             ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
              "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
-             "vpg_number,nat_interface,platform")
+             "vpg_number,nat_interface,svi_igp,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -1913,9 +2014,12 @@ def test_device_view_mixed_policy_defaults(tmp_path):
 
 
 def test_policy_read_once_per_request(tmp_path):
-    """policy.json is parsed exactly once per /api/devices or /api/overview
+    """The policy store is read exactly once per /api/devices or /api/overview
     request, regardless of fleet size — the console polls both endpoints, so
-    a per-device get_policy() re-read would grow linearly with the fleet."""
+    a per-device get_policy() re-read would grow linearly with the fleet.
+
+    Policy is keyed per device now, so the one read is the whole-fleet
+    ``list_policies()`` snapshot rather than one parse of ``policy.json``."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, cat = deps
     try:
@@ -1928,14 +2032,13 @@ def test_policy_read_once_per_request(tmp_path):
         cat.set_policy("d0", approved_image_id="img1")
 
         reads = {"policy": 0}
-        orig_read = cat._read
+        orig_list = cat.list_policies
 
-        def counting_read(path):
-            if path == cat.policy_path:
-                reads["policy"] += 1
-            return orig_read(path)
+        def counting_read():
+            reads["policy"] += 1
+            return orig_list()
 
-        cat._read = counting_read
+        cat.list_policies = counting_read
         st, _, _ = _req(host, port, "GET", "/api/devices",
                         headers={"Cookie": ck})
         assert st == 200
@@ -2256,7 +2359,9 @@ def test_sse_stream_survives_queue_wait(tmp_path, monkeypatch):
 
         t = threading.Thread(target=read_all, daemon=True)
         t.start()
-        time.sleep(2.5)                       # 2.5x the idle cap, still queued
+        # 2.75 s: deliberately OFF-PHASE with the handler's 0.5 s poll (2.5 s
+        # landed release.set() exactly on a poll tick, IRIS-06-005).
+        time.sleep(2.75)                      # >2x the idle cap, still queued
         assert not done_reading.is_set()      # queue wait didn't close it
         assert b": keepalive" in b"".join(chunks)
         release.set()
@@ -2333,8 +2438,8 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
             "management_type": "xr-host", "device_ip": "10.0.0.9",
             "swarm_port": "6881", "model": "8201", "platform": "xr-appmgr",
             "renderer": "v1"}
-        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
-                    "app_gateway", "inband_vlan", "vpg_number",
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "svi_igp", "app_ip",
+                    "app_mask", "app_gateway", "inband_vlan", "vpg_number",
                     "nat_interface", "ios_ssh_host"):
             assert key not in plan["resolved"], key
         assert plan["ownership"] == (
@@ -2407,6 +2512,40 @@ def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tm
         resolved = json.loads(body)["plan"]["resolved"]
         assert resolved["management_type"] == "routed"     # not 'inband'
         assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+    finally:
+        stop()
+
+
+def test_plan_carries_svi_igp_through_to_the_resolved_record(tmp_path):
+    """issue #85: a routed device's per-record svi_igp override must reach
+    the resolved plan gui_onboard._build_env reads for the installer env --
+    not just live in the fleet row. A device with no override plans with an
+    empty svi_igp, so device-install.sh's own SVI_IGP env var default still
+    decides for it."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "management_type": "routed", "iris_vlan": "666",
+                      "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                      "app_ip": "10.0.0.1", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.0.0.2", "svi_igp": "isis",
+                      "model": "C9300", "platform": "guestshell"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.9",
+                      "management_type": "routed", "iris_vlan": "667",
+                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.252",
+                      "app_ip": "10.0.0.9", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.0.0.10",
+                      "model": "C9300", "platform": "guestshell"})
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        assert json.loads(body)["plan"]["resolved"]["svi_igp"] == "isis"
+        status, _, body = _req(host, port, "GET", "/api/devices/d2/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        assert json.loads(body)["plan"]["resolved"]["svi_igp"] == ""
     finally:
         stop()
 
@@ -2728,7 +2867,8 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
         assert plan["resolved"] == {
             "management_type": "router-routed", "device_ip": "192.0.2.10",
             "iris_vlan": "", "svi_ip": "",
-            "svi_mask": "", "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
+            "svi_mask": "", "svi_igp": "", "app_ip": "10.7.0.2",
+            "app_mask": "255.255.255.252",
             "app_gateway": "10.7.0.1", "inband_vlan": "", "vpg_number": "7",
             "nat_interface": "", "swarm_port": "6881", "ios_ssh_host": "",
             "model": "C8000V", "platform": "router", "renderer": "v1"}
@@ -2892,6 +3032,118 @@ def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
         assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
         assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
         assert ran[-1]["ROUTER_RESOURCES_OWNED"] == "1"
+    finally:
+        stop()
+
+
+def _serve_nonrouter(tmp_path, run_fn, device):
+    """Record-backed server for a Guest Shell or IOx device, handing back the
+    fleet and record store so a test can edit the inventory and read the
+    record the way the router variant above does."""
+    import deployment_records
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    fleet.upsert(device)
+    creds = gui_creds.CredentialStore(secrets_path)
+    creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
+    record_store = deployment_records.DeploymentRecordStore(state)
+    art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
+    for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
+        open(os.path.join(art, pkg), "w").close()
+    onboard = gui_onboard.OnboardService(
+        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
+        run_fn=run_fn, record_store=record_store, artifacts_dir=art,
+        probe_fn=lambda dev, env: "C9300",
+        guestshell_preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "FOC0000GS",
+            "detected_model": "C9300-48P"},
+        iox_preflight_fn=lambda dev, env, resolved: {
+            "status": "passed", "device_identity": "FCW0000IOX",
+            "detected_model": "IE-3400"})
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, record_store=record_store)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, fleet, record_store, srv.shutdown
+
+
+_GS_ROW = {"device_id": "edge", "device_ip": "192.0.2.10",
+           "management_type": "inband", "inband_vlan": "120",
+           "app_ip": "192.0.2.11", "app_mask": "255.255.255.0",
+           "app_gateway": "192.0.2.1", "model": "C9300",
+           "platform": "guestshell", "credential_profile_id": "lab"}
+_IOX_ROW = dict(_GS_ROW, device_id="ie1", model="IE-3400", platform="iox")
+
+
+@pytest.mark.parametrize("device, identity", [(_GS_ROW, "FOC0000GS"),
+                                              (_IOX_ROW, "FCW0000IOX")])
+def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
+        tmp_path, device, identity):
+    """The router path was hardened against a post-deploy inventory edit
+    retargeting its teardown, and the route's comment claimed the guarantee
+    for every undeploy -- but Guest Shell and IOx records were written with
+    preflight 'not-required' and no identity, and their teardown took
+    DEVICE_IP from the live fleet row. The recorded teardown could then
+    remove an operator VLAN/SVI and IRIS-named config from whatever box
+    answered at the edited address, with an empty EXPECTED_DEVICE_IDENTITY."""
+    ran = []
+    did = device["device_id"]
+    host, port, fleet, record_store, stop = _serve_nonrouter(
+        tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1], device)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        _, _, body = _req(host, port, "POST", "/api/devices/%s/onboard" % did,
+                          {}, headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
+        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+        record = record_store.active_for_device(did)
+        # the record now carries the evidence of the check that ran
+        assert record["preflight"]["status"] == "passed"
+        assert record["preflight"]["device_identity"] == identity
+        assert record["resolved"]["device_identity"] == identity
+        assert record["resolved"]["device_ip"] == "192.0.2.10"
+
+        fleet.upsert({"device_id": did, "device_ip": "203.0.113.99"})
+        _, _, body = _req(host, port, "POST", "/api/devices/%s/undeploy" % did,
+                          {}, headers=headers)
+        assert _wait_onboard_job(host, port, cookie,
+                                 json.loads(body)["job_id"])["state"] == "done"
+        assert ran[-1]["DEVICE_IP"] == "192.0.2.10", "teardown followed the edited row"
+        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+        assert ran[-1]["MANAGEMENT_TYPE"] == "inband"
+        assert record_store.get(record["record_id"])["state"] == "removed"
+    finally:
+        stop()
+
+
+def test_nonrouter_onboard_record_starts_pending_not_not_required(tmp_path):
+    """The planned record's preflight is 'pending' for every platform now;
+    'not-required' misdescribed a check that runs in the worker pool."""
+    gate = threading.Event()
+    host, port, _fleet, record_store, stop = _serve_nonrouter(
+        tmp_path, lambda path, env, on: (gate.wait(5), 0)[1], _GS_ROW)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        _, _, body = _req(host, port, "POST", "/api/devices/edge/onboard", {},
+                          headers=headers)
+        jid = json.loads(body)["job_id"]
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            states = [r["state"] for r in record_store.list("edge")]
+            if states == ["applying"]:
+                break
+            time.sleep(0.01)
+        (record,) = record_store.list("edge")
+        assert record["state"] == "applying"
+        assert record["preflight"]["status"] == "passed"     # already bound
+        gate.set()
+        assert _wait_onboard_job(host, port, cookie, jid)["state"] == "done"
     finally:
         stop()
 
@@ -3730,7 +3982,7 @@ def test_setup_status_route_requires_auth(tmp_path, monkeypatch):
 
 def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
     """Authenticated GET must actually reach setup_status.build_status and
-    return its three-card shape wired to the real session + credential
+    return its four-card shape wired to the real session + credential
     store -- unlike the source-scan test, this fails if the route raises,
     returns the wrong shape, or never calls the builder at all."""
     monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
@@ -3741,7 +3993,7 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
                                headers={"Cookie": ck})
         assert status == 200
         st = json.loads(body)
-        assert set(("admin", "stage_host", "packages")) <= set(st)
+        assert set(("admin", "telemetry", "packages", "image_verification")) <= set(st)
         # the session's real username must flow through, not a placeholder
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
@@ -3792,29 +4044,6 @@ def test_setup_status_route_carries_the_image_verification_card(tmp_path, monkey
         status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
                                headers={"Cookie": ck})
         assert json.loads(body)["image_verification"]["state"] == "ok"
-    finally:
-        stop()
-
-
-def test_setup_status_route_response_has_no_secret_material(tmp_path, monkeypatch):
-    """The card exists to be trustworthy about system state; it must never
-    leak stage-host credentials onto the wire, even after a real stage-host
-    password has been set through the credential store it reads from."""
-    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
-    host, port, _ctx, stop = _serve_full(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        status, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
-                            {"username": "svc-iris", "password": "hostpw-s3cr3t"},
-                            headers=hh)
-        assert status == 200
-        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
-                               headers={"Cookie": ck})
-        assert status == 200
-        blob = body.decode().lower()
-        for banned in ("password", "secret", "token", "private", "begin "):
-            assert banned not in blob
     finally:
         stop()
 
@@ -3908,50 +4137,6 @@ def test_devices_example_csv_download(tmp_path):
         assert st == 200
         assert "filename=devices-example.csv" in hd.get("Content-Disposition", "")
         assert "device_id,device_ip,management_type,iris_vlan" in b.decode()
-    finally:
-        stop()
-
-
-def test_settings_stage_host_roundtrip(tmp_path):
-    host, port, _deps, stop = _serve_full(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        # auth: no session -> 401; session without CSRF -> 403
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": "p"})[0] == 401
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": "p"},
-                    headers={"Cookie": ck})[0] == 403
-        # starts unconfigured; GET /api/settings shows the redacted view
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert st == 200
-        assert json.loads(b)["stage_host"] == {"configured": False, "username": ""}
-        # validation: missing/null/non-string fields and non-object JSON -> 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "", "password": "p"}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": ""}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": None}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": 42, "password": "p"}, headers=hh)[0] == 400
-        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    raw=b"[]", headers=hh_json)[0] == 400
-        # set, then the settings view reflects it — but NEVER the password
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "svc-iris", "password": "hostpw"},
-                    headers=hh)[0] == 200
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert json.loads(b)["stage_host"] == {"configured": True,
-                                               "username": "svc-iris"}
-        assert b"hostpw" not in b
-        # clear
-        st, _, b = _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        assert st == 200 and json.loads(b)["deleted"] is True
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert json.loads(b)["stage_host"]["configured"] is False
     finally:
         stop()
 
@@ -4225,6 +4410,137 @@ def test_device_credential_empty_string_clears_profile(tmp_path):
         stop()
 
 
+# ---- bulk credential reassignment (issue #125) ----
+
+def test_bulk_credential_requires_session_and_csrf(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "lab"})
+        assert st == 401
+        ck, _csrf = _auth(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "lab"},
+                        headers={"Cookie": ck})
+        assert st == 403
+    finally:
+        stop()
+
+
+def test_bulk_credential_rejects_bad_device_ids_body(tmp_path):
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for body in ({"device_ids": []}, {"device_ids": "d1"},
+                     {"device_ids": [1, 2]}, {"device_ids": [""]}, {}):
+            st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                            body, headers=hh)
+            assert st == 400, body
+    finally:
+        stop()
+
+
+def test_bulk_credential_unknown_profile_400_applies_nothing(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "nope"},
+                        headers=hh)
+        assert st == 400
+        assert fleet.get_device("d1").get("credential_profile_id") in (None, "")
+    finally:
+        stop()
+
+
+def test_bulk_credential_happy_path_one_audit_record(tmp_path):
+    """The whole point of the bulk endpoint: ONE request, ONE audit record,
+    applied to every selected device -- not one request/record per device."""
+    host, port, deps, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        for i in range(5):
+            fleet.upsert({"device_id": "d%d" % i, "device_ip": "10.0.0.%d" % i})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        ids = ["d%d" % i for i in range(5)]
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ids, "credential_profile_id": "lab"},
+                        headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result == {"ok": True, "applied": 5, "failed": {}}
+        for did in ids:
+            assert fleet.get_device(did)["credential_profile_id"] == "lab"
+        events = [json.loads(l) for l in open(audit_path) if l.strip()]
+        creds_events = [e for e in events
+                       if e.get("event") == "device_credential_bulk_change"]
+        assert len(creds_events) == 1, creds_events
+        assert "5/5" in creds_events[0]["detail"]
+    finally:
+        stop()
+
+
+def test_bulk_credential_partial_failure_names_the_missing_device(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1", "ghost"],
+                         "credential_profile_id": "lab"}, headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result["ok"] is True
+        assert result["applied"] == 1
+        assert result["failed"] == {"ghost": "no such device"}
+        assert fleet.get_device("d1")["credential_profile_id"] == "lab"
+    finally:
+        stop()
+
+
+def test_bulk_credential_matches_select_all_matching_at_scale(tmp_path):
+    """The scenario issue #125 is actually about: the console's "Select all
+    N matching devices" bulk action fires this ONE request for the whole
+    filtered set. A few hundred devices is enough to prove correctness end
+    to end over HTTP without making the test itself slow."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        n = 300
+        for i in range(n):
+            fleet.upsert({"device_id": "d%03d" % i, "device_ip": "10.0.%d.%d" % (i // 256, i % 256)})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        ids = ["d%03d" % i for i in range(n)]
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ids, "credential_profile_id": "lab"},
+                        headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result == {"ok": True, "applied": n, "failed": {}}
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        devs = json.loads(b)["devices"]
+        assert len(devs) == n
+        assert all(d["credential_profile_id"] == "lab" for d in devs)
+    finally:
+        stop()
+
+
 # ---- per-device platform override selection ----
 
 def test_device_platform_requires_session_and_csrf(tmp_path):
@@ -4355,6 +4671,157 @@ import audit as audit_mod
 def _read_audit_lines(path):
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+# ---- forget SSH host key (issue #84) --------------------------------------
+#
+# A re-imaged/replaced device presents a new SSH host key; accept-new mode's
+# persistent known_hosts (lab/iris-ssh-policy.sh) then refuses every session
+# with a changed-key error, and that file lives inside the IRIS state
+# volume -- not somewhere an operator always has shell access to. The console
+# route below shells out to the real lab/iris-ssh-policy.sh (OnboardService's
+# repo_root, unless overridden, is the real repo root), so every test here
+# points IRIS_SSH_STATE_DIR at an isolated tmp_path -- never the host's own
+# IRIS_STATE -- via monkeypatch.setenv.
+
+def _serve_forget_host_key(tmp_path, monkeypatch, ssh_state_dir=None,
+                           audit_path=None, devices=None):
+    monkeypatch.setenv("IRIS_SSH_STATE_DIR",
+                       str(ssh_state_dir or (tmp_path / "sshstate")))
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
+    state = str(tmp_path / "state")
+    fleet = gui_fleet.FleetStore(state)
+    for dev in (devices or [{"device_id": "d1", "device_ip": "192.0.2.10"}]):
+        fleet.upsert(dev)
+    creds = gui_creds.CredentialStore(secrets_path)
+    onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
+                                         mint_fn=lambda d: "TOK")
+    srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
+                                 onboard, certfile=None, audit_path=audit_path)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", port, fleet, srv.shutdown
+
+
+def test_forget_host_key_requires_session_and_csrf(tmp_path, monkeypatch):
+    host, port, _fleet, stop = _serve_forget_host_key(tmp_path, monkeypatch)
+    try:
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/forget-host-key", {})
+        assert st == 401
+        ck, _csrf = _auth(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/forget-host-key",
+                        {}, headers={"Cookie": ck})
+        assert st == 403
+    finally:
+        stop()
+
+
+def test_forget_host_key_unknown_device_404(tmp_path, monkeypatch):
+    host, port, _fleet, stop = _serve_forget_host_key(tmp_path, monkeypatch)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/nope/forget-host-key",
+                        {}, headers=hh)
+        assert st == 404
+    finally:
+        stop()
+
+
+def test_forget_host_key_removes_only_that_devices_entry_and_re_pins_next_time(
+        tmp_path, monkeypatch):
+    """The persistent known_hosts holds two devices; forgetting d1 must drop
+    ONLY d1's line, leave d2's trust untouched, and leave the file in a state
+    where the NEXT session re-verifies and re-pins d1's new key (plain
+    trust-on-first-use) rather than disabling verification for it."""
+    ssh_state = tmp_path / "sshstate"
+    known_hosts = ssh_state / "known_hosts"
+    ssh_state.mkdir()
+    known_hosts.write_text(
+        "192.0.2.10 ssh-ed25519 AAAAOLDKEYFORD1==\n"
+        "192.0.2.20 ssh-ed25519 AAAAKEYFORD2==\n")
+    host, port, fleet, stop = _serve_forget_host_key(
+        tmp_path, monkeypatch, ssh_state_dir=ssh_state,
+        devices=[{"device_id": "d1", "device_ip": "192.0.2.10"},
+                {"device_id": "d2", "device_ip": "192.0.2.20"}])
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/forget-host-key",
+                        {}, headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True, "peer": "192.0.2.10"}
+        contents = known_hosts.read_text()
+        assert "192.0.2.10" not in contents      # d1's stale entry is gone
+        assert "192.0.2.20" in contents           # d2's trust is untouched
+    finally:
+        stop()
+
+
+def test_forget_host_key_is_idempotent_when_nothing_was_recorded(tmp_path, monkeypatch):
+    """A peer with no recorded entry (never contacted, or already forgotten)
+    is success, not an error -- the desired end state (no stale entry)
+    already holds."""
+    host, port, _fleet, stop = _serve_forget_host_key(tmp_path, monkeypatch)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/forget-host-key",
+                        {}, headers=hh)
+        assert st == 200
+        assert json.loads(b) == {"ok": True, "peer": "192.0.2.10"}
+    finally:
+        stop()
+
+
+def test_forget_host_key_audits_the_device_and_actor(tmp_path, monkeypatch):
+    audit_path = str(tmp_path / "audit.jsonl")
+    ssh_state = tmp_path / "sshstate"
+    known_hosts = ssh_state / "known_hosts"
+    ssh_state.mkdir()
+    known_hosts.write_text("192.0.2.10 ssh-ed25519 AAAAOLDKEY==\n")
+    host, port, _fleet, stop = _serve_forget_host_key(
+        tmp_path, monkeypatch, ssh_state_dir=ssh_state, audit_path=audit_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/forget-host-key",
+                        {}, headers=hh)
+        assert st == 200
+        events = _read_audit_lines(audit_path)
+        forget_events = [e for e in events if e.get("event") == "device_forget_host_key"]
+        assert len(forget_events) == 1
+        entry = forget_events[0]
+        assert entry["target"] == "d1"           # the device
+        assert entry["actor"] == "console:admin"  # the actor
+        assert entry["result"] == "ok"
+        assert "192.0.2.10" in (entry.get("detail") or "")
+    finally:
+        stop()
+
+
+def test_forget_host_key_never_touches_an_operator_pinned_known_hosts(tmp_path, monkeypatch):
+    """IRIS_SSH_HOST_KEY (a per-device pin) and IRIS_SSH_KNOWN_HOSTS (an
+    operator-supplied file) are not IRIS-managed state -- forget-host-key
+    must act only on the persistent accept-new file, never on either."""
+    ssh_state = tmp_path / "sshstate"
+    ssh_state.mkdir()
+    pinned = tmp_path / "operator-known-hosts"
+    pinned.write_text("192.0.2.10 ssh-ed25519 AAAAOPERATORPINNED==\n")
+    host, port, _fleet, stop = _serve_forget_host_key(
+        tmp_path, monkeypatch, ssh_state_dir=ssh_state,
+        devices=[{"device_id": "d1", "device_ip": "192.0.2.10"}])
+    monkeypatch.setenv("IRIS_SSH_KNOWN_HOSTS", str(pinned))
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/forget-host-key",
+                        {}, headers=hh)
+        assert st == 200
+        assert "192.0.2.10" in pinned.read_text()   # the operator's file is untouched
+    finally:
+        stop()
 
 
 def _serve_full_audit(tmp_path):
@@ -4633,27 +5100,6 @@ def test_device_assign_detail_notes_previous_image(tmp_path):
         stop()
 
 
-def test_stage_host_set_emits_without_password_in_file(tmp_path):
-    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        st, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
-                        {"username": "svc-iris", "password": "supersecretpw"},
-                        headers=hh)
-        assert st == 200
-        raw = open(audit_path).read()
-        assert "supersecretpw" not in raw
-        lines = _read_audit_lines(audit_path)
-        settings_events = [e for e in lines if e.get("category") == "settings"]
-        # the username belongs in detail (before -> after); target is the key
-        ev = [e for e in settings_events if e.get("event") == "stage_host_set"]
-        assert ev and ev[0]["target"] == "stage-host"
-        assert ev[0]["detail"] == "user (none) -> svc-iris"
-    finally:
-        stop()
-
-
 def test_audit_emission_failure_does_not_break_route(tmp_path, monkeypatch):
     host, port, _ctx, _audit_path, stop = _serve_full_audit(tmp_path)
     try:
@@ -4857,32 +5303,6 @@ def test_auth_ops_emit_enriched_audit(tmp_path):
         assert by_event["revoke_other_sessions"]["detail"] == \
             "revoked 0 other session(s)"
         assert by_event["logout"]["src_ip"] == "127.0.0.1"
-    finally:
-        stop()
-
-
-def test_stage_host_update_and_clear_details(tmp_path):
-    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _req(host, port, "POST", "/api/settings/stage-host",
-             {"username": "svc-a", "password": "stagepw1"}, headers=hh)
-        _req(host, port, "POST", "/api/settings/stage-host",
-             {"username": "svc-b", "password": "stagepw2"}, headers=hh)
-        _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        sets = [e for e in _read_audit_lines(audit_path)
-                if e.get("event") == "stage_host_set"]
-        clears = [e for e in _read_audit_lines(audit_path)
-                  if e.get("event") == "stage_host_clear"]
-        assert [e["detail"] for e in sets] == \
-            ["user (none) -> svc-a", "user svc-a -> svc-b"]
-        assert [e["detail"] for e in clears] == \
-            ["cleared (was user svc-b)", "nothing was configured"]
-        assert all(e["target"] == "stage-host" for e in sets + clears)
-        raw = open(audit_path).read()
-        assert "stagepw1" not in raw and "stagepw2" not in raw
     finally:
         stop()
 
@@ -5376,11 +5796,15 @@ def test_make_server_falls_back_to_iris_cert_when_gui_cert_is_corrupt(
         srv.shutdown()
 
 
-def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
+def test_make_server_refuses_plaintext_when_all_candidates_corrupt(
         tmp_path, monkeypatch):
-    """Both the gui-cert override and IRIS_CERT are unusable at startup --
-    make_server must still not crash; it serves plain HTTP (no tls_ctx),
-    same as the certfile=None path, rather than taking the process down."""
+    """Rewritten (IRIS-06-003 / IRIS-01-004): both the gui-cert override and
+    IRIS_CERT are unusable at startup. The old contract silently served
+    plain HTTP -- accepting the admin password in cleartext and then unable
+    to keep a session in any remote browser (Secure cookie over http://).
+    Now make_server fails CLOSED with ConsoleTLSError unless
+    IRIS_GUI_ALLOW_PLAINTEXT=1 opts in explicitly; with the opt-in it serves
+    plain HTTP as before (no tls context, reload_tls a safe no-op)."""
     builtin = tmp_path / "cert.pem"
     builtin.write_text("-----BEGIN CERTIFICATE-----\nnot a cert\n"
                        "-----END CERTIFICATE-----\n")
@@ -5389,9 +5813,14 @@ def test_make_server_falls_back_to_plain_http_when_all_candidates_corrupt(
                    "-----END CERTIFICATE-----\n")
     monkeypatch.setenv("IRIS_CERT", str(builtin))
     monkeypatch.setenv("IRIS_GUI_CERT", str(gui))
+    monkeypatch.delenv("IRIS_GUI_ALLOW_PLAINTEXT", raising=False)
     certfile = gui_server._resolve_certfile()  # picks the corrupt override
     assert certfile == str(gui)
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    with pytest.raises(gui_server.ConsoleTLSError) as ei:
+        gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    assert "IRIS_GUI_ALLOW_PLAINTEXT=1" in str(ei.value)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
     srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
     try:
         assert srv.reload_tls() is False  # no live TLS context to hot-swap
@@ -5480,6 +5909,10 @@ def test_settings_gui_cert_roundtrip(tmp_path, monkeypatch):
         assert st == 200
         gc = json.loads(b)["gui_cert"]
         assert gc["source"] == "custom"
+        # this fixture serves plain HTTP: the answer must say the file was
+        # saved but NOT applied (takes effect at restart), not imply it is live
+        assert json.loads(b)["applied"] is False
+        assert "next restart" in json.loads(b)["note"]
         assert "iris-custom" in gc["subject"]
         assert gc["fingerprint_sha256"] not in ("", "unknown")
         # GET reflects it — and NEVER echoes key material
@@ -6875,7 +7308,7 @@ def test_telemetry_health_badge_lives_on_overview_not_monitoring():
     monitoring = html.split('id="view-monitoring"', 1)[1].split("</section>", 1)[0]
     assert 'id="telemetry-health"' not in monitoring
     # it refreshes with the Overview, not as part of refreshMonitoring()
-    monitoring_fn = js.split("async function refreshMonitoring()", 1)[1].split("}", 1)[0]
+    monitoring_fn = js.split("async function refreshMonitoring(fromPoll)", 1)[1].split("}", 1)[0]
     assert "refreshTelemetryHealth" not in monitoring_fn
     overview_fn = js.split("async function refreshOverview()", 1)[1].split("\n  }", 1)[0]
     assert "refreshTelemetryHealth" in overview_fn
@@ -7244,8 +7677,8 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     Settings > General / > Telemetry to actually do anything. First run is a
     flow, so it becomes a stepped wizard that hosts the forms in place.
 
-    Three steps -- telemetry, stage host, device packages -- with admin shown
-    as already complete, because first-run just created it. Every step can be
+    Steps -- telemetry, device packages, image verification -- with admin
+    shown as already complete, because first-run just created it. Every step can be
     skipped and the wizard resumes at the first incomplete one, because the
     packages step can NEVER complete in-console (no Docker socket), so a
     wizard that insisted on completion could never be finished."""
@@ -7261,10 +7694,9 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
 
     wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
-    # the two form steps mount the SHARED templates rather than copying them
-    assert 'id="wz-td-mount"' in wiz and 'id="wz-sh-mount"' in wiz
+    # the telemetry form step mounts the SHARED template rather than copying it
+    assert 'id="wz-td-mount"' in wiz
     assert "mountSettingsForm('td', 'wz-td-mount')" in js
-    assert "mountSettingsForm('sh', 'wz-sh-mount')" in js
     # packages is detect-and-instruct, never a form
     assert 'id="wz-pkg-recheck"' in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
@@ -7341,7 +7773,7 @@ def test_setup_wizard_shows_every_step_even_when_already_complete():
     """The wizard renders one step at a time and opens on the first incomplete
     one. On a server whose telemetry destination already comes from the
     deployment environment (IRIS_OTLP_ENDPOINT), telemetry resolves to 'ok',
-    so the wizard opened on stage host and the telemetry step was never
+    so the wizard opened on the next step and the telemetry step was never
     visible at all -- it looked missing.
 
     Every step must therefore be listed and reachable, whatever its state."""
@@ -7603,6 +8035,46 @@ def test_forced_undeploy_escapes_multiple_recoverable_records(tmp_path):
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert record_store.get(first)["state"] == "abandoned"
         assert record_store.get(second)["state"] == "abandoned"
+    finally:
+        stop()
+
+
+def test_undeploy_reports_a_corrupt_record_store_instead_of_adopt_it_first(
+        tmp_path):
+    """A record store that cannot be parsed is a SERVER fault, not proof that
+    the device has no deployment. It used to read as "no record", so the console
+    told the operator to adopt a device IRIS may already own -- which would
+    write a record asserting an unverified deployment on top of a repairable
+    file. The undeploy gate now reads strictly and reports the real fault."""
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        _stranded_record(record_store)          # IRIS DOES own this device
+        with open(record_store.path, "w") as f: # ... and then the file rots
+            f.write("{\"records\": {truncated")
+
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 503, b
+        assert b"unreadable" in b
+        assert b"adopt it first" not in b, (
+            "an unreadable store was reported as an unowned device")
+    finally:
+        stop()
+
+
+def test_undeploy_still_says_adopt_when_there_is_genuinely_no_record(tmp_path):
+    """The corrupt-store branch must not swallow the real no-record advice:
+    an EMPTY (or absent) store still means the device was never deployed."""
+    host, port, fleet, record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
+                        headers=hh)
+        assert st == 409, b
+        assert b"adopt it first" in b
     finally:
         stop()
 
@@ -7874,6 +8346,43 @@ def test_picker_does_not_open_on_a_failed_image_fetch():
     assert "not in the catalog" in picker
 
 
+def test_bulk_assign_resolves_off_page_selection_from_the_server():
+    """Issue #121: selection is id-keyed and outlives paging (issue #112), so
+    a selected device is very often NOT in LAST_DEVICES, which holds only the
+    currently rendered page. The bulk picker used to derive its pre-check
+    intersection AND its expect_image_ids compare-and-set straight from
+    LAST_DEVICES, so an off-page selected device read as "assigned: []" --
+    the server correctly refused (409) the resulting write, but for the wrong
+    reason, and it happened for every off-page device in the selection.
+
+    fetchDeviceRows() resolves each selected id's REAL current row first (a
+    bounded /api/devices walk keyed by device_id -- there is no "fetch by id
+    list" route), and the click handler now reads from that map instead of
+    LAST_DEVICES."""
+    app_js = _webroot("app.js")
+    assert "async function fetchDeviceRows(ids)" in app_js
+    fetch_fn = app_js.split("async function fetchDeviceRows(ids) {", 1)[1].split(
+        "\n  document.getElementById('assign-images-selected')", 1)[0]
+    # keyed by device_id, seeded from whatever page is already rendered
+    assert "byId[d.device_id] = d" in fetch_fn
+    assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
+    assert "/api/devices?" in fetch_fn
+    # bounded: nothing to fetch when the whole selection is already rendered,
+    # and the walk stops the moment every missing id has been found rather
+    # than always paging the entire fleet
+    assert "if (!missing.length) return byId;" in fetch_fn
+    assert "remaining--" in fetch_fn
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "await fetchDeviceRows(ids)" in bulk_handler
+    # the pre-check/expect sets are read from the fetched map, never straight
+    # from LAST_DEVICES (which is exactly the bug: the page in the DOM is not
+    # the same thing as the selection)
+    assert "byId[id]" in bulk_handler
+    assert "LAST_DEVICES" not in bulk_handler, \
+        "bulk picker still trusts LAST_DEVICES for a selection that can span pages"
+
+
 def test_image_picker_is_one_function_shared_by_both_entry_points():
     """The row select and the bulk dropdown used to be two separate ways to
     assign the same thing, through two different code paths that could (and
@@ -8125,11 +8634,17 @@ def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
     host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(tmp_path)
     try:
         ck, _csrf = _auth(host, port)
-        # a row as it looked before the stamp existed
-        with open(fleet.path) as stream:
+        # a row as it looked before the stamp existed. FleetStore is
+        # sharded per device now (see keyed_state.py) -- _serve_router_jobs
+        # already upserted r1 before the server even started, so fleet.path
+        # (fleet.json) is the retired legacy document, not the live store;
+        # r1's row lives in its own shard.
+        shard = os.path.join(keyed_state.shard_dir(fleet.path),
+                             "%02x.json" % keyed_state.bucket_of("r1"))
+        with open(shard) as stream:
             raw = json.load(stream)
-        raw["devices"]["r1"].pop("registered_at", None)
-        with open(fleet.path, "w") as stream:
+        raw["r1"].pop("registered_at", None)
+        with open(shard, "w") as stream:
             json.dump(raw, stream)
         _plant_deploy_log(log_dir, "r1", 500, job_id="cccccccccccc0003")
 
@@ -8367,9 +8882,8 @@ def test_forms_get_persistent_field_labels():
         form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
         for fid in field_ids:
             assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
-    # the two shared templates (mounted into both Setup and Settings)
-    for tpl_id, field_ids in (("tpl-sh-form", ("sh-user", "sh-pass", "sh-pass2")),
-                               ("tpl-td-form", ("td-endpoint",))):
+    # the shared template (mounted into both Setup and Settings)
+    for tpl_id, field_ids in (("tpl-td-form", ("td-endpoint",)),):
         tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
         for fid in field_ids:
             assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
@@ -8382,7 +8896,7 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("df-err", "cf-err", "pw-msg", "sh-msg", "cert-msg",
+    alert_ids = ("df-err", "cf-err", "pw-msg", "cert-msg",
                  "trust-msg", "ca-msg", "td-msg", "ae-msg",
                  "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
                  "ii-override-note", "ii-release-msg")
@@ -8390,7 +8904,7 @@ def test_error_and_status_regions_carry_live_roles():
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
     status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
-                  "sh-status", "cert-status", "td-status", "ae-status",
+                  "cert-status", "td-status", "ae-status",
                   "sessions-info", "swarm-summary")
     for sid in status_ids:
         tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
@@ -8775,12 +9289,12 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
 
 
 def test_settings_card_never_wraps_a_template_root():
-    """The card goes AROUND the mount point (#sh-mount / #td-mount), never
+    """The card goes AROUND the mount point (#td-mount), never
     around the <template> whose content is cloned into it -- a wrapped
     template root would be inert markup styled as a card that never
     actually renders."""
     html = _webroot("index.html")
-    for tpl_id, mount_id in (("tpl-sh-form", "sh-mount"), ("tpl-td-form", "td-mount")):
+    for tpl_id, mount_id in (("tpl-td-form", "td-mount"),):
         before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
         last_card_open = before_tpl.rfind('<div class="card">')
         last_card_close = before_tpl.rfind("</div>")
@@ -8828,9 +9342,20 @@ def test_table_scroll_fade_color_is_parameterized_for_cards():
 def test_bulk_bar_names_selection_scope():
     """Final review fix wave, spec §5: the bulk bar names whether the checked
     set IS the whole filtered table or only part of it, and -- when it's
-    only part -- gives a one-click path to the rest, WITHOUT growing a
-    second copy of the header checkbox's select-all logic. The click just
-    flips #mark-all and replays that checkbox's own 'change' listener."""
+    only part -- gives a one-click path to the rest.
+
+    Rewritten for issue #112 (paging): "the whole filtered table" used to BE
+    every rendered '#dev-rows .mark' row, because the table always rendered
+    the entire fleet -- so m (every row) and n (checked rows) were both safe
+    to read straight off the DOM, and the one-click path could just replay
+    #mark-all's own change handler. Once the table pages, that DOM read is
+    exactly the ambiguity issue #112 flags: '#dev-rows .mark' only ever
+    holds the current page, and replaying #mark-all only ever selects it.
+    m is now devTotal (the server's own match count for the current filter)
+    and n is Object.keys(SELECTED).length (real selections, id-keyed,
+    independent of what page is rendered); the one-click path now walks
+    every server page of the current filter (selectAllMatchingDevices)
+    instead of touching #mark-all at all."""
     html = _webroot("index.html")
     selbar = html.split('id="sel-bar"', 1)[1].split('class="selbar-actions"', 1)[0]
     assert '<span class="muted" id="sel-scope-text" hidden></span>' in selbar
@@ -8845,19 +9370,24 @@ def test_bulk_bar_names_selection_scope():
 
     js = _webroot("app.js")
     fn = js.split("function updateSelBar() {", 1)[1].split("\n  }", 1)[0]
-    assert "var m = document.querySelectorAll('#dev-rows .mark').length;" in fn
+    assert "var n = Object.keys(SELECTED).length;" in fn
+    assert "var m = devTotal;" in fn
     assert "var allSelected = n > 0 && n === m;" in fn
-    assert "'· All ' + m + ' filtered devices selected'" in fn
-    assert "'· Select all ' + m + ' filtered devices'" in fn
+    assert "'· All ' + m + ' matching devices selected'" in fn
+    assert "'· Select all ' + m + ' matching devices'" in fn
 
-    # the click is a shortcut INTO #mark-all's own change handler, not a
-    # second selection code path -- no independent '.mark' forEach nearby
+    # the click runs a REAL server-side walk of the current filter, not a
+    # replay of #mark-all (which can only ever reach the rendered page)
     click_fn = js.split(
         "document.getElementById('sel-scope-all').addEventListener('click', function () {",
         1)[1].split("\n  });", 1)[0]
-    assert "markAll.checked = true;" in click_fn
-    assert "markAll.dispatchEvent(new Event('change'));" in click_fn
-    assert "querySelectorAll" not in click_fn
+    assert "selectAllMatchingDevices();" in click_fn
+    assert "markAll" not in click_fn
+
+    select_all_fn = js.split("async function selectAllMatchingDevices() {", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "deviceFilterQuery(deviceFilterState())" in select_all_fn
+    assert "SELECTED[d.device_id] = true;" in select_all_fn
 
 
 def test_table_type_roles_are_magnetic_p3_p4():
@@ -9235,3 +9765,861 @@ def test_images_import_blurb_drops_the_subdirectory_examples():
             '              <span class="machine">.tar</span> or <span class="machine">.rpm</span> are\n'
             "              scanned. Set <span class=\"machine\">IMAGES_ROOT</span> to scan a\n"
             "              different directory.</p>") in html
+
+
+# ---- fix-wave regressions: HTTP layer, session lifecycle, console sources ----
+
+def test_negative_content_length_rejected_before_any_read(tmp_path):
+    """IRIS-06-001: int() accepts a sign and rfile.read(-1) reads until EOF
+    with no cap, pre-auth. The server must answer 400 without reading. At
+    the review commit this recv blocks for the 60 s handler timeout."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        s = socket.create_connection((host, port), timeout=5)
+        s.sendall(b"POST /api/login HTTP/1.1\r\nHost: x\r\n"
+                  b"Content-Type: application/json\r\nContent-Length: -1\r\n\r\n")
+        resp = b""
+        while True:
+            chunk = s.recv(4096)           # server answers and closes
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        assert b" 400 " in resp.split(b"\r\n", 1)[0]
+        assert b"bad content-length" in resp
+    finally:
+        stop()
+
+
+def test_unauthenticated_post_rejected_before_body_is_buffered(tmp_path):
+    """IRIS-06-004: session + CSRF are checked BEFORE the body is read. The
+    client declares the 8 MiB CSV cap but sends only the 64 KiB drain
+    allowance; the 401 must arrive without the rest. At the review commit
+    the server read all 8 MiB first, so this recv timed out."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        s = socket.create_connection((host, port), timeout=5)
+        declared = 8 * 1024 * 1024
+        head = ("POST /api/devices/import-csv HTTP/1.1\r\nHost: x\r\n"
+                "Content-Type: text/csv\r\nContent-Length: %d\r\n\r\n"
+                % declared).encode()
+        s.sendall(head + b"x" * (64 * 1024))
+        resp = s.recv(4096)
+        s.close()
+        assert b" 401 " in resp.split(b"\r\n", 1)[0]
+        # a session without CSRF is rejected the same way, before the read
+        ck, _ = _auth(host, port)
+        s = socket.create_connection((host, port), timeout=5)
+        head = ("POST /api/devices/import-csv HTTP/1.1\r\nHost: x\r\nCookie: %s\r\n"
+                "Content-Type: text/csv\r\nContent-Length: %d\r\n\r\n"
+                % (ck, declared)).encode()
+        s.sendall(head + b"x" * (64 * 1024))
+        resp = s.recv(4096)
+        s.close()
+        assert b" 403 " in resp.split(b"\r\n", 1)[0]
+    finally:
+        stop()
+
+
+def test_tls_handshake_is_not_on_the_accept_thread(tmp_path, monkeypatch):
+    """IRIS-06-002: one idle TCP connection (no ClientHello) used to park the
+    whole console in accept() until it went away. With the handshake in the
+    worker thread, a second client's TLS request still completes."""
+    cert, key = _gen_cert_pair(tmp_path, "iris-builtin", "accept-thread")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(cert + key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "absent-gui-cert.pem"))
+    host, port, srv, stop = _serve_tls(tmp_path, str(builtin))
+    try:
+        assert srv.tls_active is True
+        assert not isinstance(srv.socket, ssl.SSLSocket)   # listener stays plain
+        idle = socket.create_connection((host, port), timeout=5)  # never handshakes
+        time.sleep(0.3)
+        assert _peer_cert_der(host, port) == _first_cert_der(cert)  # 5 s timeout
+        idle.close()
+    finally:
+        stop()
+
+
+def _serve_tls_admin(tmp_path, certfile):
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=certfile)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", srv.server_address[1], srv.shutdown
+
+
+def _https_req(host, port, method, path, body=None, headers=None):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    c = http.client.HTTPSConnection(host, port, context=ctx, timeout=5)
+    hdrs = dict(headers or {})
+    payload = None
+    if body is not None:
+        payload = json.dumps(body).encode()
+        hdrs["Content-Type"] = "application/json"
+    c.request(method, path, body=payload, headers=hdrs)
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r.status, dict(r.getheaders()), data
+
+
+def test_login_cookie_is_secure_over_tls(tmp_path, monkeypatch):
+    """The Secure attribute follows the listener: present under TLS (login
+    and the logout expiry cookie alike), absent on the plaintext opt-in."""
+    cert, key = _gen_cert_pair(tmp_path, "iris-builtin", "secure-cookie")
+    builtin = tmp_path / "cert.pem"
+    builtin.write_text(cert + key)
+    monkeypatch.setenv("IRIS_CERT", str(builtin))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "absent-gui-cert.pem"))
+    host, port, stop = _serve_tls_admin(tmp_path, str(builtin))
+    try:
+        st, h, b = _https_req(host, port, "POST", "/api/login",
+                              {"username": "admin", "password": "pw"})
+        assert st == 200
+        assert "Secure" in h["Set-Cookie"] and "HttpOnly" in h["Set-Cookie"]
+        ck = h["Set-Cookie"].split(";")[0]
+        st, h, _ = _https_req(host, port, "POST", "/api/logout",
+                              headers={"Cookie": ck,
+                                       "X-CSRF-Token": json.loads(b)["csrf"]})
+        assert st == 200 and "Secure" in h["Set-Cookie"] and "Max-Age=0" in h["Set-Cookie"]
+    finally:
+        stop()
+
+
+def test_sse_idle_expiry_emits_terminal_end_frame(tmp_path, monkeypatch):
+    """IRIS-06-005: the idle exit used to close the stream silently, so the
+    client could not tell a stalled job from a dead server. It now ends
+    with `event: end / data: idle`."""
+    monkeypatch.setattr(gui_server, "_SSE_IDLE", 1)
+    monkeypatch.setattr(gui_server, "_SSE_KEEPALIVE", 0.2)
+    release = threading.Event()
+
+    def run_fn(p, e, on):
+        release.wait(10); return 0          # running, silent
+
+    host, port, stop = _serve_onboard(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/onboard", {},
+                        headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200
+        jid = json.loads(b)["job_id"]
+        conn = http.client.HTTPConnection(host, port, timeout=15)
+        conn.request("GET", "/api/onboard/jobs/%s/stream" % jid,
+                     headers={"Cookie": ck})
+        resp = conn.getresponse()
+        started = time.time()
+        body = resp.read()                    # server closes on idle expiry
+        assert time.time() - started < 8
+        conn.close()
+        assert b"event: end\ndata: idle\n\n" in body
+        assert b"event: end\ndata: done" not in body
+    finally:
+        release.set()
+        stop()
+
+
+def test_api_responses_are_no_store_and_static_assets_revalidate(tmp_path):
+    """IRIS-06-006: session-gated JSON never lands in a disk cache; the
+    un-hashed SPA assets revalidate cheaply (Last-Modified -> 304)."""
+    host, port, _, stop = _serve(tmp_path)
+    try:
+        ck, _ = _auth(host, port)
+        st, h, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 200 and h["Cache-Control"] == "private, no-store"
+        st, h, _ = _req(host, port, "GET", "/api/session")
+        assert st == 401 and h["Cache-Control"] == "private, no-store"
+        st, h, body = _req(host, port, "GET", "/app.js")
+        assert st == 200 and body and "Last-Modified" in h
+        assert "no-cache" in h["Cache-Control"]
+        st, h2, body2 = _req(host, port, "GET", "/app.js",
+                             headers={"If-Modified-Since": h["Last-Modified"]})
+        assert st == 304 and body2 == b""
+        st, _, _ = _req(host, port, "GET", "/app.js",
+                        headers={"If-Modified-Since": "garbage"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_poll_header_does_not_refresh_idle_expiry(tmp_path):
+    """IRIS-08-004: a GET carrying X-IRIS-Poll: 1 validates the session but
+    does not count as operator activity, so an unattended polled view
+    reaches the idle timeout; an ordinary GET still refreshes it."""
+    import gui_auth
+    clock = [1000.0]
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"), now_fn=lambda: clock[0],
+                         sessions=gui_auth.SessionStore(idle_ttl=100))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    host, port = "127.0.0.1", srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ck, _ = _auth(host, port)
+        clock[0] = 1060
+        st, _, _ = _req(host, port, "GET", "/api/session",
+                        headers={"Cookie": ck, "X-IRIS-Poll": "1"})
+        assert st == 200                               # valid, but not touched
+        clock[0] = 1110
+        st, _, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 401                               # 110 s since login
+        clock[0] = 1200
+        ck, _ = _auth(host, port)
+        clock[0] = 1260
+        st, _, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 200                               # touched
+        clock[0] = 1310
+        st, _, _ = _req(host, port, "GET", "/api/session",
+                        headers={"Cookie": ck, "X-IRIS-Poll": "1"})
+        assert st == 200                               # 50 s since the touch
+    finally:
+        srv.shutdown()
+
+
+def test_corrupt_secrets_store_fails_closed_with_503(tmp_path):
+    """IRIS-01-002 at the HTTP layer: a truncated live store must not turn
+    into "first run" (the default credential minted a setup grant) or a
+    dropped connection; every store-backed route answers 503."""
+    host, port, app, stop = _serve(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        with open(app.secrets_path, "w") as f:
+            f.write("{ truncated")
+        st, _, b = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
+        assert st == 503 and b"secrets store unreadable" in b
+        st, _, b = _req(host, port, "POST", "/api/login",
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
+        assert st == 503 and b"setup_grant" not in b
+        with open(app.secrets_path) as f:
+            assert f.read() == "{ truncated"         # nothing persisted over it
+    finally:
+        stop()
+
+
+def test_break_glass_reset_ends_live_console_session(tmp_path):
+    """IRIS-01-003 end to end: a session minted before an out-of-process
+    admin reset is refused on its next request."""
+    host, port, app, stop = _serve(tmp_path)
+    try:
+        ck, _ = _auth(host, port)
+        assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 200
+        # No sleeps: the floor and created_at keep sub-second precision, so
+        # a reset right after the login still drops it, and a login right
+        # after the reset is honoured immediately.
+        cli = gui_app.GuiApp(app.secrets_path)         # the iris-gui-admin process
+        cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
+        assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 401
+        st, h, _ = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "reset-pw"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def test_login_busy_verifier_is_503_not_a_failed_login(tmp_path):
+    """IRIS-01-006: with both scrypt slots taken the route answers 503 +
+    Retry-After instead of "invalid credentials" (which penalised the
+    limiter and audited a failure that never happened)."""
+    import gui_auth
+    host, port, _, stop = _serve(tmp_path)
+    sem = gui_auth._PASSWORD_VERIFY_SLOTS
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+    try:
+        st, h, b = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "pw"})
+        assert st == 503 and h.get("Retry-After") == "1"
+        assert b"invalid credentials" not in b
+    finally:
+        sem.release(); sem.release()
+    try:
+        st, _, _ = _req(host, port, "POST", "/api/login",
+                        {"username": "admin", "password": "pw"})
+        assert st == 200
+    finally:
+        stop()
+
+
+def _webroot(name):
+    with open(os.path.join(gui_server.WEBROOT, name)) as f:
+        return f.read()
+
+
+def test_console_fetch_wrapper_handles_session_loss_polls_and_stale_state():
+    """Source guard (IRIS-08-003/004): one fetch for the whole console --
+    401 anywhere redirects to login, 5xx/network marks the header as stale,
+    background polls carry X-IRIS-Poll and the telemetry badge never turns
+    a proxy failure into "off"."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert "function fetch(url, opts)" in js
+    assert "if (r.status === 401) onSessionLost();" in js
+    assert "window.location.href = '/login.html';" in js
+    assert "h.set('X-IRIS-Poll', '1');" in js
+    assert js.count("backgroundPoll = true;") == 2          # view poll + batch poll
+    assert "function markConnection(ok)" in js
+    assert 'id="conn-state"' in html
+    assert "if (!r.ok) throw new Error('health proxy '" in js
+    assert "poll = pollMonitoring;" in js
+    assert "if (fromPoll && auditExtraPages > 0) return;" in js
+    assert "if (!brushDrag) renderBrush(auditSel);" in js
+
+
+def test_bulk_credential_modal_untouched_is_noop_and_clear_confirms():
+    """Source guard (IRIS-08-001): the resting placeholder is disabled (an
+    untouched Apply does nothing), clearing is a distinct sentinel that is
+    confirmed, and the modal refuses to open without a profile list."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert '<select id="cred-selected"><option value="" disabled selected>' in html
+    assert 'id="cred-modal-msg"' in html
+    assert "var CRED_CLEAR = '__none';" in js
+    assert "<option value=\"\" disabled>" in js
+    assert "var pid = raw === CRED_CLEAR ? '' : raw;" in js
+    assert "confirm('Clear the credential on '" in js
+    assert "if (!raw) {" in js
+
+
+def test_credential_list_failure_is_not_rendered_as_no_credential():
+    """Source guard (IRIS-08-002): a failed /api/credentials keeps the last
+    good list, disables the pickers and says so, instead of matching every
+    row to "no credential"."""
+    js = _webroot("app.js")
+    assert "var credListOk = false;" in js
+    assert "if (cr.ok) credOpts = (await cr.json()).profiles || [];" in js
+    assert "credential pickers are disabled until it loads." in js
+    assert "var credSel = credListOk" in js
+    assert "credential list unavailable; assign later" in js
+    assert "Credential list unavailable; not opening the picker." in js
+
+
+def test_console_id_keyed_maps_are_prototype_free():
+    """Source guard (IRIS-08-009): every map keyed by an operator-chosen id
+    is created with Object.create(null).
+
+    'marked' (a per-render DOM scrape) is gone as of issue #112: selection is
+    now the persistent SELECTED map, id-keyed the same way and replacing
+    'marked' in this list rather than adding beside it."""
+    js = _webroot("app.js")
+    for decl in ("var LAST_JOBS_BY_DEVICE = Object.create(null);",
+                 "var best = Object.create(null);",
+                 "var imageFilenames = Object.create(null);",
+                 "var imageQuarantined = Object.create(null);",
+                 "var peerPolicyBusy = Object.create(null);",
+                 "var SELECTED = Object.create(null);",
+                 "SELECTED = Object.create(null);",
+                 "var checkedSet = Object.create(null);",
+                 "imageFilenames = Object.create(null);",
+                 "imageQuarantined = Object.create(null);"):
+        assert decl in js, decl
+    assert "var SELECTED = {};" not in js and "var checkedSet = {};" not in js
+
+
+def test_telemetry_filter_has_unknown_bucket():
+    """Source guard (IRIS-08-008): the filter's tri-state matches the cell's."""
+    js = _webroot("app.js")
+    html = _webroot("index.html")
+    assert '<option value="unknown">' in html.split('id="dev-filter-telemetry"')[1].split("</select>")[0]
+    assert ": 'unknown';" in js and "typeof d.telemetry_stream_enabled === 'boolean'" in js
+
+
+def test_swarm_map_treats_error_body_as_failed_poll():
+    """Source guard (IRIS-08-005): the proxy's 200-with-error shape is a
+    failed poll in the map, and its poll is marked as background."""
+    with open(os.path.join(os.path.dirname(gui_server.WEBROOT), "swarmmap.html")) as f:
+        html = f.read()
+    assert 'data.error)throw Error(' in html
+    assert '"X-IRIS-Poll":"1"' in html
+
+
+def test_login_page_distinguishes_throttling_and_network_errors():
+    """Source guard (IRIS-08-010)."""
+    js = _webroot("login.js")
+    assert "res.status === 429" in js and "Retry-After" in js
+    assert "Could not reach the server" in js
+    assert "res.status === 401" in js
+
+
+def test_corrupt_catalog_state_fails_closed_with_503(tmp_path):
+    """IRIS-02-001 at the console HTTP layer: a corrupt catalog state file
+    must not reach the operator as a dropped connection and a traceback.
+
+    catalog.CatalogStore raises StateFileError for a present-but-unreadable
+    state file so no reader mistakes it for empty and no writer overwrites
+    it. gui_server had no mapping for that, so the console answered nothing
+    at all. The contract is the same fail-closed 503 the secrets store gets.
+    """
+    host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
+    try:
+        _policy_device(fleet)
+        cookie, csrf = _auth(host, port)
+        with open(str(tmp_path / "state" / "policy.json"), "w") as f:
+            f.write("{ truncated")
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
+                        {"image_id": "img1"},
+                        headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert st == 503 and b"state unavailable" in b
+        with open(str(tmp_path / "state" / "policy.json")) as f:
+            assert f.read() == "{ truncated"      # nothing written over it
+    finally:
+        stop()
+
+
+# --- paginated read projections (#57) --------------------------------------
+# /api/devices and /api/swarm can be asked for a PAGE. Paging is opt-in and
+# every response says how much there is in total, so no caller can mistake a
+# page for the fleet.
+
+def _fleet_of(fleet, n):
+    for i in range(n):
+        fleet.upsert({"device_id": "dev-%02d" % i,
+                      "device_ip": "10.0.0.%d" % (i + 1),
+                      "management_type": "inband", "inband_vlan": "120",
+                      "app_ip": "10.9.0.2", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.9.0.1", "platform": "guestshell",
+                      "model": "C9300" if i % 2 else "C9500"})
+
+
+def test_devices_unpaged_response_carries_totals(tmp_path):
+    """The whole-fleet call is unchanged in content and now states its own
+    size: a client that never pages can still prove what it holds is
+    complete (len(devices) == total), which is what stops a page from ever
+    being mistaken for the fleet."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        _fleet_of(fleet, 5)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200
+        assert len(body["devices"]) == body["total"] == 5
+        assert body["offset"] == 0 and body["limit"] is None
+        assert body["revision"] == fleet.revision()
+    finally:
+        stop()
+
+
+def test_devices_pages_cover_the_fleet_exactly_once(tmp_path):
+    """Sequential pages of a stable fleet reconstruct it with no gap and no
+    repeat, and every page reports the same total and revision."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 5)
+        ck, _ = _login(host, port)
+        seen, revisions = [], set()
+        for offset in (0, 2, 4, 6):
+            st, _, b = _req(host, port, "GET",
+                            "/api/devices?limit=2&offset=%d" % offset,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["total"] == 5
+            assert body["offset"] == offset and body["limit"] == 2
+            revisions.add(body["revision"])
+            seen += [d["device_id"] for d in body["devices"]]
+        assert seen == ["dev-%02d" % i for i in range(5)]   # sorted, no dupes
+        assert len(revisions) == 1
+    finally:
+        stop()
+
+
+def test_devices_page_keeps_the_merged_projection(tmp_path):
+    """A page is the same row shape as the full projection -- policy and
+    heartbeat merged in -- not a thinner record."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    _, fleet, _, cat = stores
+    try:
+        _fleet_of(fleet, 3)
+        cat.set_policy("dev-01", "img1")
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=1&offset=1",
+                        headers={"Cookie": ck})
+        row = json.loads(b)["devices"][0]
+        assert row["device_id"] == "dev-01"
+        assert row["assigned_image_id"] == "img1"
+        assert "last_seen" in row and "stage_state" in row
+    finally:
+        stop()
+
+
+def test_devices_page_params_are_rejected_not_defaulted(tmp_path):
+    """Serving a different page than the one asked for is how a client comes
+    to believe it walked a fleet it never walked, so an unusable limit or
+    offset is a 400."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 3)
+        ck, _ = _login(host, port)
+        for qs in ("limit=0", "limit=-1", "limit=abc", "offset=-1",
+                   "offset=abc", "limit=2&offset=x"):
+            st, _, b = _req(host, port, "GET", "/api/devices?" + qs,
+                            headers={"Cookie": ck})
+            assert st == 400, qs
+            assert json.loads(b)["error"]
+    finally:
+        stop()
+
+
+def test_devices_limit_is_clamped_and_echoed(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 3)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=999999",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["limit"] == gui_server.MAX_PAGE_LIMIT
+        assert body["total"] == 3 and len(body["devices"]) == 3
+    finally:
+        stop()
+
+
+def test_devices_filter_counts_matches_not_the_page(tmp_path):
+    """q filters server-side over the same fields the console's search box
+    covers; total is the number of MATCHES, so a filtered page is still
+    self-describing."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 6)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?q=c9500&limit=2",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["total"] == 3 and len(body["devices"]) == 2
+        assert all(d["model"] == "C9500" for d in body["devices"])
+        st, _, b = _req(host, port, "GET", "/api/devices?q=10.0.0.4",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert [d["device_id"] for d in body["devices"]] == ["dev-03"]
+        st, _, b = _req(host, port, "GET", "/api/devices?q=dev-0",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["total"] == 6
+    finally:
+        stop()
+
+
+def test_devices_offset_past_the_end_is_an_empty_page_not_an_error(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    try:
+        _fleet_of(stores[1], 2)
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?limit=5&offset=99",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["devices"] == [] and body["total"] == 2
+    finally:
+        stop()
+
+
+# --- server-side parity for the six console column filters (#112) ----------
+# app.js's deviceMatchesFilters() decides these client-side over the whole
+# fleet; a paged table can only offer a filter the server can also apply, or
+# a page would silently disagree with what the filter bar promises. Every
+# test below pins the server's decision against the SAME semantics
+# deviceMatchesFilters documents for that field (see the comments in
+# gui_server.Handler._row_matches_extra_filters, which mirror it condition
+# for condition).
+
+def test_devices_platform_filter_matches_console_semantics(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        fleet.upsert({"device_id": "gs1", "device_ip": "10.0.0.1",
+                      "platform": "guestshell"})
+        fleet.upsert({"device_id": "iox1", "device_ip": "10.0.0.2",
+                      "platform": "iox"})
+        fleet.upsert({"device_id": "bare1", "device_ip": "10.0.0.3"})
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?platform=guestshell",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["total"] == 1
+        assert body["devices"][0]["device_id"] == "gs1"
+        st, _, b = _req(host, port, "GET", "/api/devices?platform=__none",
+                        headers={"Cookie": ck})
+        assert json.loads(b)["total"] == 1
+        assert json.loads(b)["devices"][0]["device_id"] == "bare1"
+    finally:
+        stop()
+
+
+def test_devices_management_type_filter_folds_legacy_routed(tmp_path):
+    """Mirrors deviceMatchesFilters' own legacy_routed/legacy equivalence: an
+    unclassified device is always stored as the truthy 'legacy_routed', so
+    the ?management_type=legacy filter must fold it in exactly like the
+    filter bar's "Inventory only" option does."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        fleet.upsert({"device_id": "unclassified", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "inband1", "device_ip": "10.0.0.2",
+                      "management_type": "inband", "inband_vlan": "120",
+                      "app_ip": "10.9.0.2", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.9.0.1"})
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET",
+                        "/api/devices?management_type=legacy",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["total"] == 1
+        assert body["devices"][0]["device_id"] == "unclassified"
+        st, _, b = _req(host, port, "GET",
+                        "/api/devices?management_type=inband",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "inband1"
+    finally:
+        stop()
+
+
+def test_devices_credential_filter_and_none(tmp_path):
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet, creds = stores[1], stores[2]
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+        creds.set_profile("prof1", {"name": "P", "device_user": "u",
+                                    "device_pass": "p"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/d1/credential",
+                        {"credential_profile_id": "prof1"}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices?cred=prof1",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "d1"
+        st, _, b = _req(host, port, "GET", "/api/devices?cred=__none",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "d2"
+    finally:
+        stop()
+
+
+def test_devices_telemetry_filter_is_tri_state(tmp_path):
+    """Same tri-state as the console's telemetryCell/filter: "on" only once
+    the device has actually reported telemetry; a device that never
+    heartbeated is 'unknown', never bucketed with 'off'."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet, cat = stores[1], stores[3]
+    try:
+        fleet.upsert({"device_id": "never", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "on1", "device_ip": "10.0.0.2"})
+        fleet.upsert({"device_id": "off1", "device_ip": "10.0.0.3"})
+        cat.record_heartbeat("on1", {"telemetry_enabled": True}, now=time.time())
+        cat.record_heartbeat("off1", {"telemetry_enabled": False}, now=time.time())
+        ck, _ = _login(host, port)
+        for value, expect in (("unknown", "never"), ("on", "on1"), ("off", "off1")):
+            st, _, b = _req(host, port, "GET",
+                            "/api/devices?telemetry=" + value,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert body["total"] == 1, (value, body)
+            assert body["devices"][0]["device_id"] == expect
+    finally:
+        stop()
+
+
+def test_devices_peer_filter_uses_quarantine_assignments(tmp_path):
+    """?peer=quarantined/not-quarantined reads the same peer-policy
+    assignment set /api/peer-policy exposes as quarantine_assignments -- the
+    console's peer filter and the peer-policy panel can never disagree about
+    which devices are quarantined."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        fleet.upsert({"device_id": "q1", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "nq1", "device_ip": "10.0.0.2"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "PUT", "/api/peer-policy/quarantine/q1",
+                        {"quarantined": True, "if_revision": 1}, headers=hh)
+        assert st == 200
+        st, _, b = _req(host, port, "GET", "/api/devices?peer=quarantined",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "q1"
+        st, _, b = _req(host, port, "GET", "/api/devices?peer=not-quarantined",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "nq1"
+    finally:
+        stop()
+
+
+def test_devices_status_filter_matches_every_key_deviceStatus_can_produce(tmp_path):
+    """Server-side _device_status_key mirrors app.js deviceStatus()'s key
+    derivation; this pins several of its branches against the SAME rows a
+    real console poll would classify identically."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet, cat = stores[1], stores[3]
+    try:
+        fleet.upsert({"device_id": "never", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "unassigned1", "device_ip": "10.0.0.2"})
+        fleet.upsert({"device_id": "deployed1", "device_ip": "10.0.0.3"})
+        fleet.upsert({"device_id": "copying1", "device_ip": "10.0.0.4"})
+        fleet.upsert({"device_id": "placement1", "device_ip": "10.0.0.5"})
+        cat.record_heartbeat("unassigned1", {}, now=time.time())
+        cat.set_policy("deployed1", approved_image_id="img1")
+        cat.record_heartbeat("deployed1", {"stage_state": "ready",
+                                           "current_image_id": "img1"},
+                             now=time.time())
+        cat.set_policy("copying1", approved_image_id="img1")
+        cat.record_heartbeat("copying1", {"stage_state": "transferring_to_ios",
+                                          "target_fs": "bootflash:"},
+                             now=time.time())
+        cat.set_policy("placement1", approved_image_id="img1")
+        cat.record_heartbeat("placement1", {"stage_error": "disk full"},
+                             now=time.time())
+        ck, _ = _login(host, port)
+        for status, expect in (("not-enrolled", "never"),
+                               ("unassigned", "unassigned1"),
+                               ("deployed", "deployed1"),
+                               ("copying", "copying1"),
+                               ("placement-failed", "placement1")):
+            st, _, b = _req(host, port, "GET", "/api/devices?status=" + status,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert body["total"] == 1, (status, body)
+            assert body["devices"][0]["device_id"] == expect, (status, body)
+    finally:
+        stop()
+
+
+def test_devices_status_offline_and_attention_filters(tmp_path):
+    """?status=offline is the freshness MODIFIER (deviceIsOffline), never a
+    deviceStatus() key on its own; ?status=__attention is the "needs
+    attention" rollup over negative/severe/warning levels -- both mirror
+    app.js exactly (deviceIsOffline / statusDisplay's level, respectively)."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet, cat = stores[1], stores[3]
+    try:
+        fleet.upsert({"device_id": "stale1", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "fresh1", "device_ip": "10.0.0.2"})
+        fleet.upsert({"device_id": "failed1", "device_ip": "10.0.0.3"})
+        # 10+ minutes stale by real wall clock -> offline
+        cat.record_heartbeat("stale1", {}, now=1)
+        cat.record_heartbeat("fresh1", {}, now=time.time())
+        cat.set_policy("failed1", approved_image_id="img1")
+        cat.record_heartbeat("failed1", {"stage_error": "disk full"},
+                             now=time.time())
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/devices?status=offline",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "stale1"
+        st, _, b = _req(host, port, "GET", "/api/devices?status=__attention",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert body["total"] == 1 and body["devices"][0]["device_id"] == "failed1"
+    finally:
+        stop()
+
+
+def test_devices_filters_compose_with_q_and_paging(tmp_path):
+    """Every filter narrows the SAME match set q and paging operate over --
+    total is the count of rows matching ALL active filters together, not
+    just the last one applied."""
+    host, port, stores, stop = _serve_full(tmp_path)
+    fleet = stores[1]
+    try:
+        fleet.upsert({"device_id": "dev-01", "device_ip": "10.0.0.1",
+                      "platform": "guestshell", "model": "C9300"})
+        fleet.upsert({"device_id": "dev-02", "device_ip": "10.0.0.2",
+                      "platform": "guestshell", "model": "C9500"})
+        fleet.upsert({"device_id": "other-01", "device_ip": "10.0.0.3",
+                      "platform": "guestshell", "model": "C9300"})
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET",
+                        "/api/devices?q=dev-&platform=guestshell&limit=1",
+                        headers={"Cookie": ck})
+        body = json.loads(b)
+        assert st == 200 and body["total"] == 2 and len(body["devices"]) == 1
+        assert body["devices"][0]["device_id"] == "dev-01"
+    finally:
+        stop()
+
+
+_SWARM_BODY = json.dumps({
+    "server": {"rpc_up": True},
+    "images": [
+        {"image": "a.bin", "info_hash": "aa", "peers": [{"ip": "1.1.1.%d" % i}
+                                                        for i in range(3)]},
+        {"image": "b.bin", "info_hash": "bb", "peers": [{"ip": "2.2.2.%d" % i}
+                                                        for i in range(2)]},
+    ]}).encode()
+
+
+def _serve_swarm(tmp_path, body=_SWARM_BODY):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
+                                 swarm_fetch=lambda: body)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return "127.0.0.1", srv.server_address[1], srv.shutdown
+
+
+def test_swarm_unpaged_is_byte_for_byte_passthrough(tmp_path):
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/swarm", headers={"Cookie": ck})
+        assert st == 200 and b == _SWARM_BODY
+    finally:
+        stop()
+
+
+def test_swarm_page_slices_peers_across_images(tmp_path):
+    """Peers flatten across images in image order; the image entries all
+    survive (the map builds its selector from them) with only their peer
+    lists sliced, and peers_total states the real size."""
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        seen = []
+        for offset in (0, 2, 4):
+            st, _, b = _req(host, port, "GET",
+                            "/api/swarm?limit=2&offset=%d" % offset,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["peers_total"] == 5
+            assert body["peers_limit"] == 2 and body["peers_offset"] == offset
+            assert [i["info_hash"] for i in body["images"]] == ["aa", "bb"]
+            assert body["server"] == {"rpc_up": True}
+            for image in body["images"]:
+                seen += [p["ip"] for p in image["peers"]]
+        assert seen == ["1.1.1.0", "1.1.1.1", "1.1.1.2", "2.2.2.0", "2.2.2.1"]
+    finally:
+        stop()
+
+
+def test_swarm_page_reports_an_unpaginatable_payload(tmp_path):
+    """A hub payload that is not the documented shape must never be passed
+    through WHOLE to a caller that asked for a page."""
+    host, port, stop = _serve_swarm(tmp_path, body=b'{"peers": [1, 2, 3]}')
+    try:
+        ck, _ = _login(host, port)
+        st, _, b = _req(host, port, "GET", "/api/swarm?limit=1",
+                        headers={"Cookie": ck})
+        assert st == 200
+        assert json.loads(b)["error"] == "swarm data not paginatable"
+    finally:
+        stop()
+
+
+def test_swarm_page_params_are_rejected_not_defaulted(tmp_path):
+    host, port, stop = _serve_swarm(tmp_path)
+    try:
+        ck, _ = _login(host, port)
+        st, _, _ = _req(host, port, "GET", "/api/swarm?limit=0",
+                        headers={"Cookie": ck})
+        assert st == 400
+    finally:
+        stop()

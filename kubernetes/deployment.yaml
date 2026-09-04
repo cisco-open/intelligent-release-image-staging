@@ -47,7 +47,9 @@ spec:
       initContainers:
         - name: bootstrap
           image: iris:docker-alpha
-          imagePullPolicy: IfNotPresent
+          # Always, not IfNotPresent: the tag is a mutable placeholder, and
+          # IfNotPresent would keep whatever a node cached under that name.
+          imagePullPolicy: Always
           args:
             - iris-bootstrap
           envFrom:
@@ -81,9 +83,13 @@ spec:
           # Compose path builds `iris:latest` locally and this tag is whatever
           # was last built by hand under that name. Re-tag/rebuild from the
           # current tree before deploying, or a cluster silently runs old
-          # code. Same applies to the initContainer above.
+          # code. Same applies to the initContainer above. imagePullPolicy is
+          # Always for the same reason: with a mutable tag, IfNotPresent pins
+          # each node to whatever it cached first. Rebuilding under the same
+          # tag still needs `kubectl -n iris rollout restart deployment/iris-seed-server`
+          # to make the pod re-pull.
           image: iris:docker-alpha
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: iris-seed-server

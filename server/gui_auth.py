@@ -24,6 +24,13 @@ _SCRYPT_MAXMEM = 128 * 1024 * 1024  # headroom for n*r*128 (~64 MB)
 _PASSWORD_VERIFY_SLOTS = threading.BoundedSemaphore(2)
 
 
+class VerifyBusy(Exception):
+    """Both password-verification slots are taken. Raised instead of
+    returning False so a caller never records or penalises a credential
+    failure that was never checked -- the right answer is "try again in a
+    moment" (503 + Retry-After), not "wrong password"."""
+
+
 class LoginRateLimiter:
     """Per-IP and fleet-wide exponential login backoff (in-memory)."""
 
@@ -89,7 +96,8 @@ def hash_password(password):
 
 def verify_password(encoded, password):
     """Constant-time verify *password* against an encoded scrypt hash.
-    Returns False for any malformed/empty encoded value (fail closed)."""
+    Returns False for any malformed/empty encoded value (fail closed).
+    Raises VerifyBusy when no verification slot is free (see the class)."""
     try:
         scheme, n, r, p, salt_hex, hash_hex = encoded.split("$")
         if scheme != "scrypt":
@@ -100,7 +108,7 @@ def verify_password(encoded, password):
     except (ValueError, AttributeError):
         return False
     if not _PASSWORD_VERIFY_SLOTS.acquire(blocking=False):
-        return False
+        raise VerifyBusy("password verification slots busy")
     try:
         dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
                             dklen=len(expected), maxmem=_SCRYPT_MAXMEM)
@@ -113,13 +121,47 @@ def verify_password(encoded, password):
 # Admin account (stored under store["admin"] in the secrets store)
 # ---------------------------------------------------------------------------
 
-def set_admin(store, username, password, now):
-    """Set the single admin account in *store* (in-place). Password is hashed."""
-    store["admin"] = {
+def set_admin(store, username, password, now, invalidate_sessions=False):
+    """Set the single admin account in *store* (in-place). Password is hashed.
+
+    ``invalidate_sessions=True`` (the break-glass reset from the
+    iris-gui-admin CLI) stamps ``sessions_not_before`` = now: the console
+    process reads it through GuiApp.session_info and drops every session
+    created at or before that instant, so a suspected-compromised session
+    dies with the credential it was minted from. Sessions only live in the
+    console process, so the store is the one channel a separate process has
+    to reach them. Without the flag an existing floor is carried forward
+    unchanged (the in-console password change revokes the OTHER sessions
+    itself and keeps the caller's)."""
+    previous = store.get("admin") if isinstance(store.get("admin"), dict) else {}
+    record = {
         "username": username,
         "pw_hash": hash_password(password),
         "created_at": int(now),
     }
+    # Full precision, deliberately NOT int(now): the session's created_at is
+    # compared against this with <=, and truncating both to whole seconds
+    # made a login in the same second as the reset land exactly ON the floor
+    # and die on its next request (the end-to-end test needed a 1.1 s sleep
+    # to dodge it). With sub-second timestamps on both sides a login after
+    # the reset is strictly above the floor immediately.
+    floor = now if invalidate_sessions else previous.get("sessions_not_before")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool) and floor > 0:
+        record["sessions_not_before"] = floor
+    store["admin"] = record
+
+
+def sessions_not_before(store):
+    """Epoch floor (seconds, sub-second precision kept) at or below which no
+    console session is valid (0 when no break-glass reset has ever been
+    recorded). Older stores hold a whole-second int; both are honoured."""
+    admin = store.get("admin") if isinstance(store.get("admin"), dict) else {}
+    floor = admin.get("sessions_not_before", 0)
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) or floor < 0:
+        return 0
+    if floor != floor:            # NaN never compares, so it can never floor
+        return 0
+    return floor
 
 
 def get_admin(store):
@@ -148,7 +190,9 @@ class SessionStore:
     """Thread-safe in-memory sessions with idle expiry.
 
     A session is {username, csrf, created_at, last_seen}. get() refreshes
-    last_seen on access; a session idle for >= idle_ttl seconds is dropped.
+    last_seen on access unless told not to (``touch=False``: a background
+    poll that must not count as operator activity); a session idle for
+    >= idle_ttl seconds is dropped.
     """
 
     def __init__(self, idle_ttl=1800):
@@ -163,12 +207,14 @@ class SessionStore:
             self._sessions[sid] = {
                 "username": username,
                 "csrf": csrf,
-                "created_at": int(now),
+                # Not truncated: compared with <= against the break-glass
+                # floor (set_admin), which keeps sub-second precision too.
+                "created_at": now,
                 "last_seen": int(now),
             }
         return sid, csrf
 
-    def get(self, sid, now):
+    def get(self, sid, now, touch=True):
         with self._lock:
             sess = self._sessions.get(sid)
             if sess is None:
@@ -176,7 +222,8 @@ class SessionStore:
             if int(now) - sess["last_seen"] >= self._idle_ttl:
                 del self._sessions[sid]
                 return None
-            sess["last_seen"] = int(now)
+            if touch:
+                sess["last_seen"] = int(now)
             return dict(sess)
 
     def destroy(self, sid):

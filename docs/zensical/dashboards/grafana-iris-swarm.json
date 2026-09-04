@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Does peer-to-peer distribution actually happen, how much load does it carry, and among whom. Origin-side byte totals are MEASURED (aria2-next 2.5.6 per-connection session counters, banked into the durable peer ledger); the peers-served share is DERIVED as image size x completed devices minus measured origin bytes, and every panel that derives says so in its own description. The untraced residue - origin bytes whose peer connection closed between two samples - is shown explicitly rather than absorbed. All byte panels are backed by counters so a finished transfer keeps its history and nothing blanks when the swarm goes idle. Requires the IRIS /metrics text endpoint (:9101) in Prometheus, either scraped directly or remote-written from the collector's metrics/iris9101 pipeline; the OTLP push path renames image/info_hash and is not read here.",
+  "description": "Does peer-to-peer distribution actually happen, how much load does it carry, and among whom. Origin-side byte totals are MEASURED (aria2-next 2.5.6 per-connection session counters, banked into the durable peer ledger); the peers-served share is DERIVED as device-reported fleet delivery (per device, its largest reported iris.transfer.completed_content_bytes; then summed) minus measured origin bytes - no image-size constant is involved anywhere on this board, and every panel that derives says so in its own description. The untraced residue - origin bytes whose peer connection closed between two samples - is shown explicitly rather than absorbed. All byte panels are backed by counters so a finished transfer keeps its history and nothing blanks when the swarm goes idle. Requires the IRIS /metrics text endpoint (:9101) in Prometheus, either scraped directly or remote-written from the collector's metrics/iris9101 pipeline; the OTLP push path renames image/info_hash and is not read here.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -39,7 +39,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "### What this board proves — and what it only infers\n\n**Measured** panels come straight from a counter IRIS observed: aria2's torrent-wide `uploadLength` (banked monotonically by the peer ledger) and aria2-next's per-connection `getSessionUploadLength` per peer.\n\n**Derived** panels are arithmetic on measured quantities and say so in the panel description. *Peers served* is `image size x completed devices - origin sent`; nothing in the hub can watch a device send to another device.\n\n**Untraced** is not an error bar, it is the part of the origin's own upload that could not be traced to a device, because the connection opened and closed between two samples. Lab capture rate: 73.3% at 3 s sampling, 88.1% at 2 s. It is shown, never absorbed.\n\n*Prerequisite:* the `iris_*` families below live on the IRIS `/metrics` text endpoint (`:9101`). Prometheus must scrape it directly, or the collector's `metrics/iris9101` pipeline must gain a `prometheusremotewrite` exporter. The OTLP push path renames the labels (`iris_image_id`, `iris_torrent_info_hash`) and this dashboard does not read it.",
+        "content": "### What this board proves — and what it only infers\n\n**Measured** panels come straight from a counter IRIS observed: aria2's torrent-wide `uploadLength` (banked monotonically by the peer ledger) and aria2-next's per-connection `getSessionUploadLength` per peer.\n\n**Derived** panels are arithmetic on measured quantities and say so in the panel description. *Peers served* is `device-reported fleet delivery - origin sent`, where fleet delivery is the sum over devices of each device's largest `iris.transfer.completed_content_bytes`; nothing in the hub can watch a device send to another device.\n\nNo panel multiplies an image size by a device count. `iris_image_size_bytes` appears on exactly one panel and feeds no arithmetic. Reproducing a headline from `image size x completed devices` will not match this board.\n\n*Narrowing to one image:* set **both** pickers. `$image` narrows the Prometheus (origin) leg; `$image (catalog id)` narrows the Loki (device-report) leg. They are separate because the two record families carry different id forms - the report carries the CATALOG id, `iris.swarm.peer_bytes` and the metrics carry the aria2 BASENAME. Leaving the catalog-id picker on **All** while `$image` is narrowed subtracts one image's origin bytes from *every* image's fleet delivery, and inflates every derived peer share.\n\n**Untraced** is not an error bar, it is the part of the origin's own upload that could not be traced to a device, because the connection opened and closed between two samples. Lab capture rate: 73.3% at 3 s sampling, 88.1% at 2 s. It is shown, never absorbed.\n\n*Prerequisite:* the `iris_*` families below live on the IRIS `/metrics` text endpoint (`:9101`). Prometheus must scrape it directly, or the collector's `metrics/iris9101` pipeline must gain a `prometheusremotewrite` exporter. The OTLP push path renames the labels (`iris_image_id`, `iris_torrent_info_hash`) and this dashboard does not read it.",
         "mode": "markdown"
       },
       "title": "How to read this board",
@@ -128,7 +128,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — `iris_origin_sent_bytes_total`, the origin seeder's own upload counter, banked monotonically by the peer ledger. This is the ALL-TIME CUMULATIVE VALUE of the counter (`last_over_time` over the range), never a window delta: the board must keep its history after the swarm goes idle, and a window delta would read 0 for a finished transfer and make the headline depend on where the operator dragged the time picker. No series in range renders as \"No data\", never 0. Caveats: cumulative since the tracker process started (in-memory ledger, 24 h retention/prune); it counts wire bytes the origin sent, including re-sends of hashfailed pieces, so it can exceed image size x devices.",
+      "description": "MEASURED — `iris_origin_sent_bytes_total`, the origin seeder's own upload counter, banked monotonically by the peer ledger. This is the ALL-TIME CUMULATIVE VALUE of the counter (`last_over_time` over the range), never a window delta: the board must keep its history after the swarm goes idle, and a window delta would read 0 for a finished transfer and make the headline depend on where the operator dragged the time picker. No series in range renders as \"No data\", never 0. Caveats: cumulative since the tracker process started (durable file-backed ledger under $IRIS_STATE; survives a restart; pruned at 30 days); it counts wire bytes the origin sent, including re-sends of hashfailed pieces, so it can exceed image size x devices.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -195,7 +195,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin. Lab reference: origin 4618.5 MiB, peers 1877.5 MiB of 6496.0 MiB.",
+      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin. Lab reference: origin 4618.5 MiB, peers 1877.5 MiB of 6496.0 MiB. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -281,7 +281,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. Lab reference: 28.9% fleet-wide, but per device it ranged 18.7% to 55.9% — a fleet average is not a per-device truth (see the per-device table).",
+      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. Lab reference: 28.9% fleet-wide, but per device it ranged 18.7% to 55.9% — a fleet average is not a per-device truth (see the per-device table). NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -526,7 +526,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "Origin is MEASURED (`iris_origin_sent_bytes_total`, cumulative value); the peers band is DERIVED as device-reported fleet delivery minus origin sent. Both are cumulative, so the stack holds its shape after the swarm goes idle instead of collapsing to a blank panel — that is the whole reason these are counters and not gauges. No image-size constant is used, and if either input is missing the peers band is not drawn rather than filled with zero.",
+      "description": "Origin is MEASURED (`iris_origin_sent_bytes_total`, cumulative value); the peers band is DERIVED as device-reported fleet delivery minus origin sent. Both are cumulative, so the stack holds its shape after the swarm goes idle instead of collapsing to a blank panel — that is the whole reason these are counters and not gauges. No image-size constant is used, and if either input is missing the peers band is not drawn rather than filled with zero. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -684,7 +684,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — the same two numbers as the stacked chart, at the end of the range: measured origin bytes, and device-reported fleet delivery minus those origin bytes. The peers slice is clamped at zero for display only; a clamp that fires means more was traced to devices than the origin sent, so read 'Over-traced excess' before believing the split. If either input is missing the pie is not drawn — a pie with one measured slice is not a split.",
+      "description": "DERIVED — the same two numbers as the stacked chart, at the end of the range: measured origin bytes, and device-reported fleet delivery minus those origin bytes. The peers slice is clamped at zero for display only; a clamp that fires means more was traced to devices than the origin sent, so read 'Over-traced excess' before believing the split. If either input is missing the pie is not drawn — a pie with one measured slice is not a split. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -918,7 +918,7 @@
         "type": "prometheus",
         "uid": "${ds_prom}"
       },
-      "description": "MEASURED — the rate of the traced-byte counter: how fast the ledger is pinning origin bytes to named peers. The gap between this and the panel on the left is the residue accruing in real time.",
+      "description": "MEASURED - series A is the rate of the traced-byte counter: how fast the ledger is pinning origin bytes to named peers. Series B is the rate at which residue is accruing, computed as rate(origin sent) - rate(traced); both inputs there are genuinely monotonic counters, so rate() is safe on them. rate() is NEVER applied to iris_peer_unattributed_bytes_total itself: that series is a GAUGE (max(0, origin - traced)) and steps DOWN whenever a device is traced late, which rate() reads as a counter reset and renders as a large positive spike exactly when tracing is doing better - inverting the signal. Plot the residue's VALUE on “Untraced residue (measured)” instead.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1009,7 +1009,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (rate(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
+          "expr": "sum by (image) (rate(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval])) - sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -2592,7 +2592,7 @@
       "id": 32,
       "type": "table",
       "title": "Peer share of delivery, per device (derived, %)",
-      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'. Lab reference range 18.7%-55.9%.",
+      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'. Lab reference range 18.7%-55.9%. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Mixed --"
@@ -3055,18 +3055,18 @@
       },
       {
         "name": "image_catalog_id",
-        "label": "Image (catalog id)",
+        "label": "Image (catalog id) - narrow with $image",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "${ds_prom}"
         },
-        "hide": 2,
+        "hide": 0,
         "includeAll": true,
         "multi": true,
         "allValue": ".*",
         "refresh": 2,
-        "regex": "/^(.*?)(?:\\.SPA)?\\.bin$/",
+        "regex": "/^(.*?)(?:(?:\\.SPA)?\\.bin)?$/",
         "query": {
           "qryType": 1,
           "query": "label_values(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\"}, image)",
@@ -3077,7 +3077,7 @@
           "value": "$__all"
         },
         "options": [],
-        "description": "Derived from $image by stripping the .SPA.bin/.bin suffix, mirroring publish.derive_id. iris.device.transfer.report carries the catalog id while iris.swarm.peer_bytes carries the aria2 basename; the two are never equated directly."
+        "description": "The catalog id, derived from $image by stripping a .SPA.bin/.bin suffix and passing every other name through unchanged - the same rule as publish.derive_id, so .iso/.tar/.rpm images map to themselves instead of dropping out of the list. iris.device.transfer.report carries the catalog id while iris.swarm.peer_bytes and the Prometheus metrics carry the aria2 basename, so the two are never equated directly and this picker is what narrows the Loki (device-report) leg. IT IS SEPARATE FROM $image AND DOES NOT FOLLOW IT: narrowing $image while this stays on All subtracts one image's origin bytes from every image's fleet delivery. Narrow both, or leave both on All."
       },
       {
         "allValue": ".*",

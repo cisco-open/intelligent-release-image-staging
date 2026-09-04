@@ -22,6 +22,10 @@ setup() {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN/pgrep"
   printf '#!/usr/bin/env bash\necho "$@" >> "%s/pkill.log"\n' "$TMP" > "$BIN/pkill"
   chmod +x "$BIN/pgrep" "$BIN/pkill"
+  # tests above this line are not about cadence jitter/backoff (issue #59):
+  # keep them fast and deterministic by disabling the pre-agent jitter sleep.
+  # The jitter/backoff tests below override this explicitly.
+  export IRIS_TICK_JITTER_MAX=0
 }
 
 teardown() { rm -rf "$TMP"; }
@@ -45,6 +49,105 @@ teardown() { rm -rf "$TMP"; }
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   [ ! -f "$TMP/pkill.log" ]
+}
+
+# ---------------------------------------------------------------------------
+# Persisted aria2c launch overrides from iris-agent.conf (issue #122):
+# guestshell-start.sh only reads its own live process environment, refreshed
+# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or
+# RPC_PORT/MAX_PEERS, which had the identical gap) stick without this. These
+# tests run the REAL guestshell-start.sh (not a stub) against a stub aria2c
+# so the launch line it actually builds can be inspected end to end.
+# ---------------------------------------------------------------------------
+
+@test "bootstrap propagates iris_log=on from iris-agent.conf to aria2c's real launch line" {
+  printf 'rpc_secret = SAME\niris_log = on\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$TMP/launched.txt")" == *"--log=$STAGE/aria2c.log"* ]]
+}
+
+@test "bootstrap leaves aria2c's default OFF logging alone when iris-agent.conf has no iris_log key" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
+}
+
+@test "bootstrap rejects a hostile iris_log value instead of exporting it, and stays off" {
+  # The value rides straight from the conf file into an exported env var,
+  # never through eval/exec, so there is no shell-injection path regardless
+  # -- but this proves it two ways: the shell metacharacters in the value
+  # never run (no $TMP/pwned file appears), and the malformed value is
+  # rejected rather than silently coerced to "on".
+  printf 'rpc_secret = SAME\niris_log = on; touch %s/pwned #\n' "$TMP" \
+    > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring invalid iris_log"* ]]
+  [ ! -f "$TMP/pwned" ]
+  [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
+}
+
+@test "bootstrap propagates rpc_port and max_peers from iris-agent.conf to aria2c's real launch line" {
+  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 25\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  out="$(cat "$TMP/launched.txt")"
+  [[ "$out" == *"--rpc-listen-port=6900"* ]]
+  [[ "$out" == *"--bt-max-peers=25"* ]]
+}
+
+@test "bootstrap ignores an invalid rpc_port/max_peers in iris-agent.conf and keeps the builtin defaults" {
+  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 999999\n' \
+    > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring invalid rpc_port"* ]]
+  [[ "$output" == *"ignoring out-of-range max_peers"* ]]
+  out="$(cat "$TMP/launched.txt")"
+  [[ "$out" == *"--rpc-listen-port=6800"* ]]   # builtin default, unchanged
+  [[ "$out" == *"--bt-max-peers=10"* ]]        # builtin default, unchanged
 }
 
 @test "a failed aria2c launch is recorded but does NOT block the agent" {
@@ -120,4 +223,118 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   # the launcher MUST still have been consulted despite the live process
   [ -f "$TMP/gss.log" ]
+}
+
+@test "a bundle upgrade replaces bootstrap.sh by rename so the running tick still reaches the agent" {
+  # bootstrap.sh runs FROM $SRC/bootstrap.sh (the EEM applet's path) and, on
+  # a bundle drop, replaces that very file. `cp -f` rewrote the same inode,
+  # so the bash still executing it resumed at its old byte offset inside the
+  # NEW content -- executing whatever token landed there. The upgrade tick
+  # must finish on the OLD script's logic (step 5 runs the agent) and leave
+  # the new bootstrap in place for the next tick. The bundled replacement
+  # here is pure `exit 99` lines, so an in-place overwrite fails loudly.
+  cp "$BATS_TEST_DIRNAME/bootstrap.sh" "$SRC/bootstrap.sh"
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  BUNDLE="$TMP/bundle-src"; mkdir -p "$BUNDLE/agent"
+  { printf '#!/usr/bin/env bash\n'
+    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
+  } > "$BUNDLE/bootstrap.sh"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$BUNDLE/agent/iris_agent.py"
+  tar czf "$SRC/bundle.tgz" -C "$BUNDLE" bootstrap.sh agent
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$SRC/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  # the tick that performed the upgrade still ran the agent...
+  [ -f "$TMP/agent-invoked" ]
+  # ...and the next tick will read the bundled bootstrap
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE/bootstrap.sh"
+  [ ! -e "$SRC/bootstrap.sh.new" ]
+}
+
+# ---------------------------------------------------------------------------
+# Cadence jitter + failure backoff (issue #59)
+#
+# The EEM watchdog fires this script on IOS's own fixed 60s clock, so a fleet
+# installed or reloaded together keeps every device's timer in the same
+# phase indefinitely -- amplifying every tick into a fleet-wide burst of
+# policy GETs, heartbeats, and tracker re-announces. bootstrap.sh (a) sleeps
+# a small per-device jitter before the actual catalog contact, and (b) skips
+# that contact for a while after the agent fails outright, easing off an
+# overloaded or unreachable server without the EEM timer's own cadence
+# changing (steps 0-4, local upkeep, still run every tick).
+# ---------------------------------------------------------------------------
+
+@test "bootstrap sleeps a bounded per-tick jitter before invoking the agent" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  # record the jitter sleep's argument instead of actually waiting
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
+  chmod +x "$BIN/sleep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ -f "$TMP/sleep.log" ]
+  jitter="$(cat "$TMP/sleep.log")"
+  [ "$jitter" -ge 0 ] && [ "$jitter" -lt 8 ]
+}
+
+@test "IRIS_TICK_JITTER_MAX=0 skips the jitter sleep entirely" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
+  chmod +x "$BIN/sleep"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ ! -f "$TMP/sleep.log" ]
+}
+
+@test "a failed agent tick opens a backoff window that skips the NEXT tick's catalog contact" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  # counts real invocations, then always fails -- like an unreachable/overloaded catalog
+  printf 'import sys\nwith open(r"%s/agent-invocations", "a") as f: f.write("x")\nsys.exit(1)\n' \
+    "$TMP" > "$STAGE/agent/iris_agent.py"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 1 ]
+  [ "$(wc -c < "$TMP/agent-invocations")" -eq 1 ]
+  [ -f "$STAGE/.iris-tick-backoff" ]
+  read -r skip_until streak < "$STAGE/.iris-tick-backoff"
+  [ "$streak" -eq 1 ]
+  [ "$skip_until" -gt "$(date +%s)" ]
+
+  # the NEXT tick (EEM fires again 60s later, well inside the backoff window)
+  # must skip catalog contact -- no second agent invocation -- and say so.
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"backing off catalog contact"* ]]
+  [ "$(wc -c < "$TMP/agent-invocations")" -eq 1 ]
+}
+
+@test "a successful agent tick clears a stale backoff window" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  # a backoff window that already expired, from a streak of 3 prior failures
+  printf '%s %s\n' "$(( $(date +%s) - 5 ))" 3 > "$STAGE/.iris-tick-backoff"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=0 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/agent-invoked" ]
+  [ ! -f "$STAGE/.iris-tick-backoff" ]
 }

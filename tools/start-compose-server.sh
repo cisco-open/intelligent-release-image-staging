@@ -14,12 +14,26 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 
-"${COMPOSE[@]}" build
+# --pull: server/Dockerfile's base is a floating tag; without it a rebuild
+# silently reuses the host's cached python:3.12-slim-trixie and misses
+# Debian security updates already on the tag (issue #13; measured 2026-09-02).
+"${COMPOSE[@]}" build --pull
 "${COMPOSE[@]}" run --rm iris iris-bootstrap
 "${COMPOSE[@]}" up -d
 
+# Resolve the container this compose project just started rather than trusting
+# the literal name "iris". On a host that already runs a live IRIS, the literal
+# reaches the PRODUCTION container -- the health poll below would report the
+# stack healthy because production is, and the XR freshness check further down
+# would compare against production's catalog certificate. IRIS_CONTAINER is the
+# same override the rest of tools/ honours (and names the container in
+# server/docker-compose.yml), so an explicit setting wins; otherwise the id
+# comes from compose itself.
+IRIS_CONTAINER="${IRIS_CONTAINER:-$("${COMPOSE[@]}" ps -q iris 2>/dev/null | head -n 1 || true)}"
+[ -n "$IRIS_CONTAINER" ] || { echo "!! could not resolve the iris container for this compose project" >&2; exit 1; }
+
 for _ in $(seq 1 24); do
-  health="$(docker inspect -f '{{.State.Health.Status}}' iris 2>/dev/null || true)"
+  health="$(docker inspect -f '{{.State.Health.Status}}' "$IRIS_CONTAINER" 2>/dev/null || true)"
   [ "$health" = healthy ] && break
   [ "$health" = unhealthy ] && {
     "${COMPOSE[@]}" logs --tail=100 iris >&2
@@ -51,7 +65,7 @@ done
 # eleven minutes AFTER the very certificate it was accused of predating.
 XR_RPM="$REPO/artifacts/iris-xr.rpm"
 if [ -f "$XR_RPM" ]; then
-  CERT_NB="$(docker exec iris openssl x509 -in /srv/artifacts/iris-catalog.pem \
+  CERT_NB="$(docker exec "$IRIS_CONTAINER" openssl x509 -in /srv/artifacts/iris-catalog.pem \
                -noout -startdate 2>/dev/null | sed 's/^notBefore=//' || true)"
   CERT_EPOCH=""
   if [ -n "$CERT_NB" ]; then

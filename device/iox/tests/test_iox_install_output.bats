@@ -112,12 +112,14 @@ setup() {
 @test "share run-opts render INSIDE the app-hosting docker block (before end)" {
   # app-hosting silently ignores run-opts rendered after the block's `end`,
   # so the mount would vanish while every substring gate still passed —
-  # assert the line that immediately follows run-opts 12 is `end`.
+  # assert the line that immediately follows run-opts 13 (the last one,
+  # renumbered from 12 when run-opts 10 "-e IRIS_LOG=..." was added ahead of
+  # the SHARE block) is `end`.
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
     run bash "$INSTALL" --dry-run
-  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 12' | tail -1)"
+  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 13' | tail -1)"
   [ "$after" = "end" ]
 }
 
@@ -239,6 +241,37 @@ esac
 case "$cmds" in
   *"app-hosting verification disable"*)
     echo "App hosting verification disabled successfully"
+    ;;
+esac
+case "$cmds" in
+  *"show app-hosting list"*)
+    echo "App id                                   State"
+    echo "---------------------------------------------------------"
+    # unset FAKE_APP_STATE == no app installed (the default for every test
+    # that never gets as far as the lifecycle)
+    if [ -n "${FAKE_APP_STATE:-}" ]; then
+      echo "iris                                     ${FAKE_APP_STATE}"
+    else
+      echo "No App found"
+    fi
+    ;;
+esac
+case "$cmds" in
+  *"copy https://"*)
+    echo "${FAKE_COPY_RESULT:-11223344 bytes copied in 12.345 secs}"
+    ;;
+esac
+case "$cmds" in
+  *"app-hosting install appid"*)
+    echo "Installing package 'flash:iris-arm64.tar' for 'iris'. Use 'show app-hosting list' for progress."
+    ;;
+esac
+case "$cmds" in
+  *"app-hosting activate appid"*)
+    # The second line is deliberately one the success-path grep filter drops,
+    # so a test can tell an unfiltered dump from a filtered one.
+    echo "sw1#app-hosting activate appid iris"
+    echo "${FAKE_ACTIVATE_DETAIL:-% Error: activation is still loading the app image}"
     ;;
 esac
 exit 0
@@ -370,6 +403,71 @@ _iox_env() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"ERROR: device identity mismatch"* ]]
   ! grep -qE 'app-hosting (stop|deactivate|uninstall) appid iris|no app-hosting appid iris' "$COMMAND_LOG"
+}
+
+# --- app-hosting lifecycle budgets (scrubber #78) --------------------------
+# The first install of a NEW package version has to load its docker layers into
+# the IOx image cache before the app can activate; a byte-identical package the
+# box has run before activates in seconds. The old flat 90 s activate budget was
+# shorter than that first-time load on an IE-3400, so the console onboard
+# reported failure while the activation completed a minute or two later.
+
+@test "the lifecycle budgets default to 300s and no wait is hardcoded" {
+  install="$BATS_TEST_DIRNAME/../install.sh"
+  run grep -F 'INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"' "$install"
+  [ "$status" -eq 0 ]
+  # same knob name and same default as device/xr-install.sh
+  run grep -F 'ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-300}"' "$install"
+  [ "$status" -eq 0 ]
+  run grep -F 'START_TIMEOUT="${START_TIMEOUT:-300}"' "$install"
+  [ "$status" -eq 0 ]
+  run grep -nE 'wait_state [A-Z]+ [0-9]+' "$install"
+  [ "$status" -ne 0 ]
+}
+
+@test "a non-numeric lifecycle budget is refused before the device is touched" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    ACTIVATE_TIMEOUT=abc run bash "$INSTALL" --dry-run
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"ACTIVATE_TIMEOUT must be a whole number of seconds"* ]]
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    STATE_POLL=0 run bash "$INSTALL" --dry-run
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"STATE_POLL must be greater than zero"* ]]
+}
+
+@test "activation timeout honours the budget, dumps the unfiltered IOS reply, and keeps the app for a resumable retry" {
+  # The app never leaves DEPLOYED, which is exactly the observed failure: the
+  # activation is still loading layers when the budget runs out.
+  _iox_stub_setup
+  run _iox_env FAKE_IP_ROUTING=yes FAKE_APP_STATE=DEPLOYED \
+    ACTIVATE_TIMEOUT=2 STATE_POLL=1 bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  # the budget is a knob, not a constant
+  [[ "$output" == *"did not reach ACTIVATED within 2 seconds"* ]]
+  # the activate reply is printed UNFILTERED: this line is dropped by the
+  # success-path grep, so seeing it proves the swallowed output is now shown
+  [[ "$output" == *"activation is still loading the app image"* ]]
+  [[ "$output" == *"Last observed state: DEPLOYED"* ]]
+  # and the operator is told the retry is possible without an undeploy
+  [[ "$output" == *"LEFT IN PLACE"* ]]
+  [[ "$output" == *"resumable retry"* ]]
+}
+
+@test "activation timeout leaves the app-hosting config on the device" {
+  # clear_partial_app_config belongs to the DEPLOYED failure only: removing the
+  # stanza here would abort an activation that is still in flight.
+  _iox_stub_setup
+  COMMAND_LOG="$BATS_TEST_TMPDIR/device-commands.log"
+  run _iox_env FAKE_COMMAND_LOG="$COMMAND_LOG" FAKE_IP_ROUTING=yes \
+    FAKE_APP_STATE=DEPLOYED ACTIVATE_TIMEOUT=2 STATE_POLL=1 \
+    bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  # the teardown in [1/9] is expected; a SECOND removal after the activate
+  # wait is not, so count them
+  run grep -c 'no app-hosting appid iris' "$COMMAND_LOG"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
 }
 
 # --- iox_ready: one login per observation ----------------------------------

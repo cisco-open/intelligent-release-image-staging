@@ -9,7 +9,7 @@
 # 2). The real ios-xr/xr-appmgr-build tool needs network + rpmbuild and is
 # not available here, so behavioral coverage stubs it (and docker, and git)
 # on PATH. The critical property under test throughout: xr-appmgr-build
-# prints "Done building" EVEN ON FAILURE (lab-confirmed on 100.90.168.20),
+# prints "Done building" EVEN ON FAILURE (lab-confirmed on 192.0.2.10),
 # so this script must verify the RPM landed on disk and never trust the
 # tool's own exit code or message.
 
@@ -407,4 +407,75 @@ EOF
   _run_real
   [ "$status" -ne 0 ]
   [[ "$output" == *"peer-transfer-hook.sh"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# APPMGR_BUILD_DIR is operator-overridable and used to be `rm -rf`ed before
+# cloning whenever it lacked an executable ./appmgr_build -- a typo pointing
+# at a parent directory deleted it. The clone now only goes into a missing
+# or empty directory; anything else is refused, never deleted.
+# ---------------------------------------------------------------------------
+
+@test "real run: a non-empty APPMGR_BUILD_DIR without appmgr_build is refused, not deleted" {
+  _xr_stub_setup
+  echo "operator data" > "$APPMGR_DIR/precious.txt"
+  _run_real
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to clone over it"* ]]
+  [[ "$output" != *"STUB-GIT-SHOULD-NOT-BE-CALLED"* ]]
+  [ -f "$APPMGR_DIR/precious.txt" ]
+}
+
+@test "real run: an empty APPMGR_BUILD_DIR is cloned into (git is invoked, nothing removed first)" {
+  _xr_stub_setup
+  # git stub that records the clone and plants a working appmgr_build
+  cat > "$STUBDIR/bin/git" <<'GITSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  clone) mkdir -p "$3"; printf '#!/usr/bin/env bash\nmkdir -p RPMS\necho rpm > RPMS/iris-xr.rpm\n' > "$3/appmgr_build"; chmod +x "$3/appmgr_build"; echo "CLONED $3" ;;
+  *) exit 0 ;;
+esac
+GITSTUB
+  chmod +x "$STUBDIR/bin/git"
+  _run_real
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLONED $APPMGR_DIR"* ]]
+  [ -f "$OUT_DIR/iris-xr.rpm" ]
+}
+
+@test "the script never rm -rf's APPMGR_BUILD_DIR" {
+  run grep -F 'rm -rf "$APPMGR_BUILD_DIR"' "$HELPER"
+  [ "$status" -ne 0 ]
+}
+
+@test "dry-run says the clone never deletes an existing directory" {
+  _cert_only
+  run env -u ARIA2C_BIN CATALOG_PEM="$CERT_DIR/cert-only.pem" bash "$HELPER" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"never deleted"* ]]
+}
+
+# The RPM is copied into --out via a temp name + mv: --out artifacts/ is the
+# served directory device/xr-install.sh reads, and a plain cp could be read
+# half-written.
+
+@test "real run: the RPM is placed atomically (temp name + mv, no .tmp left behind)" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p RPMS
+echo "real rpm bytes" > RPMS/iris-xr-0.0.0-ThinXR_7.3.15.x86_64.rpm
+EOF
+  chmod +x "$APPMGR_DIR/appmgr_build"
+  _run_real
+  [ "$status" -eq 0 ]
+  [ -f "$OUT_DIR/iris-xr.rpm" ]
+  [ ! -e "$OUT_DIR/.iris-xr.rpm.tmp" ]
+  run grep -F 'mv -f "$OUT/.iris-xr.rpm.tmp" "$OUT/iris-xr.rpm"' "$HELPER"
+  [ "$status" -eq 0 ]
+}
+
+@test "the default XR output directory is gitignored" {
+  run git -C "$BATS_TEST_DIRNAME/../../.." check-ignore -q device/xr/out/iris-xr.rpm
+  [ "$status" -eq 0 ]
 }

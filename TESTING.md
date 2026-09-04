@@ -6,12 +6,111 @@ test suites and what to include when reporting a bug.
 ## Running the tests
 
 The project has a Python test suite (pytest) and a shell test suite (bats). Run
-both before submitting a change:
+both before submitting a change.
+
+The Python suites need `pytest` and `PyYAML`, declared in
+`requirements-dev.txt` — the same file CI installs. `bats` comes from your
+package manager.
 
 ```
+python3 -m pip install -r requirements-dev.txt
 python3 -m pytest server/tests/ device/agent/tests/ device/iox/tests/ lab/tests/ device/test_verify_image.py -q
 bats device/test_guestshell_start.bats device/test_bootstrap.bats device/tests/ device/iox/tests/ device/xr/tests/ server/tests/*.bats
 ```
+
+Both commands are expected to be fully green on a clean checkout, with no
+host provisioning and no running IRIS stack.
+
+### Opt-in host-integration tests
+
+A few tests are not hermetic by nature: they run a real `docker build`, which
+needs a reachable Docker daemon, pulls the pinned base image and takes minutes,
+or they reach the network. They are skipped by default so that a clean checkout
+is green, and run only when you ask for them:
+
+```
+IRIS_TEST_HOST_INTEGRATION=1 bats device/xr/tests/test_xr_image.bats
+IRIS_TEST_HOST_INTEGRATION=1 python3 -m pytest server/tests/test_aria2c_build_pins.py
+```
+
+Today that covers the two image-build tests in `device/xr/tests/test_xr_image.bats`
+and the pin-resolution test in `server/tests/test_aria2c_build_pins.py`, which
+asks the live Alpine package index whether the pins in the published aria2c
+build scripts still exist — an Alpine security bump withdraws the version we
+pinned, and nothing hermetic can see that. Everything else runs
+unconditionally. Use the same variable if you add a test that cannot avoid
+depending on the machine it runs on.
+
+### Capacity harness
+
+`server/tests/test_capacity_harness.py` is a repeatable mixed-workload
+capacity harness (issue #55): it seeds a synthetic fleet of N devices in its
+own temporary directory and drives the operations a real fleet drives
+concurrently — a tracker announce, a catalog heartbeat, a device policy read,
+a terminal report, a credential resolution, a fleet-wide bulk credential
+reassignment, and the console's own fleet projection (paged and unpaged) —
+then reports how the cost of each moves as N grows. It replaces the ad hoc,
+thrown-away scripts earlier scale work (#51–#53/#56/#58, the console paging
+work) used to get its numbers, so the next change to any of those hot paths
+has something that catches a regression instead of relying on someone
+re-measuring by hand. It also found issue #125 (`FleetStore`, the operator
+inventory, was the one store that migration missed) on its first run; the
+bulk-reassignment measurement is that fix's own regression coverage —
+`FleetStore.bulk_upsert`'s shard-write count stays bounded by
+`keyed_state.SHARD_COUNT` (256) however many devices are selected, where the
+old one-request-per-device path cost one shard write per device.
+
+A small, fast pair of sizes (50 and 500 devices) runs by default with every
+test suite, in a few seconds:
+
+```
+python3 -m pytest server/tests/test_capacity_harness.py -q
+```
+
+The full progression this project's scale claims are stated at — 100, 1,000
+and 10,000 devices, a hundredfold range, 10,000 being the top of the
+supported fleet size — rebuilds a 10,000-device synthetic fleet and is slow
+by design, so it is opt-in behind its own variable, following the
+`IRIS_TEST_HOST_INTEGRATION=1` convention above:
+
+```
+IRIS_TEST_CAPACITY_LARGE=1 python3 -m pytest \
+    server/tests/test_capacity_harness.py -q -s -k ten_thousand
+```
+
+`-s` is needed to see the printed report table; without it pytest still runs
+the same assertions but swallows the table. It can also run standalone,
+outside pytest, for an ad hoc report at any sizes:
+
+```
+python3 server/tests/test_capacity_harness.py --sizes 100 1000 10000
+```
+
+**What the numbers mean, and what would invalidate them.** Every operation
+calls the real production function (or, for the console, drives the real
+`gui_server` HTTP handler end to end) against synthetic state shaped like the
+real thing — never a reimplementation of the logic under test. Wall-clock
+timings are reported for context but are **not** assertions: this is a
+shared build host that also runs the live IRIS lab server and real device
+traffic, so absolute milliseconds are noisy, and a number from one run is not
+comparable to a number from a different run, day, or machine — only the
+growth factor *within one run*, across its own sizes, is meaningful. The
+assertions that actually run are all deterministic counted work, in the
+style `server/tests/test_keyed_state_scaling.py` established: which shard
+file changed, how many rows a touched shard holds, how many credential-index
+builds a run of requests costs, how many bytes a console response carries.
+Not measured at all: concurrent load (every call in the harness runs
+sequentially, one at a time, never the thousands-of-devices-at-once shape a
+real fleet produces), process/thread/file-descriptor growth over time, and
+real disk hardware latency (state lives under a plain `tempfile
+.TemporaryDirectory()`, on whatever filesystem backs the host's temp
+directory — not necessarily what backs a production volume). See the
+module's own docstring for the full accounting.
+
+`PyYAML` is not optional: the Kubernetes manifest and docker-compose tests
+parse the shipped YAML to assert security properties, and they fail rather than
+skip when it is missing. The code under test is stdlib-only; nothing in
+`requirements-dev.txt` ships to a device or into the server image.
 
 Add tests for any new functionality or bug fix, and ensure all tests pass before
 opening a pull request.

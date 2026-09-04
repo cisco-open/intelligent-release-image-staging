@@ -61,10 +61,21 @@
 # invocation. On timeout it reports rc 124, matching GNU timeout's
 # convention, so callers that already treat a nonzero rc as step failure
 # need no changes.
+#
+# Host identity: the peer is verified per lab/iris-ssh-policy.sh (same policy
+# and env knobs as device-run.sh: IRIS_SSH_HOST_KEY / IRIS_SSH_KNOWN_HOSTS /
+# persistent accept-new; IRIS_SSH_LEGACY=1 for legacy algorithms). ssh's own
+# diagnostics are forwarded (redacted) on stderr, never discarded.
 set -uo pipefail
 HOST="${1:?usage: xr-run.sh <device-ip>  (commands on stdin)}"
 DEVICE_USER="${DEVICE_USER:?set DEVICE_USER (device login user; export it or 'source' creds/)}"
 export SSHPASS="${DEVICE_PASS:?set DEVICE_PASS (export it or 'source' your gitignored creds file)}"
+LAB_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lab/iris-ssh-policy.sh
+. "$LAB_DIR/iris-ssh-policy.sh" || { echo "xr-run.sh: cannot load $LAB_DIR/iris-ssh-policy.sh" >&2; exit 1; }
+iris_ssh_policy "$HOST" || exit 1
+ERR_COPY="$(mktemp "${TMPDIR:-/tmp}/iris-xr-run-err.XXXXXX")" \
+  || { echo "xr-run.sh: mktemp failed creating the ssh diagnostics capture -- refusing to run with ssh errors discarded" >&2; exit 1; }
 SESSION_TIMEOUT="${IRIS_XR_SESSION_TIMEOUT:-150}"
 # A garbage value here must fall back to the default, never turn into an
 # instant kill: `sleep abc` or `sleep -5` fails immediately, and a naive
@@ -93,10 +104,9 @@ GUARDED_CMDS="$(printf '%s\n' "$CMDS" | awk '
 ')"
 
 xr_run_ssh() {
-  sshpass -e ssh -tt \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
+  sshpass -e ssh -tt -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-    "${DEVICE_USER}@${HOST}" 2>/dev/null
+    "${DEVICE_USER}@${HOST}" 2>>"$ERR_COPY"
 }
 
 # Portable stand-in for `timeout "$timeout_secs" xr_run_ssh`: background the
@@ -223,7 +233,7 @@ run_bounded_ssh() {
       # This router does not only send the `\r\n` terminator a pty is
       # expected to produce: it also emits a bare CR at the START of an
       # output line -- an `\n\r` sequence, a column reset before printing --
-      # measured byte-exact on 8010-R4 (100.90.170.84) 2026-08-31. The old
+      # measured byte-exact on 8010-R4 (203.0.113.84) 2026-08-31. The old
       # `s/\r$//` anchored form left every one of those leading CRs in place,
       # and a leading CR silently defeats every `^`-anchored parser
       # downstream: device/xr-uninstall.sh:s [5/5] emptiness check drops the
@@ -239,3 +249,17 @@ run_bounded_ssh() {
         s/\Q$secret\E/[REDACTED]/g;
       }
     '
+RUN_STATUS=$?
+iris_ssh_cleanup
+# ssh's own diagnostics, redacted, on OUR stderr -- never discarded.
+if [ -s "$ERR_COPY" ]; then
+  perl -pe '
+      s/\r//g;
+      for my $secret (grep { defined && length } $ENV{DEVICE_PASS}) {
+        s/\Q$secret\E/[REDACTED]/g;
+      }
+    ' "$ERR_COPY" | sed 's/^/ssh: /' >&2
+  iris_ssh_explain "$ERR_COPY" "$HOST"
+fi
+rm -f "$ERR_COPY"
+exit "$RUN_STATUS"

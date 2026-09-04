@@ -68,3 +68,23 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   run grep -F '"$IOXCLIENT" docker package' "$BUILD"
   [ "$status" -ne 0 ]
 }
+
+@test "build.sh packages the descriptor, rootfs.tar and the pinned-cert probe member, never the docker build context" {
+  # `ioxclient package` tars its whole working directory into artifacts.tar.gz.
+  # Packaging the build context shipped a second aria2c, the agent sources and
+  # the Dockerfile as ~3.3 MB of dead weight in every IOx tar (measured
+  # 2026-09-02), so the packaging step runs in a directory that holds exactly
+  # package.yaml + rootfs.tar + iris-catalog.pem. The pem (a few KB) is the
+  # PINNED-CERT PROBE MEMBER both freshness readers depend on (IRIS-12-001);
+  # it was dropped with the rest and every fresh package then read as STALE.
+  run grep -F 'mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F 'cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F 'cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F '( cd "$PKG" && "$IOXCLIENT" package . )' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F '( cd "$CTX" && "$IOXCLIENT" package . )' "$BUILD"
+  [ "$status" -ne 0 ]
+}

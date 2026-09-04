@@ -142,6 +142,10 @@ def test_main_wires_required_identity_checkpoint(tmp_path, monkeypatch):
 
     monkeypatch.setenv("IRIS_STATE", str(tmp_path))
     monkeypatch.setenv("IRIS_REQUIRE_IDENTITY_GATE", "1")
+    # IRIS-105: catalog.main() now fails closed with no IRIS_CERT unless
+    # explicitly opted into plaintext; this test is about the identity-gate
+    # wiring, not TLS, so opt in rather than provision a throwaway cert.
+    monkeypatch.setenv("IRIS_CATALOG_ALLOW_PLAINTEXT", "1")
     monkeypatch.setattr(catalog, "make_server", fake_make_server)
     monkeypatch.setattr(catalog.threading, "Thread",
                         lambda *a, **k: type("T", (), {"start": lambda self: None})())
@@ -161,6 +165,10 @@ def test_main_preserves_upgrade_default_without_gate(tmp_path, monkeypatch):
 
     monkeypatch.setenv("IRIS_STATE", str(tmp_path))
     monkeypatch.delenv("IRIS_REQUIRE_IDENTITY_GATE", raising=False)
+    # IRIS-105: catalog.main() now fails closed with no IRIS_CERT unless
+    # explicitly opted into plaintext; this test is about the upgrade
+    # (gate-absent) default, not TLS, so opt in rather than provision a cert.
+    monkeypatch.setenv("IRIS_CATALOG_ALLOW_PLAINTEXT", "1")
     monkeypatch.setattr(catalog, "make_server",
                         lambda *a, **kw: captured.update(kw) or Server())
     monkeypatch.setattr(catalog.threading, "Thread",

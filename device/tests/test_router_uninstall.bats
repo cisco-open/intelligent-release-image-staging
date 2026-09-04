@@ -197,7 +197,7 @@ setup() {
   # is the same ownership proof the VPG itself carries.
   _router_uninstall_stub_setup
   FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
-  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881")" -ge 1 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881")" -ge 1 ]
 }
 
 @test "force teardown leaves a static NAT mapping outside any IRIS subnet alone" {
@@ -205,7 +205,7 @@ setup() {
   # it is the operator's, and must survive.
   _router_uninstall_stub_setup
   FAKE_RUNNING_NAT=yes _router_uninstall_run_live_forced
-  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 100.90.171.2")" -eq 0 ]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.10")" -eq 0 ]
 }
 
 @test "force teardown on a clean router removes no network config at all" {
@@ -295,6 +295,33 @@ natcheck_reply() {
   fi
 }
 
+# Model removals: an object the script un-configures stops being reported by
+# every later read (verify AND the retry loop's re-observe). The overload
+# no-form is honoured only after FAKE_FORCE_NAT_DRAIN_ROUNDS attempts
+# (default 1) -- IOS refuses it while translations still reference it -- and
+# never when FAKE_FORCE_NAT_STUCK=yes.
+case "$cmds" in
+  *"no ip access-list standard IRIS-NAT-5"*) touch "$FAKE_STATE_DIR/acl5_removed" ;;
+esac
+case "$cmds" in
+  *"no ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"*)
+    n=$(( $(cat "$FAKE_STATE_DIR/overload5_no_n" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAKE_STATE_DIR/overload5_no_n"
+    if [ "${FAKE_FORCE_NAT_STUCK:-no}" != "yes" ] && [ "$n" -ge "${FAKE_FORCE_NAT_DRAIN_ROUNDS:-1}" ]; then
+      touch "$FAKE_STATE_DIR/overload5_removed"
+    fi ;;
+esac
+case "$cmds" in
+  *"no ip nat inside source static tcp 192.168.254.10 6881"*) touch "$FAKE_STATE_DIR/static_removed" ;;
+esac
+case "$cmds" in
+  *"no interface VirtualPortGroup7"*) touch "$FAKE_STATE_DIR/vpg7_removed" ;;
+esac
+case "$cmds" in
+  *"clear ip nat translation inside"*)
+    printf '%s\n' "$cmds" | grep 'clear ip nat translation' >> "$FAKE_STATE_DIR/cleared" ;;
+esac
+
 case "$cmds" in
   *"__IRIS_VERIFY_RUNNING__"*)
     echo "terminal width 512"
@@ -312,10 +339,10 @@ case "$cmds" in
         fi
         # A VPG carrying the description router-install.sh writes into every
         # VPG IRIS creates -- on-device proof of IRIS ownership.
-        if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ]; then
+        if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
           echo "interface VirtualPortGroup7"
           echo " description IRIS Guest Shell VPG"
-          echo " ip address 100.90.171.1 255.255.255.252"
+          echo " ip address 192.168.254.9 255.255.255.252"
           echo "!"
         fi
         # What router-install.sh leaves on EVERY router it onboards and only
@@ -329,8 +356,9 @@ case "$cmds" in
           echo "ip http client secure-trustpoint IRIS"
         fi
         if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
-          echo "ip access-list standard IRIS-NAT-5"
-          echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
+          [ -e "$FAKE_STATE_DIR/acl5_removed" ] || echo "ip access-list standard IRIS-NAT-5"
+          [ -e "$FAKE_STATE_DIR/overload5_removed" ] || echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
+          [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881"
         fi
         echo "!"
         echo "end"
@@ -367,16 +395,16 @@ case "$cmds" in
       echo " ip address 192.168.254.1 255.255.255.252"
       echo "!"
     fi
-    if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ]; then
+    if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
       echo "interface VirtualPortGroup7"
       echo " description IRIS Guest Shell VPG"
-      echo " ip address 100.90.171.1 255.255.255.252"
+      echo " ip address 192.168.254.9 255.255.255.252"
       echo "!"
     fi
     if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
-      echo "ip access-list standard IRIS-NAT-5"
-      echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
-      echo "ip nat inside source static tcp 100.90.171.2 6881 interface GigabitEthernet1 6881"
+      [ -e "$FAKE_STATE_DIR/acl5_removed" ] || echo "ip access-list standard IRIS-NAT-5"
+      [ -e "$FAKE_STATE_DIR/overload5_removed" ] || echo "ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload"
+      [ -e "$FAKE_STATE_DIR/static_removed" ] || echo "ip nat inside source static tcp 192.168.254.10 6881 interface GigabitEthernet1 6881"
     fi
     natcheck_reply
     ;;
@@ -565,16 +593,61 @@ PY2
   [ "$status" -eq 0 ]
 }
 
-@test "forced live teardown on router-nat ignores the NAT config it preserves" {
-  # Force skips the NAT teardown by design, so the NAT rules are still there
-  # -- and with no record VPG_NUMBER is empty, so the ACL pattern collapses
-  # to the bare prefix "ip access-list standard IRIS-NAT-" and matches any
-  # other VPG's ACL too.
+# Rewritten for IRIS-11-004: this test used to assert that force mode IGNORED
+# the IRIS-NAT objects in its verify. It now asserts the corrected contract:
+# force reclaims the IRIS-named NAT objects (each in its own session, the
+# overload no-form retried after clearing IRIS-subnet translations) and the
+# verify fails closed when any of them survives.
+@test "forced live teardown on router-nat reclaims the IRIS-named NAT objects and verifies they are gone" {
   _router_uninstall_stub_setup
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
-    FAKE_RUNNING_NAT=yes run _router_uninstall_run_live_forced
+    FAKE_RUNNING_NAT=yes FAKE_FORCE_NAT_DRAIN_ROUNDS=2 run _router_uninstall_run_live_forced
   [[ "$output" != *"artifacts still present"* ]] || return 1
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || return 1
+  # the overload no-form was retried (first attempt refused while referenced)
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source list IRIS-NAT-5 interface GigabitEthernet1 overload")" -ge 2 ] || return 1
+  # and never shared a session with the ACL removal (a prompting IOS eats the next line)
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source list IRIS-NAT-5" "no ip access-list standard")" -eq 0 ] || return 1
+  # ACL removed only after the overload rule was observed gone
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip access-list standard IRIS-NAT-5")" -eq 1 ]
+}
+
+@test "forced live teardown on router-nat fails closed when the overload rule cannot be removed" {
+  # A router that was seeding seconds earlier still holds translations, so IOS
+  # refuses the no-form. The old force path sent it once, skipped the NAT
+  # scan, persisted the residue and reported clean -- and the next onboard was
+  # refused on "IRIS-NAT-N already exists" with no record left to undeploy.
+  _router_uninstall_stub_setup
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
+    FAKE_RUNNING_NAT=yes FAKE_FORCE_NAT_STUCK=yes run _router_uninstall_run_live_forced
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"could not remove the IRIS NAT overload mapping"* ]] || return 1
+  [[ "$output" != *"clean and persisted"* ]] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "copy running-config startup-config")" -eq 0 ]
+}
+
+@test "forced live teardown clears only translations inside the IRIS VPG subnet before the overload no-form" {
+  _router_uninstall_stub_setup
+  MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 \
+    FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_NAT=yes \
+    FAKE_NAT_TRANSLATIONS="$(printf 'tcp 203.0.113.9:6881 192.168.254.10:6881 198.51.100.7:40001 198.51.100.7:40001\ntcp 203.0.113.9:5000 192.168.254.2:5000 198.51.100.8:443 198.51.100.8:443')" \
+    run _router_uninstall_run_live_forced
+  [ "$status" -eq 0 ] || return 1
+  grep -q "clear ip nat translation inside 203.0.113.9 192.168.254.10 forced" "$FAKE_STATE_DIR/cleared" || return 1
+  ! grep -q "192.168.254.2" "$FAKE_STATE_DIR/cleared" || return 1
+  # cleared BEFORE the first overload no-form
+  first_clear="$(grep -n 'clear ip nat translation inside 203.0.113.9' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  first_no="$(grep -n 'no ip nat inside source list IRIS-NAT-5' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  [ "$first_clear" -lt "$first_no" ]
+}
+
+@test "forced live teardown fails closed when a reclaimed IRIS VPG survives" {
+  _router_uninstall_stub_setup
+  # the stub honours the VPG no-form only when it sees it; make it deaf
+  sed -i 's/no interface VirtualPortGroup7"\*) touch/no interface VirtualPortGroup7-NEVER"*) touch/' "$STUBDIR/lab/device-run.sh"
+  FAKE_RUNNING_IRIS_VPG=yes run _router_uninstall_run_live_forced
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"*"interface VirtualPortGroup7"* ]]
 }
 
 @test "forced teardown does not demand NAT values it will never use" {

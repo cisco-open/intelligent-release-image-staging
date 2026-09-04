@@ -91,6 +91,24 @@ IOXCLIENT="${IOXCLIENT:-ioxclient}"
 [ -r "$PACKAGE_DESCRIPTOR" ] \
   || { echo "!! package descriptor not readable: $PACKAGE_DESCRIPTOR" >&2; exit 1; }
 
+# Staleness guard (issue #72): this build bakes in device/agent AS IT SITS IN
+# THIS CHECKOUT ($REPO) -- a worktree that has fallen behind main under
+# device/agent, device/verify_image.py or device/iox ships an older agent
+# with nothing in the built image saying so. See
+# tools/agent-source-freshness.sh for the full rationale and the
+# IRIS_REQUIRE_FRESH_AGENT / IRIS_ALLOW_STALE_AGENT_ACK knobs. Sourcing is
+# ITSELF best-effort: a checkout old enough to predate this guard (exactly
+# the stale-worktree case it exists to catch) has no
+# tools/agent-source-freshness.sh to source, and that absence must degrade
+# to "the check is skipped," never to a raw "No such file or directory"
+# abort that masks every error after it.
+if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+  # shellcheck source=tools/agent-source-freshness.sh
+  . "$REPO/tools/agent-source-freshness.sh"
+  iris_check_agent_freshness "$REPO" "device/agent device/verify_image.py device/iox" \
+    || exit 1
+fi
+
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$CTX/agent" "$CTX/agent_bin" "$OUT"
@@ -189,13 +207,44 @@ else
   fi
   echo ">> cert fingerprint verified: $got"
 fi
-grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert"; exit 1; }
+grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
+# CATALOG_PEM discipline (the same guard tools/build-xr-package.sh applies):
+# bake ONLY certificate blocks into the image. The server's IRIS_CERT is a
+# COMBINED cert+key file (server/setup_status.py reads that shape server-side)
+# and pointing CATALOG_PEM at it used to ship the catalog/console TLS private
+# key inside every layer of a package that is served to, and left on, every
+# device. Refuse outright rather than silently bake key material; never echo
+# the file's contents.
+if grep -q "BEGIN.*PRIVATE KEY" "$CTX/iris-catalog.pem"; then
+  cat >&2 <<EOF
+!! CATALOG_PEM contains a PRIVATE KEY block -- refusing to build.
+   CATALOG_PEM must be the certificate block ONLY (the public cert IRIS
+   hands to devices at onboard time), never a combined cert+key file such
+   as the one IRIS_CERT points at server-side. Extract just the
+   certificate, e.g.:
+     openssl x509 -in combined.pem -out iris-catalog.pem
+EOF
+  exit 1
+fi
+# Keep only the CERTIFICATE blocks (a chain stays intact; any other PEM
+# block or stray text around them is dropped). The private-key refusal
+# above is the guard; this is the belt to that suspender.
+sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
+  "$CTX/iris-catalog.pem" > "$CTX/iris-catalog.pem.certonly"
+mv -f "$CTX/iris-catalog.pem.certonly" "$CTX/iris-catalog.pem"
+grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
 
 cp "$HERE/Dockerfile" "$HERE/entrypoint.sh" "$HERE/reconcile.sh" "$CTX/"
 cp "$PACKAGE_DESCRIPTOR" "$CTX/package.yaml"
 
 echo ">> docker build ($DOCKER_PLATFORM)"
-docker build --platform "$DOCKER_PLATFORM" -t "$IMAGE_TAG" "$CTX"
+# --pull: the Dockerfile's base is a floating tag, so without it a build
+# silently reuses whatever python:3.12-slim-trixie the build host cached
+# (measured 2026-09-02: a cache 19 days old shipped 12 Debian security
+# updates behind, OpenSSL 3.5.6 vs 3.5.7 -- issue #13). Set IRIS_NO_PULL=1
+# only to A/B a change against an already-cached base.
+PULL_FLAG="--pull"; [ -n "${IRIS_NO_PULL:-}" ] && PULL_FLAG="--pull=false"
+docker build "$PULL_FLAG" --platform "$DOCKER_PLATFORM" -t "$IMAGE_TAG" "$CTX"
 
 if [ "$PACKAGE" -eq 0 ]; then
   echo ">> image ready: $IMAGE_TAG (IOx packaging skipped)"
@@ -227,7 +276,27 @@ if tar xOf "$CTX/rootfs.tar" manifest.json 2>/dev/null | grep -q "attestation-ma
 fi
 
 echo ">> ioxclient package -> $PACKAGE_NAME"
-( cd "$CTX" && "$IOXCLIENT" package . )
-cp "$CTX/package.tar" "$OUT/$PACKAGE_NAME"
+# Package from a directory holding ONLY the descriptor, rootfs.tar and the
+# pinned-cert probe member. `ioxclient package` tars its whole working
+# directory into artifacts.tar.gz, and the descriptor references nothing but
+# rootfs.tar -- packaging the docker build context itself shipped a second
+# copy of aria2c, the agent sources and the Dockerfile as dead weight
+# (~3.3 MB, 5.6% of every IOx tar; measured 2026-09-02, scrubber #75).
+#
+# iris-catalog.pem IS deliberately re-added (a few KB): it is the PINNED-CERT
+# PROBE MEMBER. server/setup_status.py's package_fingerprint() (the console's
+# Setup "device packages" card) and tools/check-package-freshness.sh both read
+# a top-level `iris-catalog.pem` out of artifacts.tar.gz to tell whether a
+# served package still pins the live catalog certificate. Dropping it made
+# every freshly built package read as "no pinned cert" -> STALE forever, and
+# --rebuild could never converge (review finding IRIS-12-001). It must be the
+# same cert-only bytes the Dockerfile baked at /opt/iris/iris-catalog.pem.
+PKG="$CTX/pkg"
+mkdir -p "$PKG"
+mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
+cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"
+cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"
+( cd "$PKG" && "$IOXCLIENT" package . )
+cp "$PKG/package.tar" "$OUT/$PACKAGE_NAME"
 echo ">> done: $OUT/$PACKAGE_NAME"
 ls -la "$OUT/$PACKAGE_NAME"

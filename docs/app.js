@@ -85,6 +85,31 @@ function setActive(buttons, current) {
     const active = button === current;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", active ? "true" : "false");
+    // Roving tabindex: only the selected tab is in the page's tab order, and
+    // Left/Right moves between tabs. Declaring role="tab" without this sets an
+    // expectation assistive technology announces ("tab, 1 of 5") and the page
+    // would not honour.
+    button.tabIndex = active ? 0 : -1;
+  });
+}
+
+// Arrow-key navigation for one tablist, per the ARIA tabs pattern: Left/Right
+// wrap, Home/End jump to the ends, and activation follows focus (these tabs
+// swap an inline panel, so there is nothing expensive to defer).
+function bindTablistKeys(buttons, activate) {
+  buttons.forEach((button, index) => {
+    button.addEventListener("keydown", (event) => {
+      const last = buttons.length - 1;
+      let next = null;
+      if (event.key === "ArrowRight") next = index === last ? 0 : index + 1;
+      else if (event.key === "ArrowLeft") next = index === 0 ? last : index - 1;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = last;
+      if (next === null) return;
+      event.preventDefault();
+      buttons[next].focus();
+      activate(buttons[next]);
+    });
   });
 }
 
@@ -97,42 +122,31 @@ function initHeader() {
   window.addEventListener("scroll", update, { passive: true });
 }
 
-function initCopies() {
-  document.querySelectorAll("[data-copy-target]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const target = document.getElementById(button.dataset.copyTarget);
-      const text = target?.textContent.trim();
-      if (!text) return;
-
-      try {
-        await navigator.clipboard.writeText(text);
-        button.textContent = "Copied";
-        window.setTimeout(() => {
-          button.textContent = "Copy";
-        }, 1200);
-      } catch {
-        button.textContent = "Select text";
-      }
-    });
-  });
-}
-
 function initWorkflow() {
   const buttons = Array.from(document.querySelectorAll(".step"));
   const title = document.getElementById("flow-title");
   const body = document.getElementById("flow-body");
   const command = document.getElementById("flow-command");
 
+  const panel = document.getElementById("flow-detail");
+
+  const activate = (button) => {
+    const detail = workflow[button.dataset.step];
+    if (!detail) return;
+    setActive(buttons, button);
+    // One panel serves all five tabs, so its label follows the selected tab.
+    if (panel && button.id) panel.setAttribute("aria-labelledby", button.id);
+    title.textContent = detail.title;
+    body.textContent = detail.body;
+    command.textContent = detail.command;
+  };
+
   buttons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const detail = workflow[button.dataset.step];
-      if (!detail) return;
-      setActive(buttons, button);
-      title.textContent = detail.title;
-      body.textContent = detail.body;
-      command.textContent = detail.command;
-    });
+    button.addEventListener("click", () => activate(button));
   });
+  bindTablistKeys(buttons, activate);
+  const initial = buttons.find((b) => b.classList.contains("active"));
+  if (initial) activate(initial);
 }
 
 function initPaths() {
@@ -141,30 +155,47 @@ function initPaths() {
   const copy = document.getElementById("path-copy");
   const list = document.getElementById("path-list");
 
+  const panel = document.getElementById("path-body");
+
+  const activate = (button) => {
+    const detail = paths[button.dataset.path];
+    if (!detail) return;
+    setActive(buttons, button);
+    if (panel && button.id) panel.setAttribute("aria-labelledby", button.id);
+    title.textContent = detail.title;
+    copy.textContent = detail.copy;
+    list.replaceChildren(
+      ...detail.items.map((item) => {
+        const li = document.createElement("li");
+        li.textContent = item;
+        return li;
+      }),
+    );
+  };
+
   buttons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const detail = paths[button.dataset.path];
-      if (!detail) return;
-      setActive(buttons, button);
-      title.textContent = detail.title;
-      copy.textContent = detail.copy;
-      list.replaceChildren(
-        ...detail.items.map((item) => {
-          const li = document.createElement("li");
-          li.textContent = item;
-          return li;
-        }),
-      );
-    });
+    button.addEventListener("click", () => activate(button));
   });
+  bindTablistKeys(buttons, activate);
+
+  // IRIS-17-007: the default tab's bullets are ALSO in index.html, and the two
+  // copies had drifted (the markup said "Runs the agent every 60 seconds", this
+  // object says "Downloads image pieces through the private swarm"), so
+  // returning to the default tab silently rewrote a bullet. Render the default
+  // from this object on load so there is one source of truth.
+  const initial = buttons.find((b) => b.classList.contains("active"));
+  if (initial) activate(initial);
 }
 
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function initCanvas() {
   const canvas = document.getElementById("swarm-canvas");
   const context = canvas.getContext("2d");
   const particles = [];
   const count = 52;
+  let stopped = reducedMotion.matches;
 
   function resize() {
     const scale = window.devicePixelRatio || 1;
@@ -228,21 +259,37 @@ function initCanvas() {
       context.fill();
     }
 
-    window.requestAnimationFrame(draw);
+    if (!stopped) window.requestAnimationFrame(draw);
   }
 
   resize();
   seed();
+  // Runs once either way: with reduced motion on, `stopped` keeps it from
+  // re-arming, so the viewer gets a still frame rather than a blank canvas.
   draw();
 
   window.addEventListener("resize", () => {
     resize();
     seed();
   });
+
+  // WCAG 2.2 SC 2.2.2 (Pause, Stop, Hide, Level A): this is full-viewport
+  // motion that starts automatically, runs indefinitely, and sits alongside
+  // other content, so it must stop when the viewer asks for reduced motion.
+  // The rAF loop checks `stopped` before re-arming, and the listener means a
+  // viewer who flips the OS setting with the page open sees it take effect.
+  reducedMotion.addEventListener("change", (event) => {
+    if (event.matches) {
+      stopped = true;
+      context.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    } else if (stopped) {
+      stopped = false;
+      draw();
+    }
+  });
 }
 
 initHeader();
-initCopies();
 initWorkflow();
 initPaths();
 initCanvas();

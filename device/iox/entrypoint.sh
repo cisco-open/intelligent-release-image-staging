@@ -20,8 +20,45 @@ CONF="${IRIS_AGENT_CONF:-$STAGE_DIR/iris-agent.conf}"
 STATE="${IRIS_AGENT_STATE:-$STAGE_DIR/iris-agent.state}"
 RPC_PORT="${IRIS_RPC_PORT:-6800}"
 TICK="${IRIS_TICK_SECONDS:-60}"
+# Bounded per-device cadence jitter + failure backoff (issue #59): a fleet of
+# containers that starts, or restarts, together must not re-poll the catalog
+# in lockstep -- that is exactly what turns an ordinary tick into a
+# fleet-wide burst of policy GETs, heartbeats, and tracker re-announces.
+#   * JITTER_PCT dithers every ordinary tick +/-10% of TICK (54-66s at the
+#     60s default): enough that devices which started in the same second
+#     drift apart over a handful of ticks, small enough that the AVERAGE
+#     cadence -- and so token refresh / assignment convergence latency --
+#     barely moves.
+#   * a startup jitter (applied once, below, before the first tick) covers
+#     the worse case directly: many containers starting in the same second
+#     get their FIRST tick spread across the whole TICK window instead of
+#     firing together.
+#   * BACKOFF_MAX bounds the OTHER case -- the agent process itself failing
+#     outright (catalog unreachable, timed out, or answering a non-2xx
+#     status, the same shape a saturated server produces). See
+#     next_tick_sleep below. Comfortably inside the token's multi-day
+#     refresh slack (iris_agent.py's needs_refresh docstring), so a run of
+#     backed-off ticks never strands the device.
+JITTER_PCT="${IRIS_TICK_JITTER_PCT:-10}"
+BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 TARGET_FS="${IRIS_TARGET_FS:-}"
+# Device-side logging is OFF by default: flash has finite write endurance,
+# and aria2c's log is chatty and continuous for the whole life of a transfer
+# (and, with --seed-ratio=0.0 below, a staged device seeds forever, so a log
+# left on would never stop growing). Off means genuinely no recurring flash
+# write from this source, not "a smaller file" -- start_aria2c below never
+# puts --log= on the launch line unless this is explicitly on, and stdio is
+# already redirected to /dev/null regardless (see start_aria2c). On, it is
+# bounded by aria2's own --log-max-size/--log-max-files rather than growing
+# without limit. Same fail-closed on/1/true/yes parsing
+# telemetry_report.stream_enabled() uses; anything else, including garbage,
+# stays off. This never touches error reporting: the agent's own emit()
+# (IOS syslog via `send log`, delivered over the SSH-to-self CLI transport --
+# see _emit_impl in iris_agent.py) and the heartbeat's stage_error field are
+# unaffected either way -- only the continuous aria2c.log file is optional.
+IRIS_LOG="${IRIS_LOG:-off}"
+LOG_FILE="$STAGE_DIR/aria2c.log"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
 # --on-bt-download-complete: the per-peer transfer-record hook. Baked into the image by
@@ -126,10 +163,62 @@ read_secret() {
     | tr -d '[:space:]'
 }
 
+# aria2c is owned by exact PID, never by process-name matching: it runs as a
+# tracked background child of this PID-1 shell (no --daemon=true, which would
+# double-fork and setsid() it out of reach), and ARIA2_PID plus the child's
+# /proc starttime are the identity everything below acts on. That is what lets
+# the image drop procps (pgrep/pkill) altogether.
+ARIA2_PID=""
+ARIA2_START=""
+
+proc_stat() {
+  # Sets PROC_STATE / PROC_START (state letter, starttime -- /proc/<pid>/stat
+  # fields 3 and 22); fails once the PID is gone. comm (field 2) may contain
+  # spaces, so split after the LAST ") ". Builtins only: no fork, so the check
+  # itself can never reap the zombie it is about to report.
+  read -r _stat 2>/dev/null < "/proc/$1/stat" || return 1
+  set -- ${_stat##*) }
+  PROC_STATE="${1:-}"; PROC_START="${20:-}"
+}
+
+aria2_alive() {
+  # Alive means: the recorded PID exists, is the process we started (same
+  # starttime -- a recycled PID number belongs to somebody else and must never
+  # be signalled), and has not exited. A zombie still passes kill -0, which is
+  # why the state letter decides; stop_aria2c's wait is what reaps it.
+  [ -n "$ARIA2_PID" ] || return 1
+  proc_stat "$ARIA2_PID" || return 1
+  [ "$PROC_START" = "$ARIA2_START" ] || return 1
+  case "$PROC_STATE" in Z|X) return 1 ;; esac
+}
+
+stop_aria2c() {
+  # TERM first -- aria2c saves its .aria2 control files on TERM, so an
+  # interrupted download resumes on the next start -- then a bounded wait,
+  # then KILL. CONT rides along because a stopped child cannot act on TERM.
+  # wait(1) reaps the child, so PID 1 never leaves a zombie behind.
+  if aria2_alive; then
+    kill -TERM "$ARIA2_PID" 2>/dev/null || true
+    kill -CONT "$ARIA2_PID" 2>/dev/null || true
+    _w=0
+    while aria2_alive && [ "$_w" -lt 5 ]; do
+      sleep 1; _w=$((_w + 1))
+    done
+    if aria2_alive; then kill -KILL "$ARIA2_PID" 2>/dev/null || true; fi
+  fi
+  # Reap only our own child (already gone, or still ours by starttime): a
+  # recycled PID number can be a running process re-parented to PID 1, and
+  # wait(1) on that would block the supervisor for as long as it lives.
+  [ -n "$ARIA2_PID" ] || return 0
+  if ! proc_stat "$ARIA2_PID" || [ "$PROC_START" = "$ARIA2_START" ]; then
+    wait "$ARIA2_PID" 2>/dev/null || true
+  fi
+  ARIA2_PID=""; ARIA2_START=""
+}
+
 start_aria2c() {
   secret="$1"
-  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
-  sleep 1
+  stop_aria2c
   # Hand the hook the secret this daemon is being started with, by inheritance
   # through aria2c's fork. Deliberately not re-read from $CONF: the agent
   # rewrites that file on every token refresh, and a hook reading a secret the
@@ -142,16 +231,92 @@ start_aria2c() {
   # above, so reusing $@ here is safe.
   set --
   case "${HOOK:-}" in ?*) set -- "--on-bt-download-complete=$HOOK" ;; esac
+  # --log is added only when an operator explicitly opts in (IRIS_LOG=on);
+  # see the IRIS_LOG comment near the top of this file for why leaving it
+  # off the launch line entirely -- not writing a smaller/rotated file -- is
+  # what "off" means here. --log-max-size/--log-max-files bound the file
+  # once logging is on, since this platform has never shipped rotate-logs.sh
+  # (no bash dependency added just for this) and aria2 already owns the fd.
+  case "$(printf '%s' "$IRIS_LOG" | tr '[:upper:]' '[:lower:]')" in
+    on|1|true|yes)
+      set -- "$@" "--log=$LOG_FILE" --log-max-size=50M --log-max-files=1 ;;
+  esac
+  # A tracked child with its stdio on /dev/null -- exactly what --daemon=true's
+  # daemon(0,0) did, minus the double fork. The redirect is not optional:
+  # aria2c writes a progress readout line every second, to a pipe as readily
+  # as to a terminal, for as long as anything is downloading OR seeding, and a
+  # staged device seeds indefinitely -- that would flood the app log. The
+  # aria2c options themselves are unchanged.
+  # --check-integrity=true is a RESUME guard. Without it aria2 trusts the piece
+  # map recorded in the .aria2 control file, so a completed piece that rotted
+  # on flash (bit-rot, a torn write during a power loss) survives the resume:
+  # the torrent reports complete and the staged image carries the wrong
+  # SHA-256. The agent's whole-image hash still catches that, but only after
+  # the whole remaining transfer, and the repair is then a full re-stage
+  # instead of one 1 MiB piece.
+  #
+  # It sits on the launch line rather than being plumbed per download because
+  # in aria2's own code (RequestGroup.cc, createInitialCommand for BitTorrent)
+  # the launch flag ALREADY costs nothing on the two paths that are not a
+  # resume:
+  #   * nothing on disk yet -- every piece read returns 0 bytes, throws, and
+  #     the piece is marked missing at once; no I/O, no hashing.
+  #   * a COMPLETED file being re-added to seed -- --bt-seed-unverified=true
+  #     above marks every piece done, and aria2 then takes the
+  #     onDownloadFinished branch, skipping validation entirely. A device
+  #     seeding ten staged images does not re-hash them on a relaunch.
+  # So the read-back is paid exactly where the corruption can hide: over the
+  # bytes an interrupted transfer already put on flash.
   "$ARIA2" \
-    --daemon=true --enable-rpc=true --rpc-listen-all=false \
+    --enable-rpc=true --rpc-listen-all=false \
     --rpc-listen-port="$RPC_PORT" --rpc-secret="$secret" \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
+    --check-integrity=true \
     --max-concurrent-downloads="${IRIS_MAX_CONCURRENT:-100}" \
     "$@" \
     --file-allocation=none --dir="$STAGE_DIR" \
     --log-level=warn --summary-interval=0 \
-    && echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT"
+    </dev/null >/dev/null 2>&1 &
+  ARIA2_PID=$!
+  # starttime is fixed at fork and survives the exec, so it can be read right
+  # away; it is what makes this PID *ours* on every later check.
+  ARIA2_START=""
+  if proc_stat "$ARIA2_PID"; then ARIA2_START="$PROC_START"; fi
+  echo "IRIS-ENTRYPOINT: aria2c (re)started on :$RPC_PORT (pid $ARIA2_PID)"
+}
+
+# Health-probe bounds, in seconds. They are two different questions and the
+# split is the whole point of this probe:
+#   * --connect-timeout answers "is anything bound to the RPC port". On
+#     loopback that is decided instantly -- a daemon that is gone gets the
+#     connection REFUSED (curl exit 7), a daemon that is merely busy still
+#     owns its listen socket, so the kernel completes the connection for it.
+#   * --max-time bounds the wait for the ANSWER, and must sit well above the
+#     longest stall a HEALTHY aria2c can have. Built without c-ares, aria2c
+#     resolves tracker hostnames with a blocking getaddrinfo() on its
+#     event-loop thread: one announce against a slow or unresponsive resolver
+#     freezes the entire daemon -- RPC replies included -- for as long as the
+#     resolver takes. Measured at 5.03 s (a blackholed forwarder), and the
+#     glibc default of 5 s x 2 attempts is the ceiling to design for.
+RPC_CONNECT_TIMEOUT=2
+RPC_HEALTH_TIMEOUT=10
+
+rpc_probe() {
+  # One probe; the caller reads curl's own exit status (0 answered, 7 nothing
+  # listening, 28 connected but no answer inside the bound, anything else a
+  # transport failure mid-request). Run as a tracked background child and
+  # waited on, for the same reason the tick's sleep is: a POSIX shell defers
+  # traps while a FOREGROUND command runs, and PID 1 must never make the
+  # container wait out a probe before it can act on TERM.
+  curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+    "http://127.0.0.1:$RPC_PORT/jsonrpc" \
+    -d '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
+    >/dev/null 2>&1 &
+  _probe_pid=$!
+  _probe_rc=0
+  wait "$_probe_pid" || _probe_rc=$?
+  return "$_probe_rc"
 }
 
 rpc_healthy() {
@@ -159,20 +324,70 @@ rpc_healthy() {
   # blocks its own relaunch, and the agent then fails every tick on
   # ECONNREFUSED without ever heartbeating (field incident 2026-08-20, Guest
   # Shell; this supervisor had the identical condition). Ask the RPC itself.
-  curl -s --max-time 3 "http://127.0.0.1:$RPC_PORT/jsonrpc" \
-    -d '{"jsonrpc":"2.0","id":"h","method":"aria2.getVersion","params":["token:'"$1"'"]}' \
-    >/dev/null 2>&1
+  #
+  # But a SLOW answer is not a dead daemon, and one curl with a 3 s bound
+  # could not tell those apart: any overrun read as "kill it", so a daemon
+  # stalled in getaddrinfo (see the bounds above) was killed and relaunched
+  # while perfectly healthy -- twice in 300 s under one measured DNS stall,
+  # its in-flight download dropped from the daemon each time. Two things
+  # separate busy from dead here:
+  #   * WHERE the probe failed. Connection refused means nothing is listening;
+  #     that is a verdict on its own and must relaunch AT ONCE, because
+  #     waiting there is exactly the 2026-08-20 deadlock. Any other failure
+  #     only says the answer was late, which is a suspicion, not a verdict.
+  #   * A SECOND probe. A resolver stall ends when the resolver gives up, so
+  #     the retry gets through; a genuinely wedged daemon fails it too.
+  _rc=0
+  rpc_probe "$1" || _rc=$?
+  case "$_rc" in
+    0) return 0 ;;
+    7) return 1 ;;
+  esac
+  # Any verdict this function returns is a plain healthy/unhealthy, never
+  # curl's own status: the supervisor loop asks a yes/no question.
+  rpc_probe "$1" || return 1
+}
+
+# rand_below N -- uniform 0..N-1. Shells out to python3, which is already a
+# hard dependency of every tick below: this avoids relying on $RANDOM, a
+# bash/ksh extension dash does not provide and busybox ash provides only
+# inconsistently across builds.
+rand_below() {
+  python3 -c 'import random,sys; print(random.randrange(int(sys.argv[1])))' "$1"
+}
+
+# next_tick_sleep FAIL_STREAK -- seconds to sleep before the next tick.
+#   FAIL_STREAK=0 (the ordinary path): TICK dithered by +/-JITTER_PCT%, see
+#   the block above.
+#   FAIL_STREAK>0: the tick that just ran failed outright (see the loop
+#   below). Back off exponentially from TICK, capped at BACKOFF_MAX, still
+#   jittered the same way so a batch of devices that failed together does
+#   not retry together either.
+next_tick_sleep() {
+  streak="${1:-0}"
+  base="$TICK"
+  if [ "$streak" -gt 0 ]; then
+    [ "$streak" -le 10 ] || streak=10   # 2**10 * TICK is already far past BACKOFF_MAX
+    mult=1; i=0
+    while [ "$i" -lt "$streak" ]; do mult=$((mult * 2)); i=$((i + 1)); done
+    base=$((TICK * mult))
+    [ "$base" -le "$BACKOFF_MAX" ] || base="$BACKOFF_MAX"
+  fi
+  spread=$(( (base * JITTER_PCT) / 100 ))
+  [ "$spread" -gt 0 ] || spread=1
+  echo $((base - spread + $(rand_below $((spread * 2 + 1)))))
 }
 
 AGENT_PID=""
 SLEEP_PID=""
+FAIL_STREAK=0
 
 stop_agent() {
   trap - TERM INT
   for pid in "$AGENT_PID" "$SLEEP_PID"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
-  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
+  stop_aria2c
   for pid in "$AGENT_PID" "$SLEEP_PID"; do
     [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
@@ -182,12 +397,28 @@ stop_agent() {
 trap stop_agent TERM INT
 
 echo "IRIS-ENTRYPOINT: starting; stage=$STAGE_DIR conf=$CONF tick=${TICK}s"
+
+# Spread a fleet-wide simultaneous restart across the whole tick window
+# before the FIRST tick -- the case the steady-state dither above only
+# corrects gradually. IRIS_STARTUP_JITTER=0 skips it (a single-device debug
+# session watching for the first tick to fire).
+if [ "${IRIS_STARTUP_JITTER:-1}" != "0" ] && [ "$TICK" -gt 0 ]; then
+  startup_jitter="$(rand_below "$TICK")"
+  if [ "$startup_jitter" -gt 0 ]; then
+    echo "IRIS-ENTRYPOINT: startup jitter ${startup_jitter}s"
+    sleep "$startup_jitter" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" || true
+    SLEEP_PID=""
+  fi
+fi
+
 cur=""
 while true; do
   want="$(read_secret)"
   [ -z "$want" ] && want="iris"          # placeholder until the agent fetches the real secret
   if [ "$want" != "$cur" ] \
-     || ! pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 \
+     || ! aria2_alive \
      || ! rpc_healthy "$want"; then
     start_aria2c "$want" && cur="$want"
   fi
@@ -198,10 +429,16 @@ while true; do
   AGENT_PID=$!
   if ! wait "$AGENT_PID"; then
     echo "IRIS-ENTRYPOINT: agent tick returned non-zero"
+    FAIL_STREAK=$((FAIL_STREAK + 1))
+  else
+    FAIL_STREAK=0
   fi
   AGENT_PID=""
 
-  sleep "$TICK" &
+  sleep_for="$(next_tick_sleep "$FAIL_STREAK")"
+  [ "$FAIL_STREAK" -eq 0 ] \
+    || echo "IRIS-ENTRYPOINT: backing off ${sleep_for}s (failure streak $FAIL_STREAK)"
+  sleep "$sleep_for" &
   SLEEP_PID=$!
   wait "$SLEEP_PID" || true
   SLEEP_PID=""

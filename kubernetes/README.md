@@ -32,11 +32,14 @@ From the repository root, build an amd64 image and publish it to a registry the
 cluster can pull from:
 
 ```bash
-docker build --platform linux/amd64 \
+docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t registry.example.com/iris/seed-server:docker-alpha .
 docker push registry.example.com/iris/seed-server:docker-alpha
 ```
+
+`--pull` re-resolves the base image tag rather than reusing the build host's
+cache — worth it on any image a registry hands to every node.
 
 Set that image in `kustomization.yaml`:
 
@@ -51,7 +54,7 @@ images:
 
 1. Reserve the external LoadBalancer IPv4 address using the mechanism for your
    cluster, such as a cloud load-balancer annotation or a MetalLB address pool.
-2. Replace `REPLACE_WITH_STATIC_EXTERNAL_IP` in `configmap.yaml` with that exact
+2. Replace `REPLACE_WITH_STATIC_EXTERNAL_IP` in `iris-seed-server.env` with that exact
    address. It becomes the TLS certificate IP SAN, tracker URL, and seeder
    advertised address, so it must not change behind the running deployment.
 3. Create and protect an age identity, then put only that identity into the
@@ -66,7 +69,7 @@ kubectl -n iris create secret generic iris-age \
   --from-file=identity=iris-age.txt
 ```
 
-4. Replace `REPLACE_WITH_AGE_RECIPIENTS` in `configmap.yaml` with the printed
+4. Replace `REPLACE_WITH_AGE_RECIPIENTS` in `iris-seed-server.env` with the printed
    public recipient, ideally followed by an offline break-glass recipient.
 5. Review the `50Gi` PVC request and LoadBalancer configuration, then deploy:
 
@@ -78,6 +81,17 @@ kubectl -n iris rollout status deployment/iris-seed-server
 The init container runs `iris-bootstrap` idempotently against the PVC. The main
 container then decrypts secrets into memory and starts the tracker, catalog,
 seeder, artifact server, console, and telemetry health endpoint.
+
+`iris-seed-server.env` becomes the ConfigMap through kustomize's
+`configMapGenerator`, so its name carries a content hash: edit the file and
+re-run `kubectl apply -k kubernetes` and the Deployment rolls onto the new
+values. The image tag is a mutable placeholder and is pulled with
+`imagePullPolicy: Always`, so after rebuilding and pushing under the same tag
+force a re-pull with:
+
+```bash
+kubectl -n iris rollout restart deployment/iris-seed-server
+```
 
 ## Operate
 

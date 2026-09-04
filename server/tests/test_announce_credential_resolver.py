@@ -227,3 +227,74 @@ def test_duplicate_ownership_is_hard_config_error():
     with pytest.raises(secrets_store.DuplicateCredentialError) as ei:
         secrets_store.build_announce_index(store)
     assert shared["value"] not in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# .expired classification (IRIS-111): metrics-only, never changes the
+# refusal itself -- see tracker.py's on_announce_refused and
+# metrics.py's iris_tracker_announces_refused_expired_total.
+# ---------------------------------------------------------------------------
+
+def test_dedicated_expired_credential_is_classified_expired():
+    now = 1_000_000
+    store = _store()
+    val = secrets_store.mint(store, "dev-1", "announce_token", now)
+    store["devices"]["dev-1"]["announce_token"]["expires_at"] = now + 10
+    idx = _index(store)
+    with pytest.raises(auth.AnnounceAuthError) as ei:
+        auth.resolve_announce_principal(
+            "announce_token=%s" % val, idx, store, now + 100, 0)
+    assert ei.value.expired is True
+
+
+def test_dedicated_unknown_credential_is_not_classified_expired():
+    now = 1_000_000
+    store = _store()
+    idx = _index(store)
+    with pytest.raises(auth.AnnounceAuthError) as ei:
+        auth.resolve_announce_principal(
+            "announce_token=nonexistent-garbage-value", idx, store, now, 0)
+    assert ei.value.expired is False
+
+
+def test_dedicated_revoked_credential_is_not_classified_expired():
+    """A revoked credential is invalid for a different reason than an
+    expired one -- the refused-announce counters must not conflate the two
+    (a revocation is deliberate; an aged-out overlap token is not)."""
+    now = 1_000_000
+    store = _store()
+    val = secrets_store.mint(store, "dev-1", "announce_token", now)
+    store["devices"]["dev-1"]["announce_token"]["revoked"] = True
+    idx = _index(store)
+    with pytest.raises(auth.AnnounceAuthError) as ei:
+        auth.resolve_announce_principal(
+            "announce_token=%s" % val, idx, store, now, 0)
+    assert ei.value.expired is False
+
+
+def test_legacy_scan_all_expired_candidates_classified_expired():
+    now = 1_000_000
+    store = _store()
+    val = secrets_store.mint(store, "dev-1", "announce_token", now)
+    store["devices"]["dev-1"]["announce_token"]["expires_at"] = now + 10
+    idx = _index(store)
+    with pytest.raises(auth.AnnounceAuthError) as ei:
+        auth.resolve_announce_principal(
+            "key=%s" % val, idx, store, now + 100, 0)
+    assert ei.value.expired is True
+
+
+def test_ambiguous_refusal_is_not_classified_expired():
+    """Ambiguity is refused for a structural reason, independent of any
+    single credential's validity -- .expired defaults False rather than
+    inspecting either value."""
+    now = 1_000_000
+    store = _store()
+    v1 = secrets_store.mint(store, "dev-1", "announce_token", now)
+    v2 = secrets_store.mint(store, "dev-2", "announce_token", now)
+    idx = _index(store)
+    with pytest.raises(auth.AnnounceAuthError) as ei:
+        auth.resolve_announce_principal(
+            "announce_token=%s&announce_token=%s" % (v1, v2), idx, store,
+            now, 0)
+    assert ei.value.expired is False

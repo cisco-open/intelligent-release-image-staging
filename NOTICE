@@ -32,11 +32,14 @@ command-line / RPC interface and remains under its own license:
                communicated with only over its JSON-RPC interface and command
                line, as a separate independent program.
 
-               Corresponding source (GPLv2 §3): the upstream fork
+               Corresponding source (GPLv2 §3), complete and in this
+               repository — nothing has to be requested: the upstream fork
                https://github.com/AnInsomniacy/aria2-next at commit
-               d4971f0e12322e2ffcdb1721911b7d5c6206d0e5, plus the patches in
-               tools/aria2c-patches/, applied in numeric order — see the
-               README in that directory for the build description.
+               d4971f0e12322e2ffcdb1721911b7d5c6206d0e5; the patches in
+               tools/aria2c-patches/, applied in numeric order; and the
+               scripts used to control compilation in tools/aria2c-build/
+               (Dockerfile + build.sh). The README in each directory
+               explains how to rebuild.
 
   * mktorrent — GNU General Public License, version 2 (GPLv2).
                Installed as a system package and invoked as a subprocess to
@@ -56,6 +59,54 @@ command-line / RPC interface and remains under its own license:
                source repository and is NOT redistributed here.
 
 ------------------------------------------------------------------------------
+Third-party programs installed in the distributed server image
+------------------------------------------------------------------------------
+
+The published seed-server container image (server/Dockerfile) additionally
+installs the following Debian system packages. They are redistributed inside
+that image as separate, unmodified programs; IRIS does not link against, embed,
+or derive from any of them. Each remains under its own license. Licenses are
+named as the upstream projects publish them; consult each project for the
+authoritative text.
+
+  * sshpass  — GNU General Public License, version 2 (GPLv2).
+               Installed as a system package and invoked as a subprocess
+               (argv ["sshpass", "-e", "scp", ...]) so the audit-export upload
+               and the server-side device sessions can supply an SSH password
+               from the environment. Never modified, never linked.
+
+  * age      — MIT License. Copyright (c) The age Authors.
+               Installed as a system package and invoked as a subprocess to
+               encrypt and decrypt the at-rest secret store (IRIS_AGE_BIN).
+
+  * OpenSSH client (ssh, scp)
+             — BSD-style OpenSSH license, with components under other
+               permissive terms. Copyright (c) 1995 Tatu Ylonen and the
+               OpenSSH contributors. Installed as a system package and invoked
+               as a subprocess for every server-side device session and for the
+               audit-export upload.
+
+  * curl     — curl license (MIT/X derivative). Copyright (c) 1996-2026
+               Daniel Stenberg and contributors. Installed as a system package;
+               invoked by the image's own HEALTHCHECK.
+
+  * ca-certificates
+             — Mozilla Public License 2.0 (the CA certificate data);
+               the Debian packaging scripts are under their own terms.
+               Installed as a system package to supply the system trust store.
+
+  * unzip    — Info-ZIP license (BSD-style). Copyright (c) 1990-2009
+               Info-ZIP. Installed as a system package; present for operator
+               convenience inside the container.
+
+  * iproute2 — GNU General Public License, version 2. Installed as a system
+               package; present for operator diagnostics inside the container.
+
+The IOx and IOS-XR device images (device/iox/Dockerfile, device/xr/Dockerfile)
+install a smaller set of the same kinds of packages under the same terms; see
+those files for the exact list per image.
+
+------------------------------------------------------------------------------
 Documentation tooling and runtime assets
 ------------------------------------------------------------------------------
 
@@ -70,7 +121,9 @@ third-party tools or runtime assets. They are not linked into the IRIS runtime:
   * Mermaid  — MIT License.
                Copyright (c) 2014-2022 Knut Sveidqvist.
                Loaded by the generated documentation site to render diagrams
-               from Mermaid code blocks.
+               from Mermaid code blocks. Pinned to an exact version by
+               docs/zensical/javascripts/mermaid.mjs; see that file for the
+               version and its Subresource Integrity digest.
 
 ------------------------------------------------------------------------------
 Vendored web console assets
@@ -80,14 +133,21 @@ The operator web console (server/webroot/) self-hosts the following third-party
 assets, each governed solely by its own license:
 
   * Inter — SIL Open Font License 1.1.
-               Copyright (c) The Inter Project Authors.
+               Copyright 2020 The Inter Project Authors
+               (https://github.com/rsms/inter).
                Self-hosted as WOFF2 under server/webroot/fonts/ for console
-               body and interface text.
+               body and interface text. OFL 1.1 condition 2 requires the
+               license notice to travel with the font: the full text is
+               distributed alongside the binaries as
+               server/webroot/fonts/Inter-OFL.txt.
 
   * Roboto Mono — Apache License, Version 2.0.
-               Copyright (c) Google LLC.
+               Copyright 2015 The Roboto Mono Project Authors
+               (the embedded notice; the project is published by Google LLC).
                Self-hosted as WOFF2 under server/webroot/fonts/ for
-               machine-data text (identifiers, hashes, addresses, logs).
+               machine-data text (identifiers, hashes, addresses, logs). The
+               Apache-2.0 requirement is satisfied by this repository's own
+               LICENSE file.
 
   * Phosphor Icons — MIT License.
                Copyright (c) 2023 Phosphor Icons.

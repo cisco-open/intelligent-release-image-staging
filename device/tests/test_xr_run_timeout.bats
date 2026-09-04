@@ -23,6 +23,7 @@ setup() {
   STDIN_LOG="$BATS_TEST_TMPDIR/stdin.log"; : > "$STDIN_LOG"
   export ARGV_LOG SLEEP_LOG STDIN_LOG
   export TMPDIR="$BATS_TEST_TMPDIR"
+  export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
   export DEVICE_USER=admin DEVICE_PASS=zzsecretzz
 
   # Fake sshpass: logs the argv it was invoked with, captures whatever
@@ -218,7 +219,7 @@ _assert_full_request_delivered() {
   [ ! -s "$SLEEP_LOG" ]
 }
 
-# Live-reproduced 2026-08-31 on 8010-R4 (100.90.170.84), byte dump in
+# Live-reproduced 2026-08-31 on 8010-R4 (203.0.113.84), byte dump in
 # agentinfo/xr-support/: the router does not only terminate lines with the
 # `\r\n` a pty is expected to produce -- it also emits a bare CR at the START
 # of an output line (the `\n\r` sequence, a column reset before printing).

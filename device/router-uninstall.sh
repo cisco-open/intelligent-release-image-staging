@@ -190,7 +190,44 @@ for line in re.findall(r"(?m)^ip nat inside source static tcp .*$", text):
         continue
     if any(ip in n for n in nets):
         print("static %s" % line)
+for n in nets:
+    print("net %s" % n.with_prefixlen)
 ' "$IRIS_VPG_DESCRIPTION"
+}
+
+# Translations whose inside-local address sits in an IRIS VPG subnet, as
+# "<inside-global> <inside-local>" pairs -- the record path clears by APP_IP,
+# the force path (no record) clears by the subnet the IRIS-marked VPG owns.
+iris_owned_translations() {   # $1 = newline-separated networks (CIDR)
+  printf 'show ip nat translations\n' | "$RUN" "$DEVICE_IP" 2>/dev/null \
+    | python3 -c '
+import ipaddress, re, sys
+nets = []
+for line in sys.argv[1].splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        nets.append(ipaddress.IPv4Network(line, strict=False))
+    except ValueError:
+        pass
+seen = set()
+for line in sys.stdin:
+    f = line.split()
+    if len(f) < 3:
+        continue
+    g = re.match(r"^(\d+(?:\.\d+){3})(?::\d+)?$", f[1])
+    l = re.match(r"^(\d+(?:\.\d+){3})(?::\d+)?$", f[2])
+    if not (g and l):
+        continue
+    try:
+        local = ipaddress.IPv4Address(l.group(1))
+    except ValueError:
+        continue
+    if any(local in n for n in nets) and (g.group(1), str(local)) not in seen:
+        seen.add((g.group(1), str(local)))
+        print("%s %s" % (g.group(1), local))
+' "$1"
 }
 
 config_cleanup_force() {
@@ -283,6 +320,7 @@ for _ in $(seq 1 30); do
 done
 [ -z "$st" ] || { echo "ERROR: guestshell still present after destroy: $st" >&2; exit 1; }
 
+OWNED=""
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   echo "[4/5] FORCE: remove the IRIS app-hosting stanza and reclaim IRIS-marked network config"
   { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
@@ -292,40 +330,86 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   # again -- router preflight refuses an existing VPG, its subnet, and the
   # IRIS-NAT ACL/overload rule. Anything unmarked is left exactly as it is.
   OWNED="$(iris_owned_config || true)"
-  FORCE_RECLAIM=""
-  # Order matters: static mappings pin the address, the overload rule
-  # references its ACL, and the VPG owns the subnet -- unwind inwards out.
+  OWNED_NETS="$(printf '%s\n' "$OWNED" | sed -n 's/^net //p')"
+  # Order matters, and so does SESSION SEPARATION: static mappings pin the
+  # address, the overload rule references its ACL, and the VPG owns the
+  # subnet -- unwind inwards out, one mutation per session. IOS refuses the
+  # overload no-form while translations still reference it (see the record
+  # path below), and on a prompting IOS the NEXT piped line is consumed as
+  # the answer -- so a single combined session silently lost the ACL removal
+  # too and the run still reported clean. That residue is exactly what
+  # router preflight refuses on the next onboard.
+  reclaimed_any=0
   while IFS= read -r line; do
     case "$line" in
       "static "*)
         rule="${line#static }"
         echo "  reclaiming static NAT mapping inside the IRIS VPG subnet"
-        FORCE_RECLAIM="$FORCE_RECLAIM
-no $rule" ;;
+        { echo "configure terminal"; echo "no $rule"; echo "end"; } \
+          | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+        reclaimed_any=1 ;;
     esac
   done <<< "$OWNED"
+  force_nat_stuck=""
   while IFS=' ' read -r kind a b; do
     [ "$kind" = "overload" ] || continue
     echo "  reclaiming NAT overload rule $a (interface $b)"
-    FORCE_RECLAIM="$FORCE_RECLAIM
-no ip nat inside source list $a interface $b overload"
+    reclaimed_any=1
+    NAT_RULE="ip nat inside source list $a interface $b overload"
+    NAT_REMOVE_ATTEMPTS="${NAT_REMOVE_ATTEMPTS:-4}"
+    NAT_REMOVE_SETTLE="${NAT_REMOVE_SETTLE:-3}"
+    nat_gone=0
+    attempt=1
+    while [ "$attempt" -le "$NAT_REMOVE_ATTEMPTS" ]; do
+      # clear only translations inside the IRIS-marked VPG subnet(s) first
+      if [ -n "$OWNED_NETS" ]; then
+        while read -r global local; do
+          [ -n "$global" ] && [ -n "$local" ] || continue
+          printf 'clear ip nat translation inside %s %s forced\n' "$global" "$local" \
+            | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+        done <<< "$(iris_owned_translations "$OWNED_NETS" || true)"
+      fi
+      { echo "configure terminal"; echo "no $NAT_RULE"; echo "end"; } \
+        | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
+      NAT_RUNNING="$(printf 'terminal width 512\nshow running-config\n' \
+        | "$RUN" "$DEVICE_IP" | grep -v '#' || true)"
+      case "$NAT_RUNNING" in
+        *"$NAT_RULE"*) : ;;
+        *) nat_gone=1; break ;;
+      esac
+      [ "$attempt" -lt "$NAT_REMOVE_ATTEMPTS" ] || break
+      echo "  NAT mapping still referenced; clearing translations and retrying" \
+           "($attempt/$NAT_REMOVE_ATTEMPTS)"
+      sleep "$NAT_REMOVE_SETTLE"
+      attempt=$((attempt + 1))
+    done
+    [ "$nat_gone" -eq 1 ] || force_nat_stuck="${force_nat_stuck}${force_nat_stuck:+, }$NAT_RULE"
   done <<< "$OWNED"
+  if [ -n "$force_nat_stuck" ]; then
+    {
+      echo "ERROR: could not remove the IRIS NAT overload mapping after $NAT_REMOVE_ATTEMPTS attempts. LEFT ON THE DEVICE:"
+      echo "         $force_nat_stuck"
+      echo "       Its ACL is kept so the mapping stays valid for reconciliation rather than dangling."
+      echo "       Cause is usually NAT translations still referencing the mapping; re-run the"
+      echo "       forced undeploy once \`show ip nat translations\` has drained, or remove both by hand."
+    } >&2
+    exit 1
+  fi
   while IFS=' ' read -r kind a b; do
     [ "$kind" = "acl" ] || continue
     echo "  reclaiming NAT ACL $a"
-    FORCE_RECLAIM="$FORCE_RECLAIM
-no ip access-list standard $a"
+    reclaimed_any=1
+    { echo "configure terminal"; echo "no ip access-list standard $a"; echo "end"; } \
+      | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
   done <<< "$OWNED"
   while IFS=' ' read -r kind a b; do
     [ "$kind" = "vpg" ] || continue
     echo "  reclaiming VirtualPortGroup$a (carries IRIS's description)"
-    FORCE_RECLAIM="$FORCE_RECLAIM
-no interface VirtualPortGroup$a"
+    reclaimed_any=1
+    { echo "configure terminal"; echo "no interface VirtualPortGroup$a"; echo "end"; } \
+      | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
   done <<< "$OWNED"
-  if [ -n "$FORCE_RECLAIM" ]; then
-    { echo "configure terminal"; printf '%s\n' "$FORCE_RECLAIM"; echo "end"; } \
-      | "$RUN" "$DEVICE_IP" >/dev/null
-  else
+  if [ "$reclaimed_any" -eq 0 ]; then
     echo "  no IRIS-marked VirtualPortGroup or IRIS-named NAT object found;" \
          "operator network left untouched"
   fi
@@ -532,6 +616,25 @@ if [ "$MANAGEMENT_TYPE" = "router-nat" ] && [ "$FORCE_AGENT_ONLY" != "1" ]; then
       *"ip nat outside"*) forbidden="${forbidden}${forbidden:+, }$NAT_INTERFACE ip nat outside" ;;
     esac
   fi
+fi
+
+# Force mode: everything the reclaim step CHOSE to remove (because it carried
+# IRIS's mark or name) must actually be gone. The scan used to skip every NAT
+# artifact in force mode, so a refused overload no-form -- the normal state of
+# a router that was seeding seconds earlier -- was persisted and recorded as
+# clean, and the next onboard was refused on "IRIS-NAT-N already exists".
+if [ "$FORCE_AGENT_ONLY" = "1" ] && [ -n "$OWNED" ]; then
+  while IFS= read -r line; do
+    set -- $line
+    case "${1:-}" in
+      acl)      artifact="ip access-list standard $2" ;;
+      overload) artifact="ip nat inside source list $2 interface $3 overload" ;;
+      vpg)      artifact="interface VirtualPortGroup$2" ;;
+      static)   artifact="${line#static }" ;;
+      *)        continue ;;
+    esac
+    case "$RUNNING" in *"$artifact"*) forbidden="${forbidden}${forbidden:+, }$artifact" ;; esac
+  done <<< "$OWNED"
 fi
 
 [ -z "$forbidden" ] || {

@@ -109,7 +109,7 @@ def test_build_observation_observed_full_shape():
         transfer_id="a" * 32, image_id="cat9k.bin", sample_seq=42,
         aria_session_id="b1d9c0a2f4e6", sampling_class="good",
         stats=_observed_stats(),
-        peers=[{"ip": "100.92.100.14", "send_bps": 131072, "receive_bps": 0}])
+        peers=[{"ip": "198.51.100.14", "send_bps": 131072, "receive_bps": 0}])
     assert env["v"] == 2
     assert env["obs_state"] == "observed"
     assert env["observed_at"] == 1755743100.12
@@ -123,7 +123,7 @@ def test_build_observation_observed_full_shape():
         "total_content_bytes": 1288490188, "receive_bps": 11534336,
         "send_bps": 262144, "connections": 5}
     assert env["peer_connections"] == [
-        {"ip": "100.92.100.14", "send_bps": 131072, "receive_bps": 0}]
+        {"ip": "198.51.100.14", "send_bps": 131072, "receive_bps": 0}]
 
 
 def test_build_observation_state_only_invents_no_transfer_fields():
@@ -240,7 +240,7 @@ class _Cat:
 def _deps(cat, sizes, **over):
     order = cat.order
     base = dict(
-        catalog=cat, emit=lambda *a: None, ios=lambda c: "",
+        catalog=cat, emit=lambda *a: None, boot_image=lambda: "running.bin",
         aria_add=lambda t, d: None, file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: True, free_bytes=lambda prefix="flash:": 9_000_000_000,
         version=lambda: "17", copy_to_root=lambda f, tp="flash:", expected_size=None: True,

@@ -5,8 +5,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """One-shot IRIS diagnostic: TCP reachability to tracker+seeder, and
-aria2c RPC download status + peer list. Run in Guest Shell:
-  guestshell run python3 /flash/guest-share/iris/iris-diag.py"""
+aria2c RPC download status + peer list.
+
+A lab helper, NOT part of the agent bundle (tools/make-agent-bundle.sh does
+not ship it). Copy it to the device first, then run it in Guest Shell:
+  guestshell run python3 /flash/guest-share/iris/iris-diag.py [server-ip]
+Exits 1 when any probe fails, so it is usable from automation.
+"""
 import json
 import os
 import socket
@@ -26,12 +31,22 @@ RPC_SECRET_FILE = os.environ.get(
     os.path.join(os.environ.get("STAGE_DIR", _DEFAULT_STAGE), "rpc-secret"),
 )
 
+# aria2c never runs with an EMPTY secret: guestshell-start.sh (and the IOx
+# entrypoint) launch it on the placeholder `iris` when the file is missing or
+# empty, so a probe that sent `token:` reported Unauthorized against a healthy
+# daemon -- the exact placeholder-secret state the 2026-08-20 incident hinged on.
+PLACEHOLDER_SECRET = "iris"
+
+
 def _read_secret():
     try:
         with open(RPC_SECRET_FILE) as _f:
-            return _f.read().strip()
+            return _f.read().strip() or PLACEHOLDER_SECRET
     except OSError:
-        return ""
+        return PLACEHOLDER_SECRET
+
+
+FAILED = False
 
 
 def tcp(host, port):
@@ -43,8 +58,11 @@ def tcp(host, port):
         return "FAIL:%s" % e
 
 
-print("tracker %s:6969 -> %s" % (HOST, tcp(HOST, 6969)))
-print("seeder  %s:6881 -> %s" % (HOST, tcp(HOST, 6881)))
+for _name, _port in (("tracker", 6969), ("seeder ", 6881)):
+    _result = tcp(HOST, _port)
+    print("%s %s:%d -> %s" % (_name, HOST, _port, _result))
+    if _result != "OPEN":
+        FAILED = True
 
 
 def rpc(method, params=None):
@@ -79,3 +97,7 @@ try:
                      p.get("amChoking"), p.get("peerChoking")))
 except Exception as e:
     print("RPC error: %s" % e)
+    FAILED = True
+
+if FAILED:
+    sys.exit(1)

@@ -56,8 +56,11 @@ MODEL="${MODEL:-}"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 if [ "$DRY" -eq 0 ]; then
   : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
+  # A failed session here used to trip errexit with ssh's status and NO
+  # message (stderr was discarded too); name the fault instead.
   VERSION_OUT="$(printf 'show version\n' \
-    | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null)"
+    | "$HERE/../lab/device-run.sh" "$DEVICE_IP")" \
+    || { echo "ERROR: could not read 'show version' from $DEVICE_IP -- the device session failed (see the ssh diagnostics above: reachability, host key, credentials)" >&2; exit 1; }
   LIVE_MODEL="$(printf '%s\n' "$VERSION_OUT" \
     | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
   LIVE_IDENTITY="$(printf '%s\n' "$VERSION_OUT" \
@@ -198,8 +201,16 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 ssh_host() {
-  SSHPASS="$HOST_PASS" sshpass -e ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@"
+  # Same trust policy as the device transport (lab/iris-ssh-policy.sh): the
+  # stage host receives the per-device enrollment token, so it is verified.
+  # shellcheck source=lab/iris-ssh-policy.sh
+  . "$HERE/../lab/iris-ssh-policy.sh" || return 1
+  iris_ssh_policy "$STAGE_HOST" || return 1
+  local rc=0
+  SSHPASS="$HOST_PASS" sshpass -e ssh "${IRIS_SSH_OPTS[@]}" \
+    -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@" || rc=$?
+  iris_ssh_cleanup
+  return "$rc"
 }
 
 echo "[1/7] bootflash pre-check on $DEVICE_IP"

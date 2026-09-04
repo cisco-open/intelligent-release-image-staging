@@ -20,11 +20,30 @@ def test_load_missing_returns_skeleton(tmp_path):
     assert store == {"devices": {}, "seeder": {}}
 
 
-def test_load_corrupt_returns_skeleton(tmp_path):
+def test_load_corrupt_raises_not_skeleton(tmp_path):
+    # Rewritten from test_load_corrupt_returns_skeleton: the old contract
+    # (skeleton for a corrupt file) let every writer re-encrypt an empty
+    # store over the durable ciphertext (IRIS-01-002). A present-but-
+    # unreadable file must be distinguishable from a missing one.
     p = tmp_path / "bad.json"
     p.write_text("NOT JSON {{}")
-    store = secrets_store.load(str(p))
-    assert store == {"devices": {}, "seeder": {}}
+    with pytest.raises(secrets_store.StoreCorruptError) as ei:
+        secrets_store.load(str(p))
+    # path and failure class only -- never file content
+    assert "NOT JSON" not in str(ei.value)
+    assert "JSONDecodeError" in str(ei.value)
+    assert issubclass(secrets_store.StoreCorruptError, ValueError)
+
+
+def test_load_unreadable_raises_not_skeleton(tmp_path):
+    d = tmp_path / "store-is-a-dir.json"
+    d.mkdir()
+    with pytest.raises(secrets_store.StoreCorruptError):
+        secrets_store.load(str(d))
+    truncated = tmp_path / "trunc.json"
+    truncated.write_text('{"devices": {"d1": {"catalog_token": {"value": "x"')
+    with pytest.raises(secrets_store.StoreCorruptError):
+        secrets_store.load(str(truncated))
 
 
 def test_mint_retries_catalog_token_collision(monkeypatch):

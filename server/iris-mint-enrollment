@@ -64,7 +64,14 @@ def main(argv=None):
     # a concurrent rotation/revoke can't load a snapshot that predates this
     # mint and write it back, dropping the freshly minted enrollment token.
     with secrets_store.store_lock(secrets_path):
-        store = secrets_store.load(secrets_path)
+        try:
+            store = secrets_store.load(secrets_path)
+        except secrets_store.StoreCorruptError as exc:
+            # Fail closed: a present-but-unreadable store must never be
+            # mistaken for an empty one and re-encrypted over the durable
+            # ciphertext holding every device credential.
+            print("error: %s" % exc, file=sys.stderr)
+            return 1
         # Explicit re-enrollment begins a new credential lineage. A previous
         # token retained for refresh-response recovery must not be able to
         # retrieve the newly enrolled device's secret bag.

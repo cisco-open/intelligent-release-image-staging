@@ -12,13 +12,32 @@ import tempfile
 import time
 
 import gui_onboard
+import keyed_state
 import secrets_store
 
+
+class FleetStateError(RuntimeError):
+    """A fleet state file (the legacy ``fleet.json``, a ``fleet.d/`` shard,
+    or the ``fleet-revision.json`` counter) is present but unreadable or
+    malformed. Deliberately NOT a ``ValueError``: every FleetStore write
+    path already raises plain ``ValueError`` for BAD INPUT (an invalid
+    device_id, an unsupported management_type, ...), which every existing
+    caller catches locally and turns into a 400. Corrupt STORAGE is a
+    different failure a client did nothing to cause, and reusing the same
+    exception type would let it fall into one of those local catches and
+    come back as a misleading 400 instead of the clean 503 gui_server.py's
+    connection-level handler gives catalog.StateFileError -- mirrored here,
+    on purpose, for the identical reason."""
 
 _CSV_V2_OLD_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
                     "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
                     "inband_vlan", "ios_ssh_host", "model", "platform"]
-CSV_V2_COLS = _CSV_V2_OLD_COLS[:-1] + ["vpg_number", "nat_interface", "platform"]
+# The pre-svi_igp v2 header (issue #85): router fields (vpg_number,
+# nat_interface) but no svi_igp column. Kept as its own name, like
+# _CSV_V2_OLD_COLS, so an export/CSV from before this field existed still
+# imports unchanged -- see import_csv's v2_headers.
+_CSV_V2_PRE_SVI_IGP_COLS = _CSV_V2_OLD_COLS[:-1] + ["vpg_number", "nat_interface", "platform"]
+CSV_V2_COLS = _CSV_V2_PRE_SVI_IGP_COLS[:-1] + ["svi_igp", "platform"]
 _LEGACY_COLS = ["device_id", "device_ip", "vlan", "svi_ip", "svi_mask",
                 "guest_ip", "model", "platform"]
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -29,6 +48,11 @@ _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
 
 
 def _atomic_write_json(path, obj):
+    """Only remaining caller: _bump_revision's {"revision": N} counter (every
+    device row now goes through keyed_state's own _write_shard, which
+    already sets allow_nan=False). Matches that same guard: a NaN/Infinity
+    that slipped in would otherwise be written as a bare token no JSON
+    parser accepts, poisoning the next reader."""
     directory = os.path.dirname(path) or "."
     mode = None
     try:
@@ -38,7 +62,7 @@ def _atomic_write_json(path, obj):
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fleet-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as stream:
-            json.dump(obj, stream, indent=2, sort_keys=True)
+            json.dump(obj, stream, indent=2, sort_keys=True, allow_nan=False)
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -83,6 +107,27 @@ def _vpg(value):
     if not 0 <= number <= 31:
         raise ValueError("vpg_number must be between 0 and 31")
     return number
+
+
+# Per-device override of device/device-install.sh's SVI_IGP env var (issue
+# #85): routed onboarding used to have exactly one way to opt a fabric's IRIS
+# SVI into IS-IS -- the process-wide SVI_IGP env var on the server -- which is
+# wrong the moment one server onboards devices into different fabrics. This is
+# interpolated into a live IOS config block (device-install.sh emits a literal
+# " ip router isis" line whenever it equals "isis"), so it is validated the
+# same way every other value bound for that path is: a closed enum, not a
+# pattern that merely excludes shell metacharacters. Blank means "no
+# per-device override" -- device-install.sh then falls back to its own
+# SVI_IGP env var / "none" default, so a record that says nothing behaves
+# exactly as before this field existed.
+_SVI_IGP_VALUES = ("", "none", "isis")
+
+
+def _svi_igp(value):
+    value = _text(value)
+    if value not in _SVI_IGP_VALUES:
+        raise ValueError("svi_igp must be 'none' or 'isis'")
+    return value
 
 
 def _static_network(ip, mask, gateway, prefix):
@@ -177,6 +222,10 @@ def validate_record(record, allow_legacy=False):
         result["iris_vlan"] = str(_vlan(result.get("iris_vlan"), "iris_vlan"))
         result["svi_ip"] = _ipv4(result.get("svi_ip"), "svi_ip")
         result["svi_mask"] = _mask(result.get("svi_mask"), "svi_mask")
+        # Per-device SVI_IGP override (issue #85): blank keeps the
+        # process-wide SVI_IGP env var (default 'none') as the fallback --
+        # see _svi_igp's docstring-equivalent comment above.
+        result["svi_igp"] = _svi_igp(result.get("svi_igp"))
         app_ip, app_mask, app_gateway = _static_network(
             result.get("app_ip"), result.get("app_mask"), result.get("app_gateway"), "app")
         result.update(app_ip=app_ip, app_mask=app_mask, app_gateway=app_gateway)
@@ -189,7 +238,7 @@ def validate_record(record, allow_legacy=False):
             result.get("app_ip"), result.get("app_mask"), result.get("app_gateway"), "app")
         result.update(app_ip=app_ip, app_mask=app_mask, app_gateway=app_gateway)
         if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask",
-                                           "vpg_number", "nat_interface")):
+                                           "svi_igp", "vpg_number", "nat_interface")):
             raise ValueError("inband inventory cannot contain routed or router fields")
         # ios_ssh_host is the IOS endpoint the inband IOx app SSHes to for its
         # plain-copy placement. It defaults to the device's management IP
@@ -203,9 +252,9 @@ def validate_record(record, allow_legacy=False):
         # VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface exists to
         # configure, so a non-empty one is a caller mistake, not silently
         # tolerated garbage.
-        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
-                    "app_gateway", "inband_vlan", "ios_ssh_host", "vpg_number",
-                    "nat_interface"):
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "svi_igp", "app_ip",
+                    "app_mask", "app_gateway", "inband_vlan", "ios_ssh_host",
+                    "vpg_number", "nat_interface"):
             if result.get(key):
                 raise ValueError(
                     "xr-host needs no app-network fields; remove %s" % key)
@@ -215,7 +264,7 @@ def validate_record(record, allow_legacy=False):
             result.get("app_ip"), result.get("app_mask"), result.get("app_gateway"), "app")
         result.update(app_ip=app_ip, app_mask=app_mask, app_gateway=app_gateway)
         if any(result.get(key) for key in ("iris_vlan", "svi_ip", "svi_mask",
-                                           "inband_vlan", "ios_ssh_host")):
+                                           "svi_igp", "inband_vlan", "ios_ssh_host")):
             raise ValueError("router inventory cannot contain switch management fields")
         nat_interface = result.get("nat_interface", "")
         if management_type == "router-nat":
@@ -254,11 +303,170 @@ def _legacy_like(record):
     return result
 
 
+def _fleet_legacy_rows(doc):
+    """Extract ``{device_id: row}`` from a legacy whole-fleet ``fleet.json``
+    document for :class:`keyed_state.KeyedState`'s one-shot migration.
+
+    The document has taken two shapes over this store's life: the current
+    ``{"revision": N, "devices": {...}}`` wrapper, and — before the
+    ``revision`` field existed — a bare ``{device_id: row}`` mapping with no
+    wrapper at all. ``FleetStore`` has tolerated reading either shape since
+    before this migration (see the old ``_read``'s "upgrade the old bare
+    mapping in memory" branch); this mirrors that same two-shape check
+    exactly, so a legacy document that read one way before migration reads
+    the identical rows after it."""
+    if isinstance(doc.get("devices"), dict):
+        return doc["devices"]
+    return doc
+
+
 class FleetStore:
+    # snapshot()'s revision+rows pairing is two separate reads (a small
+    # revision-counter file, and a KeyedState.snapshot() that is itself up to
+    # SHARD_COUNT separate shard reads) standing in for what used to be ONE
+    # json.load of one document. A write racing the scan can make the two
+    # reads disagree about which edit of the fleet they describe; this many
+    # settle attempts (read revision, scan rows, read revision again, retry
+    # if they moved) resolves that in the overwhelmingly common case of an
+    # operator edit landing between two of many device reads, cheaply (two
+    # small-file reads per extra attempt). See snapshot()'s docstring for the
+    # safe fallback once attempts run out.
+    _SNAPSHOT_SETTLE_ATTEMPTS = 4
+
     def __init__(self, state_dir, now_fn=time.time):
         os.makedirs(state_dir, exist_ok=True)
         self.path = os.path.join(state_dir, "fleet.json")
+        # The fleet-wide revision counter (see revision()/snapshot()) is
+        # deliberately NOT part of the keyed store: it describes the STORE,
+        # not any one device, so it has no device_id to shard on. It is one
+        # small file bumped under its own lock -- still O(1) regardless of
+        # fleet size (a fixed few bytes), which is the property this whole
+        # migration exists to give every per-device write; it is just the
+        # one remaining thing every fleet mutation still serializes on,
+        # because "did the fleet change" is inherently a whole-store
+        # question. A store migrated from a pre-shard fleet.json restarts
+        # this counter at 0 -- see _bump_revision.
+        self._revision_path = os.path.join(state_dir, "fleet-revision.json")
+        # One keyed store, sharded by device_id (see keyed_state.py). The
+        # legacy whole-fleet document at self.path is migrated into shards
+        # on first use; error=FleetStateError keeps every fail-closed raise
+        # here out of the plain-ValueError input-validation catches every
+        # write route already has (see FleetStateError's docstring).
+        self._devices = keyed_state.KeyedState(
+            self.path, error=FleetStateError, legacy_extract=_fleet_legacy_rows)
         self._now = now_fn
+
+    def _read_revision(self):
+        """The fleet-wide revision counter. A MISSING file is a fresh store
+        (revision 0, matching a fresh KeyedState store with no legacy
+        document — see __init__). An EXISTING file that cannot be parsed, or
+        whose value is not an int, fails closed exactly like every other
+        state file here — never silently reset to 0, which would let the
+        next write quietly resume counting from the wrong place."""
+        try:
+            with open(self._revision_path) as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            return 0
+        except (OSError, ValueError) as exc:
+            raise FleetStateError(
+                "fleet revision counter %s is unreadable (%s); refusing to "
+                "overwrite it -- repair or remove the file"
+                % (self._revision_path, type(exc).__name__))
+        value = data.get("revision") if isinstance(data, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise FleetStateError("fleet revision counter %s is malformed"
+                                  % self._revision_path)
+        return value
+
+    def _ensure_revision_readable(self):
+        """Fail closed on a corrupt revision counter BEFORE a write path
+        mutates any device row, not only when it goes to bump the counter
+        afterward: _bump_revision runs after the row write commits (see its
+        own docstring for why), so without this check first, a counter that
+        was ALREADY corrupt would let the row write go through and only
+        raise on the bump that follows it -- a caller seeing the exception
+        would have no way to know the device was, in fact, just written. A
+        pre-existing corruption is by far the common case this catches; the
+        remaining window (the counter is corrupted by something else between
+        this check and the bump) is the same narrow, already-accepted class
+        of race as the rest of this store's fail-closed design."""
+        self._read_revision()
+
+    def _bump_revision(self):
+        """Increment the revision counter by exactly one, under its own
+        lock. Called AFTER the device row write it accounts for has already
+        committed (never before): if the shard write itself fails, nothing
+        here has counted a change that never happened; if it succeeds, the
+        counter can only be READ as stale relative to it, never as ahead of
+        it — the safe direction snapshot()'s settle loop relies on, since a
+        reader that samples the counter after the row content has already
+        landed can only under- or exactly-count, never over-count, a
+        concurrent write it raced."""
+        with secrets_store.store_lock(self._revision_path):
+            current = self._read_revision()
+            _atomic_write_json(self._revision_path, {"revision": current + 1})
+
+    def _merge_record(self, previous, record):
+        """The full per-row merge/validate/stamp pipeline every write path
+        (upsert, bulk_upsert, import_csv) shares — factored out so there is
+        exactly ONE place this logic lives, whether one device is being
+        written or a thousand. Raises ValueError on an invalid record;
+        otherwise returns the normalized new row. *previous* is that
+        device's CURRENT row (or None), read from within the same shard
+        lock that will hold the write — never a separately-fetched, possibly
+        stale copy."""
+        previous_record = previous if isinstance(previous, dict) else {}
+        merged = dict(previous_record)
+        incoming_management_type = record.get("management_type")
+        if incoming_management_type is not None:
+            incoming_management_type = _text(incoming_management_type)
+        if incoming_management_type and incoming_management_type != previous_record.get(
+                "management_type"):
+            # Management-type-specific fields are mutually exclusive. A
+            # partial upsert changing type must not retain stale values
+            # from the old family and then fail validation (or, worse,
+            # retarget a plan).
+            old_router = previous_record.get("management_type") in _ROUTER_TYPES
+            new_router = incoming_management_type in _ROUTER_TYPES
+            old_xr = previous_record.get("management_type") == "xr-host"
+            new_xr = incoming_management_type == "xr-host"
+            if old_xr or new_xr:
+                # xr-host carries none of the XE addressing fields, and no
+                # XE management type carries xr-host's (none); either
+                # direction of this swap must not let a stale one survive.
+                for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip",
+                            "app_mask", "app_gateway", "inband_vlan",
+                            "ios_ssh_host", "vpg_number", "nat_interface"):
+                    merged.pop(key, None)
+            elif old_router and new_router:
+                # VPG and app addressing are shared by both router modes;
+                # only the NAT outside field is mode-specific.
+                if incoming_management_type == "router-routed":
+                    merged.pop("nat_interface", None)
+            else:
+                for key in ("iris_vlan", "svi_ip", "svi_mask", "inband_vlan",
+                            "ios_ssh_host", "vpg_number", "nat_interface"):
+                    merged.pop(key, None)
+            if (old_router != new_router or old_xr != new_xr) and \
+                    "platform" not in record:
+                merged.pop("platform", None)
+        merged.update({key: value for key, value in record.items() if value is not None})
+        # Full v2 validation applies only when the record actually carries a
+        # classified management type (Console form, CSV v2, adoption). Bare
+        # creation and partial edits (model/platform/credential/legacy CSV)
+        # are stored as legacy_routed and must pick a management type before
+        # deployment -- OnboardService/plan enforce that at onboard time.
+        if merged.get("management_type") in (
+                "routed", "inband", "router-routed", "router-nat", "xr-host"):
+            normalized = validate_record(merged)
+        elif merged.get("management_type", "") in ("", "legacy_routed"):
+            normalized = _legacy_like(merged)
+        else:
+            raise ValueError("management_type must be routed, inband, router-routed, "
+                             "router-nat, xr-host, or legacy_routed")
+        normalized["registered_at"] = self._registration_stamp(previous)
+        return normalized
 
     def _registration_stamp(self, previous):
         """When this device id was registered, or ``None`` when unknown.
@@ -280,97 +488,116 @@ class FleetStore:
         except (TypeError, ValueError):
             raise ValueError("registered_at must be an integer or null")
 
-    def _read(self):
-        try:
-            with open(self.path) as stream:
-                data = json.load(stream)
-            if not isinstance(data, dict):
-                return {"revision": 0, "devices": {}}
-            if "devices" in data and isinstance(data["devices"], dict):
-                result = {"revision": int(data.get("revision", 0)), "devices": data["devices"]}
-            else:
-                # Upgrade the old bare mapping in memory on the next write.
-                result = {"revision": 0, "devices": data}
-            return result
-        except (OSError, ValueError):
-            return {"revision": 0, "devices": {}}
-
     def list_devices(self):
-        return list(self._read()["devices"].values())
+        return list(self._devices.snapshot().values())
+
+    def snapshot(self):
+        """(revision, [record, ...]).
+
+        The paginated console projection needs both halves to describe the
+        SAME edit of the fleet: stamping a page with a revision fetched by an
+        unrelated read could label rows from state A with the version of
+        state B, which is exactly what a caller walking pages compares to
+        decide its walk is still coherent. That used to come for free (one
+        json.load of one document); now the rows are up to SHARD_COUNT
+        separate shard reads with no single lock spanning all of them, so a
+        write racing the scan could otherwise pair fresh rows with a stale
+        revision (or vice versa). This retries a settled (revision, rows)
+        pairing a few times — cheap, since nothing here holds a lock, only
+        re-reads a small file and rescans — and if it still hasn't settled,
+        falls back to the LAST revision read next to the last scan: always
+        >= what those rows reflect (see _bump_revision), so the fallback can
+        only look newer than the rows actually are, never staler."""
+        for _ in range(self._SNAPSHOT_SETTLE_ATTEMPTS - 1):
+            before = self._read_revision()
+            rows = list(self._devices.snapshot().values())
+            after = self._read_revision()
+            if before == after:
+                return before, rows
+        rows = list(self._devices.snapshot().values())
+        return self._read_revision(), rows
 
     def get_device(self, device_id):
-        return self._read()["devices"].get(device_id)
+        return self._devices.get(device_id)
 
     def revision(self):
-        return self._read()["revision"]
+        return self._read_revision()
 
     def upsert(self, record):
         did = _text(record.get("device_id"))
-        with secrets_store.store_lock(self.path):
-            data = self._read()
-            previous = data["devices"].get(did)
-            previous_record = previous if isinstance(previous, dict) else {}
-            merged = dict(previous_record)
-            incoming_management_type = record.get("management_type")
-            if incoming_management_type is not None:
-                incoming_management_type = _text(incoming_management_type)
-            if incoming_management_type and incoming_management_type != previous_record.get(
-                    "management_type"):
-                # Management-type-specific fields are mutually exclusive. A
-                # partial upsert changing type must not retain stale values
-                # from the old family and then fail validation (or, worse,
-                # retarget a plan).
-                old_router = previous_record.get("management_type") in _ROUTER_TYPES
-                new_router = incoming_management_type in _ROUTER_TYPES
-                old_xr = previous_record.get("management_type") == "xr-host"
-                new_xr = incoming_management_type == "xr-host"
-                if old_xr or new_xr:
-                    # xr-host carries none of the XE addressing fields, and no
-                    # XE management type carries xr-host's (none); either
-                    # direction of this swap must not let a stale one survive.
-                    for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip",
-                                "app_mask", "app_gateway", "inband_vlan",
-                                "ios_ssh_host", "vpg_number", "nat_interface"):
-                        merged.pop(key, None)
-                elif old_router and new_router:
-                    # VPG and app addressing are shared by both router modes;
-                    # only the NAT outside field is mode-specific.
-                    if incoming_management_type == "router-routed":
-                        merged.pop("nat_interface", None)
-                else:
-                    for key in ("iris_vlan", "svi_ip", "svi_mask", "inband_vlan",
-                                "ios_ssh_host", "vpg_number", "nat_interface"):
-                        merged.pop(key, None)
-                if (old_router != new_router or old_xr != new_xr) and \
-                        "platform" not in record:
-                    merged.pop("platform", None)
-            merged.update({key: value for key, value in record.items() if value is not None})
-            # Full v2 validation applies only when the record actually carries a
-            # classified management type (Console form, CSV v2, adoption). Bare
-            # creation and partial edits (model/platform/credential/legacy CSV)
-            # are stored as legacy_routed and must pick a management type before
-            # deployment -- OnboardService/plan enforce that at onboard time.
-            if merged.get("management_type") in (
-                    "routed", "inband", "router-routed", "router-nat", "xr-host"):
-                normalized = validate_record(merged)
-            elif merged.get("management_type", "") in ("", "legacy_routed"):
-                normalized = _legacy_like(merged)
-            else:
-                raise ValueError("management_type must be routed, inband, router-routed, "
-                                 "router-nat, xr-host, or legacy_routed")
-            normalized["registered_at"] = self._registration_stamp(previous)
-            data["devices"][did] = normalized
-            data["revision"] += 1
-            _atomic_write_json(self.path, data)
+        self._ensure_revision_readable()
+        normalized = self._devices.update(
+            did, lambda old: self._merge_record(old, record))
+        self._bump_revision()
         return normalized
 
+    def bulk_upsert(self, device_ids, fields):
+        """Apply the SAME partial-record patch *fields* (e.g. a credential or
+        platform reassignment) to every id in *device_ids* — the fix for
+        issue #125: the console's "Select all N matching devices" bulk
+        action used to fire one HTTP request per selected device against the
+        single-device routes, each locking and rewriting the WHOLE fleet
+        document; with FleetStore sharded, each of those N requests would
+        still be O(1), but N still means N HTTP round trips and, worse, N
+        separate lock/read/write cycles against the same ~256 shards (every
+        selected device's shard rewritten once per device landing in it,
+        instead of once total). This groups by shard the same way
+        keyed_state.KeyedState.update_many does (because it IS update_many)
+        so a shard holding a hundred of the selected ids is read and
+        rewritten exactly once.
+
+        Unlike import_csv, this is NOT all-or-nothing: a device id that does
+        not exist, or whose merged record fails validation, is reported and
+        skipped — every OTHER id in the batch still applies. A ten-thousand-
+        device selection needs to know exactly which ones did not take, not
+        have one bad id abort the other 9,999. It also deliberately does
+        NOT create a device that does not already exist (unlike upsert()) —
+        the two callers this exists for (bulk credential/platform
+        reassignment) both refuse a non-existent device on the single-device
+        route today, and a stale "Select all" snapshot racing a delete must
+        fail the same way there, not quietly conjure a bare inventory row.
+
+        Returns ``{device_id: {"ok": True, "device": normalized}
+                              | {"ok": False, "error": message}}``, one entry
+        per id in *device_ids* (a repeated id is processed once per
+        occurrence; only the last outcome for it survives in the result,
+        the same as calling upsert() that many times in a row would leave)."""
+        self._ensure_revision_readable()
+        fields = {key: value for key, value in dict(fields or {}).items()
+                 if key != "device_id"}
+        results = {}
+
+        def merge(did, previous):
+            if previous is None:
+                results[did] = {"ok": False, "error": "no such device"}
+                return None
+            try:
+                normalized = self._merge_record(
+                    previous, dict(fields, device_id=did))
+            except ValueError as exc:
+                results[did] = {"ok": False, "error": str(exc)}
+                return None
+            results[did] = {"ok": True, "device": normalized}
+            return normalized
+
+        ids = [_text(did) for did in device_ids]
+        self._devices.update_many(ids, merge)
+        # One bump per CALL, not per device: the counter is a "did the fleet
+        # change" signal, not a per-row tally (import_csv has always bumped
+        # once per call the same way), and bumping it once keeps this call's
+        # cost O(1) regardless of how many of the ten thousand ids actually
+        # applied -- N separate bumps would reintroduce, on the one file
+        # every mutation still shares, exactly the kind of per-device
+        # serialization this whole batch call exists to avoid.
+        if any(outcome["ok"] for outcome in results.values()):
+            self._bump_revision()
+        return results
+
     def delete(self, device_id):
-        with secrets_store.store_lock(self.path):
-            data = self._read()
-            existed = data["devices"].pop(device_id, None) is not None
-            if existed:
-                data["revision"] += 1
-                _atomic_write_json(self.path, data)
+        self._ensure_revision_readable()
+        existed = self._devices.delete(device_id)
+        if existed:
+            self._bump_revision()
         return existed
 
     def import_csv(self, text):
@@ -394,51 +621,90 @@ class FleetStore:
         if header is None:
             return {"imported": 0, "new": 0, "updated": 0, "skipped": skipped}
         # The pre-router v2 header (_CSV_V2_OLD_COLS, no vpg_number/nat_interface
-        # columns) still imports unchanged; the retired network_attachment
-        # alias header is gone -- an old exported CSV using it is rejected
-        # below like any other unknown header.
-        v2_headers = (CSV_V2_COLS, _CSV_V2_OLD_COLS)
+        # columns) and the pre-svi_igp v2 header (_CSV_V2_PRE_SVI_IGP_COLS, no
+        # svi_igp column) both still import unchanged; the retired
+        # network_attachment alias header is gone -- an old exported CSV
+        # using it is rejected below like any other unknown header.
+        v2_headers = (CSV_V2_COLS, _CSV_V2_OLD_COLS, _CSV_V2_PRE_SVI_IGP_COLS)
         legacy = header in (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
         if header not in v2_headers and not legacy:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
         cols = header if header in v2_headers else CSV_V2_COLS
         records = []
+        first_row_of = {}
         for index, row in enumerate(data_rows, 1):
             if len(row) != len(header):
                 raise ValueError("data row %d has %d columns, need %d"
                                  % (index, len(row), len(header)))
             try:
-                records.append(_legacy_record(row) if legacy else
-                               validate_record(dict(zip(cols, row)),
-                                               allow_legacy=True))
+                record = (_legacy_record(row) if legacy else
+                          validate_record(dict(zip(cols, row)),
+                                          allow_legacy=True))
             except ValueError as exc:
                 raise ValueError("data row %d: %s" % (index, exc))
+            # Two rows for one device used to collapse silently (last row
+            # wins, stats counting it as new AND updated). The import is
+            # all-or-nothing for bad rows; a conflicting duplicate is bad
+            # input too, and naming both rows is what lets the operator fix
+            # the sheet.
+            seen_at = first_row_of.setdefault(record["device_id"], index)
+            if seen_at != index:
+                raise ValueError("data row %d repeats device_id %s from data "
+                                 "row %d" % (index, record["device_id"],
+                                             seen_at))
+            records.append(record)
+        # Every row above is fully parsed and validated (schema, IP/mask,
+        # management-type field isolation, duplicate device_id) BEFORE any
+        # storage is touched -- the "all-or-nothing" the docstring promises
+        # is about BAD INPUT, and is enforced entirely above this point, so
+        # nothing below can fail on account of what the CSV said. What CAN
+        # still fail below is storage itself (a shard that is independently
+        # corrupt): grouped by shard the same way bulk_upsert is, one shard's
+        # failure aborts that shard's write (leaving it untouched, as every
+        # fail-closed shard read here always has) without rolling back
+        # shards that already committed earlier in this same call -- the
+        # same narrower blast radius every other store's migration to
+        # keyed_state already accepted (a corrupt shard used to mean a
+        # corrupt WHOLE fleet.json blocking every device; now it means the
+        # devices in that one shard).
         new = updated = 0
-        with secrets_store.store_lock(self.path):
-            data = self._read()
-            for record in records:
-                previous = data["devices"].get(record["device_id"])
-                if previous is not None:
-                    updated += 1
-                else:
-                    new += 1
-                # A re-import REPLACES the row wholesale, so carry the
-                # registration stamp across explicitly or every CSV import
-                # would look like a fresh registration of the whole fleet.
-                record["registered_at"] = self._registration_stamp(previous)
-                # Same reason, different field: os_family is determined from
-                # the device's own 'show version' banner and is deliberately
-                # NOT a CSV column -- an operator typing it would be a new way
-                # to lie to the system. Dropping it on the documented
-                # export -> edit -> re-import round trip would silently reopen
-                # the IOS-XR misroute on the next onboard.
-                family = previous.get("os_family") if isinstance(previous, dict) else None
-                if family:
-                    record["os_family"] = family
-                data["devices"][record["device_id"]] = record
-            if records:
-                data["revision"] += 1
-                _atomic_write_json(self.path, data)
+        by_id = {record["device_id"]: record for record in records}
+
+        def merge(did, previous):
+            nonlocal new, updated
+            record = dict(by_id[did])
+            if previous is not None:
+                updated += 1
+            else:
+                new += 1
+            # A re-import REPLACES the row wholesale, so carry the
+            # registration stamp across explicitly or every CSV import
+            # would look like a fresh registration of the whole fleet.
+            record["registered_at"] = self._registration_stamp(previous)
+            # Same reason, different field: os_family is determined from
+            # the device's own 'show version' banner and is deliberately
+            # NOT a CSV column -- an operator typing it would be a new way
+            # to lie to the system. Dropping it on the documented
+            # export -> edit -> re-import round trip would silently reopen
+            # the IOS-XR misroute on the next onboard.
+            family = previous.get("os_family") if isinstance(previous, dict) else None
+            if family:
+                record["os_family"] = family
+            # And the credential profile: the CSV deliberately carries no
+            # credential column (fleet-workflows.md), so the assignment
+            # made in the Console after the first import must survive the
+            # export -> edit -> re-import cycle, or one bulk edit silently
+            # disarms every device's onboard/undeploy until re-assigned.
+            profile = (previous.get("credential_profile_id")
+                       if isinstance(previous, dict) else None)
+            if profile and not record.get("credential_profile_id"):
+                record["credential_profile_id"] = profile
+            return record
+
+        if records:
+            self._ensure_revision_readable()
+            self._devices.update_many(list(by_id), merge)
+            self._bump_revision()
         return {"imported": len(records), "new": new, "updated": updated,
                 "skipped": skipped}
 
@@ -458,7 +724,7 @@ class FleetStore:
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(CSV_V2_COLS)
-        devices = self._read()["devices"]
+        devices = self._devices.snapshot()
         for device_id in sorted(devices):
             writer.writerow(self._export_row(devices[device_id]))
         return output.getvalue()
@@ -475,11 +741,14 @@ class FleetStore:
             "# Router modes use a VirtualPortGroup; router-nat also needs an outside interface.",
             "# XR host (xr-host, platform xr-appmgr) runs on the router's own network stack --",
             "# no VLAN, SVI, app IP/mask/gateway, VPG, or NAT interface; leave those columns empty.",
+            "# svi_igp is routed-only: 'isis' adds 'ip router isis' to the IRIS SVI for a fabric",
+            "# that must learn it (e.g. an SD-Access underlay). Blank keeps the SVI_IGP env var's",
+            "# default (none) for that device; every other management type must leave it blank.",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
-            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,guestshell",
-            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,guestshell",
-            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,iox",
-            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router",
-            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr",
+            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,guestshell",
+            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,guestshell",
+            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,iox",
+            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router",
+            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,xr-appmgr",
         ]) + "\n"

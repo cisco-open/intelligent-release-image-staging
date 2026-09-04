@@ -69,6 +69,8 @@ class FakeSeeder:
 # ---------------------------------------------------------------------------
 
 def test_rotate_announce_keeps_previous_and_mints_current():
+    # Was asserting expires_at == 0 ("non-expiring"): that WAS the defect --
+    # nothing retired a previous, so every rotation left a permanent credential.
     store = {"devices": {}, "seeder": {"announce_token": {
         "value": "OLD", "created_at": 1, "expires_at": 0, "revoked": False}}}
     new = rot.rotate_announce(store, now=100)
@@ -76,9 +78,32 @@ def test_rotate_announce_keeps_previous_and_mints_current():
     assert new != "OLD"
     prev = store["seeder"]["announce_token_previous"]
     assert prev[0]["value"] == "OLD"
-    assert prev[0]["expires_at"] == 0  # non-expiring
+    # bounded recovery overlap, measured from this rotation
+    assert prev[0]["expires_at"] == 100 + secrets_store.SEEDER_PREV_TTL
     assert prev[0]["rotated_at"] == 100
     assert "record_id" in prev[0]
+
+
+def test_rotate_announce_retires_an_expired_previous_instead_of_refusing():
+    """An expired previous is a dead credential: the pass drops it rather than
+    counting it against the cap, so rotation never needs a manual revoke to
+    proceed and the old value stops resolving."""
+    old = 1000
+    store = {"devices": {}, "seeder": {
+        "announce_token": {"value": "CUR", "created_at": old,
+                           "expires_at": 0, "revoked": False},
+        "announce_token_previous": [
+            {"value": "P1", "created_at": old, "rotated_at": old,
+             "expires_at": old + secrets_store.SEEDER_PREV_TTL,
+             "revoked": False, "record_id": "a"},
+            {"value": "P2", "created_at": old, "rotated_at": old,
+             "expires_at": old + secrets_store.SEEDER_PREV_TTL,
+             "revoked": False, "record_id": "b"}]}}
+    later = old + secrets_store.SEEDER_PREV_TTL + 1
+    new = rot.rotate_announce(store, now=later)
+    prev = store["seeder"]["announce_token_previous"]
+    assert [r["value"] for r in prev] == ["CUR"]
+    assert store["seeder"]["announce_token"]["value"] == new
 
 
 def test_rotate_announce_refuses_when_two_valid_previous():
@@ -1127,7 +1152,7 @@ def _serving_swarm(info_hashes, rpc_up=True, extra_peers=None, last_seen=100.0,
         last_seen_by_info_hash = {h: last_seen for h in info_hashes}
     return {
         "now": 100.0,
-        "server": {"host": "100.90.168.20", "server_observation": {
+        "server": {"host": "192.0.2.10", "server_observation": {
             "observed_at": 100.0, "rpc_up": rpc_up,
             "tracker_observation": {"principal_type": "service",
                                     "principal_id": "seeder",
@@ -1227,7 +1252,7 @@ def test_is_seeder_serving_rejects_legacy_or_device_seeder_row():
     # deduped: it shows up as a legacy ring peer with role=seeder for the
     # expected torrent. That is a genuine conflict with the canonical dedup ->
     # fail.
-    legacy_seeder_peer = {"ip": "100.90.168.20", "port": 6881,
+    legacy_seeder_peer = {"ip": "192.0.2.10", "port": 6881,
                           "tracker": {"principal_type": "legacy",
                                       "participant_class": "legacy_unattributed",
                                       "role": "seeder", "left": 0}}
@@ -1239,7 +1264,7 @@ def test_is_seeder_serving_rejects_service_seeder_ring_row():
     # A service:seeder that appears as an UN-deduped ring row (rather than under
     # the canonical `server` source) means the current-seeder identity is not
     # cleanly proven -> fail.
-    svc_seeder_peer = {"ip": "100.90.168.20", "port": 6881,
+    svc_seeder_peer = {"ip": "192.0.2.10", "port": 6881,
                        "tracker": {"principal_type": "service",
                                    "principal_id": "seeder",
                                    "role": "seeder", "left": 0}}
@@ -1254,7 +1279,7 @@ def test_is_seeder_serving_allows_completed_device_seeder_row():
     # the canonical `server` source proof (rpc_up + expected control-state
     # torrents). The probe must succeed and ignore device ring rows.
     completed_device_seeder = {
-        "ip": "100.92.100.14", "port": 6881,
+        "ip": "198.51.100.14", "port": 6881,
         "tracker": {"principal_type": "device", "principal_id": "d1",
                     "role": "seeder", "left": 0}}
     doc = _serving_swarm(["abc"], extra_peers=[completed_device_seeder])
@@ -1262,7 +1287,7 @@ def test_is_seeder_serving_allows_completed_device_seeder_row():
 
 
 def test_is_seeder_serving_allows_leecher_ring_peers():
-    leecher = {"ip": "100.92.100.14", "port": 6881,
+    leecher = {"ip": "198.51.100.14", "port": 6881,
                "tracker": {"principal_type": "device", "principal_id": "d1",
                            "role": "leecher", "left": 5}}
     doc = _serving_swarm(["abc"], extra_peers=[leecher])

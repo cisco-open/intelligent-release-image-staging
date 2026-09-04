@@ -21,7 +21,15 @@
   [ "$status" -eq 0 ]
   # Use grep for reliable substring matching after run (bats [[ ]] does not
   # enforce failures when -e is disabled by run's set+eET).
-  echo "$output" | grep -q -- "--rpc-secret=tmpfssecret"
-  ! echo "$output" | grep -q -- "--rpc-secret=stalesecret"
+  # The secret never appears in the argv (IRIS-13-016); it is written to the
+  # 0600 conf file aria2c is pointed at, and the stale on-volume value is
+  # not what lands there.
+  argv="$output"
+  run grep -q -- "--rpc-secret=" <<<"$argv"
+  [ "$status" -ne 0 ]
+  grep -q -- "--conf-path=$tmp/state/seeder.aria2.conf" <<<"$argv"
+  grep -qx "rpc-secret=tmpfssecret" "$tmp/state/seeder.aria2.conf"
+  run grep -q "stalesecret" "$tmp/state/seeder.aria2.conf"
+  [ "$status" -ne 0 ]
   rm -rf "$tmp"
 }

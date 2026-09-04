@@ -53,6 +53,24 @@ say " device grabs it during install with an IOS 'copy https://...'"
 say " command. You only do this once per new agent version."
 say ""
 
+# Staleness guard (issue #119, same mechanism device/iox/build.sh and
+# tools/build-xr-package.sh guard against -- see issue #72): this bundler
+# packs device/agent (and the installer scripts it ships alongside) AS THEY
+# SIT IN THIS CHECKOUT ($REPO_ROOT) -- a worktree that has fallen behind main
+# under those paths ships an older Guest Shell agent with nothing in the
+# built iris-agent.tgz saying so. See tools/agent-source-freshness.sh.
+# Sourcing is ITSELF best-effort -- a checkout old enough to predate this
+# guard has no tools/agent-source-freshness.sh to source, and that must
+# degrade to "the check is skipped," never to a raw "No such file or
+# directory" abort that masks every error after it.
+if [ -r "$REPO_ROOT/tools/agent-source-freshness.sh" ]; then
+  # shellcheck source=tools/agent-source-freshness.sh
+  . "$REPO_ROOT/tools/agent-source-freshness.sh"
+  iris_check_agent_freshness "$REPO_ROOT" \
+    "device/agent device/verify_image.py device/bootstrap.sh device/guestshell-start.sh device/rotate-logs.sh" \
+    || exit 1
+fi
+
 # ---- 1. make sure every piece is present ----------------------------------
 missing=0
 for f in "$DEVICE/agent/iris_agent.py" "$DEVICE/agent/catalog_client.py" \

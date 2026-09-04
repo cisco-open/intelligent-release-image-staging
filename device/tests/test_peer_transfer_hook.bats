@@ -34,6 +34,12 @@ printf '%s\n' "\$@" > "$TMPD/curl-argv.txt"
 printf '[{"id":"peers","result":[{"ip":"10.0.0.2","port":"6881","downloaded":"200","uploaded":"0","seeder":"false"}]}]'
 EOF
   chmod +x "$TMPD/bin/curl"
+  # A no-op sleep: none of the tests above ever hit the empty-peers retry loop
+  # (the default curl stub answers non-empty on the first try), but a real
+  # `sleep 1` between retries would make a test that DOES trip it slow for no
+  # reason -- stub it everywhere, unconditionally.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMPD/bin/sleep"
+  chmod +x "$TMPD/bin/sleep"
 }
 
 run_hook() {
@@ -128,6 +134,52 @@ EOF
   [ ! -e "$FILE.peers.json" ]
 }
 
+# ---------------------------------------------------------------------------
+# Board #68 -- the sole feeding peer was a seeder, gone by the first ask
+# ---------------------------------------------------------------------------
+
+@test "an empty peers result is retried before giving up" {
+  # The first ask lands after the peer -- a pure seeder, nothing left to
+  # exchange with us once we finish -- has already disconnected. The SECOND
+  # ask catches a peer that took a little longer to actually drop.
+  cat > "$TMPD/bin/curl" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$TMPD/curl-calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" > "$TMPD/curl-calls"
+if [ "\$n" -lt 2 ]; then
+  printf '[{"id":"peers","result":[]},{"id":"session","result":{"sessionId":"s"}}]'
+else
+  printf '[{"id":"peers","result":[{"ip":"10.0.0.2","downloaded":"200","uploaded":"0","seeder":"true"}]},{"id":"session","result":{"sessionId":"s"}}]'
+fi
+EOF
+  chmod +x "$TMPD/bin/curl"
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMPD/curl-calls")" -eq 2 ]
+  [ -f "$FILE.peers.json" ]
+  grep -q '"downloaded":"200"' "$FILE.peers.json"
+}
+
+@test "a persistently empty peers result gives up after a bound, not forever" {
+  # A genuinely empty swarm (or a peer gone for good) must not spin the hook
+  # forever: exactly 3 asks, then the (empty) answer is written as-is -- the
+  # ordinary "nothing measured" outcome, not a hang.
+  cat > "$TMPD/bin/curl" <<EOF
+#!/usr/bin/env bash
+n=\$(cat "$TMPD/curl-calls" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" > "$TMPD/curl-calls"
+printf '[{"id":"peers","result":[]},{"id":"session","result":{"sessionId":"s"}}]'
+EOF
+  chmod +x "$TMPD/bin/curl"
+  run_hook
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TMPD/curl-calls")" -eq 3 ]
+  [ -f "$FILE.peers.json" ]
+  grep -q '"result":\[\]' "$FILE.peers.json"
+}
+
 @test "no clock means no snapshot, never a fabricated timestamp" {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$TMPD/bin/date"
   chmod +x "$TMPD/bin/date"
@@ -140,6 +192,7 @@ EOF
   # aria2's seeder flag means "holds a complete copy" (RpcMethodImpl.cc:1166),
   # which in a wave is every device that finished early. A comment claiming it
   # separates the origin is how a peer share ends up counting the server.
-  ! grep -q 'tells the origin apart' "$HOOK"
+  run grep -q 'tells the origin apart' "$HOOK"
+  [ "$status" -ne 0 ]
   grep -q 'service:seeder' "$HOOK"
 }

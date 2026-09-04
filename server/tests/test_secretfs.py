@@ -10,6 +10,7 @@ decrypt, `-r REC ... -o ENC PLAIN` to encrypt) is injected via the
 `age_bin` argument. The fake's "ciphertext" is just the plaintext with a
 fixed header line so a test can assert the persistent copy is NOT plaintext.
 """
+import errno
 import os
 import stat
 import subprocess
@@ -91,7 +92,7 @@ def test_encrypt_from_persistent_copy_is_ciphertext(tmp_path, fake_age):
 def test_round_trip(tmp_path, fake_age):
     orig = tmp_path / "run" / "secrets.json"
     orig.parent.mkdir()
-    orig.write_text("{\"devices\": {\"100.92.9.3\": {}}}\n")
+    orig.write_text("{\"devices\": {\"203.0.113.3\": {}}}\n")
     enc = tmp_path / "secrets.json.age"
     key = tmp_path / "key"
     key.write_text("AGE-SECRET-KEY-FAKE\n")
@@ -238,3 +239,103 @@ exit 0
 
     with pytest.raises(subprocess.TimeoutExpired):
         secretfs.decrypt_to(str(enc), str(out), str(key), age_bin=str(slow_age))
+
+
+# ---------------------------------------------------------------------------
+# Durability: the ciphertext is the only copy that survives a restart, so the
+# atomic rename must also be a DURABLE one (issue #96).
+# ---------------------------------------------------------------------------
+
+def _fsync_spy(monkeypatch):
+    """Record (st_dev, st_ino) of every descriptor fsynced, in order.
+
+    Identifying the target by inode rather than by fd number survives the
+    rename: after os.replace the synced temp file IS enc_path, so the tuple
+    recorded before the rename matches os.stat(enc_path) afterwards.
+    """
+    synced = []
+    real_fsync = os.fsync
+
+    def spy(fd):
+        st = os.fstat(fd)
+        synced.append((st.st_dev, st.st_ino))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(secretfs.os, "fsync", spy)
+    return synced
+
+
+def _ino(path):
+    st = os.stat(str(path))
+    return (st.st_dev, st.st_ino)
+
+
+def test_encrypt_from_fsyncs_ciphertext_and_directory(tmp_path, fake_age,
+                                                      monkeypatch):
+    """Without the fsyncs the ciphertext rename is atomic but not durable: a
+    host crash right after a rotation would come back up with the PREVIOUS
+    secrets store while the server already reported the rotation complete."""
+    plain = tmp_path / "run" / "secrets.json"
+    plain.parent.mkdir()
+    plain.write_text("{\"devices\": {\"new\": 2}}")
+    enc = tmp_path / "durable" / "secrets.json.age"
+    enc.parent.mkdir()
+
+    synced = _fsync_spy(monkeypatch)
+    secretfs.encrypt_from(str(plain), str(enc), "age1rec", age_bin=fake_age)
+
+    assert _ino(enc) in synced, "ciphertext bytes were never fsynced"
+    assert _ino(enc.parent) in synced, "the rename's directory was never fsynced"
+    # Bytes first, then the directory entry that publishes them.
+    assert synced.index(_ino(enc)) < synced.index(_ino(enc.parent))
+
+
+def test_persist_store_rotation_is_durable(tmp_path, fake_age, monkeypatch):
+    """The whole device-token rotation path (persist_store -> encrypt_from)
+    must reach stable storage before the caller can report success."""
+    plain = tmp_path / "run" / "secrets.json"
+    plain.parent.mkdir()
+    plain.write_text("{\"devices\": {\"old\": 1}}")
+    enc = tmp_path / "durable" / "secrets.json.age"
+    enc.parent.mkdir()
+
+    synced = _fsync_spy(monkeypatch)
+    secretfs.persist_store({"devices": {"new": 2}}, str(plain),
+                           recipients_csv="age1rec", enc_path=str(enc),
+                           age_bin=fake_age)
+
+    assert _ino(enc) in synced, "rotation ciphertext was never fsynced"
+    assert _ino(enc.parent) in synced, "rotation rename was never fsynced"
+
+
+def test_encrypt_from_tolerates_directory_fsync_unsupported(tmp_path, fake_age,
+                                                            monkeypatch):
+    """A filesystem without directory fsync (EINVAL/ENOTSUP) must not fail the
+    write; any OTHER I/O error still surfaces so nothing reports a rotation
+    durable that is not."""
+    plain = tmp_path / "secrets.json"
+    plain.write_text("{}")
+    enc = tmp_path / "secrets.json.age"
+    real_fsync = os.fsync
+    dir_ino = _ino(tmp_path)
+
+    def picky(fd):
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) == dir_ino:
+            raise OSError(errno.EINVAL, "directory fsync unsupported")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(secretfs.os, "fsync", picky)
+    secretfs.encrypt_from(str(plain), str(enc), "age1rec", age_bin=fake_age)
+    assert enc.exists()
+
+    def broken(fd):
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) == dir_ino:
+            raise OSError(errno.EIO, "disk went away")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(secretfs.os, "fsync", broken)
+    with pytest.raises(OSError):
+        secretfs.encrypt_from(str(plain), str(enc), "age1rec",
+                              age_bin=fake_age)

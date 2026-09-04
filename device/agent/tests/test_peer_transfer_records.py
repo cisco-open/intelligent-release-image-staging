@@ -474,19 +474,25 @@ class TestReportBlock:
             "session_bytes_from_peer"] == 500
 
     def test_capture_outside_the_window_costs_only_itself(self):
-        """window.start collapses onto done_ts when a transfer's started_ts was
-        never recorded (agent state lost while the staged file survived), which
-        puts the hook's instant BEFORE the window. The server rejects the whole
-        report over an impossible instant, so the block is dropped instead —
-        and stretching the window back to captured_at, which would keep it,
-        would misstate the transfer window to save a byte count."""
+        """A transfer whose started_ts was never recorded (agent state lost
+        while the staged file survived) has no window start to place the
+        hook's instant in: the report leaves window.start ABSENT and the
+        window incomplete, and the records are bounded at done_ts — which is
+        strictly after the hook fired — so the block is dropped instead of
+        costing the whole report an impossible instant. Stretching the window
+        back to captured_at, which would keep it, would misstate the transfer
+        window to save a byte count.
+        (Rewritten: it used to pin window.start COLLAPSED onto done_ts, the
+        invented zero-length window IRIS-10-002 removed.)"""
         tele = _state()["img1"]["tele"]
         del tele["started_ts"]                    # the state that was lost
         assert tr.fold_peer_transfer_records(tele, tr.parse_peer_transfer_snapshot(
             _doc([_peer("10.0.0.7", 500, 0)], captured_at=1099.0)),
             now=1100.0) is True                   # measured, and kept in state
         rep = _report({"img1": {"copied": True, "tele": tele}})
-        assert rep["window"]["start"] == 1100.0   # collapsed onto done_ts
+        assert "start" not in rep["window"]       # unknown, not invented
+        assert rep["window"]["end"] == 1100.0
+        assert rep["window"]["complete"] is False
         assert "peer_transfer_records" not in rep         # but not shipped
         assert rep["content"]["completed_content_bytes"] == 973078528
 

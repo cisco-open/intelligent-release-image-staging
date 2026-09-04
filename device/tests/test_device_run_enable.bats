@@ -12,10 +12,13 @@
 # resolve it as a hostname. Measured 2026-09-01 on identical sessions, with no
 # DNS configuration difference between the two boxes:
 #
-#     100.90.168.114   3.06 s clean / 3.19 s with the pair   (+0.13 s)
-#     100.90.170.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
+#     192.0.2.114     3.06 s clean / 3.19 s with the pair   (+0.13 s)
+#     203.0.113.101   3.41 s clean / 51.79 s with the pair   (+48.4 s)
 #
-# The .168 segment is merely lucky -- something there answers the default
+# (RFC 5737 documentation stand-ins for the two lab segments; only the split
+# between them matters.)
+#
+# The first segment is merely lucky -- something there answers the default
 # 255.255.255.255 broadcast. So the contract is the DEFAULT: send neither line,
 # and escalate only for a device that has shown it runs us at user EXEC, where
 # `enable` really does raise the prompt the secret then answers.
@@ -27,7 +30,8 @@ setup() {
   RUN="$BATS_TEST_DIRNAME/../../lab/device-run.sh"
   STUB="$BATS_TEST_TMPDIR/bin"; mkdir -p "$STUB"
   LOG="$BATS_TEST_TMPDIR/sent.log"
-  export TMPDIR="$BATS_TEST_TMPDIR"          # keep the escalation marker local
+  export TMPDIR="$BATS_TEST_TMPDIR"
+  export IRIS_STATE="$BATS_TEST_TMPDIR/state"  # keep known_hosts + the escalation marker local
   export DEVICE_USER=u DEVICE_PASS=zzsecretzz
   # The stub records what was piped in, and replays a transcript whose prompt
   # marker is controlled by FAKE_PROMPT (# = already enabled, > = user mode).
@@ -113,4 +117,39 @@ STUBEOF
   run env FAKE_SSH_STATUS=23 bash -c \
     "printf 'show clock\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -eq 23 ]
+}
+
+# --- interactive install-subsystem commands are refused (#120) -------------
+# `install remove inactive` waits on a [y/n] prompt. This transport feeds
+# stdin ahead of the prompt, so the answer is lost and the session drops while
+# the operation is still open; the switch then refuses every later install
+# operation until it is reloaded, with nothing in `show install log` to say
+# why. stk03-fiab2 sat wedged that way for six days. IRIS's own reclaim path
+# drives the command from an EEM applet with pattern "[y/n]" instead.
+
+@test "an interactive install command is refused before any connection" {
+  run bash -c 'printf "install remove inactive\n" | DEVICE_USER=u DEVICE_PASS=p \
+      "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"refusing an interactive install-subsystem command"* ]]
+  [[ "$output" == *"EEM applet"* ]]        # names the idiom that does work
+  [[ "$output" != *"Connection"* ]]        # never dialled the device
+}
+
+@test "the refusal is not fooled by a do- prefix or leading whitespace" {
+  for cmd in "do install add file flash:x.bin" "   install activate" \
+             "INSTALL COMMIT" "install rollback to committed"; do
+    run bash -c 'printf "%s\n" "$1" | DEVICE_USER=u DEVICE_PASS=p \
+        "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99' _ "$cmd"
+    [ "$status" -eq 2 ]
+  done
+}
+
+@test "read-only show install commands are still allowed through" {
+  # The guard must not block looking, only mutating -- diagnosing a wedged
+  # switch needs `show install log` to work.
+  run bash -c 'printf "show install log\n" | DEVICE_USER=u DEVICE_PASS=p \
+      "'"$BATS_TEST_DIRNAME"'/../../lab/device-run.sh" 192.0.2.99'
+  [ "$status" -ne 2 ]
+  [[ "$output" != *"refusing an interactive install-subsystem command"* ]]
 }

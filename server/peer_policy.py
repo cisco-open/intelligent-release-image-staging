@@ -92,19 +92,6 @@ def base_document():
     }
 
 
-def ensure_reserved(doc):
-    """Materialize the reserved quarantine ACL if absent (spec 7)."""
-    acls = doc.setdefault("acls", {})
-    q = acls.get(RESERVED_QUARANTINE)
-    if q is None or q.get("reserved") is not True \
-            or q.get("rules") != _QUARANTINE_RULES:
-        acls[RESERVED_QUARANTINE] = {
-            "reserved": True,
-            "description": "reserved: fully isolate an assigned device",
-            "rules": [dict(r) for r in _QUARANTINE_RULES]}
-    return doc
-
-
 def _validate_rule(rule):
     if not isinstance(rule, dict):
         raise PolicyError("rule must be an object")

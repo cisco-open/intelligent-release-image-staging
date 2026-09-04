@@ -68,7 +68,7 @@ _appid_block_output() {
   run _appid_block_output "10.20.30.40" "iosadmin"
   [ "$status" -eq 0 ]
   [[ "$output" == *"-e IRIS_DEVICE_SSH_HOST=10.20.30.40"* ]]
-  [[ "$output" != *"100.92.100.253"* ]]
+  [[ "$output" != *"198.51.100.253"* ]]
 }
 
 @test "install.sh passes the selected IOS target filesystem to the app" {
@@ -94,72 +94,96 @@ _appid_block_output() {
 # Finding #2 — entrypoint.sh: supervisor must restart a crashed aria2c
 # ---------------------------------------------------------------------------
 
-@test "entrypoint.sh calls start_aria2c when aria2c is absent even if secret unchanged" {
-  # Exercise entrypoint.sh's actual read_secret + supervisor loop condition
-  # (not a re-implementation): source the real functions from the script, stub
-  # only start_aria2c and the blocking agent/sleep calls, then verify a call
-  # happens when cur==want but no aria2c process is running.
-  TMPD="$(mktemp -d)"
-  CONF="$TMPD/iris-agent.conf"
-  echo "rpc_secret = mysecret" > "$CONF"
-  CALL_LOG="$TMPD/calls"
-  touch "$CALL_LOG"
-
-  # We extract read_secret and start_aria2c definitions from the real entrypoint,
-  # then run one iteration of the loop condition using the actual if-expression.
-  # If entrypoint.sh's condition regresses (drops the pgrep clause), this test fails.
-  LOOP_COND="$(awk '/^  if \[/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
-
-  run bash -c '
+# Run ONE iteration of entrypoint.sh's actual supervisor condition (the real
+# if-expression, not a re-implementation) with the real read_secret, proc_stat
+# and aria2_alive sourced from the script, start_aria2c stubbed to a call log,
+# and $1 evaluated first to set the scenario up (ARIA2_PID / ARIA2_START and a
+# rpc_healthy stub). cur already equals the conf's secret, so only the
+# scenario can trigger a call. Prints the number of start_aria2c calls.
+_loop_cond_calls() {
+  local scenario="$1" tmpd conf log cond
+  tmpd="$(mktemp -d)"
+  conf="$tmpd/iris-agent.conf"; log="$tmpd/calls"
+  echo "rpc_secret = mysecret" > "$conf"
+  touch "$log"
+  # If entrypoint.sh's condition regresses (drops the liveness or the health
+  # clause), the tests below fail on the real text. Anchored on the secret
+  # comparison so no other `if [` earlier in the script can be picked up.
+  cond="$(awk '/^  if \[ "\$want" != "\$cur" \]/{found=1} found{print; if(/; then/) exit}' "$ENTRYPOINT")"
+  [ -n "$cond" ] || { echo "loop condition not found in $ENTRYPOINT" >&2; return 1; }
+  bash -c '
     set -u
-    CONF="'"$CONF"'"
-    CALL_LOG_FILE="'"$CALL_LOG"'"
-
-    # Source the real read_secret and start_aria2c from entrypoint.sh.
-    # We must stub the env vars it references so sourcing does not abort.
-    IRIS_STAGE_DIR="'"$TMPD"'" IRIS_AGENT_CONF="'"$CONF"'" \
-    IRIS_RPC_PORT=6800 IRIS_TICK_SECONDS=60 IRIS_MAX_PEERS=10
-
-    eval "$(awk "/^read_secret\(\)/,/^}/" "'"$ENTRYPOINT"'")"
-
+    CONF="'"$conf"'"
+    CALL_LOG_FILE="'"$log"'"
+    eval "$(awk "/^(read_secret|proc_stat|aria2_alive)\(\)/,/^}/" "'"$ENTRYPOINT"'")"
     # Stub start_aria2c so it logs the call without launching a real daemon.
     start_aria2c() { echo "started:$1" >> "$CALL_LOG_FILE"; }
-    # Make the daemon-absent precondition deterministic. A test runner command
-    # line can itself mention aria2c and otherwise produce a false pgrep match.
-    pgrep() { return 1; }
-
-    # Simulate: cur already equals want (secret did not change).
+    ARIA2_PID=""; ARIA2_START=""
+    '"$scenario"'
     cur=mysecret
     want="$(read_secret)"
     [ -z "$want" ] && want="iris"
-
-    # Run the ACTUAL condition from entrypoint.sh (not a re-implementation).
-    '"$LOOP_COND"'
+    '"$cond"'
       start_aria2c "$want" && cur="$want"
     fi
   '
-  CALLS="$(wc -l < "$CALL_LOG" | tr -d ' ')"
-  rm -rf "$TMPD"
-  # start_aria2c must have been called even though the secret matched —
-  # because no aria2c process is running (pgrep returns non-zero in CI).
-  [ "$CALLS" -ge 1 ]
+  wc -l < "$log" | tr -d ' '
+  rm -rf "$tmpd"
+}
+
+# The supervisor's own liveness scenario: this very shell stands in for a live
+# aria2c child, with its starttime recorded through the real proc_stat.
+_ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
+
+@test "entrypoint.sh calls start_aria2c when aria2c is absent even if secret unchanged" {
+  # No child recorded -- the state after a crash has been reaped, or before
+  # the first launch. Health answers yes, so liveness alone must relaunch.
+  run _loop_cond_calls 'rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh calls start_aria2c when the recorded aria2c has exited" {
+  # A child that exited and was reaped: /proc/<pid> is gone, so the recorded
+  # PID must read as dead even though the secret is unchanged and health is
+  # not consulted.
+  run _loop_cond_calls 'sleep 0 & ARIA2_PID=$!; proc_stat "$ARIA2_PID" && ARIA2_START="$PROC_START"; wait "$ARIA2_PID"; rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh calls start_aria2c when aria2c is alive but not answering RPC" {
+  # Liveness alone deadlocked Guest Shell devices in the field (2026-08-20):
+  # an aria2c that was running but not serving blocked its own relaunch, so
+  # the agent hit ECONNREFUSED on every tick and never reached its first
+  # heartbeat. The IOx supervisor had the identical latent fault.
+  run _loop_cond_calls "$_ALIVE"'; rpc_healthy() { return 1; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "entrypoint.sh leaves a live, healthy aria2c with an unchanged secret alone" {
+  # The inverse guard: a healthy daemon must not be bounced every tick.
+  run _loop_cond_calls "$_ALIVE"'; rpc_healthy() { return 0; }'
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 0 ]
 }
 
 @test "entrypoint.sh supervisor checks aria2c HEALTH, not just liveness" {
   # Static analysis: the loop body must restart the daemon when it is dead
-  # (pgrep/kill -0) AND when it is alive but not answering RPC. Liveness alone
-  # deadlocked Guest Shell devices in the field (2026-08-20): an aria2c that
-  # was running but not serving blocked its own relaunch, so the agent hit
-  # ECONNREFUSED on every tick and never reached its first heartbeat. The IOx
-  # supervisor had the identical condition and the identical latent fault.
-  grep -q 'pgrep\|kill -0' "$ENTRYPOINT"
+  # (aria2_alive -- the exact PID it launched, never a process-name match)
+  # AND when it is alive but not answering RPC (rpc_healthy).
+  grep -q 'aria2_alive' "$ENTRYPOINT"
   grep -q 'rpc_healthy\|jsonrpc' "$ENTRYPOINT"
 }
 
 @test "entrypoint.sh tracks agent and sleep children for prompt TERM handling" {
   grep -q 'python3 "\$AGENT" --once &' "$ENTRYPOINT"
   grep -q 'AGENT_PID=\$!' "$ENTRYPOINT"
-  grep -q 'sleep "\$TICK" &' "$ENTRYPOINT"
+  # sleep_for (issue #59) replaces a bare "$TICK": every ordinary tick is
+  # jittered, and a failed tick backs off -- see next_tick_sleep -- but the
+  # tracked-child TERM-handling shape this test guards is unchanged.
+  grep -q 'sleep "\$sleep_for" &' "$ENTRYPOINT"
   grep -q 'SLEEP_PID=\$!' "$ENTRYPOINT"
   grep -q 'kill "\$pid"' "$ENTRYPOINT"
   grep -q 'wait "\$pid"' "$ENTRYPOINT"
@@ -282,4 +306,87 @@ _appid_block_output() {
   # holds this file in lockstep with server/Dockerfile.
   grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$IOX_DIR/Dockerfile"
   ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$IOX_DIR/Dockerfile"
+}
+
+# ---------------------------------------------------------------------------
+# IRIS-12-005 -- values that ride inside the quoted run-opts lines are
+# validated before anything touches the device (the XR installer already did
+# this; the IOx one pasted them blind, IOS dropped the malformed line, and
+# the app died on its entrypoint's required-env guard AFTER [1/9] had torn
+# down the working app).
+# ---------------------------------------------------------------------------
+
+@test "install.sh rejects a DEVICE_SSH_PASS containing a double quote" {
+  DEVICE_SSH_PASS='pa"ss' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+}
+
+@test "install.sh rejects a DEVICE_SSH_PASS containing a newline" {
+  DEVICE_SSH_PASS=$'pa\nss' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+}
+
+@test "install.sh allows whitespace inside DEVICE_SSH_PASS (it stays quoted)" {
+  DEVICE_SSH_PASS='pass with spaces' run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+}
+
+@test "install.sh rejects a CATALOG_TOKEN with a double quote, and whitespace" {
+  CATALOG_TOKEN='to"k' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_TOKEN must not contain"* ]] || return 1
+  CATALOG_TOKEN='to k' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_TOKEN contains whitespace"* ]]
+}
+
+@test "install.sh rejects CATALOG_URL, DEVICE_ID and DEVICE_SSH_USER that would break the run-opts quoting" {
+  CATALOG_URL='https://x:8443/"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"CATALOG_URL"* ]] || return 1
+  DEVICE_ID='sw "1"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"DEVICE_ID"* ]] || return 1
+  DEVICE_SSH_USER=$'dn\nac' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"DEVICE_SSH_USER"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# #123/#124 -- IRIS_LOG must actually reach the container (previously neither
+# installer passed it, so the documented opt-in was unreachable on exactly
+# the platforms whose entrypoints implement it), validated the same way every
+# other value riding inside the quoted run-opts lines already is.
+# ---------------------------------------------------------------------------
+
+@test "install.sh defaults IRIS_LOG to off and forwards it in the run-opts" {
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=off"'* ]]
+}
+
+@test "install.sh forwards an operator's IRIS_LOG=on opt-in in the run-opts" {
+  IRIS_LOG=on run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=on"'* ]]
+}
+
+@test "install.sh rejects an IRIS_LOG value that would break the run-opts quoting, and whitespace" {
+  IRIS_LOG='on"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"IRIS_LOG must not contain"* ]] || return 1
+  IRIS_LOG='on off' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"IRIS_LOG contains whitespace"* ]]
+}
+
+@test "install.sh's quoting guard runs before the first device session" {
+  # structural: the guard precedes the [1/9] teardown AND the identity probe
+  guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"
+  probe="$(grep -n "printf 'show version" "$INSTALL" | head -1 | cut -d: -f1)"
+  step1="$(grep -n '\[1/9\] teardown' "$INSTALL" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$probe" ] && [ -n "$step1" ]
+  [ "$guard" -lt "$probe" ] && [ "$guard" -lt "$step1" ]
 }

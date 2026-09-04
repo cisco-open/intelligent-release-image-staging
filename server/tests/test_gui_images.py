@@ -615,3 +615,73 @@ def test_scan_still_ignores_files_that_are_not_images(tmp_path):
     svc = gui_images.ImageService(str(tmp_path / "state"),
                                   str(tmp_path / "vol"), import_root=str(root))
     assert [c["filename"] for c in svc.list_importable()] == ["real.26.01.01.SPA.bin"]
+
+
+# ---------------------------------------------------------------------------
+# The tracker URL carries the seeder's announce token. A failing publish must
+# never put it in the job message (served to every console session) or the
+# audit detail (exported off-box).
+# ---------------------------------------------------------------------------
+
+def test_publish_failure_never_carries_the_announce_token(tmp_path):
+    import subprocess
+    token = "deadbeefcafef00d" * 2
+    url = "http://10.0.0.5:6969/announce?announce_token=" + token
+    calls = []
+
+    def boom(image_path, store, tracker_url, **k):
+        # what subprocess.run(check=True) raises when mktorrent fails, argv and all
+        raise subprocess.CalledProcessError(
+            1, ["mktorrent", "-p", "-a", tracker_url, "-o", "x.torrent", image_path])
+
+    svc = gui_images.ImageService(
+        str(tmp_path / "state"), str(tmp_path / "imgs"),
+        tracker_url_fn=lambda: url, publish_fn=boom, now_fn=lambda: 1000,
+        audit_fn=lambda **kw: calls.append(kw))
+    p = svc.image_path("img.bin")
+    open(p, "wb").close()
+    job = _wait_job(svc, svc.start_publish(p))
+    assert job["state"] == "error"
+    assert token not in job["message"]
+    assert url not in job["message"]
+    ev = [c for c in calls if c["event"] == "image_publish_finished"][0]
+    assert ev["result"] == "fail"
+    assert token not in ev["detail"]
+    assert "<redacted>" in job["message"]
+
+
+def test_delete_stops_the_seeder_before_unlinking_and_reports_a_failed_stop(tmp_path):
+    import os
+    order = []
+    svc = gui_images.ImageService(str(tmp_path / "state"), str(tmp_path / "imgs"),
+                                  seeder_remove_fn=lambda ih: order.append(
+                                      ("stop", os.path.exists(imgfile))))
+    store = svc._store()
+    store.save_image({"id": "img1", "filename": "img1.bin", "size": 3,
+                      "sha256": "ab", "info_hash_hex": "deadbeef", "published_at": 1})
+    imgfile = svc.image_path("img1.bin"); open(imgfile, "wb").write(b"abc")
+    open(store.torrent_path("img1"), "wb").write(b"d")
+    warnings = []
+    assert svc.delete_image("img1", warnings=warnings) == []
+    assert order == [("stop", True)], "seeder must be stopped while the file exists"
+    assert warnings == []
+    assert not os.path.exists(imgfile)
+
+    # an unreachable seeder: the delete still completes, but not silently
+    def unreachable(ih):
+        raise OSError("connection refused http://127.0.0.1:6800/jsonrpc token:xyz")
+
+    svc = gui_images.ImageService(str(tmp_path / "state2"), str(tmp_path / "imgs2"),
+                                  seeder_remove_fn=unreachable)
+    store = svc._store()
+    store.save_image({"id": "img2", "filename": "img2.bin", "size": 3,
+                      "sha256": "ab", "info_hash_hex": "cafe", "published_at": 1})
+    open(svc.image_path("img2.bin"), "wb").write(b"abc")
+    warnings = []
+    assert svc.delete_image("img2", warnings=warnings) == []
+    assert store.get_image("img2") is None
+    assert len(warnings) == 1 and "seeder stop failed (OSError)" in warnings[0]
+    assert "token" not in warnings[0] and "http" not in warnings[0]
+    # callers that pass no list keep the old, quiet contract
+    store.save_image({"id": "img3", "filename": "img3.bin", "published_at": 1})
+    assert svc.delete_image("img3") == []

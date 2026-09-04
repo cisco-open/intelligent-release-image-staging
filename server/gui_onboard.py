@@ -11,11 +11,12 @@ runner and the token minter are INJECTED so orchestration is unit-testable witho
 a device. Stage-only invariant preserved: device-install.sh only sets up the agent
 + enrollment; it never installs/activates/reloads. Stdlib only.
 
-Note: onboarding passes DEVICE_PASS (and, when configured in the store, the
-stage-host HOST_USER/HOST_PASS) to the installer via the environment (consumed
-by lab/device-run.sh's SSHPASS and the installer's sshpass). The streamed job
-lines are the installer's stdout, which echoes neither password (sshpass reads
-them from the env)."""
+Note: onboarding passes DEVICE_PASS to the installer via the environment
+(consumed by lab/device-run.sh's SSHPASS and the installer's sshpass). The
+streamed job lines are the installer's stdout, which never echoes the password
+(sshpass reads it from the env). The stage-host HOST_USER/HOST_PASS pair is
+deliberately NOT exported: the console always stages locally
+(IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
 import inspect
 import ipaddress
 import os
@@ -34,6 +35,20 @@ _JOB_TTL = 3600  # seconds a terminal onboard job is retained before eviction
 # undeploy for it is refused. Comfortably above the slowest real recipe (the
 # router guestshell wait plus copy retries, ~7-10 min).
 _JOB_DEADLINE = int(os.environ.get("IRIS_ONBOARD_JOB_TIMEOUT") or 7200)
+# How long reap_overdue_jobs waits after signalling an overdue installer
+# before escalating (SIGTERM -> SIGKILL -> mark failed). The recipe's ssh
+# child normally exits within seconds of SIGTERM; the grace only matters for a
+# process that ignores it.
+_REAP_GRACE = int(os.environ.get("IRIS_ONBOARD_REAP_GRACE") or 60)
+# How often the maintenance thread wakes on its own. The worker pool's idle
+# wakeups already drive TTL eviction and the reaper, but only while SOME worker
+# is idle: with every worker blocked on a wedged installer -- the single-job
+# case on a pool of one -- no wakeup is left, and the SIGTERM -> SIGKILL ->
+# marked-failed escalation stalled until an operator clicked something. One
+# daemon thread doing one timed wait per tick is that missing wakeup. Not an
+# operator knob: it only bounds how late an escalation step is, and the steps
+# themselves are paced by _JOB_DEADLINE and _REAP_GRACE.
+_MAINTENANCE_INTERVAL = 30
 _TERMINAL = ("done", "error", "cancelled")
 _DEFAULT_CONCURRENCY = 25  # simultaneous installer runs (env IRIS_ONBOARD_CONCURRENCY)
 # A fleet action may legitimately be large, but a request storm must not retain
@@ -473,12 +488,45 @@ _IRIS_NAMED_COLLISIONS = (
 )
 
 
-def _check_iris_named_collisions(running, extra=()):
+def _check_iris_named_collisions(running, extra=(), waive=()):
     """Raise on any IRIS-named artifact still present. ``extra`` carries the
-    platform's own app-hosting stanza, which differs per platform."""
+    platform's own app-hosting stanza, which differs per platform. ``waive``
+    holds descriptions the caller has established this deployment re-creates
+    itself (see _default_iox_preflight's resumable retry) -- everything else
+    is still a collision."""
     for pattern, description in tuple(extra) + _IRIS_NAMED_COLLISIONS:
+        if description in waive:
+            continue
         if re.search(pattern, running):
             raise ValueError("%s already exists" % description)
+
+
+# States an IOx app can hold WITHOUT serving anything: it is installed but was
+# never started, so it is a half-finished onboard, not a live deployment.
+# device/iox/install.sh's own step [1/9] stops/deactivates/uninstalls whatever
+# it finds, so a retry over one of these is exactly the documented idempotent
+# re-install (scrubber #78: a first install of a new package that outran the
+# activate budget left the app DEPLOYED, and preflight then refused every
+# retry until the operator undeployed by hand).
+_IOX_RESUMABLE_APP_STATES = ("DEPLOYED", "ACTIVATED")
+
+# The IRIS-named artifacts device/iox/install.sh re-establishes on every run:
+# step [4/9] pastes `no crypto pki trustpoint IRIS` before re-adding the
+# trustpoint and re-binding the HTTP client to it. Those are the only
+# collisions a resumable retry may walk over -- an EEM applet or a logging
+# discriminator belongs to the Guest Shell recipe, which this installer does
+# not own or replace, so those still refuse.
+_IOX_RETRY_REINSTATED = ("crypto pki trustpoint IRIS",
+                         "the IRIS HTTP client trustpoint binding")
+
+
+def _iox_app_state(apps, appid):
+    """The app's state from `show app-hosting list`, upper-cased; '' when the
+    table does not list it. Rows START with the name, so anchor there: it is
+    what keeps an operator app whose name merely CONTAINS ours from being read
+    as this one."""
+    match = re.search(r"(?im)^[ \t]*%s[ \t]+(\S+)" % re.escape(appid), apps)
+    return match.group(1).upper() if match else ""
 
 
 def _probe_sections(runner, env, commands, label):
@@ -728,7 +776,11 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
     It used to resolve identity and nothing else, which is why a device still
     carrying IRIS config was refused as a router and accepted as IOx. Raises
     ValueError (fail-closed) on an unparseable identity; never proceeds with
-    an empty value."""
+    an empty value.
+
+    An IRIS app that is DEPLOYED or ACTIVATED but never started is treated as
+    a resumable retry rather than a collision -- see the note at
+    _IOX_RESUMABLE_APP_STATES."""
     runner = os.path.join(repo_root, "lab", "device-run.sh")
     appid = str((resolved or {}).get("iox_appid") or "iris")
     sections = _probe_sections(runner, env, (
@@ -749,26 +801,42 @@ def _default_iox_preflight(dev, env, resolved, repo_root):
     model, device_identity = _parse_show_version(sections["version"])
     if not device_identity:
         raise ValueError("could not determine the device's processor board ID")
-    _check_iris_named_collisions(sections["running"], extra=(
-        (r"(?m)^app-hosting appid %s\s*$" % re.escape(appid),
-         "the %s app-hosting config" % appid),))
+    # A leftover app-hosting stanza is a collision ONLY while the app is
+    # actually running. An app that is installed but never started is the
+    # residue of an onboard that failed after [7/9] -- refusing it made the
+    # console's own retry impossible and forced a manual undeploy, while the
+    # installer it guards is explicitly idempotent. Anything else IRIS-named
+    # (and an app that IS running) still refuses.
+    appid_stanza = r"(?m)^app-hosting appid %s\s*$" % re.escape(appid)
+    app_state = _iox_app_state(sections["apps"], appid)
+    resumable = (re.search(appid_stanza, sections["running"]) is not None
+                 and app_state in _IOX_RESUMABLE_APP_STATES)
+    if resumable:
+        _check_iris_named_collisions(sections["running"],
+                                     waive=_IOX_RETRY_REINSTATED)
+    else:
+        _check_iris_named_collisions(sections["running"], extra=(
+            (appid_stanza, "the %s app-hosting config" % appid),))
     evidence = {"status": "passed", "device_identity": device_identity}
+    if resumable:
+        evidence["resumable_app_state"] = app_state
     if model:
         evidence["detected_model"] = model
     return evidence
 
 
-def apply_iox_preflight(resolved, evidence):
-    """Return renderer input bound to validated live IOx device identity --
-    the IOx counterpart of apply_router_preflight. Fails closed: a missing
-    or unsafe identity, or a mismatch against an identity already bound to
-    this job, raises rather than letting an empty/stale value through to
-    _build_env's EXPECTED_DEVICE_IDENTITY export."""
+def _apply_identity_preflight(resolved, evidence, label):
+    """Return renderer input bound to a validated live device identity -- the
+    Guest Shell / IOx counterpart of apply_router_preflight. Fails closed: a
+    missing or unsafe identity, or a mismatch against an identity already
+    bound to this job, raises rather than letting an empty/stale value
+    through to _build_env's EXPECTED_DEVICE_IDENTITY export."""
     if evidence.get("status") != "passed":
-        raise ValueError("iox preflight did not pass")
+        raise ValueError("%s preflight did not pass" % label)
     identity = str(evidence.get("device_identity") or "").strip()
     if not identity or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", identity):
-        raise ValueError("iox preflight did not return a safe device identity")
+        raise ValueError("%s preflight did not return a safe device identity"
+                         % label)
     result = dict(resolved)
     bound_identity = str(result.get("device_identity") or "").strip()
     if bound_identity and bound_identity != identity:
@@ -778,6 +846,50 @@ def apply_iox_preflight(resolved, evidence):
     if detected_model:
         result["model"] = detected_model
     return result
+
+
+def apply_iox_preflight(resolved, evidence):
+    """IOx: bind the live processor board ID (and model) into the plan."""
+    return _apply_identity_preflight(resolved, evidence, "iox")
+
+
+def apply_guestshell_preflight(resolved, evidence):
+    """Guest Shell: bind the live processor board ID (and model) into the
+    plan, exactly like IOx. The evidence used to be discarded, so a Guest
+    Shell record never carried the identity of the box it was written for
+    and its teardown could not be checked against the device answering at
+    the address."""
+    return _apply_identity_preflight(resolved, evidence, "guestshell")
+
+
+def apply_xr_preflight(resolved, evidence):
+    """IOS-XR: the appmgr recipes consume no board identity (see
+    _default_xr_preflight), so only the detected model is bound; the evidence
+    itself is what the caller persists on the record."""
+    if evidence.get("status") != "passed":
+        raise ValueError("xr preflight did not pass")
+    result = dict(resolved)
+    detected_model = str(evidence.get("detected_model") or "").strip()
+    if detected_model:
+        result["model"] = detected_model
+    return result
+
+
+def bind_preflight(resolved, evidence, platform=None):
+    """Bind a platform's execution-time preflight evidence into its resolved
+    plan: one entry point for every platform, so a caller that persists the
+    bound plan onto the deployment record (gui_server's pre_apply) cannot
+    do it for routers and forget the rest."""
+    platform = platform or (resolved or {}).get("platform")
+    if platform == "router":
+        return apply_router_preflight(resolved, evidence)
+    if platform == "iox":
+        return apply_iox_preflight(resolved, evidence)
+    if platform == "guestshell":
+        return apply_guestshell_preflight(resolved, evidence)
+    if platform == _XR_PLATFORM:
+        return apply_xr_preflight(resolved, evidence)
+    raise ValueError("no preflight binding for platform %r" % (platform,))
 
 
 # The names device/xr-install.sh gives IRIS's two artifacts on the router
@@ -911,16 +1023,27 @@ class OnboardService:
         except (TypeError, ValueError):
             self._run_supports_proc = False
         self._lock = threading.Lock()
+        # The autonomous escalation driver: started on the first submission,
+        # and it retires itself once no job is left (see _maintenance_loop).
+        self._maintenance = None
+        self._maintenance_stop = threading.Event()
 
     def _worker_loop(self):
         while True:
             try:
                 work = self._work_queue.get(timeout=60)
             except queue.Empty:
-                # TTL cleanup does not depend on another submission; idle pool
-                # wakeups provide periodic maintenance without another thread.
+                # TTL cleanup does not depend on another submission: an idle
+                # worker drives it for free. The maintenance thread covers the
+                # case where NO worker is idle to wake up.
                 with self._lock:
                     self._evict_old(self._now())
+                # The reaper's SIGTERM -> SIGKILL escalation must advance even
+                # when no operator submits anything for hours.
+                try:
+                    self.reap_overdue_jobs()
+                except Exception:
+                    pass
                 continue
             try:
                 work()
@@ -934,6 +1057,60 @@ class OnboardService:
             worker = threading.Thread(target=self._worker_loop, daemon=True)
             self._workers.append(worker)
             worker.start()
+
+    def _ensure_maintenance(self):
+        """Start the single maintenance thread if it is not already running.
+
+        reap_overdue_jobs() only advances when something calls it, and the two
+        existing callers are start() and an IDLE worker's queue timeout. Both
+        can be absent for hours: one wedged job on a pool of one (or a full
+        pool of wedged installers) leaves no idle worker, and an unattended
+        console makes no start() call -- so the escalation stalled and the
+        device stayed busy until an operator clicked something. This thread is
+        the missing driver. It signals nothing itself; it just calls the same
+        reaper on a timer. Caller must hold self._lock."""
+        if self._maintenance is not None:
+            return
+        self._maintenance_stop.clear()
+        t = threading.Thread(target=self._maintenance_loop, daemon=True,
+                             name="iris-onboard-maintenance")
+        self._maintenance = t
+        t.start()
+
+    def _maintenance_loop(self):
+        """Tick TTL eviction and the reaper until no job is left.
+
+        A timed Event wait, never a busy loop, and the thread retires itself
+        the moment the job table is empty -- so a server that is not onboarding
+        anything carries no extra thread. The exit decision and the attribute
+        clear happen in ONE critical section, and start() registers its job
+        before calling _ensure_maintenance() under the same lock, so a
+        submission can never race with a retiring thread and be left with no
+        driver."""
+        while not self._maintenance_stop.wait(max(0.01, _MAINTENANCE_INTERVAL)):
+            try:
+                with self._lock:
+                    self._evict_old(self._now())
+                    if not self._jobs:
+                        self._maintenance = None
+                        return
+            except Exception:
+                pass
+            try:
+                self.reap_overdue_jobs()
+            except Exception:
+                pass
+        with self._lock:
+            if self._maintenance is threading.current_thread():
+                self._maintenance = None
+
+    def stop_maintenance(self):
+        """Stop the maintenance thread (process shutdown, and tests)."""
+        self._maintenance_stop.set()
+        with self._lock:
+            t = self._maintenance
+        if t is not None:
+            t.join(timeout=5)
 
     def _build_env(self, device_id, mint=True, resolved=None, env_extra=None):
         dev = self.fleet.get_device(device_id)
@@ -952,8 +1129,12 @@ class OnboardService:
         management_type = target["management_type"]
         if management_type == "legacy_routed":
             management_type = "routed"
-        target_ip = (target.get("device_ip")
-                     if management_type in ("router-routed", "router-nat") else None)
+        # The address comes from the RESOLVED target for every management
+        # type: on undeploy that is the deployment record, so an inventory
+        # edit after deployment cannot retarget the teardown at another box.
+        # Only the router path used to be bound this way; Guest Shell and IOx
+        # teardowns followed the live fleet row.
+        target_ip = target.get("device_ip")
         env.update({
             "DEVICE_IP": target_ip or dev["device_ip"],
             "DEVICE_ID": device_id,
@@ -975,7 +1156,8 @@ class OnboardService:
             "ROUTER_RESOURCES_OWNED": str(target.get("router_resources_owned", "0")),
             # inband IOx reaches IOS at the switch's management IP by default
             "IOS_SSH_HOST": (target.get("ios_ssh_host", "")
-                             or (dev["device_ip"] if management_type == "inband" else "")),
+                             or ((target_ip or dev["device_ip"])
+                                 if management_type == "inband" else "")),
             "CATALOG_URL": self.catalog_url,
             "STAGE_HOST": self.host_ip,
             "CATALOG_TOKEN": token,
@@ -994,16 +1176,23 @@ class OnboardService:
         })
         if target.get("model"):
             env["MODEL"] = target["model"]
-        # Stage-host SSH login for the installer's remote-STAGE_HOST branch (in
-        # Docker the container's netns never owns STAGE_HOST, so artifact staging
-        # goes over ssh). The age-encrypted store beats any inherited process env;
-        # unset leaves the plain passthrough (and the on-host local path needs
-        # neither). getattr: injected test doubles may predate stage-host support.
-        stage_host_fn = getattr(self.creds, "stage_host_secrets", None)
-        sh = stage_host_fn() if callable(stage_host_fn) else None
-        if sh:
-            env["HOST_USER"] = sh["username"]
-            env["HOST_PASS"] = sh["password"]
+        # Per-device override of device-install.sh's SVI_IGP (issue #85): the
+        # record already validated this to the closed 'none'/'isis' enum
+        # (gui_fleet.validate_record) before it could ever reach here. A
+        # blank record value must NOT be exported at all -- env already
+        # carries whatever SVI_IGP the server process itself was started
+        # with (env = dict(os.environ) above), and that process-wide value
+        # stays the fallback default for a device whose own record says
+        # nothing, exactly as it behaved before this field existed.
+        if target.get("svi_igp"):
+            env["SVI_IGP"] = target["svi_igp"]
+        # IRIS_STAGE_LOCAL=1 above makes the recipes' remote-STAGE_HOST ssh
+        # branch -- the only reader of HOST_USER/HOST_PASS -- unreachable, so
+        # the stage-host credential from the store is never exported here and
+        # an inherited pair is dropped: a password no recipe can use has no
+        # business in the environment of every installer and its ssh children.
+        env.pop("HOST_USER", None)
+        env.pop("HOST_PASS", None)
         # Console-driven feature flags (e.g. the telemetry checkboxes) applied
         # last: explicit operator intent beats any inherited process env.
         if env_extra:
@@ -1080,6 +1269,29 @@ class OnboardService:
             env["DEVICE_SSH_PASS"] = env["DEVICE_PASS"]
             env["DEVICE_SSH_USER"] = env["DEVICE_USER"]
         return platform, script
+
+    def _bind_evidence(self, job_id, device_id, action, job, pre_apply,
+                       evidence, platform, dev, env, script):
+        """Bind a platform preflight's evidence into the job's resolved plan
+        and rebuild the installer env from it. With a pre_apply hook (the
+        console's record-backed onboard) the hook persists the bound plan and
+        the evidence onto the deployment record first; without one (embedded
+        / degraded, no record store) the plan is bound in memory only.
+        Returns the refreshed (dev, env, platform, script)."""
+        resolved = job.get("resolved") or dev
+        final_resolved = (pre_apply(evidence) if pre_apply else
+                          bind_preflight(resolved, evidence, platform=platform))
+        if final_resolved is None:
+            return dev, env, platform, script
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current is not None:
+                current["resolved"] = final_resolved
+        dev, env = self._build_env(device_id, mint=False,
+                                   resolved=final_resolved,
+                                   env_extra=job.get("env_extra"))
+        platform, script = self._resolve(device_id, dev, env, action)
+        return dev, env, platform, script
 
     def _persist_os_family(self, device_id, dev, prior_family):
         """Best-effort cache of a freshly classified os_family onto the
@@ -1234,10 +1446,18 @@ class OnboardService:
                     # carrying IRIS config was refused as a router and
                     # silently accepted here.
                     try:
-                        self._guestshell_preflight(
+                        evidence = self._guestshell_preflight(
                             dev, env, j.get("resolved") or dev)
                     except Exception as exc:
                         raise ValueError("preflight failed: %s" % exc)
+                    # The evidence used to be discarded here. Bind it (board
+                    # ID, model) into the plan and, through pre_apply, onto
+                    # the deployment record -- the same as every other
+                    # platform -- so the record names the box it describes
+                    # and its teardown exports EXPECTED_DEVICE_IDENTITY.
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
                 if action == "onboard" and platform == "router":
                     # The router preflight classifies os_family from the
                     # banner it just read (_default_router_preflight), same
@@ -1277,11 +1497,15 @@ class OnboardService:
                     # the router/iox flows -- see _persist_os_family.
                     prior_family = dev.get("os_family")
                     try:
-                        self._xr_preflight(dev, env, j.get("resolved") or dev)
+                        evidence = self._xr_preflight(
+                            dev, env, j.get("resolved") or dev)
                     except Exception as exc:
                         self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
                     self._persist_os_family(device_id, dev, prior_family)
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
                 elif action == "onboard" and platform == "iox":
                     # The console never supplies device_identity for IOx
                     # devices (unlike router, there is no separate
@@ -1301,17 +1525,13 @@ class OnboardService:
                         self._persist_os_family(device_id, dev, prior_family)
                         raise ValueError("preflight failed: %s" % exc)
                     self._persist_os_family(device_id, dev, prior_family)
-                    final_resolved = apply_iox_preflight(
-                        j.get("resolved") or dev, evidence)
-                    with self._lock:
-                        current = self._jobs.get(job_id)
-                        if current is not None:
-                            current["resolved"] = final_resolved
-                    dev, env = self._build_env(
-                        device_id, mint=False, resolved=final_resolved,
-                        env_extra=j.get("env_extra"))
-                    platform, script = self._resolve(
-                        device_id, dev, env, action)
+                    # Bound onto the RECORD as well as the job (pre_apply),
+                    # not just into this job's env as before: the persisted
+                    # record used to say preflight "not-required" and carry
+                    # no identity for a check that had in fact run.
+                    dev, env, platform, script = self._bind_evidence(
+                        job_id, device_id, action, j, pre_apply, evidence,
+                        platform, dev, env, script)
             except Exception as exc:
                 # Nothing has reached the device yet. A planned onboarding
                 # record must not become teardown authority: another actor
@@ -1423,6 +1643,10 @@ class OnboardService:
             raise ValueError("onboarding queue is full")
         with self._lock:
             self._ensure_workers()
+            # Under the same lock, and after the job is in self._jobs: the
+            # reaper now advances on a timer even if this job wedges every
+            # worker and nobody ever clicks again.
+            self._ensure_maintenance()
         return job_id
 
     def _append(self, job_id, line):
@@ -1492,13 +1716,23 @@ class OnboardService:
                 self._append_locked(j, "[abort requested by operator]")
                 return True
             self._append_locked(j, "[abort requested by operator]")
+        return self._signal_group(proc, signal.SIGTERM)
+
+    @staticmethod
+    def _signal_group(proc, sig):
+        """Deliver *sig* to the installer's whole process group -- the
+        recipe's ssh child is what holds the pipe, so signalling only the
+        shell leaves the job hung. Falls back to the Popen handle when the
+        group cannot be resolved (already gone, or a test double without a
+        pid). Returns True if something was signalled."""
         try:
-            # Signal the whole group: the recipe's ssh child is what holds the
-            # pipe, so terminating only the shell leaves the job hung.
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                os.killpg(os.getpgid(proc.pid), sig)
             except (OSError, AttributeError, ProcessLookupError):
-                proc.terminate()
+                if sig == signal.SIGKILL:
+                    proc.kill()
+                else:
+                    proc.terminate()
         except Exception:
             return False
         return True
@@ -1521,7 +1755,13 @@ class OnboardService:
                 j["finished_at"] = int(self._now())
                 device_id = j.get("device_id")
                 action = j.get("action", "onboard")
-                dur = _fmt_dur(j["finished_at"] - j["started_at"])
+                # A job can finish without ever starting (a reaper or cancel
+                # path); measure from the queue stamp then, never crash.
+                base = j.get("started_at")
+                if base is None:
+                    base = j.get("queued_at")
+                dur = (_fmt_dur(j["finished_at"] - base)
+                       if base is not None else "?")
                 platform = j.get("platform")
                 if state == "done":
                     detail = "job %s %s platform=%s rc=0" % (job_id, dur, platform)
@@ -1691,37 +1931,84 @@ class OnboardService:
         return n
 
     def reap_overdue_jobs(self):
-        """Fail every job past its deadline, with the SAME bookkeeping an
-        ordinary finish gets.
+        """Stop every RUNNING job past its deadline and return the ids acted
+        on.
 
-        The old inline version wrote a ``rc`` key that no reader looks at (they
-        all read ``returncode``), never went through _finish, and so left the
-        installer handle in self._procs, wrote no persisted log, and emitted no
-        ``*_finished`` audit event — a job could fail with nothing anywhere
-        saying so. Going through _finish fixes all four.
+        A running installer is signalled like an operator abort -- SIGTERM to
+        its process group, SIGKILL if it is still there _REAP_GRACE later --
+        and the job stays ``running`` until its worker returns, so the busy
+        guard keeps refusing the opposite action while the recipe may still
+        be touching the device, abort() stays reachable, and the worker
+        thread is freed instead of leaking for good. The worker then finishes
+        the job the ordinary way (record -> needs-reconcile, real rc, log,
+        audit). The old version dropped the Popen handle without a signal:
+        the installer kept running, the busy guard opened (an undeploy could
+        interleave with the still-running install), abort() went dead, and
+        the blocked worker was never replaced.
 
-        Takes the lock itself and does the log/audit I/O outside it, so start()
-        can call this before its busy guard.
+        Only when nothing can be signalled -- a runner that never reports its
+        process, or a group that survived SIGKILL -- is the job marked failed
+        outright, with the SAME bookkeeping an ordinary finish gets (going
+        through _finish: returncode, persisted log, *_finished audit). Such a
+        worker may still return later and finish the job a second time; the
+        second finish records the real outcome, and recording it twice beats
+        a job that stays non-terminal forever.
 
-        A genuinely hung worker may still return later and finish the job a
-        second time. That is deliberate and predates this: the second finish
-        records the real outcome, and recording it twice beats a job that stays
-        non-terminal forever."""
+        Queued jobs are deliberately never reaped: a deep queue wait is
+        legitimate (a large batch behind a small pool), cancel_queued /
+        cancel_device bound it, and failing one here used to run the job
+        anyway later, or drop it with its planned record orphaned.
+
+        Takes the lock itself and does the signalling and log/audit I/O
+        outside it, so start() can call this before its busy guard."""
+        to_signal = []
+        to_finish = []
         with self._lock:
-            overdue = self._reap_overdue(self._now())
-            for jid in overdue:
-                # Claim it while still holding the lock: _reap_overdue only
-                # considers jobs with no finished_at, so stamping one here stops
-                # a concurrent reap from failing the same job twice. _finish
-                # overwrites this with the real stamp a moment later.
-                self._jobs[jid]["finished_at"] = int(self._now())
-                self._append_locked(
-                    self._jobs[jid],
-                    "[job exceeded %ds deadline; marked failed so the device is "
-                    "not left permanently busy]" % _JOB_DEADLINE)
-        for jid in overdue:
+            now = self._now()
+            acted = self._reap_overdue(now)
+            for jid in acted:
+                j = self._jobs[jid]
+                proc = self._procs.get(jid)
+                stage = j.get("_reap_stage", 0)
+                if not self._run_supports_proc:
+                    stage = 2   # nothing to signal: straight to marking failed
+                if stage == 0:
+                    j["_reap_stage"] = 1
+                    j["_reap_signalled_at"] = now
+                    # Covers the pre-spawn window exactly like abort(): the
+                    # worker stops before launching the installer, or
+                    # _register_proc terminates it on registration.
+                    j["_abort_requested"] = True
+                    self._append_locked(
+                        j, "[job exceeded %ds deadline; terminating the "
+                        "installer]" % _JOB_DEADLINE)
+                    if proc is not None:
+                        to_signal.append((proc, signal.SIGTERM))
+                elif stage == 1:
+                    j["_reap_stage"] = 2
+                    j["_reap_signalled_at"] = now
+                    self._append_locked(
+                        j, "[installer still running %ds after SIGTERM; "
+                        "killing its process group]" % _REAP_GRACE)
+                    if proc is not None:
+                        to_signal.append((proc, signal.SIGKILL))
+                else:
+                    # Claim it while still holding the lock: _reap_overdue
+                    # only considers jobs with no finished_at, so stamping
+                    # one here stops a concurrent reap from failing the same
+                    # job twice. _finish overwrites it a moment later.
+                    j["_reap_stage"] = 3
+                    j["finished_at"] = int(now)
+                    self._append_locked(
+                        j, "[job exceeded %ds deadline and its installer "
+                        "could not be stopped; marked failed so the device "
+                        "is not left permanently busy]" % _JOB_DEADLINE)
+                    to_finish.append(jid)
+        for proc, sig in to_signal:
+            self._signal_group(proc, sig)
+        for jid in to_finish:
             self._finish(jid, "error", -1)
-        return overdue
+        return acted
 
     def cancel_device(self, device_id):
         """Stop everything in flight for *device_id*: queued jobs are
@@ -1756,21 +2043,70 @@ class OnboardService:
                 pass
         return {"cancelled": cancelled, "aborted": aborted}
 
+    def forget_host_key(self, device_id):
+        """Remove device_id's SSH host key from the PERSISTENT known_hosts
+        lab/iris-ssh-policy.sh's default (accept-new) mode records first
+        contact into. Console action for the IRIS-11-001 follow-up: a
+        re-imaged or replaced device presents a new host key and every
+        session then fails with a changed-key error -- correct
+        trust-on-first-use behaviour, but with no way to clear the stale
+        entry short of reaching inside the state volume by hand.
+
+        Only the persistent accept-new file is touched. IRIS_SSH_HOST_KEY
+        (a per-device pin) and IRIS_SSH_KNOWN_HOSTS (an operator-supplied
+        file) are not IRIS-managed state and are untouched here -- an
+        operator using either owns clearing it themselves.
+
+        This is a trust decision, so it is deliberate (one device, on
+        request) and the caller is expected to audit it; this method itself
+        performs no audit write. Returns (True, peer) on success (including
+        "nothing was recorded for this peer" -- already effectively
+        forgotten), (False, message) otherwise. Never raises.
+
+        The next session re-verifies and re-pins the peer's NEW key on first
+        contact -- the same trust-on-first-use flow a brand-new device gets,
+        never a switch to unverified connections."""
+        dev = self.fleet.get_device(device_id) if self.fleet else None
+        if dev is None:
+            return False, "no such device"
+        peer = (dev.get("device_ip") or "").strip()
+        if not peer:
+            return False, "device has no device_ip on record"
+        policy_script = os.path.join(self.repo_root, "lab", "iris-ssh-policy.sh")
+        try:
+            proc = subprocess.run(
+                ["bash", "-c",
+                 'set -e; . "$1"; iris_ssh_forget "$2"',
+                 "iris-ssh-forget", policy_script, peer],
+                capture_output=True, text=True, env=dict(os.environ), timeout=15)
+        except Exception as exc:
+            return False, "could not run iris-ssh-policy.sh: %s" % exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return False, detail or ("iris_ssh_forget exited %d" % proc.returncode)
+        return True, peer
+
     def _reap_overdue(self, now):
-        """Fail any job that has been running past the deadline.
+        """Ids of the RUNNING jobs whose deadline (measured from started_at,
+        never from the queue stamp) has passed and whose reaping is due:
+        never signalled yet, or signalled more than _REAP_GRACE ago.
 
         A hung recipe is indistinguishable from a slow one from here, so the
-        bound is deliberately generous. What matters is that the job becomes
-        TERMINAL: that releases the busy guard, lets the job record be
-        evicted, and leaves the deployment record in a state teardown can
-        read -- turning a permanent strand into an ordinary failure. Caller
-        must hold self._lock."""
+        bound is deliberately generous. Queue wait is not run time: a job
+        still ``queued`` has touched nothing and is bounded by cancel, and
+        counting its wait used to fail (and then run, or orphan) the tail of
+        every large batch. Caller must hold self._lock."""
         overdue = []
         for jid, j in self._jobs.items():
-            if j.get("state") not in _TERMINAL and j.get("finished_at") is None:
-                started = j.get("started_at") or j.get("queued_at")
-                if started is not None and now - started > _JOB_DEADLINE:
-                    overdue.append(jid)
+            if j.get("state") != "running" or j.get("finished_at") is not None:
+                continue
+            started = j.get("started_at")
+            if started is None or now - started <= _JOB_DEADLINE:
+                continue
+            signalled = j.get("_reap_signalled_at")
+            if signalled is not None and now - signalled <= _REAP_GRACE:
+                continue
+            overdue.append(jid)
         return overdue
 
     def _evict_old(self, now):

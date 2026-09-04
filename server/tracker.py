@@ -20,6 +20,8 @@ from urllib.parse import unquote_to_bytes, urlparse
 import auth
 import bencode
 import blocklist_reconciler as _reconciler
+import bounded_pool
+import credential_cache
 import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
@@ -28,6 +30,42 @@ import telemetry
 from peer_registry import PeerRegistry, INTERVAL
 
 MIN_INTERVAL = 10
+
+# Per-connection socket inactivity timeout (seconds), same posture as the
+# catalog handler: a client that opens a connection and never completes its
+# request line must not hold a thread and a file descriptor for the life of
+# the server. IRIS_HTTP_TIMEOUT overrides; garbage/non-positive -> default.
+HANDLER_TIMEOUT = 30.0
+
+
+def handler_timeout(env=None):
+    raw = (os.environ if env is None else env).get("IRIS_HTTP_TIMEOUT")
+    try:
+        value = float(raw) if raw else HANDLER_TIMEOUT
+    except (TypeError, ValueError):
+        return HANDLER_TIMEOUT
+    return value if value > 0 else HANDLER_TIMEOUT
+
+
+class _TrackerServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer with a fleet-sized accept backlog and a bounded
+    pool of concurrently running handler threads.
+
+    The stdlib default ``request_queue_size`` is 5. Every peer in the swarm
+    re-announces on the same interval, so a rollout burst overflows the
+    accept queue and the kernel answers with RSTs -- a peer then sees a
+    connection reset instead of a slow answer, and drops out of the swarm.
+    Matches gui_server._ConsoleServer and catalog._CatalogServer.
+
+    ``ThreadingMixIn.process_request`` spawns one thread per connection with
+    no cap -- see bounded_pool.py for why that is unsafe and how the mixin
+    bounds it without risking a deadlock on a long-lived connection.
+    """
+
+    request_queue_size = 128
+    # No long-lived connections here -- announce/scrape are bounded bencoded
+    # exchanges. Sized to the fleet-sized accept backlog above.
+    max_concurrent_requests = 256
 
 
 def _valid_ipv4(addr):
@@ -87,7 +125,9 @@ def parse_announce(query):
 
     # BEP3 optional ip= override — retain it for container/NAT deployments, but
     # only for private/CGNAT dotted-quad IPv4. Public endpoints always come
-    # from the authenticated connection's socket source.
+    # from the authenticated connection's socket source. The tracker further
+    # honours it ONLY for a service principal (the containerized seeder, whose
+    # socket source is loopback/bridge-local): see _handle_announce.
     raw_ip = raw.get("ip") or None
     ip = raw_ip if raw_ip is not None and _valid_ipv4(raw_ip) \
         and _private_override(raw_ip) else None
@@ -157,7 +197,7 @@ def _legacy_id(peer_ip, peer_port):
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
-                on_endpoint_change=None):
+                on_endpoint_change=None, on_announce_refused=None):
     """Build the tracker HTTP server.
 
     Typed identity/policy integration (spec §6/§7):
@@ -175,8 +215,23 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
       changing the HTTP 200 or the policy filtering.
     * ``record_endpoint`` — injectable endpoint writer (defaults to
       ``peer_endpoints.record_endpoint``); used for failure-injection tests.
+    * ``on_announce_refused`` — called with one keyword, ``expired`` (bool),
+      whenever an /announce or /scrape credential is refused (IRIS-111): a
+      403 answers with no operator-visible signal otherwise, and
+      ``iris_legacy_announce_participants`` reads 0 identically whether the
+      fleet fully migrated or every un-migrated device just aged out of
+      SEEDER_PREV_TTL and can no longer authenticate to be counted.
+      ``expired=True`` means the presented credential resolved to a known,
+      non-revoked record that failed only because it timed out -- the
+      SEEDER_PREV_TTL overlap case this counter exists for.
     """
     registry = registry or PeerRegistry()
+    # One stat-validated snapshot of the secret store and its strict announce
+    # index, shared by every announce. Every announce used to re-parse the
+    # whole store and rebuild a fleet-wide index to resolve one credential;
+    # the snapshot rebuilds only when the store file changes on disk, which
+    # every mint/rotate/revoke causes. See credential_cache.
+    _credentials = credential_cache.CredentialResolver(secrets_path)
     _grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
     _record_endpoint = record_endpoint or _peer_endpoints.record_endpoint
 
@@ -186,6 +241,11 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
         return _peer_policy.load_policy(policy_paths[0], policy_paths[1])
 
     class Handler(BaseHTTPRequestHandler):
+        # Socket inactivity timeout (see HANDLER_TIMEOUT): a stalled read
+        # raises TimeoutError inside handle_one_request, which closes the
+        # connection and releases the thread.
+        timeout = handler_timeout()
+
         def _send(self, status, body):
             self.send_response(status)
             self.send_header("Content-Type", "text/plain")
@@ -202,15 +262,17 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 return auth.resolve_announce_principal(
                     query, index, store, now, _grace,
                     legacy_id=_legacy_id(peer_ip, peer_port))
-            except auth.AnnounceAuthError:
+            except auth.AnnounceAuthError as exc:
+                if on_announce_refused is not None:
+                    on_announce_refused(expired=exc.expired)
                 return None
 
         def do_GET(self):
             parsed = urlparse(self.path)
             query = parsed.query
-            store = secrets_store.load(secrets_path)
             try:
-                index = secrets_store.build_announce_index(store)
+                store, index = _credentials.view(
+                    "announce", secrets_store.build_announce_index)
             except secrets_store.DuplicateCredentialError:
                 # A hard configuration error (two records share a value) is a
                 # token-free 403 — never a silent overwrite (spec §6).
@@ -232,11 +294,11 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
 
         def _handle_announce(self, query, store, index, now):
             a = parse_announce(query)
-            # Effective peer IP retains the explicit override allowlist
-            # (RFC1918 + CGNAT only, via parse_announce). ip=None means the
-            # override was absent/invalid: fall back to the socket source.
-            peer_ip = a["ip"] or self.client_address[0]
-            ctx = self._resolve_principal(query, store, index, now, peer_ip,
+            socket_ip = self.client_address[0]
+            # The legacy id is derived from the SOCKET endpoint: a legacy
+            # credential never earns the ip= override (below), so this is
+            # its effective endpoint.
+            ctx = self._resolve_principal(query, store, index, now, socket_ip,
                                           a["port"])
             if ctx is None:
                 self._send(403, build_failure("missing or invalid token"))
@@ -249,11 +311,24 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 self._send(400, build_failure("info_hash must be 20 bytes"))
                 return
             principal = ctx.principal
+            # Effective peer IP: the explicit override (already allowlisted to
+            # RFC1918 + CGNAT by parse_announce) is honoured ONLY for a
+            # service principal -- the containerized seeder, whose socket
+            # source is loopback/bridge-local. A device's durable endpoint is
+            # what the seeder blocklist is derived from, so a device that
+            # could name its own address could plant a permitted row on a
+            # quarantined device's address (lifting that block through the
+            # shared permit/deny conflict) or have arbitrary fleet addresses
+            # blocked; devices therefore always get the socket source.
+            if a["ip"] and principal.type == "service":
+                peer_ip = a["ip"]
+            else:
+                peer_ip = socket_ip
             # port=None means the client sent an out-of-range value. Registering
             # a substitute port would advertise a wrong endpoint; skip
             # registration AND any durable endpoint write, but still 200.
             if a["port"] is None:
-                peers = self._select(a, principal, peer_ip)
+                peers = self._select(a, principal, peer_ip, store, now)
                 self._send(200, build_announce_response(
                     peers, compact=a["compact"]))
                 return
@@ -267,7 +342,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             # never changes the HTTP 200 or the policy filtering: enqueue the
             # latest pending tuple and signal a degrade / local wake.
             self._persist_endpoint(principal, peer_ip, peer_port, now)
-            peers = self._select(a, principal, peer_ip)
+            peers = self._select(a, principal, peer_ip, store, now)
             self._send(200, build_announce_response(
                 peers, compact=a["compact"]))
 
@@ -279,7 +354,12 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             try:
                 _record_endpoint(endpoints_path, principal, peer_ip,
                                  peer_port, now)
-            except OSError:
+            except (OSError, _peer_endpoints.EndpointStoreError):
+                # A corrupt store (EndpointStoreError) is a write failure like
+                # any other for this path: the announce still gets its 200
+                # and peer list, the tuple waits in the pending queue (which
+                # the reconciler also derives from), and the reconciler
+                # reports the store state. Mirrors retry_pending.
                 if pending_queue is not None:
                     pending_queue.enqueue(principal, peer_ip, peer_port, now)
                 if on_endpoint_failure is not None:
@@ -290,7 +370,22 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if on_endpoint_change is not None:
                 on_endpoint_change()
 
-        def _select(self, a, principal, peer_ip):
+        def _denied_legacy_addresses(self, policy, store, now):
+            """Addresses a durable endpoint row attributes to a device the
+            policy denies or whose credentials are revoked, or None when the
+            endpoint store cannot be read (the caller fails closed)."""
+            if endpoints_path is None:
+                return set()
+            revoked = secrets_store.revoked_device_principals(store)
+            keep = _reconciler.denied_retention(policy, revoked)
+            try:
+                durable = _peer_endpoints.fresh_endpoints(
+                    endpoints_path, now, keep=keep)
+            except _peer_endpoints.EndpointStoreError:
+                return None
+            return _reconciler.denied_endpoint_ips(policy, durable, revoked)
+
+        def _select(self, a, principal, peer_ip, store, now):
             policy = _load_policy()
             if policy is None:
                 return registry.peers(a["info_hash"], a["peer_id"],
@@ -298,8 +393,35 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if policy.fail_closed:
                 return []
             doc = policy.document
+            # A legacy credential (a previous seeder announce token, which
+            # every device that ever received a torrent carrying it still
+            # holds) has no ACL slot, so a quarantined device could otherwise
+            # reclassify itself out of quarantine by announcing with it. A
+            # previous token now expires on its own (secrets_store's
+            # SEEDER_PREV_TTL, enforced by the same `valid` check as any other
+            # credential), which is the real boundary; this address rule is the
+            # hint that holds inside the overlap window. The
+            # credential stays the identity; the address is only a DENY
+            # hint: a legacy requester or candidate at an address a durable
+            # endpoint attributes to a denied/revoked device is treated as
+            # that device -- no peers for it, and it is handed to nobody.
+            cache = {}
+
+            def legacy_denied(p, ip):
+                if p is None or p.type != "legacy":
+                    return False
+                if "ips" not in cache:
+                    cache["ips"] = self._denied_legacy_addresses(
+                        policy, store, now)
+                denied = cache["ips"]
+                return denied is None or ip in denied
+
+            if legacy_denied(principal, peer_ip):
+                return []
 
             def predicate(req_p, req_ip, cand_p, cand_ip):
+                if legacy_denied(cand_p, cand_ip):
+                    return False
                 return _peer_policy.mutual_permit(
                     doc, req_p, req_ip, cand_p, cand_ip)
 
@@ -330,12 +452,15 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
         def log_message(self, *args):
             pass
 
-    return ThreadingHTTPServer((host, port), Handler)
+    return _TrackerServer((host, port), Handler)
 
 
 def _start_pruner(registry):
     def tick():
-        registry.prune_all()
+        try:
+            registry.prune_all()
+        except Exception:
+            pass        # one bad pass must not end periodic pruning
         t = threading.Timer(INTERVAL, tick)
         t.daemon = True
         t.start()
@@ -354,8 +479,10 @@ RECONCILE_POLL = 2.0   # max seconds before durable cross-process changes apply
 # flag is a no-op (the dead-poll gate suppresses the redundant per-2s RPC), but
 # endpoint TTL expiry and periodic RPC/session recovery are time-driven and have
 # no file-change signal — so we still force a maintenance pass at least this
-# often. Bounded to one endpoint-TTL horizon (capped) so pruning is timely
-# without blindly never running.
+# often. A pass that runs because this deadline passed also prunes expired
+# rows from the durable endpoint map (peer_endpoints.prune); a wake- or
+# change-driven pass only reads it. Bounded to one endpoint-TTL horizon
+# (capped) so pruning is timely without blindly never running.
 MAINTENANCE_INTERVAL_CAP = 60.0   # seconds
 
 
@@ -484,7 +611,7 @@ class TrackerReconciler:
 
     def _loop(self):
         # Startup always applies once (force full valid desired).
-        self._guarded_run()
+        self._safe_run()
         while not self._stop.is_set():
             # Local wake (tracker-authored) OR the ≤2s poll deadline, whichever
             # comes first, then also poll durable stat keys for other-process
@@ -497,11 +624,52 @@ class TrackerReconciler:
             # something actually needs reconciling (durable stat change, pending
             # work, unhealthy RPC/session, or the bounded maintenance deadline).
             if self._poll_should_run(waked):
-                self._guarded_run()
+                self._safe_run()
+
+    def _safe_run(self):
+        """One guarded pass that survives an unexpected exception. This is
+        the SOLE enforcement loop: if it died (ENOSPC from write_status, an
+        exception escaping derivation), announces would keep flowing while
+        peer-enforcement.json froze on its last -- possibly ``enforced`` --
+        claim and no later quarantine or revocation ever reached the seeder.
+        A failed pass is recorded as ``degraded`` (best effort) and the next
+        poll retries."""
+        try:
+            self._guarded_run()
+        except Exception as exc:
+            self._note_pass_failure(exc)
+
+    def _note_pass_failure(self, exc):
+        # Force the next bare poll to run (the deadline is the cheapest lever
+        # that does not pretend to know the RPC state), then try to say so in
+        # the status file. Only the exception TYPE is recorded: an RPC error's
+        # text can embed the secret.
+        self._next_maintenance = None
+        try:
+            prior = _peer_enforcement.read_status(self._enforcement_path) or {}
+            count = prior.get("desired_ip_count", 0)
+            status = _peer_enforcement.build_status(
+                state="degraded",
+                aria_session_id=prior.get("aria_session_id"),
+                desired_hash=prior.get("desired_hash"),
+                applied_revision=prior.get("applied_revision"),
+                desired_ip_count=count if isinstance(count, int)
+                and not isinstance(count, bool) else 0,
+                now=self._now(),
+                last_operation_exported_revision=prior.get(
+                    "last_operation_exported_revision", 0),
+                conflicts=prior.get("conflicts"),
+                last_effect=prior.get("last_effect"),
+                last_error=type(exc).__name__)
+            _peer_enforcement.write_status(self._enforcement_path, status)
+        except Exception:
+            pass
 
     def _current_poll_keys(self):
         return (_stat_key(self._policy_paths[0]),
-                _stat_key(self._endpoints_path))
+                # The durable endpoint map is a keyed shard directory, not one
+                # document, so its change key is the directory's.
+                _peer_endpoints.change_key(self._endpoints_path))
 
     def _poll_should_run(self, waked):
         """Decide whether this loop iteration should reconcile.
@@ -564,8 +732,22 @@ class TrackerReconciler:
         # 2) Recompute desired from durable + pending + active + revocation +
         #    policy + protected seeder (never in-memory residue).
         policy = _peer_policy.load_policy(*self._policy_paths)
+        revoked = set(self._revoked_principals() or set())
+        # Rows of revoked principals and of principals the policy denies at
+        # that address outlive ENDPOINT_TTL (spec 7 retirement): the seeder
+        # block for a device that stopped announcing must not lapse while it
+        # is still quarantined or revoked.
+        keep = _reconciler.denied_retention(policy, revoked)
+        if self._next_maintenance is None or now >= self._next_maintenance:
+            # Maintenance-driven pass: TTL prune of the durable map. A wake
+            # or change-driven pass only reads it (no per-announce rewrite).
+            try:
+                _peer_endpoints.prune(self._endpoints_path, now, keep=keep)
+            except (OSError, _peer_endpoints.EndpointStoreError):
+                pass    # the read below reports the store's state
         try:
-            durable = _peer_endpoints.fresh_endpoints(self._endpoints_path, now)
+            durable = _peer_endpoints.fresh_endpoints(
+                self._endpoints_path, now, keep=keep)
         except _peer_endpoints.EndpointStoreError:
             prior = _peer_enforcement.read_status(self._enforcement_path) or {}
             status = _peer_enforcement.build_status(
@@ -583,7 +765,6 @@ class TrackerReconciler:
             self._schedule_maintenance()
             return status
         active = list(self._active_participants() or [])
-        revoked = set(self._revoked_principals() or set())
         derived = _reconciler.derive_denied_set(
             policy, durable, pending_snapshot, active, revoked,
             self._protected_seeder_ip)
@@ -911,7 +1092,8 @@ def main():
         policy_paths=policy_paths, endpoints_path=endpoints_path,
         pending_queue=reconciler._pending,
         on_endpoint_failure=reconciler.wake,
-        on_endpoint_change=reconciler.wake)
+        on_endpoint_change=reconciler.wake,
+        on_announce_refused=hub.note_announce_refused)
     reconciler.start()
     print("tracker on http://%s:%d/announce" % (host, port), flush=True)
     srv.serve_forever()

@@ -26,6 +26,15 @@
 #     cert.pem+key). Supplied by tools/gen-device-installers.sh. Used to (a) paste the
 #     cert into the on-device PKI trustpoint IRIS and (b) `curl --cacert` the preflight.
 #     Required for a real run; optional for --dry-run (the block is rendered either way).
+#   SVI_IGP — routed mode only. `isis` adds `ip router isis` to the IRIS SVI so a
+#     fabric running IS-IS (e.g. an SD-Access underlay) learns the IRIS subnet.
+#     Default `none`: IRIS never injects its subnet into the operator's IGP, and
+#     never creates a `router isis` process, unless the record says so.
+#
+# Routed mode touches the AppGig trunk ADDITIVELY (`switchport trunk allowed
+# vlan add`), exactly like inband: the bare form REPLACES the allowed list and
+# would drop every other IOx app's VLAN from the switch's single app-hosting
+# uplink. Teardown removes only the IRIS VLAN from that list.
 set -euo pipefail
 
 : "${DEVICE_IP:?set DEVICE_IP}"
@@ -39,7 +48,12 @@ MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
 case "$MANAGEMENT_TYPE" in
   routed)
     : "${VLAN:?set VLAN}"; : "${SVI_IP:?set SVI_IP}"; : "${SVI_MASK:?set SVI_MASK}"; : "${GUEST_IP:?set GUEST_IP}"
-    GW_IP="${GW_IP:-$SVI_IP}" ;;
+    GW_IP="${GW_IP:-$SVI_IP}"
+    SVI_IGP="${SVI_IGP:-none}"
+    case "$SVI_IGP" in
+      none|isis) ;;
+      *) echo "ERROR: SVI_IGP must be 'none' or 'isis' (got '$SVI_IGP')" >&2; exit 1 ;;
+    esac ;;
   inband)
     : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
     VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
@@ -72,7 +86,7 @@ RPC_SECRET_FILE="rpc-secret-$CAP"
 # stays individually env-overridable.
 MODEL="${MODEL:-}"
 if [ -z "$MODEL" ] && [ "$DRY" -eq 0 ]; then
-  MODEL="$(printf 'show version\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null \
+  MODEL="$(printf 'show version\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" \
             | sed -nE 's/^cisco[[:space:]]+([^[:space:]]+)[[:space:]]+\(.*/\1/p' | head -1)"
 fi
 case "$(printf '%s' "$MODEL" | tr 'a-z' 'A-Z')" in
@@ -136,12 +150,14 @@ vlan $VLAN
 !
 interface $APP_INTF
  switchport mode trunk
- switchport trunk allowed vlan $VLAN
+ switchport trunk allowed vlan add $VLAN
 !
 interface Vlan$VLAN
  description IRIS Guest Shell inline GRT
  ip address $SVI_IP $SVI_MASK
- ip router isis
+EOF
+[ "$SVI_IGP" = "isis" ] && echo " ip router isis"
+cat <<EOF
  no shutdown
 !
 app-hosting appid guestshell
@@ -239,9 +255,18 @@ if [ "$DRY" -eq 1 ]; then
 fi
 
 ssh_host() {                       # run a command on STAGE_HOST
-  # password via env (sshpass -e), never argv — argv is world-readable in /proc
-  SSHPASS="$HOST_PASS" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@"
+  # password via env (sshpass -e), never argv — argv is world-readable in /proc.
+  # The stage host receives the per-device enrollment token, so its identity
+  # is verified like a device's: lab/iris-ssh-policy.sh (IRIS_SSH_KNOWN_HOSTS /
+  # IRIS_SSH_HOST_KEY / persistent accept-new), never /dev/null.
+  # shellcheck source=lab/iris-ssh-policy.sh
+  . "$HERE/../lab/iris-ssh-policy.sh" || return 1
+  iris_ssh_policy "$STAGE_HOST" || return 1
+  local rc=0
+  SSHPASS="$HOST_PASS" sshpass -e ssh "${IRIS_SSH_OPTS[@]}" \
+    -o LogLevel=ERROR "$HOST_USER@$STAGE_HOST" "$@" || rc=$?
+  iris_ssh_cleanup
+  return "$rc"
 }
 
 echo "[1/7] flash pre-check on $DEVICE_IP"
@@ -283,7 +308,7 @@ if not match:
     sys.exit(1)
 sys.stdout.write(match.group(1))' "$1"
 }
-PRECHECK_OUT="$(precheck_request | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
+PRECHECK_OUT="$(precheck_request | "$HERE/../lab/device-run.sh" "$DEVICE_IP" || true)"
 FLASH_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section FLASH)" || true
 printf '%s\n' "$FLASH_RAW" | grep -i 'bytes free' || true
 
@@ -339,8 +364,8 @@ if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STA
   [ -e "$ART/bootstrap.sh" ]     || cp "$HERE/bootstrap.sh" "$ART/bootstrap.sh"
   [ -e "$ART/iris-catalog.pem" ] || cp "$IRIS_CRT_FILE" "$ART/iris-catalog.pem"
 else
-  : "${HOST_USER:?set HOST_USER (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
-  : "${HOST_PASS:?set HOST_PASS (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  : "${HOST_USER:?set HOST_USER (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  : "${HOST_PASS:?set HOST_PASS (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
   agent_conf | ssh_host "umask 077 && mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\n' '$RPC_SECRET' > ~/iris/artifacts/staging/$RPC_SECRET_FILE"
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi

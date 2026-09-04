@@ -19,6 +19,7 @@ import os
 import re
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -75,6 +76,28 @@ def _fingerprint(pem_block):
     if not der:
         return "unknown"
     return hashlib.sha256(der).hexdigest()
+
+
+def _warn(msg):
+    """Operator-visible diagnostic for trust-store degradation. stderr is
+    the container log; nothing from a certificate body is interpolated."""
+    print("trust: " + msg, file=sys.stderr, flush=True)
+
+
+def is_certificate(pem_text):
+    """True iff OpenSSL parses *pem_text* as >=1 X.509 certificate and
+    nothing in it is a CERTIFICATE-labelled block that is NOT a certificate.
+    Stdlib only (a throwaway client context's cadata load). This is the
+    same parser that ssl_context() will run over the bundle later, so a
+    block that passes here can never poison the runtime bundle."""
+    if not isinstance(pem_text, str) or not pem_text.strip():
+        return False
+    try:
+        probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        probe.load_verify_locations(cadata=pem_text)
+    except (ssl.SSLError, ValueError, OSError):
+        return False
+    return True
 
 
 def cert_info(pem_block):
@@ -166,6 +189,15 @@ def add_pem(text):
     fp = _fingerprint(blocks[0])
     if fp == "unknown":
         raise ValueError("first certificate block is not decodable")
+    # Base64 that decodes is not enough: OpenSSL rejects a whole bundle over
+    # one CERTIFICATE block that is not DER of an X.509 certificate, which
+    # would silently drop every previously installed private CA from
+    # ssl_context(). Validate each block with the parser that will consume
+    # the bundle before anything is written.
+    for i, block in enumerate(blocks, 1):
+        if not is_certificate(block):
+            raise ValueError(
+                "certificate block %d is not a valid X.509 certificate" % i)
     d = trust_dir()
     os.makedirs(d, exist_ok=True)
     name = fp + ".pem"
@@ -205,17 +237,35 @@ def rebuild_bundle():
     for n in names:
         try:
             with open(os.path.join(trust_dir(), n)) as f:
-                blocks.extend(split_pem_certs(f.read()))
+                file_blocks = split_pem_certs(f.read())
         except (OSError, UnicodeDecodeError):
             continue
+        # A store file that OpenSSL would reject (hand-placed, or written by
+        # a release that validated less) must not poison the bundle for
+        # every other CA: skip it and say so, instead of letting
+        # ssl_context() fall back to system roots alone.
+        bad = [b for b in file_blocks if not is_certificate(b)]
+        if bad:
+            _warn("skipping store file %s: %d block(s) are not X.509 "
+                  "certificates; remove it from the console's Trusted CAs"
+                  % (n, len(bad)))
+            continue
+        blocks.extend(file_blocks)
     if not blocks:
         try:
             os.remove(bundle)
         except OSError:
             pass
         return 0
+    text = "\n".join(blocks) + "\n"
+    if not is_certificate(text):
+        # Belt and braces: every block passed individually, so this should
+        # be unreachable; keep the previous bundle rather than write one
+        # the consumer cannot load.
+        _warn("assembled bundle does not load; keeping the previous bundle")
+        return 0
     os.makedirs(os.path.dirname(bundle) or ".", exist_ok=True)
-    _atomic_write(bundle, "\n".join(blocks) + "\n")
+    _atomic_write(bundle, text)
     return len(blocks)
 
 
@@ -230,7 +280,8 @@ def ssl_context():
     size) so a console trust edit is picked up on the next call without a
     restart and without rebuilding a context per request. A corrupt bundle
     degrades to system roots alone (never raises — callers are best-effort
-    paths)."""
+    paths) and says so on stderr, since the symptom downstream is a
+    verification failure against the operator's own private CA."""
     path = bundle_path()
     try:
         st = os.stat(path)
@@ -244,7 +295,10 @@ def ssl_context():
     if key[1] is not None:
         try:
             ctx.load_verify_locations(path)
-        except (ssl.SSLError, OSError):
+        except (ssl.SSLError, OSError) as exc:
+            _warn("runtime CA bundle %s failed to load (%s); outbound TLS "
+                  "is verifying against system roots ONLY until the trust "
+                  "store is repaired" % (path, exc.__class__.__name__))
             ctx = ssl.create_default_context()
     with _CTX_LOCK:
         _CTX_CACHE["key"], _CTX_CACHE["ctx"] = key, ctx
@@ -404,6 +458,13 @@ def download_bundle(url):
     if not blocks:
         return {"ok": False, "certs": 0,
                 "error": "no certificates found in download"}
+    # Same rule as add_pem: one non-certificate block would make OpenSSL
+    # reject the whole runtime bundle. A download carrying such a block is
+    # rejected (previous file kept) rather than written partially.
+    if any(not is_certificate(b) for b in blocks):
+        return {"ok": False, "certs": 0,
+                "error": "download contains a block that is not an X.509 "
+                         "certificate"}
     d = trust_dir()
     os.makedirs(d, exist_ok=True)
     _atomic_write(os.path.join(d, DOWNLOADED_BUNDLE),

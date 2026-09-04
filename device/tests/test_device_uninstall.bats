@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 setup() {
-  export DEVICE_IP=100.92.9.3 DEVICE_USER=u DEVICE_PASS=p VLAN=666
+  export DEVICE_IP=203.0.113.3 DEVICE_USER=u DEVICE_PASS=p VLAN=666
   UNINSTALL="$BATS_TEST_DIRNAME/../device-uninstall.sh"
 }
 
@@ -49,6 +49,30 @@ setup() {
 @test "dry-run removes vlan and SVI" {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no interface Vlan666"* ]] && [[ "$output" == *"no vlan 666"* ]]
+}
+
+@test "routed dry-run removes ONLY the IRIS VLAN from the AppGig allowed list" {
+  # The installer only ever ADDS the IRIS VLAN to the trunk; teardown removes
+  # exactly that (record-owned) VLAN and never the trunk or other apps' VLANs.
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *$'interface AppGigabitEthernet1/0/1\n switchport trunk allowed vlan remove 666'* ]] || return 1
+  [[ "$output" != *"no switchport"* ]] || return 1
+  [[ "$output" != *"switchport trunk allowed vlan none"* ]]
+}
+
+@test "the AppGig port follows the model (IE-3x00) or an explicit APP_INTF" {
+  MODEL=IE-3400-8P2S run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"interface AppGigabitEthernet1/1"* ]] || return 1
+  APP_INTF=AppGigabitEthernet2/0/1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" == *"interface AppGigabitEthernet2/0/1"* ]]
+}
+
+@test "inband and force teardowns never touch the trunk's allowed list" {
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"allowed vlan"* ]] || return 1
+  IRIS_FORCE_AGENT_ONLY=1 run bash "$UNINSTALL" --dry-run
+  [[ "$output" != *"allowed vlan"* ]]
 }
 
 @test "dry-run detaches IRISQ with EXPLICIT-name no-forms" {
@@ -156,13 +180,43 @@ _device_uninstall_stub_setup() {
   mkdir -p "$STUBDIR/lab" "$STUBDIR/device"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
-cat > /dev/null
-# No app-hosting entry, no matching config: the device reads as already clean,
+# Model the `ssh -tt` transcript: every typed line is echoed back behind the
+# prompt (which is what carries the verify markers), then the response. No
+# app-hosting entry, no matching config: the device reads as already clean,
 # so both poll loops exit on their first pass and nothing sleeps.
+req="$(cat)"
+if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
+  printf '=== CALL ===\n%s\n' "$req" >> "$FAKE_COMMAND_LOG"
+fi
+case "$req" in
+  *"show version"*)
+    [ -n "${FAKE_VERSION_EMPTY:-}" ] && exit 0
+    printf '%s\n' "sw1#show version" "cisco C9300-24T (X86) processor" \
+      "Processor board ID ${FAKE_BOARD_ID:-FOC1234ABCD}"
+    exit 0 ;;
+esac
+case "$req" in
+  *"__IRIS_VERIFY_"*)
+    if [ -n "${FAKE_VERIFY_TRUNCATED:-}" ]; then
+      # session dropped before the FILES section came back
+      printf '%s\n' "$req" | sed 's/^/sw1#/' | sed '/FILES__/,$d'
+      exit 0
+    fi
+    printf '%s\n' "$req" | sed 's/^/sw1#/'
+    exit "${FAKE_VERIFY_STATUS:-0}" ;;
+esac
+printf '%s\n' "$req" | sed 's/^/sw1#/'
 echo "[OK]"
 STUB
   chmod +x "$STUBDIR/lab/device-run.sh"
   ln -sf "$UNINSTALL" "$STUBDIR/device/device-uninstall.sh"
+  FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/commands.log"; : > "$FAKE_COMMAND_LOG"
+  export FAKE_COMMAND_LOG
+}
+
+_device_uninstall_run_live() {
+  env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
+    bash "$STUBDIR/device/device-uninstall.sh"
 }
 
 @test "forced teardown does not demand a VLAN it will never use" {
@@ -186,4 +240,72 @@ STUB
     DEVICE_PASS=p bash "$STUBDIR/device/device-uninstall.sh"
   [[ "$output" == *"VLAN not set"* ]] || return 1
   [ "$status" -ne 0 ]
+}
+
+# --- identity guard + fail-closed verify (IRIS-11-003 / IRIS-11-007) --------
+# The Guest Shell teardown used to open with an unchecked config write and to
+# read an empty verify response as "clean". It now opens with a read-only
+# `show version` (which also lets device-run.sh learn the enable requirement
+# before any config write), compares the board ID against
+# EXPECTED_DEVICE_IDENTITY when the record supplies one, and refuses to
+# declare the device clean unless every verify section came back.
+
+@test "live: a record-driven teardown completes and persists against a clean device" {
+  _device_uninstall_stub_setup
+  run _device_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"undeploy complete"* ]]
+}
+
+@test "live: the FIRST device session is a read-only show version, before any config write" {
+  _device_uninstall_stub_setup
+  run _device_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  first="$(awk '/^=== CALL ===$/{n++} n==1' "$FAKE_COMMAND_LOG")"
+  [[ "$first" == *"show version"* ]] || return 1
+  [[ "$first" != *"configure terminal"* ]]
+}
+
+@test "live: EXPECTED_DEVICE_IDENTITY mismatch aborts before any destructive command" {
+  _device_uninstall_stub_setup
+  EXPECTED_DEVICE_IDENTITY=FOC9999ZZZZ run _device_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"device identity mismatch"* ]] || return 1
+  [[ "$output" == *"FOC9999ZZZZ"*"FOC1234ABCD"* ]] || return 1
+  ! grep -q "no event manager applet" "$FAKE_COMMAND_LOG" || return 1
+  ! grep -q "guestshell" "$FAKE_COMMAND_LOG" || return 1
+  ! grep -q "delete /force" "$FAKE_COMMAND_LOG"
+}
+
+@test "live: EXPECTED_DEVICE_IDENTITY match proceeds to the teardown" {
+  _device_uninstall_stub_setup
+  EXPECTED_DEVICE_IDENTITY=FOC1234ABCD run _device_uninstall_run_live
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"identity verified"* ]] || return 1
+  grep -q "no event manager applet IRIS-AGENT" "$FAKE_COMMAND_LOG"
+}
+
+@test "live: a truncated identity probe aborts before any destructive command" {
+  _device_uninstall_stub_setup
+  FAKE_VERSION_EMPTY=1 EXPECTED_DEVICE_IDENTITY=FOC1234ABCD run _device_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"returned nothing"* ]] || return 1
+  ! grep -q "no event manager applet" "$FAKE_COMMAND_LOG"
+}
+
+@test "live: an empty verify response is NOT clean -- a missing section fails closed" {
+  _device_uninstall_stub_setup
+  FAKE_VERIFY_TRUNCATED=1 run _device_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"refusing to declare the device clean"* ]] || return 1
+  [[ "$output" != *"undeploy complete"* ]] || return 1
+  ! grep -q "copy running-config startup-config" "$FAKE_COMMAND_LOG"
+}
+
+@test "live: a failed verify session (ssh rc 255) is NOT clean" {
+  _device_uninstall_stub_setup
+  FAKE_VERIFY_STATUS=255 run _device_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"verify session"*"failed"* ]] || return 1
+  ! grep -q "copy running-config startup-config" "$FAKE_COMMAND_LOG"
 }

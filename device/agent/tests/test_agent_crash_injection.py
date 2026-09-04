@@ -55,7 +55,7 @@ def _deps(cat, sizes, state_path, **over):
         iris_agent._atomic_write_state(state_path, state)
 
     base = dict(
-        catalog=cat, emit=lambda *a: None, ios=lambda c: "",
+        catalog=cat, emit=lambda *a: None, boot_image=lambda: "running.bin",
         aria_add=lambda t, d: None, file_size=lambda p: sizes.get(p),
         verify=lambda p, sha: True, free_bytes=lambda prefix="flash:": 9_000_000_000,
         version=lambda: "17", copy_to_root=lambda f, tp="flash:", expected_size=None: True,

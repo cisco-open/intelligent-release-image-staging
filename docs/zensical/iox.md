@@ -90,6 +90,29 @@ IOx. The installer also checks `ip routing` on a device using the routed managem
 and warns — without blocking — on a device clock old enough to break TLS
 certificate validation.
 
+### First install of a new package version
+
+The first time a device sees a given package, the IOx runtime has to load its
+docker layers into the image cache before the app can activate; a
+byte-identical package the box has run before activates in seconds because
+those layers are already cached. The installer's lifecycle waits are sized for
+that cold case: `INSTALL_TIMEOUT`, `ACTIVATE_TIMEOUT` and `START_TIMEOUT`
+default to 300 seconds each (`STATE_POLL`, the poll interval, to 5), the same
+budget `device/xr-install.sh` uses. They are flat rather than scaled by package
+size — each wait returns as soon as the state is reached, so a generous ceiling
+costs a healthy install nothing — and every one of them is an environment
+override for a device that needs longer. A wait that does run out prints the
+device's full, unfiltered reply to the `app-hosting` command and the last state
+it observed.
+
+An onboard that fails at activation leaves the app-hosting configuration in
+place, because the activation may still be in flight. That is deliberate and
+does **not** need an undeploy or a forced teardown: re-run the installer, or
+press Onboard again in the console. Console preflight treats an IRIS app that
+is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry (it serves
+nothing, and the installer's own step [1/9] tears down whatever it finds),
+while an app that is `RUNNING` is a live deployment and still refuses.
+
 ## Build modes
 
 ```bash
@@ -103,6 +126,15 @@ CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
 ```
+
+`CATALOG_PEM` must be the certificate block **only** — the public cert IRIS
+hands to devices, never the server's combined cert+key file (`IRIS_CERT`).
+The build refuses a file carrying a private-key block, and only CERTIFICATE
+blocks reach the image. The same cert-only bytes are packaged a second time
+as a top-level `iris-catalog.pem` inside `artifacts.tar.gz`: that is the
+pinned-cert probe member `tools/check-package-freshness.sh` and the console's
+Setup "device packages" card read, so a served package can be checked
+against the live certificate without unpacking its image.
 
 `device/iox/build.sh` never downloads `aria2c`. The binary is a handed-in
 deliverable, produced elsewhere by the aria2-next-static project and only
@@ -138,7 +170,10 @@ tools/stage-iox-package.sh --arch amd64
 ```
 
 On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
-`tools/bin/ioxclient`; that binary is git-ignored and not embedded in the
+`tools/bin/ioxclient`, verifying the extracted binary against
+`tools/ioxclient.sha256` and refusing a mismatch or an unrecorded version
+(`IOXCLIENT_SKIP_VERIFY=1` is the explicit one-off escape hatch, which prints
+the sha256 to record); that binary is git-ignored and not embedded in the
 repository or seed-server image. The helper retrieves the live catalog
 certificate from the running `iris` container, builds a package that pins it,
 and places the result in `/srv/artifacts`. When the served host directory is not

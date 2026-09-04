@@ -44,7 +44,18 @@ class AnnounceAuthError(Exception):
 
     Maps to a tracker 403. The message is deliberately token-free — no announce
     token value, record, or query URL is ever included.
+
+    ``expired`` classifies the refusal for metrics only (IRIS-111): True iff
+    at least one presented credential value resolved to a KNOWN record (not
+    revoked) that failed validity solely because ``now`` is past its
+    ``expires_at`` + grace -- as opposed to a value absent from the index
+    entirely (bogus/unknown) or a revoked record. It never affects the
+    refusal itself, which stays exactly as strict either way; it only lets a
+    caller count "a real, expired credential was presented" separately from
+    "someone sent garbage" -- see tracker.py's on_announce_refused and
+    metrics.py's iris_tracker_announces_refused_expired_total.
     """
+    expired = False
 
 
 # Query parameter names (spec §6): IRIS carries its credential in a DEDICATED
@@ -76,6 +87,27 @@ def _resolve_valid_credential(index, store, value, now, grace):
     if not _ss.valid(record, now, grace):
         return None
     return (principal, secret_name, legacy)
+
+
+def _known_expired(index, value, now, grace):
+    """True iff *value* resolves to a KNOWN, non-revoked record whose only
+    reason for failing _resolve_valid_credential is that it has expired.
+
+    Classification only (IRIS-111): re-derives the same lookup
+    _resolve_valid_credential already did, purely to distinguish "a real
+    credential that timed out" from "unknown/garbage" or "revoked" for the
+    refused-announce counters. Never influences the auth decision itself,
+    and never returns or logs the value."""
+    entry = index.get(value)
+    if entry is None:
+        return False
+    _principal, _secret_name, record, _legacy = entry
+    if record.get("revoked"):
+        return False
+    expires_at = record.get("expires_at", 0)
+    if expires_at == 0:
+        return False
+    return now >= expires_at + grace
 
 
 def resolve_announce_principal(query, index, store, now=None, grace=None,
@@ -110,7 +142,9 @@ def resolve_announce_principal(query, index, store, now=None, grace=None,
         resolved = _resolve_valid_credential(
             index, store, dedicated[0], now, grace)
         if resolved is None:
-            raise AnnounceAuthError("invalid announce credential")
+            err = AnnounceAuthError("invalid announce credential")
+            err.expired = _known_expired(index, dedicated[0], now, grace)
+            raise err
         return _context(resolved, legacy_id)
 
     # Step 3: exactly one blank dedicated OR no dedicated -> legacy scan.
@@ -125,7 +159,10 @@ def resolve_announce_principal(query, index, store, now=None, grace=None,
         (resolved,) = valid_hits.values()
         return _context(resolved, legacy_id)
     if len(valid_hits) == 0:
-        raise AnnounceAuthError("no valid announce credential")
+        err = AnnounceAuthError("no valid announce credential")
+        err.expired = any(_known_expired(index, v, now, grace)
+                          for v in legacy_values)
+        raise err
     raise AnnounceAuthError("ambiguous announce credential: "
                             "multiple valid legacy keys")
 

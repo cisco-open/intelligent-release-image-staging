@@ -1,8 +1,18 @@
 device_id,image_id
 # Which device should have which image. Apply with: tools/apply-assignments.sh
-# Changing a device's row to a different image makes that device clean up the old
-# image and pull the new one automatically (within ~60s of applying).
-100.92.9.3,cat9k_iosxe.26.01.01
-100.92.9.1,cat9k_iosxe.26.01.01
-100.92.9.129,cat9k_iosxe.26.01.01
-100.92.9.131,cat9k_iosxe.26.01.01
+#
+# Comment lines (#) and the header are ignored, so every example row below is
+# inert until you uncomment it. Addresses are TEST-NET-1 (192.0.2.0/24, RFC
+# 5737) placeholders -- replace them with your own device ids.
+#
+# Changing a device's row to a different image makes that device pull the new
+# image (within ~60s of applying) and PARK the old one: its torrent stops and
+# its staging copy is freed, but the copy already placed on the storage root is
+# deliberately KEPT so re-adding the image is a presence check rather than
+# another multi-gigabyte transfer. That kept copy is reclaimed by a later
+# placement that is short of room -- not at the moment you reassign -- so size
+# the storage root for the images you want resident at once. See
+# docs/zensical/device-agents.md ("Unassigned image park").
+#192.0.2.10,cat9k_iosxe.26.01.01
+#192.0.2.20,cat9k_iosxe.26.01.01
+#192.0.2.30,cat9k_iosxe.26.01.01

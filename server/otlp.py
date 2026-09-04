@@ -15,6 +15,7 @@ import collections
 import json
 import os
 import threading
+import time
 import urllib.request
 
 import trust
@@ -176,6 +177,61 @@ def _ts_nano(value):
         return "0"
 
 
+def _rfc3339_millis(value):
+    """Epoch seconds -> ``2026-09-02T14:03:11.482Z``: UTC, EXACTLY three
+    fractional digits, a literal trailing ``Z``.
+
+    Three properties the operator-facing Splunk extraction
+    ``%Y-%m-%dT%H:%M:%S.%N%Z`` depends on, none of them incidental:
+      1. UTC via ``time.gmtime``, never the container's local zone -- the
+         exported instant must not change meaning when a host is re-zoned.
+      2. The fractional field is ALWAYS present and ALWAYS exactly three
+         digits, so ``%N`` never faces a missing or variable-width field. A
+         whole-second instant rendered as ``...:11Z`` fails the pattern
+         outright, which is why the millis are formatted unconditionally.
+      3. A literal ``Z``, never ``+00:00``: ``%Z`` matches a zone NAME and
+         will not consume a numeric offset.
+    The date part is assembled with explicit ``%`` conversions off the
+    ``time.gmtime`` fields rather than ``strftime``, whose output is
+    locale-sensitive in some builds; an operator's LANG must not be able to
+    change the shape of an exported timestamp.
+
+    Returns None for anything uncoercible -- ``bool`` included, since it is an
+    ``int`` subclass and would otherwise render True as
+    ``1970-01-01T00:00:01.000Z``. None means the caller DROPS the attribute
+    pair (``attrs = [_attr(k, v) for k, v in pairs if v is not None]``), which
+    is the house rule here: a builder never raises on bad input, and an absent
+    attribute is honest where a fabricated instant is not."""
+    if isinstance(value, bool):
+        return None
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN is the only value unequal to itself; an infinity would blow up
+    # int() below. A negative epoch is not a thing IRIS can observe -- it
+    # means a corrupt row, not a pre-1970 transfer.
+    if ts != ts or abs(ts) == float("inf") or ts < 0:
+        return None
+    whole = int(ts)
+    millis = int(round((ts - whole) * 1000))
+    if millis == 1000:
+        # The rounding carried: 1.9996 is ...:02.000Z, never ...:01.1000Z,
+        # which would be four fractional digits and break property 2 above.
+        whole += 1
+        millis = 0
+    try:
+        tm = time.gmtime(whole)
+    except (OverflowError, ValueError, OSError):
+        # A year outside the platform's time_t range. Same contract as every
+        # other rejection: drop the attribute rather than raise inside an
+        # exporter that must never break the caller.
+        return None
+    return "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ" % (
+        tm.tm_year, tm.tm_mon, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec, millis)
+
+
 def _build_v2_report_record(report, device_id, enrich=None):
     """v2 terminal report -> ``iris.device.transfer.report`` (design §10.8).
     OTLP event time = server ``received_at`` (device ``observed_at`` rides as an
@@ -323,6 +379,158 @@ def build_policy_record(entry, status=None):
     return _record("iris.peer.policy", _ts_nano(entry.get("created_at")),
                    attrs, event_id=entry.get("event_id"),
                    body="peer policy operation")
+
+
+_LIFECYCLE_NAME = "iris.transfer.lifecycle"
+
+# The two transitions a transfer plan can report, in the only order they can
+# occur. ``planned`` is minted with the assignment; ``seeding_started`` is the
+# server's observation that the device holds verified content AND is announcing
+# as a seeder for it. There is deliberately no "downloading" between them: the
+# server has no honest instant for one.
+_LIFECYCLE_EVENTS = ("planned", "seeding_started")
+
+
+def build_transfer_lifecycle_record(row, event):
+    """One ``transfer_lifecycle`` store row -> ``iris.transfer.lifecycle``,
+    the server-side plan lifecycle event (``event`` is one of
+    ``_LIFECYCLE_EVENTS``).
+
+    OTLP event time is the SOURCE instant -- ``planned_at`` for ``planned``,
+    ``seeding_started_at`` for ``seeding_started`` -- never the emit instant
+    and never an ingestion time. This is a deliberate departure from
+    ``_build_v2_report_record``, which times off the server's ``received_at``
+    because the only thing it knows for certain about a device report is when
+    it arrived. Here the server itself minted and observed both instants, so
+    timing the record off the emit would report a queue delay as a transfer
+    fact, and a crash-replay would then move an already-exported timestamp.
+
+    ``event.id`` is DERIVED from the plan (``<plan_id>.<event>``), never minted
+    per emission, so a replay after a crash between the queue accepting the
+    record and the durable marker landing carries a byte-identical record. The
+    two events MUST therefore differ in that suffix: ``LogQueue.emit`` refuses
+    a key already in ``_keys``/``_inflight_keys``, so a shared id would make
+    the second record vanish silently rather than fail loudly.
+
+    Both device-id spellings ride on purpose. ``iris.device.transfer.report``
+    carries ``device.id`` and ``iris.swarm.peer_bytes`` carries
+    ``iris.device.id``; emitting both here lets either join be written without
+    a coalesce. An attribute cannot be withdrawn additively, so this is a
+    permanent commitment, made knowingly.
+
+    WHAT IS AN INGEST INSTANT SAYS SO. ``iris.transfer.checksum_verified_at``
+    is the server's ``received_at`` for the attesting report, so the same value
+    also ships as ``iris.transfer.report_received_at`` -- the honest name. The
+    device reports no verification instant at all, so nothing is back-dated to
+    stand in for one; what ships instead is the device's own
+    ``report_created_at``, beside its ``observed_at``, on the device's clock,
+    so an operator can see how much delivery latency a plan-to-seed duration
+    is carrying rather than reading it as transfer time.
+
+    ``iris.transfer.recovered_promotion`` rides only when the row was promoted
+    on a pass that REBUILT it from a lost store. Such a record's
+    ``seeding_started_at`` is the durable pair alone, which may be earlier than
+    what an earlier emission under the identical ``event.id`` carried; the flag
+    is what lets a backend attribute that difference instead of silently
+    holding two values.
+
+    Garbage-tolerant throughout: a non-dict row reads as empty, every
+    uncoercible timestamp drops its own attribute pair (see
+    ``_rfc3339_millis``), and ``_ts_nano`` yields ``"0"`` rather than raising.
+    An absent attribute means NOT KNOWN -- nothing here is defaulted, because a
+    defaulted plan id or instant is worse than a missing one."""
+    if not isinstance(row, dict):
+        row = {}
+    seeding = event == "seeding_started"
+    pairs = [
+        ("otel.log.name", _LIFECYCLE_NAME),
+        (_SCHEMA_ATTR, 2),
+        ("event", _enrich_str(event)),
+        # The four correlation ids. ``iris.plan.id`` is the join key an
+        # operator groups on: it is stable across both events of one plan and
+        # distinct across two plans for the same device and image.
+        ("iris.transfer.id", _enrich_str(row.get("transfer_id"))),
+        ("iris.plan.id", _enrich_str(row.get("plan_id"))),
+        ("iris.device.id", _enrich_str(row.get("device_id"))),
+        ("device.id", _enrich_str(row.get("device_id"))),
+        ("iris.image.id", _enrich_str(row.get("image_id"))),
+        ("iris.torrent.info_hash", _enrich_str(row.get("info_hash"))),
+        # Repeated on BOTH events so plan-to-seeding duration is computable
+        # from the seeding_started record alone, without joining back to the
+        # planned record that may have been dropped by a bounded queue.
+        ("iris.transfer.planned_at", _rfc3339_millis(row.get("planned_at"))),
+    ]
+    at = row.get("planned_at")
+    if seeding:
+        at = row.get("seeding_started_at")
+        pairs.extend([
+            ("iris.transfer.seeding_started_at",
+             _rfc3339_millis(row.get("seeding_started_at"))),
+            # The two preconditions that produced it, exported separately so
+            # an operator can see WHICH one was the laggard: a device whose
+            # sha256 of a ~1.2 GB image runs minutes after aria2 first
+            # announced left=0 shows tracker_seeder_at well before
+            # checksum_verified_at, and the reverse ordering means the swarm,
+            # not the device, was the wait. Both are honest per-transfer
+            # facts, latched once by the store and never recomputed.
+            ("iris.transfer.checksum_verified_at",
+             _rfc3339_millis(row.get("checksum_verified_at"))),
+            # THE SAME INSTANT, UNDER THE NAME THAT SAYS WHAT IT IS. The
+            # value above is the server's INGEST of the attesting report --
+            # the first moment the server knew the checksum had verified --
+            # not the moment the device verified it. The device reports no
+            # verification instant, so nothing here back-dates a guess; the
+            # inflation is instead made legible. It is not marginal: the agent
+            # arms the terminal report at completion but defers the whole send
+            # on a bad link, backing off to ~16 minutes, so on exactly the
+            # constrained devices IRIS exists for the ingest instant can sit
+            # that far behind the physical one. `checksum_verified_at` keeps
+            # shipping because an exported attribute cannot be withdrawn.
+            ("iris.transfer.report_received_at",
+             _rfc3339_millis(row.get("checksum_verified_at"))),
+            ("iris.transfer.tracker_seeder_at",
+             _rfc3339_millis(row.get("tracker_seeder_at"))),
+        ])
+    attrs = [_attr(k, v) for k, v in pairs if v is not None]
+    if seeding:
+        # The DEVICE's own clocks for the attesting report, kept as float
+        # epochs and named exactly as ``_build_v2_report_record`` names them,
+        # so the two records answer "what did the device think the time was"
+        # the same way: the end of its measurement window, and the instant it
+        # composed the report. The second is the closest thing to "when the
+        # device verified" that the device actually reports, and read against
+        # ``iris.transfer.report_received_at`` it shows how long that report
+        # spent getting here -- the whole magnitude of a plan-to-seed duration
+        # inflated by delivery backoff. These are a SECOND CLOCK: the
+        # difference is that latency PLUS whatever skew stands between them,
+        # and neither is ever subtracted from a server instant above as though
+        # it were exact. Each is absent when the report carried none.
+        for key, field in (("iris.device.observed_at", "observed_at"),
+                           ("iris.device.report_created_at",
+                            "report_created_at")):
+            value = row.get(field)
+            try:
+                if value is not None:
+                    attrs.append(_attr(key, float(value)))
+            except (TypeError, ValueError):
+                pass
+        if row.get("recovered_promotion") is True:
+            # This record REBUILT a lost store row, so its
+            # seeding_started_at is max(checksum_verified_at, planned_at) --
+            # the durable pair only. The original emission under this same
+            # event.id may have carried a LATER instant taken from
+            # tracker_seeder_at, and no rebuild can reproduce it: the peer
+            # registry is in memory. The flag is how a backend tells the
+            # replay from the original instead of holding two disagreeing
+            # values with nothing to attribute the difference to; it also
+            # says that tracker_seeder_at on THIS record is a post-loss
+            # re-announce, so recomputing max() over the three attributes
+            # here will not reproduce seeding_started_at. Absent -- never
+            # false -- on an ordinary promotion.
+            attrs.append(_attr("iris.transfer.recovered_promotion", True))
+    return _record(_LIFECYCLE_NAME, _ts_nano(at), attrs,
+                   event_id="%s.%s" % (row.get("plan_id"), event),
+                   body="transfer lifecycle %s" % event)
 
 
 def build_tracker_record(event):
@@ -648,10 +856,17 @@ class LogQueue:
     by a destination change.
 
     Durability contract:
-      * ``emit`` appends FIFO; when the queue is full the OLDEST event is
-        dropped BEFORE the append (bounded best-effort, Day-1 in-process), and
-        ``dropped_total`` is incremented per drop. FIFO order of the kept
-        events is preserved.
+      * ``emit`` appends FIFO; when the queue is full the OLDEST EVICTABLE
+        event is dropped BEFORE the append (bounded best-effort, Day-1
+        in-process), and ``dropped_total`` is incremented per drop. FIFO
+        order of the kept events is preserved. ``emit(event, evictable=True)``
+        marks a SAMPLED record (the per-connection ``iris.swarm.peer_rate`` /
+        ``peer_bytes`` stream, which the hub queues on every 2 s seeder pass
+        and which the durable ledger already holds): those are evicted first,
+        so a burst of them can never push a tracker peer lifecycle event, a
+        policy operation, a device report or its exact per-peer fan-out out
+        of the queue. Only when nothing evictable is queued is the oldest
+        durable-intent event dropped.
       * ``flush(send)`` hands a snapshot batch to ``send`` and removes those
         events from the queue ONLY after ``send`` returns without raising.
         On failure the batch remains in place. Concurrent emits remain
@@ -693,12 +908,29 @@ class LogQueue:
             self._event_key = event_key
             self._delivered_callback = delivered_callback
             self._queue = collections.deque(
-                (event_id, event, self._key(event))
-                for event_id, event, _ in self._queue)
-            self._keys = {key for _, _, key in self._queue}
+                (event_id, event, self._key(event), evictable)
+                for event_id, event, _, evictable in self._queue)
+            self._keys = {key for _, _, key, _ in self._queue}
             self._keys.discard(None)
 
-    def emit(self, event):
+    def _evict_one(self):
+        """Drop one queued event to make room: the oldest evictable
+        (sampled) one if any, else the oldest event. Caller holds the lock."""
+        victim = None
+        for index, (_, _, _, evictable) in enumerate(self._queue):
+            if evictable:
+                victim = index
+                break
+        if victim is None:
+            _, _, dropped_key, _ = self._queue.popleft()
+        else:
+            _, _, dropped_key, _ = self._queue[victim]
+            del self._queue[victim]
+        if dropped_key is not None:
+            self._keys.discard(dropped_key)
+        self._dropped += 1
+
+    def emit(self, event, evictable=False):
         with self._lock:
             key = self._key(event)
             if key is not None and (key in self._keys or
@@ -708,11 +940,8 @@ class LogQueue:
                 self._dropped += 1
                 return False
             while len(self._queue) >= self._max:
-                dropped_id, _, dropped_key = self._queue.popleft()
-                if dropped_key is not None:
-                    self._keys.discard(dropped_key)
-                self._dropped += 1
-            self._queue.append((self._next_id, event, key))
+                self._evict_one()
+            self._queue.append((self._next_id, event, key, bool(evictable)))
             if key is not None:
                 self._keys.add(key)
             self._next_id += 1
@@ -730,7 +959,7 @@ class LogQueue:
 
     def snapshot(self):
         with self._lock:
-            return [event for _, event, _ in self._queue]
+            return [event for _, event, _, _ in self._queue]
 
     def flush(self, send):
         """Deliver the current FIFO prefix via ``send(batch)`` (which must
@@ -740,12 +969,13 @@ class LogQueue:
         with self._flush_lock:
             with self._lock:
                 queued_batch = list(self._queue)
-                self._inflight_ids = {event_id for event_id, _, _ in queued_batch}
-                self._inflight_keys = {key for _, _, key in queued_batch
+                self._inflight_ids = {event_id
+                                      for event_id, _, _, _ in queued_batch}
+                self._inflight_keys = {key for _, _, key, _ in queued_batch
                                        if key is not None}
             if not queued_batch:
                 return None
-            batch = [event for _, event, _ in queued_batch]
+            batch = [event for _, event, _, _ in queued_batch]
             try:
                 send(batch)
             except Exception:
@@ -753,16 +983,20 @@ class LogQueue:
                     self._inflight_ids.clear()
                     self._inflight_keys.clear()
                 return 0
-            sent_ids = {event_id for event_id, _, _ in queued_batch}
-            sent_keys = {key for _, _, key in queued_batch if key is not None}
+            sent_ids = {event_id for event_id, _, _, _ in queued_batch}
+            sent_keys = {key for _, _, key, _ in queued_batch
+                         if key is not None}
             with self._lock:
-                retained_sent_ids = {event_id for event_id, _, _ in self._queue
+                retained_sent_ids = {event_id
+                                     for event_id, _, _, _ in self._queue
                                      if event_id in sent_ids}
-                # Overflow may have dropped part of this in-flight prefix.
-                # Remove only its still-retained contiguous suffix; later
-                # concurrent emits have distinct IDs and stay queued.
-                while self._queue and self._queue[0][0] in sent_ids:
-                    _, _, key = self._queue.popleft()
+                # Overflow may have dropped part of this in-flight prefix
+                # (evictable records anywhere in it, or the oldest). Remove
+                # every still-retained sent event; later concurrent emits have
+                # distinct IDs and stay queued in order.
+                self._queue = collections.deque(
+                    item for item in self._queue if item[0] not in sent_ids)
+                for _, _, key, _ in queued_batch:
                     if key is not None:
                         self._keys.discard(key)
                 # Events evicted while this successful send was in flight were

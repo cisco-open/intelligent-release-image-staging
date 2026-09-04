@@ -197,10 +197,13 @@ def test_docs_state_announce_credential_travels_over_http():
     _require("security.md", ["cleartext"])
 
 
-def test_docs_state_no_day1_revoke_or_migration():
-    """Both credentials stay valid. There is no shipped revoke command and no
-    automated migration on day one."""
-    _require("security.md", ["no shipped command"])
+def test_docs_state_previous_announce_token_is_bounded():
+    # Was test_docs_state_no_day1_revoke_or_migration, which required the docs
+    # to say both credentials stay valid indefinitely -- the defect itself.
+    """Both credentials stay valid for a bounded overlap, after which the old
+    one expires on its own. There is still no shipped revoke command, so the
+    docs must not tell an operator to retire one by hand."""
+    _require("security.md", ["no shipped command", "bounded overlap"])
 
 
 def test_docs_state_stage_only_invariant():
@@ -258,3 +261,189 @@ def test_docs_state_swarm_map_is_proven_by_hand():
 def test_docs_state_identity_gate_env_var():
     """The deployment gate is off by default and documented where env vars live."""
     _require("reference.md", ["IRIS_REQUIRE_IDENTITY_GATE"])
+
+
+# ---------------------------------------------------------------------------
+# Environment-registry gate (IRIS-15-001).
+#
+# Compose injects ONLY what server/docker-compose.yml's `environment:` block
+# names -- a variable set in server/.env or the shell but absent from that block
+# is a silent no-op. Twelve documented knobs (including IRIS_METRICS_HOST, which
+# security.md calls "the hard control" for the swarm surface, and the
+# IRIS_OTLP_HEADERS collector credential) were unreachable that way. This gate
+# fails if a variable documented in reference.md's env tables is neither passed
+# through nor on the explicit host-side/one-shot list below.
+
+# Documented, but deliberately NOT container environment. Each entry says why.
+_COMPOSE_UNAVAILABLE = {
+    # Read by Compose itself (project name) / interpolated into container_name;
+    # neither is a container variable.
+    "COMPOSE_PROJECT_NAME": "compose project name, host-side only",
+    "IRIS_CONTAINER": "compose container_name + tools/ target, host-side only",
+    # Interpolated host-side into the secrets/bind-mount stanzas, never injected.
+    "IRIS_AGE_KEY_FILE_HOST": "host path of the age identity (docker secret)",
+    "IRIS_ARTIFACTS_HOST_DIR": "host path of the artifacts bind mount",
+    "IRIS_IMAGE_ROOT": "host path of the read-only image bind mount",
+    "IRIS_SHARP_SANS_FONT_HOST": "host path of the licensed-font bind mount",
+    # Build argument, not a runtime variable.
+    "IRIS_VERSION": "docker build arg",
+    # Read by the IOS-XR appmgr container's own entrypoint on the device, not
+    # by the server: it never belongs in the server container's environment.
+    "IRIS_XR_SKIP_MOUNT_CHECK": "device-side XR entrypoint, test-only",
+    # Passed on the one-shot `run --rm -e ...` so the long-lived container never
+    # holds the admin password in its environment.
+    "IRIS_GUI_ADMIN_PASSWORD": "one-shot iris-gui-admin only",
+    # Container-side defaults; the docs say none of these needs setting.
+    "IRIS_GUI_CERT": "container default path",
+    "IRIS_TRUST_DIR": "container default path",
+    "IRIS_CA_BUNDLE": "container default path",
+}
+
+_ENV_TABLE_SECTIONS = (
+    "### Required at deploy time",
+    "### Optional at deploy time",
+    "### Container paths",
+    "### Image path variables",
+    "### Telemetry variables",
+)
+
+
+def _reference_env_vars():
+    """Every variable named in the first cell of a reference.md env table row."""
+    with open(os.path.join(DOCS, "reference.md")) as fh:
+        text = fh.read()
+    found = set()
+    for heading in _ENV_TABLE_SECTIONS:
+        start = text.index(heading) + len(heading)
+        rest = text[start:]
+        nxt = re.search(r"^#{2,3} ", rest, re.M)
+        block = rest[:nxt.start()] if nxt else rest
+        for line in block.splitlines():
+            m = re.match(r"\|\s*`([A-Z][A-Z0-9_]*)`\s*\|", line)
+            if m:
+                found.add(m.group(1))
+    return found
+
+
+def _compose_environment_keys():
+    """Keys of the `environment:` mapping in server/docker-compose.yml, read as
+    text so the gate needs no YAML dependency and no interpolation."""
+    path = os.path.join(REPO, "server", "docker-compose.yml")
+    with open(path) as fh:
+        lines = fh.readlines()
+    keys = set()
+    indent = None
+    for line in lines:
+        if re.match(r"^\s*environment:\s*$", line):
+            indent = len(line) - len(line.lstrip())
+            continue
+        if indent is None:
+            continue
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        if here <= indent:
+            break
+        m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*:", line)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def test_documented_env_vars_reach_the_compose_container():
+    documented = _reference_env_vars()
+    assert len(documented) > 25, \
+        "reference.md env tables parsed as only %d rows" % len(documented)
+    passed_through = _compose_environment_keys()
+    missing = sorted(documented - passed_through - set(_COMPOSE_UNAVAILABLE))
+    assert not missing, (
+        "reference.md documents these variables but server/docker-compose.yml's "
+        "environment: block does not pass them through, so setting them in "
+        "server/.env or the shell is a silent no-op: %s" % missing)
+
+
+def test_compose_unavailable_list_has_no_stale_entries():
+    """An entry here claims a documented variable is deliberately not injected.
+    If it IS injected, the carve-out is stale and misleading."""
+    passed_through = _compose_environment_keys()
+    stale = sorted(set(_COMPOSE_UNAVAILABLE) & passed_through)
+    assert not stale, \
+        "these are passed through after all; drop the carve-out: %s" % stale
+
+
+def test_reference_states_the_compose_injection_mechanism():
+    """The registry must say that server/.env alone does not reach the process --
+    the false-confidence half of IRIS-15-001."""
+    _require("reference.md", [
+        "How a variable reaches the container",
+        "environment:",
+        "silently dropped",
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Shipped example CSVs (IRIS-14-005).
+#
+# fleet/devices.csv.example shipped three UNCOMMENTED rows carrying the
+# maintainer's live lab addresses, so the documented `cp ... devices.csv` +
+# import landed three phantom devices in a new operator's inventory (and
+# published lab addressing in a public repo). The console's own generated
+# template, FleetStore.example_csv(), already got this right; these gates keep
+# the checked-in files from drifting from it again.
+
+_EXAMPLE_CSVS = ("devices.csv.example", "assignments.csv.example")
+
+# RFC 5737 documentation ranges + RFC 1918 / RFC 6598 private space, which is
+# what an example router-side subnet legitimately uses.
+_ALLOWED_EXAMPLE_NETS = (
+    "192.0.2.", "198.51.100.", "203.0.113.",       # TEST-NET-1/2/3
+    "10.", "192.168.", "127.", "100.64.",
+) + tuple("172.%d." % n for n in range(16, 32))
+
+
+def _example_csv_lines(name):
+    with open(os.path.join(REPO, "fleet", name)) as fh:
+        return fh.read().splitlines()
+
+
+def test_example_csv_data_rows_are_all_commented():
+    """Importing a shipped template as-is must add zero devices and zero
+    assignments -- the header and comments are ignored, an uncommented row is
+    not."""
+    for name in _EXAMPLE_CSVS:
+        lines = _example_csv_lines(name)
+        for n, line in enumerate(lines[1:], start=2):   # line 1 is the header
+            if not line.strip():
+                continue
+            assert line.lstrip().startswith("#"), \
+                "fleet/%s line %d is a live data row: %r" % (name, n, line)
+
+
+def test_example_csv_addresses_are_documentation_ranges():
+    """No lab or customer addressing in a public template."""
+    octet = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+    for name in _EXAMPLE_CSVS:
+        for n, line in enumerate(_example_csv_lines(name), start=1):
+            for addr in octet.findall(line):
+                if addr.startswith(("255.", "0.")):
+                    continue                            # netmasks
+                assert addr.startswith(_ALLOWED_EXAMPLE_NETS), \
+                    "fleet/%s line %d ships a non-documentation address %s" \
+                    % (name, n, addr)
+
+
+def test_devices_csv_example_header_matches_the_console_template():
+    """The checked-in template and the one the console serves are two copies of
+    the same artifact; a header that is not CSV_V2_COLS fails import."""
+    import sys
+    sys.path.insert(0, os.path.join(REPO, "server"))
+    try:
+        import gui_fleet
+    finally:
+        sys.path.pop(0)
+    header = _example_csv_lines("devices.csv.example")[0]
+    assert header == ",".join(gui_fleet.CSV_V2_COLS), \
+        "fleet/devices.csv.example header is not gui_fleet.CSV_V2_COLS"
+    served = gui_fleet.FleetStore.example_csv().splitlines()
+    served_header = next(l for l in served if l.startswith("device_id,"))
+    assert header == served_header

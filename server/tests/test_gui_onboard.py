@@ -232,7 +232,12 @@ def test_old_terminal_onboard_jobs_evicted():
     assert svc.get_job(j2) is not None
 
 
-def test_stage_host_creds_injected(monkeypatch):
+def test_stage_host_creds_never_reach_the_recipe_env(monkeypatch):
+    # Rewritten: this used to assert HOST_USER/HOST_PASS were exported from
+    # the store, which encoded the defect -- _build_env forces
+    # IRIS_STAGE_LOCAL=1, so no recipe can reach the ssh branch that reads
+    # them, and the password was copied into every installer's env for
+    # nothing.
     monkeypatch.delenv("HOST_USER", raising=False)
     monkeypatch.delenv("HOST_PASS", raising=False)
     seen = {}
@@ -244,13 +249,19 @@ def test_stage_host_creds_injected(monkeypatch):
     svc = _svc(fake_run, stage_host={"username": "svc", "password": "hostpw"})
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["env"]["HOST_USER"] == "svc"
-    assert seen["env"]["HOST_PASS"] == "hostpw"
+    assert seen["env"]["IRIS_STAGE_LOCAL"] == "1"
+    assert "HOST_USER" not in seen["env"]
+    assert "HOST_PASS" not in seen["env"]
+    assert "hostpw" not in repr(seen["env"])
     # the password never appears in the streamed job lines
     assert all("hostpw" not in ln for ln in job["lines"])
 
 
-def test_stage_host_creds_beat_process_env(monkeypatch):
+def test_inherited_stage_host_env_is_dropped_from_the_recipe_env(monkeypatch):
+    # Rewritten from the old "process env passes through" contract for the
+    # same reason as above: a stage-host password no recipe can use must not
+    # ride into the installer and its ssh children from the server's own
+    # environment either.
     monkeypatch.setenv("HOST_USER", "envuser")
     monkeypatch.setenv("HOST_PASS", "envpw")
     seen = {}
@@ -259,25 +270,12 @@ def test_stage_host_creds_beat_process_env(monkeypatch):
         seen["env"] = e
         return 0
 
-    svc = _svc(fake_run, stage_host={"username": "svc", "password": "hostpw"})
-    _wait(svc, svc.start("d1"))
-    assert seen["env"]["HOST_USER"] == "svc"
-    assert seen["env"]["HOST_PASS"] == "hostpw"
-
-
-def test_no_stage_host_keeps_env_passthrough(monkeypatch):
-    monkeypatch.setenv("HOST_USER", "envuser")
-    monkeypatch.setenv("HOST_PASS", "envpw")
-    seen = {}
-
-    def fake_run(p, e, on):
-        seen["env"] = e
-        return 0
-
-    svc = _svc(fake_run)   # plain _Creds: no stage_host_secrets at all
-    _wait(svc, svc.start("d1"))
-    assert seen["env"]["HOST_USER"] == "envuser"
-    assert seen["env"]["HOST_PASS"] == "envpw"
+    for stage_host in (None, {"username": "svc", "password": "hostpw"}):
+        svc = _svc(fake_run, stage_host=stage_host)
+        _wait(svc, svc.start("d1"))
+        assert "HOST_USER" not in seen["env"]
+        assert "HOST_PASS" not in seen["env"]
+        assert "envpw" not in repr(seen["env"])
 
 
 def test_no_stage_host_no_env_leaves_unset(monkeypatch):
@@ -611,7 +609,7 @@ def test_default_xr_preflight_passes_a_clean_router(monkeypatch):
                        sources="No entries found\n", seen=seen)
     dev = {"device_id": "8010-R1"}
     evidence = gui_onboard._default_xr_preflight(
-        dev, {"DEVICE_IP": "100.90.170.81"}, {}, "/repo")
+        dev, {"DEVICE_IP": "203.0.113.81"}, {}, "/repo")
     assert evidence == {"status": "passed", "detected_model": "8000"}
     assert dev["os_family"] == "xr"
     # driven over the XR transport, not the IOS-XE one
@@ -683,7 +681,7 @@ def test_default_xr_preflight_raises_when_the_transport_fails(monkeypatch):
 
 
 def _xr_svc(run_fn, **kw):
-    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "100.90.170.81",
+    fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "203.0.113.81",
                            "vlan": "666", "svi_ip": "10.0.0.2",
                            "svi_mask": "255.255.255.252",
                            "guest_ip": "10.0.0.3", "model": "8010",
@@ -719,7 +717,7 @@ def test_xr_onboard_runs_the_xr_recipe_with_the_env_it_documents(tmp_path):
     assert job["state"] == "done", job["lines"]
     assert seen["path"].endswith("device/xr-install.sh")
     env = seen["env"]
-    assert env["DEVICE_IP"] == "100.90.170.81"
+    assert env["DEVICE_IP"] == "203.0.113.81"
     assert env["DEVICE_ID"] == "d1"
     assert env["CATALOG_TOKEN"] == "TOK-d1"
     assert env["CATALOG_URL"] == "https://10.9.9.9:8443"
@@ -749,7 +747,7 @@ def test_xr_onboard_refuses_when_the_preflight_refuses(tmp_path):
 
     def refuse(dev, env, resolved):
         dev["os_family"] = "xe"
-        raise ValueError("100.90.170.81 reports IOS-XE, not IOS-XR")
+        raise ValueError("203.0.113.81 reports IOS-XE, not IOS-XR")
 
     svc = _xr_svc(fake_run, artifacts_dir=str(tmp_path),
                   xr_preflight_fn=refuse)
@@ -1652,6 +1650,115 @@ def test_default_iox_preflight_raises_when_identity_unparseable(monkeypatch):
     with pytest.raises(ValueError, match="processor board ID"):
         gui_onboard._default_iox_preflight(
             {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+# --- IOx preflight: a half-finished onboard is resumable (scrubber #78) ----
+# A first install of a NEW package version can outrun the installer's activate
+# budget while the IOx runtime is still loading the package's docker layers.
+# That left the app DEPLOYED and the app-hosting stanza (plus the trustpoint
+# the installer pastes in [4/9]) on the device, and preflight then refused
+# EVERY retry -- the operator had to undeploy by hand before the console would
+# try again. An app that is installed but never started serves nothing, and
+# device/iox/install.sh's step [1/9] tears down whatever it finds, so that is a
+# resumable retry, not a collision.
+
+def _iox_preflight_stub(monkeypatch, running="hostname sw1\n",
+                        apps="No App found\n"):
+    def run(_argv, input=None, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=(
+            "__IRIS_PREFLIGHT_VERSION__\n" + _iox_show_version() +
+            "\n__IRIS_PREFLIGHT_RUNNING__\n" + running +
+            "\n__IRIS_PREFLIGHT_APPS__\n" + apps))
+    monkeypatch.setattr(gui_onboard.subprocess, "run", run)
+
+
+# exactly what device/iox/install.sh leaves behind when the activate wait times
+# out: its trustpoint from [4/9] and its app-hosting stanza from [7/9]
+_IOX_FAILED_ONBOARD = ("hostname sw1\n"
+                       "crypto pki trustpoint IRIS\n"
+                       " enrollment terminal\n"
+                       "ip http client secure-trustpoint IRIS\n"
+                       "app-hosting appid iris\n"
+                       " app-vnic AppGigabitEthernet trunk\n")
+
+
+def _iox_app_list(state):
+    return ("App id                                   State\n"
+            "---------------------------------------------------------\n"
+            "iris                                     %s\n" % state)
+
+
+@pytest.mark.parametrize("state", ["DEPLOYED", "ACTIVATED"])
+def test_default_iox_preflight_resumes_an_installed_but_unstarted_app(
+        monkeypatch, state):
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps=_iox_app_list(state))
+    evidence = gui_onboard._default_iox_preflight(
+        {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+    assert evidence["status"] == "passed"
+    # recorded on the deployment record, so the retry is visible as a retry
+    assert evidence["resumable_app_state"] == state
+    assert evidence["device_identity"] == "9ABC123"
+
+
+def test_default_iox_preflight_still_refuses_a_running_app(monkeypatch):
+    """A RUNNING app is a live deployment, not a failed onboard: still refuse
+    rather than let a re-onboard tear a working agent down by surprise."""
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps=_iox_app_list("RUNNING"))
+    with pytest.raises(ValueError,
+                       match="the iris app-hosting config already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_refuses_a_stanza_with_no_installed_app(
+        monkeypatch):
+    """Fail closed on anything the app list does not explicitly report as
+    installed-but-unstarted -- an unlisted app is not evidence of a failed
+    onboard, and the installer already removes its own stanza when the
+    install itself fails."""
+    _iox_preflight_stub(monkeypatch, running=_IOX_FAILED_ONBOARD,
+                        apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_resume_does_not_waive_guest_shell_artifacts(
+        monkeypatch):
+    """The waiver covers only what device/iox/install.sh re-creates itself.
+    An EEM applet belongs to the Guest Shell recipe, which this installer
+    neither owns nor replaces."""
+    _iox_preflight_stub(
+        monkeypatch,
+        running=_IOX_FAILED_ONBOARD + "event manager applet IRIS-AGENT authorization bypass\n",
+        apps=_iox_app_list("DEPLOYED"))
+    with pytest.raises(ValueError, match="an IRIS EEM applet already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_default_iox_preflight_refuses_iris_trustpoint_without_an_app(
+        monkeypatch):
+    """No app-hosting stanza means no resumable IOx deployment, so the
+    IRIS-named leftovers are somebody else's and still refuse."""
+    _iox_preflight_stub(monkeypatch,
+                        running="hostname sw1\ncrypto pki trustpoint IRIS\n",
+                        apps="No App found\n")
+    with pytest.raises(ValueError,
+                       match="crypto pki trustpoint IRIS already exists"):
+        gui_onboard._default_iox_preflight(
+            {}, {"DEVICE_IP": "192.0.2.30"}, {}, "/repo")
+
+
+def test_iox_app_state_ignores_an_app_whose_name_merely_contains_ours():
+    apps = ("App id                                   State\n"
+            "irisprobe                                RUNNING\n")
+    assert gui_onboard._iox_app_state(apps, "iris") == ""
+    assert gui_onboard._iox_app_state(
+        apps + "iris                                     DEPLOYED\n",
+        "iris") == "DEPLOYED"
 
 
 def test_apply_iox_preflight_binds_identity_and_model():
@@ -2699,7 +2806,7 @@ def test_a_job_past_the_deadline_stops_blocking_the_device():
     """A recipe whose output pipe never EOFs hangs forever. The job then never
     becomes terminal, is never evicted, and the busy guard refuses BOTH a
     re-onboard and an undeploy for that device -- permanently. That is how
-    100.90.168.116 was stranded: onboard_start with no onboard_finished, no log,
+    192.0.2.116 was stranded: onboard_start with no onboard_finished, no log,
     and a device already carrying a live Guest Shell.
 
     Past the deadline the job must be marked failed so the device frees up.
@@ -2876,22 +2983,47 @@ def test_reaped_job_records_the_key_every_reader_uses(tmp_path):
 
 def test_reaped_job_is_persisted_and_audited(tmp_path):
     """Bypassing _finish meant a reaped job wrote no log and emitted no
-    *_finished event: it failed with nothing anywhere saying so."""
-    events = []
-    svc = _svc(lambda *a, **k: 0,
-               now_fn=lambda: 1000.0 + gui_onboard._JOB_DEADLINE + 5,
-               log_dir=str(tmp_path / "deploy-logs"),
-               audit_fn=lambda **kw: events.append(kw))
-    jid = _stuck_job(svc)
-    assert svc.reap_overdue_jobs() == [jid]
+    *_finished event: it failed with nothing anywhere saying so.
 
-    logs = os.listdir(str(tmp_path / "deploy-logs"))
+    Rewritten: the old version planted a job with no installer process and
+    asserted the handle was gone after the reap, which encoded the defect --
+    the reaper dropped a LIVE handle without signalling it. Reaping now
+    signals the installer and keeps the handle (abort stays reachable) until
+    the worker returns; the log and audit come from that ordinary finish."""
+    events = []
+    clock = {"t": 1000.0}
+    log_dir = str(tmp_path / "deploy-logs")
+    proc = threading.Event()
+    signalled = []
+
+    class Proc:
+        def terminate(self):
+            signalled.append("TERM")
+            proc.set()
+
+    def run_fn(p, e, on, on_proc):
+        on_proc(Proc())
+        proc.wait(10)
+        return 143
+
+    svc = _svc(run_fn, now_fn=lambda: clock["t"], log_dir=log_dir,
+               audit_fn=lambda **kw: events.append(kw))
+    jid = svc.start("d1")
+    assert _wait_for(lambda: jid in svc._procs)
+    clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+    assert svc.reap_overdue_jobs() == [jid]
+    assert signalled == ["TERM"]
+    assert jid in svc._procs, "handle dropped while the installer was alive"
+
+    job = _wait(svc, jid)
+    assert job["state"] == "error" and job["returncode"] == 143
+    logs = os.listdir(log_dir)
     assert len(logs) == 1, logs
-    with open(os.path.join(str(tmp_path / "deploy-logs"), logs[0])) as stream:
+    with open(os.path.join(log_dir, logs[0])) as stream:
         header = stream.readline()
-    assert "rc=-1" in header and "state=error" in header
+    assert "rc=143" in header and "state=error" in header
     assert [e for e in events if e.get("event") == "onboard_finished"], events
-    # and the installer handle is released rather than leaked
+    # and the installer handle is released once the worker has returned
     assert jid not in svc._procs
 
 
@@ -2990,3 +3122,359 @@ def test_probe_sections_survive_an_input_echoing_transport(monkeypatch):
         "xr")
     assert "Cisco IOS XR Software" in sections["version"]
     assert gui_onboard.parse_os_family(sections["version"]) == "xr"
+
+
+# ---------------------------------------------------------------------------
+# The deadline reaper: run time is measured from started_at only, a queued
+# job is never reaped, and reaping a RUNNING job stops its installer instead
+# of abandoning it.
+# ---------------------------------------------------------------------------
+
+class _BlockedProc:
+    """A fake installer handle (no pid -> _signal_group falls back to the
+    Popen methods, exactly like the abort tests above)."""
+    def __init__(self, release_on_term=True, release_on_kill=True):
+        self.release = threading.Event()
+        self.signals = []
+        self._on_term = release_on_term
+        self._on_kill = release_on_kill
+
+    def terminate(self):
+        self.signals.append("TERM")
+        if self._on_term:
+            self.release.set()
+
+    def kill(self):
+        self.signals.append("KILL")
+        if self._on_kill:
+            self.release.set()
+
+
+def _blocked_runner(proc, rc=137):
+    """A proc-reporting runner that blocks until the fake proc is released."""
+    started = threading.Event()
+
+    def run_fn(p, e, on, on_proc):
+        on_proc(proc)
+        started.set()
+        on("running")
+        proc.release.wait(10)
+        return rc
+    return run_fn, started
+
+
+def test_reaper_never_counts_queue_wait_as_run_time():
+    """A queued job's wait is not run time: it has touched nothing and is
+    bounded by cancel. Counting it used to make the next start() -- for ANY
+    device -- select the queued job, crash on its missing started_at (the
+    operator's request died with a traceback) and leave it flagged failed but
+    still in the work queue, so it later ran the installer anyway."""
+    proc = _BlockedProc()
+    run_fn, started = _blocked_runner(proc, rc=0)
+    clock = {"t": 1000.0}
+    svc = _multi_svc(3, run_fn, max_concurrent=1, now_fn=lambda: clock["t"])
+    j1 = svc.start("d1")
+    assert started.wait(5)
+    j2 = svc.start("d2")
+    assert svc.get_job(j2)["state"] == "queued"
+    assert svc.get_job(j2)["started_at"] is None
+
+    clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+    j3 = svc.start("d3")                      # must not raise
+    queued = svc.get_job(j2)
+    assert queued["state"] == "queued"
+    assert queued["finished_at"] is None
+    assert not any("deadline" in ln for ln in queued["lines"])
+    assert svc.get_job(j3)["state"] == "queued"
+
+    # only the RUNNING job past its deadline was acted on
+    assert svc.get_job(j1)["state"] == "running"
+    assert proc.signals == ["TERM"]
+    proc.release.set()
+    assert _wait(svc, j2)["state"] == "done"
+    assert _wait(svc, j3)["state"] == "done"
+    assert not any("deadline" in ln for ln in svc.get_job(j2)["lines"])
+
+
+def test_finish_tolerates_a_job_that_never_started():
+    """_finish measured the duration from started_at, which is None for a
+    job that never won a slot; it must fall back to the queue stamp."""
+    events = []
+    svc = _svc(lambda p, e, on: 0, now_fn=lambda: 5000.0,
+               audit_fn=lambda **kw: events.append(kw))
+    jid = _stuck_job(svc, "d1", state="queued")
+    svc._jobs[jid]["started_at"] = None
+    svc._jobs[jid]["queued_at"] = 4000
+    svc._finish(jid, "error", -1)
+    job = svc.get_job(jid)
+    assert job["state"] == "error" and job["returncode"] == -1
+    assert events and "16m40s" in events[-1]["detail"]
+
+
+def test_reaping_a_running_job_signals_the_installer_and_keeps_the_device_busy(tmp_path):
+    """Reaping used to drop the Popen handle without a signal: the installer
+    kept running against the device, abort() went dead, the busy guard
+    opened -- so an undeploy was ACCEPTED and ran while the install was still
+    executing on the same box -- and the blocked worker was never replaced.
+
+    Now the reaper behaves like an operator abort: the process group is
+    signalled, the job stays running (busy guard truthful, abort reachable)
+    until the worker returns, and the worker then finishes the job the
+    ordinary way with the real rc and a needs-reconcile record."""
+    proc = _BlockedProc(release_on_term=False)
+    run_fn, started = _blocked_runner(proc, rc=137)
+    clock = {"t": 1000.0}
+    record_store = deployment_records.DeploymentRecordStore(str(tmp_path / "state"))
+    events = []
+    svc = _multi_svc(2, run_fn, max_concurrent=1, now_fn=lambda: clock["t"],
+                     record_store=record_store,
+                     audit_fn=lambda **kw: events.append(kw))
+    record = record_store.create({
+        "controller_id": "c", "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "h" * 64, "preflight": {"status": "pending"},
+        "resolved": {"platform": "guestshell", "management_type": "routed"},
+        "resources": []})
+    j1 = svc.start("d1", prepare=lambda: record["record_id"])
+    assert started.wait(5)
+    assert record_store.get(record["record_id"])["state"] == "applying"
+
+    clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+    assert svc.reap_overdue_jobs() == [j1]
+    assert proc.signals == ["TERM"]
+    job = svc.get_job(j1)
+    assert job["state"] == "running", "job went terminal with the installer still running"
+    assert any("deadline" in ln for ln in job["lines"])
+    # the device is still busy: the opposite action is refused, not interleaved
+    with pytest.raises(ValueError, match="busy"):
+        svc.start("d1", action="undeploy")
+    # abort stays reachable while the installer lives
+    assert svc.abort(j1) is True
+    assert proc.signals == ["TERM", "TERM"]
+    # a second reap inside the grace period does nothing more
+    assert svc.reap_overdue_jobs() == []
+
+    proc.release.set()                        # the installer finally dies
+    job = _wait(svc, j1)
+    assert job["state"] == "error" and job["returncode"] == 137
+    assert record_store.get(record["record_id"])["state"] == "needs-reconcile"
+    assert j1 not in svc._procs
+    assert [e for e in events if e.get("event") == "onboard_finished"]
+    # and the pool worker is free again: the next job actually runs
+    proc2 = _BlockedProc()
+    proc2.release.set()
+    svc._run = _blocked_runner(proc2, rc=0)[0]
+    assert _wait(svc, svc.start("d2"))["state"] == "done"
+
+
+def test_reaper_escalates_to_kill_and_only_then_marks_failed(tmp_path):
+    """An installer that ignores SIGTERM is SIGKILLed after the grace period;
+    only when even that leaves the job running is it marked failed -- with
+    the ordinary finish bookkeeping (returncode, persisted log, audit)."""
+    proc = _BlockedProc(release_on_term=False, release_on_kill=False)
+    run_fn, started = _blocked_runner(proc, rc=137)
+    clock = {"t": 1000.0}
+    events = []
+    log_dir = str(tmp_path / "deploy-logs")
+    svc = _multi_svc(1, run_fn, max_concurrent=1, now_fn=lambda: clock["t"],
+                     log_dir=log_dir, audit_fn=lambda **kw: events.append(kw))
+    j1 = svc.start("d1")
+    assert started.wait(5)
+
+    clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+    assert svc.reap_overdue_jobs() == [j1]
+    assert proc.signals == ["TERM"]
+    clock["t"] += gui_onboard._REAP_GRACE + 1
+    assert svc.reap_overdue_jobs() == [j1]
+    assert proc.signals == ["TERM", "KILL"]
+    assert svc.get_job(j1)["state"] == "running"
+    clock["t"] += gui_onboard._REAP_GRACE + 1
+    assert svc.reap_overdue_jobs() == [j1]
+    job = svc.get_job(j1)
+    assert job["state"] == "error" and job["returncode"] == -1
+    assert any("could not be stopped" in ln for ln in job["lines"])
+    assert len(os.listdir(log_dir)) == 1
+    assert [e for e in events if e.get("event") == "onboard_finished"]
+    assert svc.reap_overdue_jobs() == []      # terminal: never reaped again
+    proc.release.set()                        # let the worker thread go
+
+
+def test_a_queued_job_past_the_deadline_is_not_overdue():
+    svc = _svc(lambda *a, **k: 0)
+    jid = _stuck_job(svc, "dev-q", state="queued", started_at=1000)
+    svc._jobs[jid]["started_at"] = None
+    assert svc._reap_overdue(1000.0 + gui_onboard._JOB_DEADLINE + 1) == []
+    assert svc.reap_overdue_jobs() == []
+    assert svc._jobs[jid]["state"] == "queued"
+
+
+def test_escalation_advances_with_no_idle_worker_and_no_operator_action(monkeypatch):
+    """One wedged job on a pool of one: every worker is blocked inside the
+    installer, so no idle-worker queue timeout is left to call the reaper, and
+    an unattended console makes no further start(). The escalation therefore
+    never advanced -- the installer kept running and the device stayed busy
+    until an operator clicked something. A maintenance thread now drives it.
+
+    Nothing in this test calls reap_overdue_jobs(), start(), or any other
+    service method between the submission and the terminal state."""
+    monkeypatch.setattr(gui_onboard, "_MAINTENANCE_INTERVAL", 0.02)
+    proc = _BlockedProc(release_on_term=False, release_on_kill=False)
+    run_fn, started = _blocked_runner(proc, rc=137)
+    clock = {"t": 1000.0}
+    svc = _multi_svc(1, run_fn, max_concurrent=1, now_fn=lambda: clock["t"])
+    try:
+        j1 = svc.start("d1")
+        assert started.wait(5)
+        assert len(svc._workers) == 1   # the only worker is inside run_fn
+
+        clock["t"] = 1000.0 + gui_onboard._JOB_DEADLINE + 5
+        assert _wait_for(lambda: proc.signals == ["TERM"], timeout=5), \
+            "the deadline passed and nothing signalled the installer"
+        clock["t"] += gui_onboard._REAP_GRACE + 1
+        assert _wait_for(lambda: proc.signals == ["TERM", "KILL"], timeout=5), \
+            "SIGTERM was ignored and nothing escalated to SIGKILL"
+        clock["t"] += gui_onboard._REAP_GRACE + 1
+        job = _wait(svc, j1, timeout=5)
+        assert job["state"] == "error" and job["returncode"] == -1
+        # ... and the busy guard is open again: the device is usable
+        assert svc.start("d1") != j1
+    finally:
+        proc.release.set()
+        svc.stop_maintenance()
+
+
+def test_maintenance_thread_retires_itself_when_no_job_is_left(monkeypatch):
+    """It is one timed wait per tick, not a busy loop, and a service that is
+    not onboarding anything carries no extra thread at all."""
+    monkeypatch.setattr(gui_onboard, "_MAINTENANCE_INTERVAL", 0.02)
+    svc = _multi_svc(1, lambda p, e, on: 0)
+    assert svc._maintenance is None          # never started before a job
+    try:
+        assert _wait(svc, svc.start("d1"))["state"] == "done"
+        monkeypatch.setattr(gui_onboard, "_JOB_TTL", 0)   # let it be evicted
+        assert _wait_for(lambda: svc._maintenance is None, timeout=5), \
+            "the maintenance thread outlived the last job"
+    finally:
+        svc.stop_maintenance()
+
+
+# ---------------------------------------------------------------------------
+# Every platform's preflight evidence is bound into the job's plan (and,
+# through pre_apply, onto the deployment record) -- not only the router's.
+# ---------------------------------------------------------------------------
+
+def test_guestshell_onboard_binds_preflight_evidence_through_pre_apply():
+    """The Guest Shell preflight's evidence used to be discarded, so the
+    record never learned which board it described and a later teardown ran
+    with an empty EXPECTED_DEVICE_IDENTITY."""
+    seen, bound = {}, {}
+
+    def pre_apply(evidence):
+        bound["evidence"] = dict(evidence)
+        return gui_onboard.bind_preflight(
+            {"platform": "guestshell", "management_type": "routed",
+             "device_ip": "10.0.0.1"}, evidence)
+
+    svc = _svc(lambda p, e, on: seen.update(e) or 0,
+               guestshell_preflight_fn=lambda dev, env, resolved: {
+                   "status": "passed", "device_identity": "FOC1111GS",
+                   "detected_model": "C9300-48P"})
+    job = _wait(svc, svc.start("d1", resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1"}, pre_apply=pre_apply))
+    assert job["state"] == "done"
+    assert bound["evidence"]["device_identity"] == "FOC1111GS"
+    assert job["resolved"]["device_identity"] == "FOC1111GS"
+    assert seen["EXPECTED_DEVICE_IDENTITY"] == "FOC1111GS"
+    assert seen["MODEL"] == "C9300-48P"
+
+
+def test_guestshell_onboard_fails_closed_without_a_bindable_identity():
+    ran = []
+    svc = _svc(lambda p, e, on: ran.append(1) or 0,
+               guestshell_preflight_fn=lambda dev, env, resolved: {
+                   "status": "passed"})
+    job = _wait(svc, svc.start("d1"))
+    assert job["state"] == "error" and ran == []
+    assert any("device identity" in ln for ln in job["lines"])
+
+
+def test_bind_preflight_dispatches_on_platform():
+    assert gui_onboard.bind_preflight(
+        {"platform": "iox"}, {"status": "passed", "device_identity": "A1"}
+    )["device_identity"] == "A1"
+    assert gui_onboard.bind_preflight(
+        {"platform": "guestshell"}, {"status": "passed", "device_identity": "B2"}
+    )["device_identity"] == "B2"
+    xr = gui_onboard.bind_preflight(
+        {"platform": "xr-appmgr"}, {"status": "passed", "detected_model": "8201"})
+    assert xr["model"] == "8201" and "device_identity" not in xr
+    with pytest.raises(ValueError, match="did not pass"):
+        gui_onboard.bind_preflight({"platform": "xr-appmgr"}, {"status": "failed"})
+    with pytest.raises(ValueError, match="no preflight binding"):
+        gui_onboard.bind_preflight({"platform": "toaster"}, {"status": "passed"})
+
+
+def test_build_env_takes_device_ip_from_the_resolved_plan_for_every_type():
+    """Undeploy renders from the record's resolved plan. Only the router
+    types used to take DEVICE_IP from it; Guest Shell and IOx teardowns
+    followed the live fleet row, so an inventory edit after deployment
+    retargeted the teardown at whatever answered at the new address."""
+    svc = _svc(lambda p, e, on: 0)
+    svc.fleet.upsert({"device_id": "d1", "device_ip": "203.0.113.99"})
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "device_identity": "FOC1111GS"})
+    assert env["DEVICE_IP"] == "10.0.0.1"
+    assert env["EXPECTED_DEVICE_IDENTITY"] == "FOC1111GS"
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "iox", "management_type": "inband",
+        "device_ip": "10.0.0.1", "inband_vlan": "120"})
+    assert env["DEVICE_IP"] == "10.0.0.1"
+    assert env["IOS_SSH_HOST"] == "10.0.0.1"
+    # a plan without an address (legacy start) still falls back to the row
+    _dev, env = svc._build_env("d1", mint=False)
+    assert env["DEVICE_IP"] == "203.0.113.99"
+
+
+# ---------------------------------------------------------------------------
+# svi_igp (issue #85): SVI_IGP used to be settable only as a process-wide env
+# var on the server -- wrong for a server that onboards devices into
+# different fabrics. A per-device record value now overrides it; a device
+# whose record says nothing must still see whatever SVI_IGP the server
+# process itself was started with (e.g. server/.env), unchanged.
+# ---------------------------------------------------------------------------
+
+def test_build_env_sets_svi_igp_from_the_resolved_record(monkeypatch):
+    monkeypatch.delenv("SVI_IGP", raising=False)
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": "isis"})
+    assert env["SVI_IGP"] == "isis"
+
+
+def test_build_env_falls_back_to_the_inherited_svi_igp_env_when_record_is_blank(monkeypatch):
+    # server/.env (or any process-wide setting) stays the default for a
+    # device whose own record carries no override -- the exact SD-Access
+    # workaround issue #85 exists to make unnecessary.
+    monkeypatch.setenv("SVI_IGP", "isis")
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": ""})
+    assert env["SVI_IGP"] == "isis"
+    # and identically when the resolved plan carries no key at all
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1"})
+    assert env["SVI_IGP"] == "isis"
+
+
+def test_build_env_record_svi_igp_overrides_the_inherited_env_default(monkeypatch):
+    # The per-device value wins over the process-wide one when both are set.
+    monkeypatch.setenv("SVI_IGP", "isis")
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": "none"})
+    assert env["SVI_IGP"] == "none"

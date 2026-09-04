@@ -17,7 +17,7 @@ This page collects the actions operators perform after the first deployment.
 | Publish image | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<path>/<image>.bin` |
 | Show images and assignments | `docker compose -f server/docker-compose.yml exec iris iris-assign` |
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
-| Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` |
+| Create or reset admin | `docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin` — a reset also ends every live console session ([Console sessions](security.md#console-sessions)) |
 
 `apply-assignments.sh` and `gen-device-installers.sh`
 ([Prepare devices](getting-started.md#prepare-devices)) require the running
@@ -65,8 +65,9 @@ already at privileged EXEC (`#`) executes the secret as a command, which IOS may
 try to resolve as a hostname and can delay every session by tens of seconds. A
 device that genuinely needs enable fails its first unprivileged session loudly,
 is learned from the prompt, and succeeds on retry. Set
-`IRIS_DEVICE_ENABLE_ALWAYS=1` only to restore the old unconditional behavior for
-a known environment.
+`IRIS_DEVICE_ENABLE_ALWAYS=1` only for a known environment that must start
+escalated; even then the pair is dropped for the rest of that process as soon
+as a session shows a privileged prompt.
 
 ## Bulk device actions
 
@@ -130,18 +131,65 @@ The same route separates its other refusals, and they mean different things:
 ## Endpoint writes that fail
 
 An authenticated announce from an attributable principal records the peer's
-address in `peer-endpoints.json` under `IRIS_STATE`, aged out by
-`IRIS_ENDPOINT_TTL`. If that durable write fails, the entry is queued in memory
-and retried on the following reconcile passes rather than being dropped — the
+address in the durable endpoint map under `IRIS_STATE`, aged out by
+`IRIS_ENDPOINT_TTL` (seconds; a non-positive or non-numeric value falls back
+to the 900 s default rather than disabling enforcement). The address recorded
+for a **device** is always the announce's socket source; the BEP3 `ip=`
+override is honoured only for the service seeder, whose container source is
+loopback. If that durable write fails, the entry is queued in memory and
+retried on the following reconcile passes rather than being dropped — the
 device keeps participating in the swarm meanwhile, but the reported enforcement
 status degrades until the write lands, because the derived deny set is computed
 from durable state.
 
-A corrupt or unreadable `peer-endpoints.json` is treated as fail-closed rather
-than empty: the reconcile pass stops before deriving or applying anything,
-existing blocks stay in place, and the recorded state is forced to `fail_closed`.
-Peer discovery is unaffected — the announce path reads the policy files
-independently.
+Rows belonging to a quarantined or revoked device are **not** aged out by the
+TTL: the seeder block for a device that has stopped announcing stays in place
+until the device is un-quarantined or re-onboarded (which clears its rows), not
+merely until the TTL lapses.
+
+### How the map is stored
+
+The map is **keyed** state: `peer-endpoints.d/` holds one row per principal,
+spread over 256 shard files, rather than one `peer-endpoints.json` document.
+An announce locks, parses and rewrites only the shard its own principal lands
+in, so the cost of a device's announce does not grow with the size of the
+fleet and unrelated devices no longer serialise behind one writer. Each shard
+is written atomically (temp file + rename). An existing `peer-endpoints.json`
+from an earlier release is migrated into the shards the first time the tracker
+touches the map and is left behind, renamed to `peer-endpoints.json.migrated`,
+for reference; nothing has to be done by hand.
+
+The capacity of the map is the supported fleet size **plus** headroom for
+service principals, so a full fleet of devices and the `service:seeder`
+principal all fit without evicting anything. The capacity bound is applied by
+the reconciler's maintenance pass, not by each announce.
+
+A corrupt or unreadable shard — unparseable JSON, a wrong schema, or a
+malformed endpoint row — is treated as fail-closed rather than empty: the reconcile pass stops before deriving or applying anything, existing
+blocks stay in place, and the recorded state is forced to `fail_closed`. Peer
+discovery for device and service principals continues (the announce still
+returns its peer list; the endpoint it could not write waits in the retry
+queue), while a legacy-token announce gets no peers until the store is readable
+again, because the tracker cannot tell whether its address belongs to a
+quarantined device.
+
+If a reconcile pass fails for any other reason (for example the state volume is
+full when the status file is written), the loop records `degraded` with the
+exception type in `last_error` where it can and retries on the next poll; it
+never stops.
+
+If even that degraded write fails — or the tracker process itself is
+down — `peer-enforcement.json` simply stops changing, and its last recorded
+state (possibly `enforced`) would otherwise sit there looking current
+indefinitely. The console's peer-policy badge (device inventory, Peer
+policy column) does not take a frozen state at face value: `GET
+/api/peer-policy` derives `enforcement.stale` from how long it has been
+since `last_reconciled_at` (never, or more than five minutes — several
+multiples of the reconciler's own 60-second maintenance deadline, to absorb
+scheduling jitter without false-flagging a healthy but quiet fleet) and the
+badge shows `<state> (stale)` regardless of what that state is, with the
+last-reconciled time and `last_error` in its tooltip. A stale badge means
+"go check the tracker process," not "policy is misconfigured."
 
 ## Retiring a device
 
@@ -156,6 +204,40 @@ is denied through its still-fresh retained endpoint regardless of policy, so the
 order of cleanup cannot accidentally re-permit it. Re-onboarding clears the
 device's old endpoint rows before the fresh credential becomes usable, and aborts
 without minting if that clear fails.
+
+## Forgetting a device's SSH host key
+
+Every SSH/scp session IRIS opens itself — device transports, the installers'
+stage-host push, the XR RPM scp — verifies the peer per
+[Security → Device SSH host keys](security.md#device-ssh-host-keys).
+By default that is trust-on-first-use: the first session records the peer's
+host key into a persistent `known_hosts` under the IRIS state volume, and
+every later session must present the same one.
+
+A device that is re-imaged or replaced presents a **new** host key, and every
+session against it then fails with a changed-key error — correct behavior
+(the alternative would be silently trusting a possibly-different box), but
+with nothing recorded to distinguish "legitimately re-imaged" from "someone
+else answering at that address" beyond the operator's own judgment, and the
+persistent `known_hosts` file lives inside the state volume, which the
+operator does not always have shell access to reach directly.
+
+**Console:** open the device's deployment details drawer and use **Forget
+host key**. This is a trust decision, so it asks for confirmation, and it is
+audited (`device_forget_host_key`, naming the device and the console user)
+either way. See [Reference → Devices](reference.md#devices) for the
+underlying route.
+
+**From a shell with access to the state volume:** the hint
+`iris_ssh_explain` already prints on a changed-key failure works directly —
+`ssh-keygen -R '<device_ip>' -f '<state>/ssh/known_hosts'`.
+
+Either path only clears the stale entry; it does not disable verification.
+The very next session re-verifies and pins whatever key the device now
+presents, the same trust-on-first-use flow a brand-new device gets. Neither
+path touches `IRIS_SSH_HOST_KEY` (a per-device pin) or an operator-supplied
+`IRIS_SSH_KNOWN_HOSTS` file — clearing either of those, if set, is the
+operator's own decision.
 
 ## Backups
 
@@ -246,6 +328,20 @@ it only permits assignment despite the mismatch — and re-running the check
 later and getting that same mismatch again does not re-quarantine an
 overridden image; a genuinely different mismatch does.
 
+Either kind of release also puts the image back into the origin seeder: the
+quarantine had force-removed its torrent from aria2, and a released image with
+no origin would otherwise leave every device assigned it waiting at 0% until the
+next container restart. The re-add happens from the image's recorded
+`source_dir`, after re-syncing the canonical torrent's announce to the current
+seeder credential (a quarantine can outlive an announce rotation, which skips
+quarantined images); the `info` byte span, and so the info hash, is unchanged.
+The response carries `seeding_resumed`, and a re-add that fails — aria2
+unreachable, or a `source_dir` that no longer exists (IRIS never guesses a
+directory by basename) — is audited as
+`image_quarantine_release_seeding` with `result=fail` while the release itself
+stays in force. A container restart re-seeds every catalogued, non-quarantined
+torrent, so it repairs that case too.
+
 ## Scaling notes
 
 Private BitTorrent reduces server load by letting devices exchange pieces after the seeder introduces the content. The server remains important for tracker announces, catalog policy, initial seeding, and telemetry. Watch the seeder data port, tracker health, and device storage pressure during large network waves.
@@ -306,13 +402,11 @@ in `lab/xr-run.sh`; a value exported in the server's environment always
 takes precedence over that default, `0` disables the bound entirely, and an
 invalid value falls back to the default with a logged warning), so a
 wedged router fails the job with a real exit code instead of hanging it. The
-150-second default sits at the top of a recon-derived 120-150-second band:
-every healthy session measured or inferred from recovered `.20` job logs ran
-~15-20 seconds, so 150s carries 6-10x headroom over that ceiling for both
-install and teardown alike — the install Up-poll is 30 short,
-client-looped sessions rather than one long one, so it shares the same
-bound safely without a separate knob
-(`agentinfo/xr-support/teardown-speed-recon.md`, section 1.4). Undeploy
+150-second default sits at the top of a measured 120-150-second band:
+every healthy session in the lab runs ~15-20 seconds, so 150s carries
+6-10x headroom over that ceiling for both install and teardown alike — the
+install Up-poll is 30 short, client-looped sessions rather than one long
+one, so it shares the same bound safely without a separate knob. Undeploy
 composes at most two bounded sessions per run — a read-only probe and
 deactivate session, then a destructive uninstall/remove/sweep/verify
 session — so a completely unresponsive router
@@ -326,21 +420,14 @@ honestly leave an empty `iris-work/` directory behind on harddisk: rather
 than failing over it — a later onboarding simply reuses that same directory
 (it only ever ensures the directory exists, never requires it be absent).
 
-`.20` operators: its `server/docker-compose.override.yml` still carries
-`IRIS_XR_SESSION_TIMEOUT=300`, set back when the tracked default was 900
-seconds and per-teardown session counts ran six to eleven. That override was
-always a per-session cap, not a total-teardown one: at that same 300-second
-override, live runs recovered from the old design still took 929-964
-seconds end to end (`agentinfo/xr-support/teardown-speed-recon.md`, section
-1.2 — roughly three stalled-to-the-bound sessions each), not 300 seconds.
-It is now redundant for teardown — Task 2's at-most-two-session composite
-plus the tracked 150-second default already keep a stalled teardown's
-worst case to a comfortable 300 seconds without any override in play — but
-leaving it in place is harmless: it only widens the per-session bound back
-out to 300s (a 600s worst case across two stalls) rather than
-reintroducing the old multi-hour exposure. Removing it tightens the worst
-case back down to the tracked default; that edit is the operator's to
-make, not something this change makes for them. Undeploy itself never touches a bare
+If your deployment carries an `IRIS_XR_SESSION_TIMEOUT` override from an
+earlier release — 300 seconds was a common one, set back when the tracked
+default was 900 seconds and a teardown ran six to eleven sessions — it is now
+redundant, and leaving it is harmless. That override was always a *per-session*
+cap, not a total-teardown one: at 300 seconds a stalled teardown's worst case
+is 600 seconds across the two sessions the current design uses, against 300
+seconds at the tracked default. Removing it tightens the worst case back to
+the default; that edit is the operator's to make. Undeploy itself never touches a bare
 image filename and reports, in one summary line, that any operator-staged
 image was left in place. Undeploy never unassigns an image, so it never
 produces the agent's own per-file record on its own: that line — the file
@@ -466,12 +553,35 @@ credential. It requires `--maintenance-frozen`, which acknowledges a freeze the
 operator has already put in place — the command never creates one. Preflight
 binds every published image's canonical torrent to exactly one active aria2 GID
 and refuses before touching anything if an image has no canonical torrent, is not
-uniquely active, the announce base is not a private HTTP URL, durable encrypted
-secrets are missing, or a recovery manifest from an earlier run is still on disk.
+uniquely active, the announce base is not a usable HTTP IPv4 endpoint (loopback,
+link-local, unspecified and multicast addresses are refused; any routable
+address is accepted), durable encrypted secrets are missing, or a recovery
+manifest from an earlier run is still on disk. A refusal names its reason on
+stderr (`refused (ValueError: canonical torrent is not uniquely active)`); the
+reasons are fixed phrases that never carry a URL or credential.
+
+A quarantined image is skipped, not a refusal: its quarantine removed the
+torrent from the seeder on purpose, so it cannot be "uniquely active" and must
+not block rotating the credential for the rest of the fleet. The command lists
+the skipped ids. Their canonical torrents keep the rotated-out announce until
+the quarantine is released, which re-syncs the announce to the then-current
+credential before re-adding the torrent (see
+[Releasing a quarantine](#releasing-a-quarantine)). If every published image is
+quarantined there is nothing active to rotate and the command refuses.
 
 Each replacement rewrites only the outer announce and keeps the `info` byte span
 identical, so info hashes do not move. Credential values are never accepted on
 the command line and never printed.
+
+The rotated-out credential stays valid for a bounded overlap — 30 days from the
+rotation, `IRIS_SEEDER_PREV_TTL` — so a device that has not yet received a
+re-personalised torrent keeps announcing meanwhile. Nothing has to be retired by
+hand: the old token expires on its own, and the next rotation drops the record.
+Two still-valid previous records are the cap, and a rotation that would exceed
+it is refused, so run no more than two rotations inside one window unless you
+have already personalised the fleet's torrents. Expiry cannot lock a device out:
+the way it picks up the current credential is a fresh personalised torrent from
+the catalog, and that request is authorised by the device's catalog token.
 
 **The rotation is only reported complete when the tracker independently proves
 the new identity is serving.** After every canonical torrent is re-added, the
@@ -500,6 +610,81 @@ the manifest — version, terminal state, path containment, digest and info-hash
 agreement, and that the named image directory matches the current catalog —
 before any file or aria2 call. Recovery leaves maintenance frozen and keeps the
 manifest as evidence in either outcome.
+
+## Rollback after the shard migration
+
+See [Keyed per-device state](reference.md#keyed-per-device-state) for what
+the migration does. This is what to do if you roll the server back to a
+release from before it.
+
+Every whole-fleet document under `IRIS_STATE` — `devices.json`,
+`policy.json`, `pull_requests.json`, `telemetry.json`, `report_ledger.json`,
+`transfer-attestations.json`, `peer-endpoints.json`, and (issue #125)
+`fleet.json`, the operator inventory itself — is migrated into a `<name>.d/`
+shard directory the first time the running server touches that store,
+normally on the container's first restart after an upgrade past the shard
+migration. Migration is automatic, one-shot per store, and never deletes
+anything: the original document is renamed to `<name>.json.migrated` and
+left in place next to its shard directory.
+
+**A rollback to a pre-migration release refuses to start rather than run
+with an empty fleet.** Code from before the migration reads a *missing*
+`devices.json` (and the same for every other store above) as an empty store
+— no devices, no policy, no telemetry — and a rename-away is exactly what
+that code would have found once migration renamed the document to
+`.migrated`. To close that off, migration leaves a placeholder file at each
+legacy path instead of leaving nothing: deliberately not valid JSON, so it
+trips the same fail-closed check that release already has for a *corrupt*
+state file (`state file unreadable: ...` / `state file is not a JSON
+object: ...` in the server log, or `EndpointStoreError` for
+`peer-endpoints.json`, or `gui_fleet.FleetStateError` for `fleet.json`), and
+the affected requests fail instead of quietly succeeding against an empty
+fleet. The placeholder file itself is plain text — `cat` it — and names the
+exact `.migrated` file to restore.
+
+To roll back:
+
+1. Stop the server (`docker compose down`, or the equivalent for your
+   deployment).
+2. List which stores were actually migrated — only a store the new release
+   touched has one:
+   ```
+   ls <state>/*.json.migrated
+   ```
+3. For each one, restore the original document over the placeholder:
+   ```
+   mv <state>/devices.json.migrated <state>/devices.json
+   mv <state>/policy.json.migrated <state>/policy.json
+   mv <state>/pull_requests.json.migrated <state>/pull_requests.json
+   mv <state>/telemetry.json.migrated <state>/telemetry.json
+   mv <state>/report_ledger.json.migrated <state>/report_ledger.json
+   mv <state>/transfer-attestations.json.migrated <state>/transfer-attestations.json
+   mv <state>/peer-endpoints.json.migrated <state>/peer-endpoints.json
+   mv <state>/fleet.json.migrated <state>/fleet.json
+   ```
+4. Start the pre-migration release.
+
+`fleet-revision.json` is not part of this restore — it has no legacy
+document to roll back to (the pre-migration release read `revision` out of
+`fleet.json` itself). Leaving it in place is harmless: the pre-migration
+release never reads it, and the post-migration release, if you later roll
+forward again, is fine finding one either way.
+
+**What this does not recover.** The restored document is a snapshot from the
+moment of migration, not from the moment of rollback. Any write the *new*
+(sharded) release made in between — a heartbeat, a policy change, a
+telemetry report, an endpoint announce, an inventory edit — lives only in
+the `<name>.d/` shard directory, and migration never folds later shard
+writes back into `<name>.json.migrated`. A rollback shortly after the
+upgrade, before devices have reported again, loses nothing; a rollback
+after the fleet has run on the new release for a while reverts every
+migrated store to its state at migration time. The shard directories are
+left in place by this procedure — pre-migration code never reads or writes
+them — so nothing already on disk
+is destroyed, but a device's activity between migration and rollback will
+not be visible to the older release. If that gap matters for your fleet,
+back up `<state>` (see [Backups](#backups)) before rolling back, and keep it
+until you have confirmed you will not need to reconcile against it.
 
 ## Recovery checklist
 

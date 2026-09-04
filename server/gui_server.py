@@ -8,6 +8,7 @@ GET /api/images/jobs/<id> publish-status poll) with HttpOnly session cookies
 and double-submit CSRF on state-changing requests.
 Mirrors catalog.py's ThreadingHTTPServer + BaseHTTPRequestHandler + TLS pattern.
 Stdlib only."""
+import email.utils
 import http.cookies
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import re
 import secrets
 import shutil
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -27,14 +29,18 @@ from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
 import audit_export
+import bounded_pool
 import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
 import catalog as catalog_mod
+import deployment_records
 import gui_app
 import gui_auth
+import gui_fleet
 import gui_onboard
 import gui_tls
 import live_samples
+import peer_endpoints
 import peer_policy
 import peer_enforcement
 import secretfs
@@ -110,6 +116,35 @@ _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
                   # behind the onboard pool legitimately waits >10 min)
 _SSE_KEEPALIVE = 15  # comment-frame interval so proxies don't reap a quiet stream
 _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing, held in memory)
+# A device_ids array at the supported fleet size (peer_endpoints.
+# SUPPORTED_DEVICES, 10,000 ids up to 64 chars each -- see gui_fleet._ID_RE)
+# plus a small field patch comfortably fits well under 64 KiB * 10; generous
+# headroom over the ~700 KB worst case without approaching _MAX_CSV's size
+# (this body is an id LIST, not per-device CSV rows).
+_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — /api/devices/bulk-credential
+# How long a client gets to complete the TLS handshake once its connection
+# has been handed to a worker thread (see _ConsoleServer). Generous for a
+# browser on an operator network; bounded so a connection that never sends
+# a ClientHello gives its thread back.
+_HANDSHAKE_TIMEOUT = 30
+# How long peer-policy enforcement can go without a recorded reconcile pass
+# before the console calls it stale (IRIS-99). The tracker's own bounded
+# maintenance deadline (tracker.MAINTENANCE_INTERVAL_CAP, 60s) forces a pass
+# -- and a fresh peer-enforcement.json write, updating last_reconciled_at --
+# even when nothing changed, and a FAILED pass still writes a "degraded"
+# status with a fresh timestamp (tracker.TrackerReconciler._note_pass_failure).
+# So under any live reconciler, healthy or degraded, last_reconciled_at
+# should never lag more than ~60s. This is several multiples of that to
+# absorb scheduling jitter and a slow aria2 RPC without false-flagging, while
+# still catching a genuinely frozen reconciler (the tracker process down, or
+# even the degraded write itself failing) well before an operator would
+# otherwise notice a stale "enforced" claim reading as healthy.
+_PEER_POLICY_STALE_AFTER = 300.0
+# Explicit opt-in for serving the console over plain HTTP. Without it the
+# console refuses to start when no usable certificate exists: the session
+# cookie is Secure-only under TLS, and a plaintext console would otherwise
+# accept the admin password in cleartext and then fail to keep a session.
+_PLAINTEXT_OPT_IN_ENV = "IRIS_GUI_ALLOW_PLAINTEXT"
 _MAX_UPLOAD = 4 * 1024 * 1024 * 1024  # 4 GiB — streamed image uploads (not the JSON cap)
 # 256 MiB — streamed offline Cisco Bulk Hash tar upload (KGV reconciler
 # Task 4). The real feed tar was ~46 MB on 2026-08-29 (bulkhash_refresh.py's
@@ -244,20 +279,31 @@ def _refresh_http_status(result):
 
 def _image_view(entry):
     """Console/API-safe projection of one catalog image entry (KGV
-    reconciler Task 4): every field the entry already carries, PLUS a
-    guaranteed-present top-level `quarantined` bool and `hash_verification`
-    verdict (both default to falsy/None for an image the reconciler has
-    never touched -- apply_hash_verification()/release_quarantine() only
-    ever set them, never pre-seed them), MINUS the two fields that exist
+    reconciler Task 4): every field the entry already carries, PLUS
+    guaranteed-present top-level `quarantined`, `cisco_signature_verified`,
+    and `operator_attested_signature` bools and a `hash_verification`
+    verdict (all default to falsy/None for an image the reconciler -- or,
+    for operator_attested_signature, the publishing operator -- has never
+    touched; apply_hash_verification()/release_quarantine() only ever set
+    the first three, never pre-seed them), MINUS the two fields that exist
     purely for catalog.py's own internal bookkeeping
     (quarantine_actions_complete -- convergence-retry state;
     quarantine_override_sha512 -- the re-quarantine-suppression ack) and
-    were never meant to be wire-visible."""
+    were never meant to be wire-visible.
+
+    cisco_signature_verified (the Cisco Bulk Hash reconciler's own verdict)
+    and operator_attested_signature (the operator's `iris-publish
+    --signature-verified` attestation, from publish.py) are DISTINCT fields
+    that must never be conflated here or anywhere downstream -- IRIS-03-009/
+    #88: they used to share one field, so the reconciler's first run
+    silently overwrote the operator's mark."""
     view = {k: v for k, v in entry.items()
            if k not in ("quarantine_actions_complete",
                         "quarantine_override_sha512")}
     view["quarantined"] = bool(entry.get("quarantined"))
     view["hash_verification"] = entry.get("hash_verification")
+    view["cisco_signature_verified"] = bool(entry.get("cisco_signature_verified"))
+    view["operator_attested_signature"] = bool(entry.get("operator_attested_signature"))
     return view
 
 
@@ -271,6 +317,134 @@ def _default_swarm_fetch():
     url = os.environ.get("IRIS_SWARM_URL", "http://127.0.0.1:9101/swarm")
     with urllib.request.urlopen(url, timeout=3) as r:
         return r.read()
+
+
+# ---- paginated read projections (fleet + swarm) ---------------------------
+# The console polls these while a view is visible, and at fleet scale the
+# whole-snapshot response is most of what the poll costs: 10,000 merged
+# device rows are ~6 MiB of JSON to encode, ship and re-render every 10 s.
+# Paging is OPT-IN -- no limit/offset means the caller gets the complete
+# projection it has always got, because a console that quietly rendered the
+# first page of a fleet as if it were the fleet is a worse failure than a
+# slow page.  Every response carries the totals a caller needs to know which
+# of the two it is holding.
+MAX_PAGE_LIMIT = 1000
+
+
+def _page_params(qs):
+    """(limit, offset) from a parsed query string; raises ValueError with an
+    operator-readable message on anything that is not a usable page.
+
+    Absent limit means "no page, the whole projection"; a limit above
+    MAX_PAGE_LIMIT is clamped (and echoed back, so the caller can see the
+    page it actually got).  A malformed or non-positive value is REJECTED
+    rather than defaulted: quietly serving a different page than the one
+    asked for is how a client ends up believing it has walked a fleet it
+    has not."""
+    def _one(name):
+        raw = qs.get(name)
+        return raw[0] if raw else None
+
+    limit = _one("limit")
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except ValueError:
+            raise ValueError("limit must be an integer")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        limit = min(limit, MAX_PAGE_LIMIT)
+
+    offset = _one("offset")
+    if offset is None:
+        offset = 0
+    else:
+        try:
+            offset = int(offset)
+        except ValueError:
+            raise ValueError("offset must be an integer")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+    return limit, offset
+
+
+def _swarm_page(body, limit, offset):
+    """A page of the hub's swarm snapshot, flattening peers across images in
+    image order.  The image entries themselves are all preserved (the map's
+    image selector is built from them); only their peer lists are sliced.
+
+    A payload that is not the documented {"images": [{"peers": [...]}]}
+    shape cannot be paged, and is reported as such rather than passed
+    through whole -- a caller that asked for 100 peers must never be handed
+    all of them believing it got a page."""
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError):
+        return {"peers": [], "error": "swarm data unavailable"}
+    if not isinstance(data, dict) or not isinstance(data.get("images"), list):
+        return {"peers": [], "error": "swarm data not paginatable"}
+
+    end = None if limit is None else offset + limit
+    images, seen = [], 0
+    for image in data["images"]:
+        if not isinstance(image, dict):
+            continue
+        peers = image.get("peers")
+        peers = peers if isinstance(peers, list) else []
+        lo = max(0, offset - seen)
+        hi = len(peers) if end is None else max(0, min(len(peers), end - seen))
+        images.append(dict(image, peers=peers[lo:hi] if lo < hi else []))
+        seen += len(peers)
+
+    return dict(data, images=images, peers_total=seen,
+                peers_offset=offset, peers_limit=limit)
+
+
+# ---- server-side filter parity for the Devices table (issue #112) --------
+# The console's filter bar offers seven controls: free-text q (already
+# server-side, above) plus six column filters -- management type, agent
+# install (platform), credential, telemetry, peer-quarantine and status --
+# and app.js filters every one of them client-side over the whole fleet
+# (deviceMatchesFilters, webroot/app.js). A paged table can only offer a
+# filter the server can also apply -- otherwise a page would silently
+# disagree with what the filter bar promises. _device_filter_params reads
+# the six off the query string; Handler._row_matches_extra_filters (below,
+# next to _row_matches_q) applies them, deliberately mirroring
+# deviceMatchesFilters condition-for-condition so the two can never decide
+# a row differently.
+_DEVICE_FILTER_PARAM_NAMES = ("management_type", "platform", "cred",
+                              "telemetry", "peer", "status")
+
+
+def _device_filter_params(qs):
+    """{name: value} for every column filter present and non-blank in *qs*.
+    Absent/blank means "no opinion", same as the dropdown's own "<field>:
+    any" option -- there is nothing to validate here; a value naming no real
+    option (a stale bookmark, a hand-edited URL) simply matches zero rows,
+    exactly like an empty-fleet q."""
+    out = {}
+    for name in _DEVICE_FILTER_PARAM_NAMES:
+        raw = (qs.get(name) or [None])[0]
+        if raw:
+            out[name] = raw
+    return out
+
+
+# Mirrors app.js's STATUS_LEVELS (the 12-level Magnetic mapping) just far
+# enough to answer "is this row's status one of negative/severe/warning" for
+# the __attention rollup filter -- the console still owns the full label/
+# icon rendering.
+_STATUS_LEVELS = {
+    "onboarding": "progress", "undeploying": "progress",
+    "copying": "progress", "staging": "progress",
+    "waiting-heartbeat": "info",
+    "onboard-failed": "negative", "undeploy-failed": "negative",
+    "placement-failed": "negative",
+    "deployed": "positive", "enrolled": "positive",
+    "image-failed": "warning",
+    "unassigned": "inactive", "not-enrolled": "inactive",
+    "offline": "inactive",
+}
 
 
 # ---- persisted deploy logs (written by OnboardService._persist_log) -------
@@ -450,9 +624,9 @@ def _resolve_certfile():
     The console-specific override (IRIS_GUI_CERT, combined cert+key built by
     the cert-upload flow and the entrypoint) wins WHEN ITS FILE EXISTS; else
     the shared combined IRIS_CERT file all three TLS services load; else
-    None -> plain-HTTP fallback (unchanged, tested behavior). Catalog and
-    artifact server keep loading IRIS_CERT directly, so device pinning is
-    untouched."""
+    None -> main() refuses to start unless IRIS_GUI_ALLOW_PLAINTEXT=1 opts
+    into a plain-HTTP console. Catalog and artifact server keep loading
+    IRIS_CERT directly, so device pinning is untouched."""
     gui = os.environ.get("IRIS_GUI_CERT", "/run/iris/tls/gui-cert.pem")
     if os.path.exists(gui):
         return gui
@@ -658,6 +832,59 @@ def ca_trust_refresh_loop(stop_event, state_dir, audit_fn=None,
             pass                    # the daily thread must never die
 
 
+def _plaintext_allowed():
+    return os.environ.get(_PLAINTEXT_OPT_IN_ENV, "") == "1"
+
+
+class ConsoleTLSError(RuntimeError):
+    """A certificate was configured for the console but none of the
+    candidate files is usable, and plaintext was not opted into."""
+
+
+class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer that completes the TLS handshake in the WORKER
+    thread and bounds the pool of concurrently running handler threads.
+    Same mechanism (and reason) as artifact_server._Server: wrapping
+    the LISTENING socket makes socketserver perform the whole handshake
+    inside accept() on the single serve_forever thread, so one client that
+    connects and never sends a ClientHello (nc, a port scan, a TCP health
+    check, a stalled NAT'd client) freezes the console for every operator
+    until it goes away. Here accept() hands back the plain socket and the
+    wrap happens per connection. ``tls_context`` is retained, so
+    reload_tls() hot-swapping the chain keeps working unchanged."""
+
+    request_queue_size = 128
+    tls_context = None
+    # The console holds long-lived SSE streams open for onboard-log tailing
+    # (Handler's text/event-stream route, below) -- up to
+    # IRIS_ONBOARD_CONCURRENCY (default 25) of them at once. Sized well above
+    # that plus ordinary multi-operator browsing/polling traffic, so
+    # bounded_pool's admission timeout is only ever reached under genuine
+    # overload, never by the SSE streams this console itself holds open.
+    max_concurrent_requests = 256
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(request, server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's
+                # problem and nobody else's.
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)   # Handler.timeout re-arms it
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time):
@@ -691,6 +918,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         if k in ("disconnected_peers", "removed_peers")
                         and isinstance(v, int) and not isinstance(v, bool)}
                        if isinstance(effect, dict) else None)
+        last_reconciled_at = (status.get("last_reconciled_at")
+            if isinstance(status.get("last_reconciled_at"), (int, float))
+            and not isinstance(status.get("last_reconciled_at"), bool) else None)
+        # IRIS-99: a frozen reconciler leaves last_reconciled_at (and
+        # whatever state/applied_revision it last wrote, possibly
+        # "enforced") sitting unchanged forever -- the console must say so
+        # explicitly rather than let an old "enforced" claim keep reading as
+        # current. No timestamp at all (missing/corrupt/never-run) is
+        # exactly as unproven as a stale one, so it is stale too.
+        stale = (last_reconciled_at is None
+                or (now_fn() - last_reconciled_at) > _PEER_POLICY_STALE_AFTER)
         enforcement = {
             "state": status.get("state") if status.get("state") in peer_enforcement.STATES else None,
             "desired_ip_count": status.get("desired_ip_count")
@@ -699,8 +937,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "applied_revision": status.get("applied_revision")
                 if isinstance(status.get("applied_revision"), int)
                 and not isinstance(status.get("applied_revision"), bool) else None,
-            "last_reconciled_at": status.get("last_reconciled_at")
-                if isinstance(status.get("last_reconciled_at"), (int, float)) else None,
+            "last_reconciled_at": last_reconciled_at,
+            "stale": stale,
+            "stale_after_seconds": _PEER_POLICY_STALE_AFTER,
             "conflict_count": len(conflicts), "conflict_types": types,
             "last_effect": safe_effect,
             "last_error": status.get("last_error")
@@ -718,8 +957,101 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     if acl == peer_policy.RESERVED_QUARANTINE),
                 "enforcement": enforcement}
 
+    def quarantine_assignment_ids():
+        """The bare set of device ids under quarantine intent -- what the
+        console's peer-policy filter (?peer=quarantined/not-quarantined)
+        needs, without policy_view()'s enforcement-status read. Read ONLY
+        when a caller actually asks for the peer filter (_device_page), so a
+        /api/devices poll that never touches it costs nothing extra."""
+        auth_path, lkg_path, _ = policy_paths()
+        result = peer_policy.load_policy(auth_path, lkg_path)
+        return {device_id for device_id, acl in
+                result.document.get("assignments", {}).items()
+                if acl == peer_policy.RESERVED_QUARANTINE}
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
+
+        def parse_request(self):
+            ok = super().parse_request()
+            # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
+            # periodic refreshers) validates the session WITHOUT refreshing its
+            # idle clock, so an unattended console on a polled view still
+            # reaches the advertised idle timeout. GET-only: a mutation can
+            # never opt out of counting as activity. gui_app.session_info
+            # consults this per-thread flag for every lookup in the request.
+            gui_app.set_request_session_touch(
+                not (ok and self.command == "GET"
+                     and self.headers.get("X-IRIS-Poll", "").strip() == "1"))
+            return ok
+
+        def handle_one_request(self):
+            try:
+                super().handle_one_request()
+            except secrets_store.StoreCorruptError as exc:
+                # The live secrets store is present but unreadable. Every
+                # route that needs it fails closed here with a diagnosable
+                # answer (nothing has been written) instead of a dropped
+                # connection and a traceback; the message carries the path
+                # and failure class only.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "secrets store unreadable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
+            except catalog_mod.StateFileError as exc:
+                # A catalog state file (policy.json, devices.json, ...) is
+                # present but unreadable. Same fail-closed contract as the
+                # secrets store above: the console must not render a corrupt
+                # file as empty state, and the operator gets a diagnosable
+                # answer rather than a traceback with no response.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "state unavailable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
+            except gui_fleet.FleetStateError as exc:
+                # The fleet inventory (fleet.json / fleet.d/ shards /
+                # fleet-revision.json) is present but unreadable. Identical
+                # fail-closed contract to the catalog case just above --
+                # gui_fleet.FleetStore's own read paths (get_device,
+                # list_devices, snapshot) now fail closed the same way its
+                # write paths always have, so this is the one place that
+                # failure surfaces as a clean answer instead of a dropped
+                # connection.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "state unavailable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
+
+        def _cookie_attrs(self):
+            """Session-cookie attributes. Secure only when this listener
+            actually serves TLS: a Secure cookie set over plain HTTP is
+            discarded by every browser except on localhost, which turned the
+            plaintext opt-in into a login loop with no diagnostic."""
+            return ("; HttpOnly; Secure; SameSite=Strict; Path=/"
+                    if srv.tls_active else "; HttpOnly; SameSite=Strict; Path=/")
+
+        def _drain_body(self, length):
+            """Consume and discard up to min(length, _MAX_BODY) bytes of a
+            request body that the route will not read (rejected before the
+            read). Bounded, so an unauthenticated client can never make
+            this process hold more than the small-body cap; enough that a
+            well-behaved client's small body is drained and the error
+            response reaches it instead of a connection reset."""
+            left = min(int(length), _MAX_BODY)
+            while left > 0:
+                chunk = self.rfile.read(min(65536, left))
+                if not chunk:
+                    return
+                left -= len(chunk)
 
         def _audit(self, event, category, action=None, target=None, detail=None,
                   actor=None, result="ok", src_ip=None):
@@ -792,6 +1124,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
                     "svi_ip": device.get("svi_ip", ""),
                     "svi_mask": device.get("svi_mask", ""),
+                    # Per-device override of the SVI_IGP env var (issue #85).
+                    # Only meaningful for management_type routed (the only
+                    # type that creates an SVI); gui_fleet.validate_record
+                    # already refuses a non-blank value on every other type,
+                    # so device.get here is always "" for those.
+                    "svi_igp": device.get("svi_igp", ""),
                     "app_ip": device.get("app_ip", device.get("guest_ip", "")),
                     "app_mask": device.get("app_mask", device.get("svi_mask", "")),
                     "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
@@ -826,10 +1164,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return plan
 
         @staticmethod
-        def _apply_router_preflight(plan, evidence):
-            """Bind live, ownership-sensitive router evidence into a plan."""
-            resolved = gui_onboard.apply_router_preflight(
-                plan["resolved"], evidence)
+        def _apply_preflight(plan, evidence):
+            """Bind a platform's live execution-time evidence (board ID,
+            model, router ownership facts) into a plan and re-hash it. Used
+            to exist for routers only; every platform's preflight now feeds
+            the record the same way."""
+            resolved = gui_onboard.bind_preflight(plan["resolved"], evidence)
             updated = dict(plan)
             updated["resolved"] = resolved
             payload = {key: value for key, value in updated.items()
@@ -988,7 +1328,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             self.send_header("Content-Length", str(len(body)))
             for k, v in _SECURITY_HEADERS:
                 self.send_header(k, v)
-            for k, v in (extra_headers or []):
+            extra = list(extra_headers or [])
+            if self.path.split("?", 1)[0].startswith("/api/") and not any(
+                    k.lower() == "cache-control" for k, _ in extra):
+                # Session-gated JSON/CSV must never land in a disk cache or
+                # bfcache that outlives the session.
+                self.send_header("Cache-Control", "private, no-store")
+            for k, v in extra:
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
@@ -1002,14 +1348,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             m = jar.get(COOKIE)
             return m.value if m else ""
 
-        def _require_session_csrf(self):
+        def _require_session_csrf(self, unread_body=0):
             """Return the session info for a valid session+CSRF request, else send
-            the error response and return None."""
+            the error response and return None. *unread_body* is the declared
+            body length the caller has deliberately NOT read yet (auth before
+            buffering); on rejection a bounded amount is drained so the error
+            answer is delivered rather than reset."""
             info = app.session_info(self._sid())
             if info is None:
+                self._drain_body(unread_body)
                 self._json(401, {"error": "unauthorized"})
                 return None
             if not _csrf_ok(self.headers.get("X-CSRF-Token", ""), info["csrf"]):
+                self._drain_body(unread_body)
                 self._json(403, {"error": "bad csrf"})
                 return None
             return info
@@ -1050,8 +1401,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if not full.startswith(WEBROOT + os.sep) or not os.path.isfile(full):
                 self._send(404, "text/plain", b"not found")
                 return
-            with open(full, "rb") as f:
-                body = f.read()
             ext = os.path.splitext(full)[1]
             # The SPA assets (index.html/app.js/styles.css) are not
             # content-hashed, so without this a browser keeps serving a stale
@@ -1059,8 +1408,34 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # stay invisible until the user manually clears their cache.
             # no-cache = the browser may store it but MUST revalidate with the
             # server before use, so a redeploy is picked up on the next load.
+            # Last-Modified + If-Modified-Since -> 304 is what makes that
+            # revalidation cheap instead of a full ~780 KB re-download per load.
+            try:
+                mtime = int(os.stat(full).st_mtime)
+            except OSError:
+                mtime = None
+            cache_headers = [("Cache-Control", "no-cache")]
+            if mtime is not None:
+                cache_headers.append(
+                    ("Last-Modified", email.utils.formatdate(mtime, usegmt=True)))
+                ims = self.headers.get("If-Modified-Since")
+                if ims:
+                    try:
+                        ims_ts = email.utils.parsedate_to_datetime(ims).timestamp()
+                    except (TypeError, ValueError, OverflowError):
+                        ims_ts = None
+                    if ims_ts is not None and mtime <= int(ims_ts):
+                        self.send_response(304)
+                        for k, v in _SECURITY_HEADERS:
+                            self.send_header(k, v)
+                        for k, v in cache_headers:
+                            self.send_header(k, v)
+                        self.end_headers()
+                        return
+            with open(full, "rb") as f:
+                body = f.read()
             self._send(200, _CONTENT_TYPES.get(ext, "application/octet-stream"),
-                       body, extra_headers=[("Cache-Control", "no-cache")])
+                       body, extra_headers=cache_headers)
 
         def _serve_swarmmap(self):
             """Serve the swarm-map page (session gate happens in do_GET) from
@@ -1209,10 +1584,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/devices":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    limit, offset = _page_params(qs)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
+                q = (qs.get("q") or [None])[0]
+                if q is not None:
+                    q = q.strip().lower() or None
+                filters = _device_filter_params(qs)
+                rows, total, revision = self._device_page(limit, offset, q, filters)
                 # "now" rides along so last_seen freshness is computed
-                # server-clock-to-server-clock in the UI (skewed lab VMs)
-                self._json(200, {"devices": self._device_view(),
-                                  "now": int(time.time())}); return
+                # server-clock-to-server-clock in the UI (skewed lab VMs).
+                # total/revision ride along on EVERY response, paged or not:
+                # a client that never pages still needs to be able to tell
+                # that what it holds is the whole fleet.
+                self._json(200, {"devices": rows, "now": int(time.time()),
+                                 "total": total, "offset": offset,
+                                 "limit": limit, "revision": revision}); return
             if path == "/api/install-options":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
@@ -1388,9 +1777,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if path == "/api/swarm":
                 if app.session_info(self._sid()) is None:
                     self._json(401, {"error": "unauthorized"}); return
+                qs = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                try:
+                    limit, offset = _page_params(qs)
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)}); return
                 try:
                     body = (swarm_fetch or _default_swarm_fetch)()
-                    self._send(200, "application/json", body)
+                    if limit is None and not offset:
+                        # Unpaged: byte-for-byte passthrough of the hub's own
+                        # JSON, exactly as before — the swarm map filters and
+                        # sorts the whole participant set client-side.
+                        self._send(200, "application/json", body)
+                    else:
+                        self._json(200, _swarm_page(body, limit, offset))
                 except Exception:
                     self._json(200, {"peers": [], "error": "swarm data unavailable"})
                 return
@@ -1439,7 +1839,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT),
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
-                    creds.get_stage_host() if creds is not None else None,
                     *_telemetry_status_args(),
                     image_verification_last_run=_image_verification_last_run()))
                 return
@@ -1483,7 +1882,37 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             self._serve_static(path)
 
         def _device_view(self):
-            devs = fleet.list_devices() if fleet else []
+            """The WHOLE merged fleet, in store order — what /api/overview's
+            aggregates and the unpaginated /api/devices are defined by."""
+            return self._device_page()[0]
+
+        def _device_page(self, limit=None, offset=0, q=None, filters=None):
+            """(rows, total, revision) for the merged device projection.
+
+            *limit*/*offset* page it; *q* and *filters* (see _row_matches_q
+            and _row_matches_extra_filters -- the six column filters the
+            issue #112 prerequisite requires parity for) narrow it. With
+            everything at its default this is the full fleet in store order,
+            exactly what the console has always received.
+
+            The page and the revision stamping it come from ONE fleet read
+            (FleetStore.snapshot), so a client walking pages can tell a
+            coherent walk from one that raced a fleet edit by comparing the
+            revision it gets back — the pages themselves carry no cursor,
+            and the actions built on them are keyed by device_id, never by
+            row position.
+
+            Paging sorts by device_id first: store order is insertion order,
+            which is stable to read but says nothing an operator could use to
+            reason about "the next 200". Sorting is deliberately NOT applied
+            to the unpaginated call, whose order is long-established.
+            """
+            filters = filters or {}
+            revision, devs = fleet.snapshot() if fleet else (0, [])
+            active_filter = q is not None or bool(filters)
+            paging = limit is not None or offset or active_filter
+            if paging:
+                devs.sort(key=lambda d: str(d.get("device_id") or ""))
             hb = {d.get("device_id"): d for d in (catalog.list_devices()
                                                   if catalog else [])}
             # each device's latest onboard/undeploy job, so the UI can show
@@ -1493,43 +1922,215 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # one policy.json read for the whole table — get_policy() re-parses
             # the file per call, which multiplies badly on the polled endpoints
             policies = catalog.list_policies() if catalog else {}
-            out = []
+
+            if not active_filter:
+                # Nothing to count that the inventory does not already know,
+                # so merge ONLY the rows this page returns: at fleet scale
+                # the merge and the JSON encoding of the rows nobody asked
+                # for are most of what the response costs.
+                total = len(devs)
+                window = devs[offset:] if limit is None else \
+                    devs[offset:offset + limit]
+                return ([self._merge_device_row(d, policies, hb, jobs)
+                         for d in window], total, revision)
+
+            # A filter reaches merged fields (heartbeat_model, status), so
+            # every row is merged to be counted; only the window is
+            # retained. The peer-quarantine assignment set is read at most
+            # ONCE per call, and only when the peer filter is actually used.
+            quarantined_ids = (quarantine_assignment_ids()
+                               if "peer" in filters else None)
+            now = time.time()
+            rows, total = [], 0
             for d in devs:
-                did = d.get("device_id")
-                pol = policies.get(did, {})
-                h = hb.get(did, {})
-                row = dict(d)
-                row["assigned_image_id"] = pol.get("approved_image_id")
-                row["assigned_image_ids"] = pol.get("approved_image_ids")
-                row["last_seen"] = h.get("last_seen")
-                row["stage_state"] = h.get("stage_state")
-                row["stage_error"] = h.get("stage_error")
-                row["current_image_id"] = h.get("current_image_id")
-                # the ordered set of images the agent reports as staged
-                # (Task 3); absent from an agent that predates the field, in
-                # which case rollout falls back to current_image_id/stage_state
-                row["staged_image_ids"] = h.get("staged_image_ids")
-                # which assigned images hit a terminal per-image failure on
-                # the agent's last tick; absent from an agent that predates
-                # the field, in which case staging falls back to guessing
-                # from the single aggregate stage_state (_row_is_staging)
-                row["errored_image_ids"] = h.get("errored_image_ids")
-                row["heartbeat_model"] = h.get("model")
-                # the "copying to <fs>" badge needs the heartbeat's target FS
-                row["target_fs"] = h.get("target_fs")
-                # telemetry posture as the DEVICE reports it, not as the last
-                # onboard requested: True/False from the agent, None when the
-                # agent predates the flag (tri-state — unknown is not "off").
-                row["telemetry_enabled"] = h.get("telemetry_enabled")
-                row["telemetry_stream_enabled"] = h.get(
-                    "telemetry_stream_enabled")
-                j = jobs.get(did)
-                if j:
-                    row["onboard_action"] = j["action"]
-                    row["onboard_state"] = j["state"]
-                    row["onboard_finished_at"] = j["finished_at"]
-                out.append(row)
-            return out
+                row = self._merge_device_row(d, policies, hb, jobs)
+                if q is not None and not self._row_matches_q(row, q):
+                    continue
+                if filters and not self._row_matches_extra_filters(
+                        row, filters, now, quarantined_ids):
+                    continue
+                total += 1
+                if total > offset and (limit is None or len(rows) < limit):
+                    rows.append(row)
+            return rows, total, revision
+
+        @staticmethod
+        def _row_matches_q(row, q):
+            """Case-insensitive substring over the same four fields the
+            console's own search box covers (app.js deviceMatchesFilters), so
+            a server-side filter and the client-side one cannot disagree
+            about what "matches" means."""
+            hay = " ".join(str(row.get(k) or "") for k in
+                           ("device_id", "device_ip", "model",
+                            "heartbeat_model")).lower()
+            return q in hay
+
+        def _row_matches_extra_filters(self, row, filters, now, quarantined_ids):
+            """Server-side mirror of app.js deviceMatchesFilters (everything
+            besides q, which _row_matches_q already covers) -- kept
+            condition-for-condition in step with it so a paged, filtered
+            table can never disagree with what the filter bar promises
+            (issue #112 prerequisite 1). quarantined_ids is the peer-policy
+            quarantine-assignment set, or None when the peer filter is not
+            in play (it is never consulted in that case)."""
+            mtype = filters.get("management_type")
+            if mtype:
+                # Mirrors managementTypeLabel/deviceMatchesFilters' own
+                # legacy_routed/legacy equivalence: the wire value for an
+                # unclassified device is always the truthy "legacy_routed".
+                raw = row.get("management_type")
+                actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
+                if actual != mtype:
+                    return False
+            platform = filters.get("platform")
+            if platform:
+                plat = row.get("platform") or ""
+                if platform == "__none":
+                    if plat != "":
+                        return False
+                elif plat != platform:
+                    return False
+            cred = filters.get("cred")
+            if cred:
+                c = row.get("credential_profile_id") or ""
+                if cred == "__none":
+                    if c != "":
+                        return False
+                elif c != cred:
+                    return False
+            telemetry = filters.get("telemetry")
+            if telemetry:
+                # Same tri-state as the console's telemetryCell/filter:
+                # "on" only once the device has actually reported it.
+                if row.get("telemetry_enabled") is False:
+                    tel = "off"
+                elif (row.get("telemetry_enabled") is True
+                      or isinstance(row.get("telemetry_stream_enabled"), bool)):
+                    tel = "on"
+                else:
+                    tel = "unknown"
+                if tel != telemetry:
+                    return False
+            peer = filters.get("peer")
+            if peer:
+                q = ("quarantined"
+                     if row.get("device_id") in (quarantined_ids or ())
+                     else "not-quarantined")
+                if q != peer:
+                    return False
+            status = filters.get("status")
+            if status:
+                if status == "offline":
+                    if not self._device_is_offline(row, now):
+                        return False
+                elif status == "__attention":
+                    key = self._device_status_key(row)
+                    level = self._device_status_level(row, key)
+                    if level not in ("negative", "severe", "warning"):
+                        return False
+                elif self._device_status_key(row) != status:
+                    return False
+            return True
+
+        def _device_status_key(self, row):
+            """Server-side mirror of app.js deviceStatus()'s KEY derivation,
+            order and conditions copied verbatim -- the human label/detail/
+            css class stay a pure rendering concern the console still owns
+            alone; only the KEY, which the status filter and the
+            __attention rollup need to test against, is duplicated here."""
+            onboard_finished_at = row.get("onboard_finished_at")
+            last_seen = row.get("last_seen")
+            job_fresh = bool(onboard_finished_at) and (
+                not last_seen or last_seen < onboard_finished_at)
+            onboard_state = row.get("onboard_state")
+            onboard_action = row.get("onboard_action")
+            if onboard_state in ("queued", "running"):
+                return "undeploying" if onboard_action == "undeploy" else "onboarding"
+            if onboard_state == "done" and onboard_action == "onboard" and job_fresh:
+                return "waiting-heartbeat"
+            if onboard_state == "error" and job_fresh:
+                return ("undeploy-failed" if onboard_action == "undeploy"
+                        else "onboard-failed")
+            assigned_ids = self._row_assigned_ids(row)
+            errored_ids = [iid for iid in (row.get("errored_image_ids") or [])
+                          if iid in assigned_ids]
+            if (assigned_ids and not errored_ids and
+                    all(self._row_has_staged(row, iid) for iid in assigned_ids)):
+                return "deployed"
+            if errored_ids:
+                return "image-failed"
+            if row.get("stage_error"):
+                return "placement-failed"
+            if row.get("stage_state") == "transferring_to_ios":
+                return "copying"
+            if row.get("stage_state") == "unassigned":
+                return "unassigned"
+            if row.get("stage_state"):
+                return "staging"
+            if last_seen and not assigned_ids:
+                return "unassigned"
+            if last_seen:
+                return "enrolled"
+            return "not-enrolled"
+
+        @staticmethod
+        def _device_status_level(row, key):
+            """The Magnetic status LEVEL for a status key -- mirrors app.js
+            statusDisplay()'s severity override for image-failed (ratio of
+            errored to assigned images, >=0.5 is 'severe' else 'warning')
+            and falls back to _STATUS_LEVELS otherwise."""
+            if key == "image-failed":
+                assigned = Handler._row_assigned_ids(row)
+                errored = [iid for iid in (row.get("errored_image_ids") or [])
+                          if iid in assigned]
+                ratio = (len(errored) / len(assigned)) if assigned else 0
+                return "severe" if ratio >= 0.5 else "warning"
+            return _STATUS_LEVELS.get(key, "inactive")
+
+        @staticmethod
+        def _device_is_offline(row, now):
+            """Mirrors app.js deviceIsOffline: a device with a heartbeat that
+            is 10+ minutes stale by the SAME server clock every response
+            already carries (row's own last_seen against *now*)."""
+            return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
+
+        @staticmethod
+        def _merge_device_row(d, policies, hb, jobs):
+            """One inventory record joined with policy, heartbeat and job."""
+            did = d.get("device_id")
+            pol = policies.get(did, {})
+            h = hb.get(did, {})
+            row = dict(d)
+            row["assigned_image_id"] = pol.get("approved_image_id")
+            row["assigned_image_ids"] = pol.get("approved_image_ids")
+            row["last_seen"] = h.get("last_seen")
+            row["stage_state"] = h.get("stage_state")
+            row["stage_error"] = h.get("stage_error")
+            row["current_image_id"] = h.get("current_image_id")
+            # the ordered set of images the agent reports as staged
+            # (Task 3); absent from an agent that predates the field, in
+            # which case rollout falls back to current_image_id/stage_state
+            row["staged_image_ids"] = h.get("staged_image_ids")
+            # which assigned images hit a terminal per-image failure on
+            # the agent's last tick; absent from an agent that predates
+            # the field, in which case staging falls back to guessing
+            # from the single aggregate stage_state (_row_is_staging)
+            row["errored_image_ids"] = h.get("errored_image_ids")
+            row["heartbeat_model"] = h.get("model")
+            # the "copying to <fs>" badge needs the heartbeat's target FS
+            row["target_fs"] = h.get("target_fs")
+            # telemetry posture as the DEVICE reports it, not as the last
+            # onboard requested: True/False from the agent, None when the
+            # agent predates the flag (tri-state — unknown is not "off").
+            row["telemetry_enabled"] = h.get("telemetry_enabled")
+            row["telemetry_stream_enabled"] = h.get(
+                "telemetry_stream_enabled")
+            j = jobs.get(did)
+            if j:
+                row["onboard_action"] = j["action"]
+                row["onboard_state"] = j["state"]
+                row["onboard_finished_at"] = j["finished_at"]
+            return row
 
         @staticmethod
         def _audit_image_names(cat, ids):
@@ -1738,10 +2339,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 },
                 "sessions": {"active": app.active_sessions(),
                              "idle_ttl_minutes": app.idle_ttl_minutes()},
-                # redacted (configured + username only) — the password stays
-                # server-side in the age-encrypted store
-                "stage_host": (creds.get_stage_host() if creds is not None
-                               else {"configured": False, "username": ""}),
                 # settings file verbatim (it holds no secret) + password_set —
                 # the SCP password itself never leaves the encrypted store
                 "audit_export": dict(
@@ -1785,6 +2382,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self.send_header(k, v)
             self.end_headers()
             cursor = 0
+            last_state = None
             idle_deadline = time.time() + _SSE_IDLE
             next_beat = time.time() + _SSE_KEEPALIVE
             try:
@@ -1801,8 +2399,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         safe = lines[cursor].replace("\r", " ").replace("\n", " ")
                         self.wfile.write(("data: %s\n\n" % safe).encode("utf-8"))
                         cursor += 1
-                    if progressed or job["state"] == "queued":
+                    # A state change (queued -> running) is progress too:
+                    # without this the poll that sees the transition, before
+                    # the first line lands, spends idle budget on it.
+                    state = job["state"]
+                    if progressed or state == "queued" or state != last_state:
                         idle_deadline = time.time() + _SSE_IDLE
+                    last_state = state
                     if time.time() >= next_beat:
                         self.wfile.write(b": keepalive\n\n")
                         next_beat = time.time() + _SSE_KEEPALIVE
@@ -1812,7 +2415,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             ("event: end\ndata: %s\n\n" % job["state"]).encode("utf-8"))
                         self.wfile.flush(); return
                     time.sleep(0.5)
-            except (BrokenPipeError, ConnectionError):
+                # Idle expiry gets a terminal frame too, so the client can
+                # tell a stalled job from a dead server.
+                self.wfile.write(b"event: end\ndata: idle\n\n")
+                self.wfile.flush()
+            except OSError:      # BrokenPipe/ConnectionReset and ssl-layer errors alike
                 return
 
         def _handle_offline_refresh(self, length):
@@ -2000,6 +2607,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except ValueError:
                 self._json(400, {"error": "bad content-length"})
                 return
+            if length < 0:
+                # int() accepts a sign, and rfile.read(-1) reads until the
+                # client half-closes with no cap at all -- pre-auth. Fail
+                # closed before any read (do_PUT already does).
+                self._json(400, {"error": "bad content-length"})
+                return
             if path == "/api/image-verification/offline":
                 # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
                 # diverted before the generic cap/eager-read below (sized and
@@ -2008,10 +2621,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # rather than held whole in memory.
                 self._handle_offline_refresh(length)
                 return
-            cap = _MAX_CSV if path == "/api/devices/import-csv" else _MAX_BODY
+            if path == "/api/devices/import-csv":
+                cap = _MAX_CSV
+            elif path == "/api/devices/bulk-credential":
+                cap = _MAX_BULK_DEVICE_IDS
+            else:
+                cap = _MAX_BODY
             if length > cap:
                 self._json(413, {"error": "payload too large"})
                 return
+            info = None
+            if path not in ("/api/login", "/api/setup"):
+                # Session + CSRF are checked BEFORE the body is buffered, so
+                # an unauthenticated connection can never make this process
+                # hold a body (up to the 8 MiB CSV cap) in memory; only the
+                # two pre-auth routes read a body first, under _MAX_BODY.
+                info = self._require_session_csrf(unread_body=length)
+                if info is None:
+                    return
             raw = self.rfile.read(length) if length else b""
 
             if path == "/api/login":
@@ -2041,7 +2668,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                src_ip=src_ip)
                     self._json(200, {"setup": True, "setup_grant": grant})
                     return
-                res = app.login(username, password)
+                try:
+                    res = app.login(username, password)
+                except gui_auth.VerifyBusy:
+                    # Nothing was verified: neither a limiter penalty nor a
+                    # login_fail audit event -- just ask for a retry.
+                    self._json(503, {"error": "server busy, retry shortly"},
+                               extra_headers=[("Retry-After", "1")])
+                    return
                 if res is None:
                     login_limiter.failure(src_ip)
                     self._audit("login_fail", "auth", action="login",
@@ -2053,7 +2687,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 sid, csrf = res
                 self._audit("login", "auth", action="login",
                            actor="console:" + username, result="ok", src_ip=src_ip)
-                cookie = "%s=%s; HttpOnly; Secure; SameSite=Strict; Path=/" % (COOKIE, sid)
+                cookie = "%s=%s%s" % (COOKIE, sid, self._cookie_attrs())
                 self._json(200, {"username": username, "csrf": csrf},
                            extra_headers=[("Set-Cookie", cookie)])
                 return
@@ -2110,8 +2744,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            src_ip=self.client_address[0])
                 self._json(200, {"ok": True}); return
 
-            # every other POST requires a live session + CSRF
-            info = self._require_session_csrf()
+            # every other POST: session + CSRF were verified above, before
+            # the body was read
             if info is None:
                 return
             sid = self._sid()
@@ -2120,8 +2754,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 app.logout(sid)
                 self._audit("logout", "auth", action="logout", actor=actor,
                            src_ip=self.client_address[0])
-                expired = ("%s=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
-                           % COOKIE)
+                expired = "%s=%s; Max-Age=0" % (COOKIE, self._cookie_attrs())
                 self._json(200, {"ok": True}, extra_headers=[("Set-Cookie", expired)])
                 return
             if path == "/api/images/import":
@@ -2168,7 +2801,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": "password must be at least 8 characters"}); return
                 if new != confirm:
                     self._json(400, {"error": "passwords do not match"}); return
-                if not app.change_password(str(data.get("current", "")), new):
+                try:
+                    changed = app.change_password(str(data.get("current", "")), new)
+                except gui_auth.VerifyBusy:
+                    self._json(503, {"error": "server busy, retry shortly"},
+                               extra_headers=[("Retry-After", "1")])
+                    return
+                if not changed:
                     self._audit("password_change_fail", "auth", action="password_change",
                                actor=actor, result="fail",
                                detail="current password incorrect",
@@ -2188,25 +2827,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="revoked %d other session(s)" % revoked,
                            src_ip=self.client_address[0])
                 self._json(200, {"revoked": revoked}); return
-            if path == "/api/settings/stage-host":
-                if creds is None:
-                    self._json(404, {"error": "not found"}); return
-                data = self._json_body(raw)
-                if data is None:
-                    return
-                user = data.get("username", ""); pw = data.get("password", "")
-                if not isinstance(user, str) or not isinstance(pw, str):
-                    self._json(400, {"error": "username and password must be strings"}); return
-                prev = creds.get_stage_host()  # redacted: configured + username only
-                try:
-                    saved = creds.set_stage_host(user, pw)
-                except ValueError as exc:
-                    self._json(400, {"error": str(exc)}); return
-                self._audit("stage_host_set", "settings", action="set",
-                           target="stage-host", actor=actor,
-                           detail="user %s -> %s"
-                                  % (prev["username"] or "(none)", user))
-                self._json(200, {"stage_host": saved}); return
             if path == "/api/settings/audit-export/run":
                 # exact match before the bare config route below
                 if creds is None:
@@ -2279,8 +2899,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                target="audit-export", actor=actor, result="fail",
                                detail="persist failed: %s" % exc.__class__.__name__)
                     self._json(500, {"error": "settings save failed"}); return
-                # destination coordinates are non-secret (stage-host
-                # precedent); the password only ever audits as a flag
+                # destination coordinates are non-secret; the password only
+                # ever audits as a flag
                 self._audit("audit_export_config", "settings", action="set",
                            target="audit-export", actor=actor,
                            detail="dest %s -> %s@%s:%s port %d, auto %s, "
@@ -2389,7 +3009,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                detail="persist failed: %s" % exc.__class__.__name__)
                     self._json(500, {"error": "settings save failed"}); return
                 # endpoint URLs are non-secret (headers stay env-only), so a
-                # before -> after detail is safe — stage-host precedent.
+                # before -> after detail is safe.
                 self._audit("telemetry-destination-set", "telemetry",
                            action="set", target="otlp-endpoint", actor=actor,
                            detail="endpoint %s -> %s, enabled %s -> %s"
@@ -2437,7 +3057,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(400, {"error": err}); return
                 try:
                     gui_tls.persist_override(cert_pem, key_pem)
-                    reload_tls()  # new handshakes serve the new chain immediately
+                    # new handshakes serve the new chain immediately -- when
+                    # this listener serves TLS at all; the answer says which
+                    applied = reload_tls()
                     cert_info = gui_tls.active_info()
                     self._audit("gui-cert-replace", "settings", action="replace",
                                target="gui-cert", actor=actor,
@@ -2445,7 +3067,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                       % (cert_info.get("subject"),
                                          cert_info.get("fingerprint_sha256")),
                                src_ip=self.client_address[0])
-                    self._json(200, {"gui_cert": cert_info}); return
+                    self._json(200, {"gui_cert": cert_info, "applied": applied,
+                                     "note": None if applied else
+                                     "saved; this console is not serving TLS, "
+                                     "so it takes effect at the next restart"})
+                    return
                 except Exception as exc:
                     self._audit("gui-cert-replace", "settings", action="replace",
                                target="gui-cert", actor=actor, result="fail",
@@ -2594,6 +3220,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 rec = self._json_body(raw)
                 if rec is None:
                     return
+                # Machine-determined fields never come from a client body:
+                # os_family is classified from the device's own 'show
+                # version' banner (a wrong value here wedged planning until
+                # hand-corrected), and registered_at is the store's own
+                # stamp. The same rule the CSV importer already applies.
+                for machine_key in ("os_family", "registered_at"):
+                    rec.pop(machine_key, None)
                 rec_id = str(rec.get("device_id") or "").strip()
                 prev = fleet.get_device(rec_id) if rec_id else None
                 try:
@@ -2639,6 +3272,65 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (stats["imported"], stats["new"],
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
+            if path == "/api/devices/bulk-credential":
+                # issue #125: the console's "Select all N matching devices"
+                # bulk action used to fire one /api/devices/<id>/credential
+                # request per selected device (still true for platform,
+                # which has no bulk UI action yet) -- each one locking and
+                # rewriting the WHOLE fleet document. FleetStore is sharded
+                # now (see gui_fleet.py / keyed_state.py), which already
+                # makes each of those O(1); this collapses the N *requests*
+                # too, and lets FleetStore.bulk_upsert group the underlying
+                # writes by shard instead of touching the same ~256 shards
+                # once per device landing in them. Keeps every property the
+                # single-device route has: session+CSRF (do_POST, above),
+                # the credential-profile-exists check, compare-and-set per
+                # device (bulk_upsert reads each device's CURRENT row from
+                # within its own shard lock, exactly like upsert()), a
+                # named audit record, and -- the one property N separate
+                # requests gave for free and a single request has to
+                # provide explicitly -- partial-failure reporting naming
+                # exactly which ids did not apply and why.
+                if fleet is None:
+                    self._json(404, {"error": "not found"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                ids = body.get("device_ids")
+                if not isinstance(ids, list) or not ids or \
+                        not all(isinstance(i, str) and i for i in ids):
+                    self._json(400, {"error": "device_ids must be a "
+                                              "non-empty array of strings"})
+                    return
+                if len(ids) > peer_endpoints.SUPPORTED_DEVICES:
+                    self._json(400, {"error": "device_ids exceeds the "
+                                              "supported fleet size (%d)"
+                                              % peer_endpoints.SUPPORTED_DEVICES})
+                    return
+                pid = str(body.get("credential_profile_id", ""))
+                if pid and (creds is None or creds.get_secrets(pid) is None):
+                    self._json(400, {"error": "no such credential profile"}); return
+                try:
+                    results = fleet.bulk_upsert(
+                        ids, {"credential_profile_id": pid})
+                except (ValueError, KeyError) as exc:
+                    self._json(400, {"error": str(exc)}); return
+                failed = {did: outcome["error"] for did, outcome in results.items()
+                         if not outcome["ok"]}
+                applied = len(results) - len(failed)
+                detail = "credential profile -> %s across %d/%d device(s)" % (
+                    pid or "(cleared)", applied, len(ids))
+                if failed:
+                    named = sorted(failed.items())
+                    detail += "; refused: " + ", ".join(
+                        "%s (%s)" % (k, v) for k, v in named[:10])
+                    if len(named) > 10:
+                        detail += " (+%d more)" % (len(named) - 10)
+                self._audit("device_credential_bulk_change", "device",
+                           action="credential", actor=actor, detail=detail,
+                           result="ok" if applied else "fail")
+                self._json(200, {"ok": True, "applied": applied,
+                                 "failed": failed}); return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
                 did = unquote(path[len("/api/devices/"):-len("/assign")])
                 if not did.strip():
@@ -2814,6 +3506,36 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                                          plat or "(auto)"),
                            actor=actor)
                 self._json(200, {"ok": True}); return
+            if path.startswith("/api/devices/") and path.endswith("/forget-host-key"):
+                # A device that was re-imaged or replaced presents a NEW SSH
+                # host key; lab/iris-ssh-policy.sh's accept-new mode (correct
+                # trust-on-first-use) then refuses every session with a
+                # changed-key error, and the persistent known_hosts recording
+                # the stale entry lives inside the IRIS state volume -- not
+                # somewhere an operator always has shell access to. This is
+                # a trust decision, so it is deliberate (one device, on
+                # request from the console) and always audited -- never a
+                # silent removal.
+                if fleet is None or onboard is None:
+                    self._json(404, {"error": "not found"}); return
+                did = unquote(path[len("/api/devices/"):-len("/forget-host-key")])
+                dev = fleet.get_device(did)
+                if dev is None:
+                    self._json(404, {"error": "no such device"}); return
+                ok, detail = onboard.forget_host_key(did)
+                if not ok:
+                    self._audit("device_forget_host_key", "device",
+                               action="forget-host-key", target=did,
+                               actor=actor, result="fail", detail=detail)
+                    self._json(400, {"error": detail}); return
+                # detail is the peer address on success -- name it in the
+                # audit trail alongside the device id and the actor, and the
+                # console's own confirmation.
+                self._audit("device_forget_host_key", "device",
+                           action="forget-host-key", target=did, actor=actor,
+                           detail="host key forgotten for %s; the next "
+                                  "session re-pins on first contact" % detail)
+                self._json(200, {"ok": True, "peer": detail}); return
             if path.startswith("/api/devices/") and path.endswith("/request-report"):
                 did = unquote(path[len("/api/devices/"):-len("/request-report")])
                 if not did.strip():
@@ -2987,32 +3709,39 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             rid = record_store.create({"controller_id": "iris",
                                 "device_id": did, "inventory_revision": fleet.revision(),
                                 "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                # Router preflight runs in the bounded worker pool,
-                                # not synchronously in this HTTP request. This lets a
-                                # large selected batch show queued progress immediately.
-                                "preflight": ({"status": "pending"}
-                                              if resolved.get("platform") == "router"
-                                              else {"status": "not-required"}),
+                                # EVERY platform's preflight runs in the bounded
+                                # worker pool, not synchronously in this HTTP
+                                # request (a large selected batch shows queued
+                                # progress immediately), and pre_apply below
+                                # replaces this with the evidence it returns.
+                                # Non-router records used to be created as
+                                # "not-required" and never updated, so they
+                                # misdescribed a check that had in fact run.
+                                "preflight": {"status": "pending"},
                                 "resources": self._owned_resources(plan["resolved"])})["record_id"]
                             record_ref["id"] = rid
                             return rid
 
-                        if resolved.get("platform") == "router":
-                            def pre_apply(evidence):
-                                # The job may have waited in the queue. Refresh
-                                # live ownership immediately before apply, then
-                                # atomically replace the planned record inputs.
-                                final_plan = self._apply_router_preflight(plan, evidence)
-                                rid = record_ref.get("id")
-                                if not rid:
-                                    raise ValueError("planned record is unavailable")
-                                record_store.update_planned(
-                                    rid, plan_hash=final_plan["plan_hash"],
-                                    resolved=final_plan["resolved"],
-                                    preflight=evidence,
-                                    resources=self._owned_resources(
-                                        final_plan["resolved"]))
-                                return final_plan["resolved"]
+                        def pre_apply(evidence):
+                            # The job may have waited in the queue. Bind the
+                            # live evidence (board ID, model, router
+                            # ownership) immediately before apply, then
+                            # atomically replace the planned record inputs.
+                            # This is what lets a later undeploy render from
+                            # the record alone: DEVICE_IP and
+                            # EXPECTED_DEVICE_IDENTITY for Guest Shell and IOx
+                            # teardowns come from here, not the live fleet row.
+                            final_plan = self._apply_preflight(plan, evidence)
+                            rid = record_ref.get("id")
+                            if not rid:
+                                raise ValueError("planned record is unavailable")
+                            record_store.update_planned(
+                                rid, plan_hash=final_plan["plan_hash"],
+                                resolved=final_plan["resolved"],
+                                preflight=evidence,
+                                resources=self._owned_resources(
+                                    final_plan["resolved"]))
+                            return final_plan["resolved"]
                     else:
                         try:
                             degraded_plan = self._plan(did, fleet.get_device(did))
@@ -3073,7 +3802,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                 # what IRIS created. Teardown must accept it, or
                                 # the device is stranded — a router cannot be
                                 # adopted and its preflight refuses a re-onboard.
-                                record = record_store.recoverable_for_device(did)
+                                # strict: an unreadable store must NOT read as
+                                # "no record for this device" — see the
+                                # RecordStoreUnreadable branch below.
+                                record = record_store.recoverable_for_device(
+                                    did, strict=True)
+                            except deployment_records.RecordStoreUnreadable as exc:
+                                # The records exist, we just cannot read them.
+                                # Reporting that as "no record" sent the
+                                # operator to adopt a device IRIS may already
+                                # own, writing an unverified record on top of a
+                                # repairable file. Server-state fault -> 503,
+                                # like the other record-store outages here.
+                                _reject(503, "%s; the console cannot tell "
+                                        "whether this device has a deployment "
+                                        "until the file is repaired" % exc)
+                                return
                             except ValueError as exc:
                                 # duplicate actives should be impossible
                                 # (activation supersedes siblings; startup
@@ -3202,14 +3946,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if info is None:
                 return
             actor = "console:" + info["username"]
-            if path == "/api/settings/stage-host" and creds is not None:
-                prev = creds.get_stage_host()  # redacted: username only
-                deleted = creds.clear_stage_host()
-                self._audit("stage_host_clear", "settings", action="clear",
-                           target="stage-host", actor=actor,
-                           detail=("cleared (was user %s)" % prev["username"])
-                                  if deleted else "nothing was configured")
-                self._json(200, {"deleted": deleted}); return
             if path == "/api/settings/audit-export" and creds is not None:
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))
@@ -3393,8 +4129,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is not None:
                     live = {d.get("device_id") for d in fleet.list_devices()}
                 entry = images.get_image(iid)
+                warnings = []
                 try:
-                    assigned = images.delete_image(iid, live_device_ids=live)
+                    assigned = images.delete_image(iid, live_device_ids=live,
+                                                   warnings=warnings)
                 except KeyError:
                     self._json(404, {"error": "no such image"}); return
                 if assigned:
@@ -3406,28 +4144,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                          + ("..." if len(assigned) > 3 else "")))
                     self._json(409, {"error": "image is assigned to devices",
                                      "assigned": assigned}); return
+                # A failed seeder stop is not a failed delete (the catalog row,
+                # file and .torrent are gone), but the audit row must say so:
+                # the origin keeps serving that torrent until it restarts.
                 self._audit("image_delete", "image", action="delete", target=iid,
                            actor=actor,
-                           detail="deleted %s (%s)"
+                           detail="deleted %s (%s)%s"
                                   % ((entry or {}).get("filename"),
-                                     _fmt_bytes((entry or {}).get("size"))))
-                self._json(200, {"deleted": True}); return
+                                     _fmt_bytes((entry or {}).get("size")),
+                                     "; " + "; ".join(warnings) if warnings
+                                     else ""))
+                self._json(200, {"deleted": True, "warnings": warnings}); return
             self._json(404, {"error": "not found"})
 
         def log_message(self, *args):
             pass
 
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = _ConsoleServer((host, port), Handler)
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the
         # gui-cert override, since _resolve_certfile() picks it on existence
         # alone) can be a corrupt or mismatched cert/key pair -- e.g. a crash
         # between writing the cert and the key. Probe with a throwaway
-        # context BEFORE wrapping the listening socket; on failure, fall
-        # back to the next candidate (IRIS_CERT) rather than crashing the
-        # process. If that also fails, serve plain HTTP -- never take the
-        # console down over a bad cert file.
+        # context first; on failure, fall back to the next candidate
+        # (IRIS_CERT) rather than crashing the process. If that also fails,
+        # fail CLOSED (ConsoleTLSError) unless plaintext was opted into with
+        # IRIS_GUI_ALLOW_PLAINTEXT=1: a silently plaintext console accepts
+        # the admin password in cleartext, and its Secure cookie could not
+        # even keep a session in a remote browser.
         candidates = [certfile]
         iris_cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
         if iris_cert != certfile:
@@ -3442,9 +4187,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 continue                          # corrupt/mismatched pair
             tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             tls_ctx.load_cert_chain(cand)
-            srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
             break
+        if tls_ctx is None and not _plaintext_allowed():
+            srv.server_close()
+            raise ConsoleTLSError(
+                "no usable console certificate (tried: %s); refusing to serve "
+                "plain HTTP. Set %s=1 to opt in deliberately."
+                % (", ".join(candidates), _PLAINTEXT_OPT_IN_ENV))
 
+    # Set AFTER construction: _ConsoleServer.get_request consults it, and
+    # nothing is accepted before serve_forever(). The handshake happens per
+    # connection in the worker thread; the listening socket stays plain.
+    srv.tls_context = tls_ctx
     srv.tls_active = tls_ctx is not None
 
     def reload_tls():
@@ -3483,7 +4237,6 @@ def main():
     import gui_images
     import gui_fleet
     import gui_creds
-    import deployment_records
     import catalog as catalog_mod
     import publish as publish_mod
     host = os.environ.get("IRIS_GUI_HOST", "0.0.0.0")
@@ -3494,6 +4247,13 @@ def main():
     state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
     images_dir = os.environ.get("IRIS_IMAGES_DIR", "/var/lib/iris-images")
     certfile = _resolve_certfile()
+    if certfile is None and not _plaintext_allowed():
+        print("iris-gui: no console certificate found (IRIS_GUI_CERT / "
+              "IRIS_CERT); refusing to serve the console over plain HTTP. "
+              "Set %s=1 to opt in deliberately (loopback or an isolated "
+              "lab network only)." % _PLAINTEXT_OPT_IN_ENV,
+              file=sys.stderr, flush=True)
+        sys.exit(2)
     audit_path = os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     # Mint the per-deployment instance id up front so the very first
     # /api/help call already sees the durable value.
@@ -3513,17 +4273,27 @@ def main():
     # (KGV reconciler) stops seeding and writes audit entries through THIS
     # instance -- mirrors exactly how `images` (gui_images.ImageService,
     # above) is wired for the identical seeder-teardown + audit concern.
+    # seeder_add_fn is the inverse, for release_quarantine(): the release
+    # puts the canonical torrent back into the seeder (re-synced to the
+    # current announce credential) instead of leaving the image with no
+    # origin until the next container restart.
     catalog = catalog_mod.CatalogStore(
         state_dir, audit_path=audit_path,
-        seeder_remove_fn=publish_mod.remove_torrent_rpc)
+        seeder_remove_fn=publish_mod.remove_torrent_rpc,
+        seeder_add_fn=publish_mod.resume_torrent_rpc)
     record_store = deployment_records.DeploymentRecordStore(state_dir)
     record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(
         fleet, creds, audit_fn=_bg_audit,
         clear_state_fn=catalog.forget_device, record_store=record_store,
         log_dir=os.path.join(state_dir, "deploy-logs"))
-    srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
-                       None, certfile=certfile, audit_path=audit_path, record_store=record_store)
+    try:
+        srv = make_server(host, port, app, images, fleet, creds, catalog, onboard,
+                          None, certfile=certfile, audit_path=audit_path,
+                          record_store=record_store)
+    except ConsoleTLSError as exc:
+        print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+        sys.exit(2)
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
     ca_stop = threading.Event()     # never set in production; loop dies with us
@@ -3544,6 +4314,11 @@ def main():
                            creds.audit_export_secrets, _bg_audit),
                      daemon=True).start()
     scheme = "https" if srv.tls_active else "http"
+    if not srv.tls_active:
+        print("iris-gui: WARNING: serving the console over PLAIN HTTP (%s=1): "
+              "the admin password and session cookie cross the network in "
+              "cleartext and the cookie is not marked Secure."
+              % _PLAINTEXT_OPT_IN_ENV, file=sys.stderr, flush=True)
     print("iris-gui on %s://%s:%d/" % (scheme, host, port), flush=True)
     srv.serve_forever()
 

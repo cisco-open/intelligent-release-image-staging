@@ -84,6 +84,22 @@ def _serve(tmp_path, device_id="dev-1"):
     return srv, srv.server_address[1], tok
 
 
+def _serve_with_seeder(tmp_path, device_id="dev-1"):
+    """Start a tracker whose store holds a device token AND a current seeder
+    announce token (the ``service:seeder`` principal, the only one the
+    ``ip=`` override is honoured for); return (srv, port, device_tok,
+    seeder_tok)."""
+    sp = _secrets_path(tmp_path)
+    tok = _mint_announce_token(sp, device_id)
+    now = time.time()
+    store = secrets_store.load(sp)
+    seeder_tok = secrets_store.mint(store, "seeder", "announce_token", now)
+    secrets_store.save(store, sp)
+    srv = tracker.make_server("127.0.0.1", 0, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1], tok, seeder_tok
+
+
 def _serve_empty(tmp_path):
     """Start a tracker with an empty secrets store (no tokens)."""
     sp = _secrets_path(tmp_path)
@@ -262,18 +278,109 @@ def test_make_server_without_telemetry_still_works(tmp_path):
         srv.shutdown()
 
 
+# ---------------------------------------------------------------------------
+# IRIS-111: a refused announce is now operator-visible via
+# on_announce_refused / iris_tracker_announces_refused_(expired_)total.
+# ---------------------------------------------------------------------------
+
+def test_refused_announce_feeds_refused_counter(tmp_path):
+    """An announce with no usable credential at all (never existed) must
+    bump the general refused counter but NOT the expired-specific one."""
+    sp = _secrets_path(tmp_path)
+    hub = telemetry.Telemetry()
+    srv = tracker.make_server("127.0.0.1", 0, sp,
+                              registry=hub.registry,
+                              on_announce_refused=hub.note_announce_refused)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _ = _get(
+            port, "/announce?info_hash=%s&peer_id=p1&port=1&key=bogus"
+            % INFO_HASH)
+        assert status == 403
+        text = hub.metrics_text()
+        assert "iris_tracker_announces_refused_total 1" in text
+        assert "iris_tracker_announces_refused_expired_total 0" in text
+    finally:
+        srv.shutdown()
+
+
+def test_expired_announce_credential_feeds_expired_counter(tmp_path):
+    """IRIS-111 repro: a rotated-out seeder announce token past
+    SEEDER_PREV_TTL is refused with a 403 that must now be visible as BOTH
+    the general refused counter and the expired-specific bucket -- the
+    signal that the legacy-participants gauge's "0" is a locked-out fleet,
+    not a migrated one."""
+    sp = _secrets_path(tmp_path)
+    now = 1_000_000.0
+    store = secrets_store.load(sp)
+    secrets_store.mint(store, "seeder", "announce_token", now)
+    prev_val = store["seeder"]["announce_token"]["value"]
+    secrets_store.rotate_announce(store, now + 1)
+    # Force the previous record's overlap window to have already elapsed.
+    store["seeder"]["announce_token_previous"][0]["expires_at"] = now + 10
+    secrets_store.save(store, sp)
+
+    hub = telemetry.Telemetry()
+    srv = tracker.make_server("127.0.0.1", 0, sp,
+                              registry=hub.registry,
+                              on_announce_refused=hub.note_announce_refused)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _ = _get(
+            port, "/announce?info_hash=%s&peer_id=p1&port=1&key=%s"
+            % (INFO_HASH, prev_val))
+        assert status == 403
+        text = hub.metrics_text()
+        assert "iris_tracker_announces_refused_total 1" in text
+        assert "iris_tracker_announces_refused_expired_total 1" in text
+        # And the legacy-participants gauge itself reads 0 here -- the exact
+        # misreading IRIS-111 is about: a locked-out device is silent there.
+        assert "iris_legacy_announce_participants 0" in text
+    finally:
+        srv.shutdown()
+
+
 def test_announce_ip_override_is_handed_to_peers(tmp_path):
     # a containerized seeder announces with a CGNAT ip=; other peers must get
-    # THAT address, not the announce's source address (127.0.0.1 here)
-    srv, port, tok = _serve(tmp_path)
+    # THAT address, not the announce's source address (127.0.0.1 here).
+    # The address MUST stay RFC1918/RFC6598: tracker._private_override accepts
+    # an ip= override only for that space, so an RFC 5737 documentation address
+    # here would be silently dropped and this test would prove nothing.
+    # 100.64.0.10 is shared address space, not a lab host.
+    # Rewritten (IRIS-04-004): the override is honoured for the service
+    # seeder principal only, so the seeder announces with its own token.
+    srv, port, tok, seeder_tok = _serve_with_seeder(tmp_path)
     try:
         _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
-             "&ip=100.90.168.20&key=%s" % (INFO_HASH, tok))
+             "&ip=100.64.0.10&key=%s" % (INFO_HASH, seeder_tok))
         status, body = _get(
             port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
             % (INFO_HASH, tok))
         peers = bencode.decode(body)[b"peers"]
-        assert any(p[b"ip"] == b"100.90.168.20" and p[b"port"] == 6881
+        assert any(p[b"ip"] == b"100.64.0.10" and p[b"port"] == 6881
+                   for p in peers)
+    finally:
+        srv.shutdown()
+
+
+def test_device_ip_override_is_ignored_and_socket_address_used(tmp_path):
+    """IRIS-04-004: a DEVICE credential never earns the ip= override. Its
+    announced address is the socket source, so a device cannot plant its
+    endpoint on another device's address (which would lift that device's
+    seeder block through the shared permit/deny conflict) or have arbitrary
+    fleet addresses blocked."""
+    srv, port, tok = _serve(tmp_path)
+    try:
+        _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
+             "&ip=10.0.0.77&key=%s" % (INFO_HASH, tok))
+        status, body = _get(
+            port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9&key=%s"
+            % (INFO_HASH, tok))
+        peers = bencode.decode(body)[b"peers"]
+        assert not any(p[b"ip"] == b"10.0.0.77" for p in peers)
+        assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
                    for p in peers)
     finally:
         srv.shutdown()
@@ -371,11 +478,12 @@ def test_bad_ip_and_port_in_registry_does_not_break_compact_for_other_peers(tmp_
 
 
 def test_valid_ipv4_ip_override_is_accepted(tmp_path):
-    """A valid dotted-quad ip= override must still be accepted and propagated."""
-    srv, port, tok = _serve(tmp_path)
+    """A valid dotted-quad ip= override must still be accepted and propagated
+    (for the service seeder principal -- IRIS-04-004)."""
+    srv, port, tok, seeder_tok = _serve_with_seeder(tmp_path)
     try:
         _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
-             "&ip=192.168.1.50&key=%s" % (INFO_HASH, tok))
+             "&ip=192.168.1.50&key=%s" % (INFO_HASH, seeder_tok))
         status, body = _get(
             port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
             "&key=%s" % (INFO_HASH, tok))
@@ -386,11 +494,12 @@ def test_valid_ipv4_ip_override_is_accepted(tmp_path):
 
 
 def test_rfc1918_172_16_ip_override_is_accepted(tmp_path):
-    """All three RFC1918 blocks are fleet address space; 172.16/12 included."""
-    srv, port, tok = _serve(tmp_path)
+    """All three RFC1918 blocks are fleet address space; 172.16/12 included
+    (service seeder principal -- IRIS-04-004)."""
+    srv, port, tok, seeder_tok = _serve_with_seeder(tmp_path)
     try:
         _get(port, "/announce?info_hash=%s&peer_id=seed&port=6881&left=0"
-             "&ip=172.16.5.5&key=%s" % (INFO_HASH, tok))
+             "&ip=172.16.5.5&key=%s" % (INFO_HASH, seeder_tok))
         status, body = _get(
             port, "/announce?info_hash=%s&peer_id=p2&port=6882&left=9"
             "&key=%s" % (INFO_HASH, tok))
@@ -434,5 +543,38 @@ def test_loopback_ip_override_is_rejected_and_client_address_used(tmp_path):
         assert not any(p[b"ip"] == b"127.0.0.2" for p in peers)
         assert any(p[b"ip"] == b"127.0.0.1" and p[b"port"] == 6881
                    for p in peers)
+    finally:
+        srv.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# IRIS-02-003 / #54 note: per-connection socket timeout on the handler
+# ---------------------------------------------------------------------------
+
+def test_handler_has_socket_timeout_and_releases_a_stalled_connection(tmp_path):
+    """A client that opens a connection and never completes its request line
+    must not pin a handler thread for the life of the server. With the
+    handler timeout set, the stalled read raises and the server closes the
+    connection on its own."""
+    import socket
+    srv, port, _tok = _serve(tmp_path)
+    assert srv.RequestHandlerClass.timeout == tracker.HANDLER_TIMEOUT
+    assert tracker.handler_timeout({"IRIS_HTTP_TIMEOUT": "0"}) == \
+        tracker.HANDLER_TIMEOUT
+    assert tracker.handler_timeout({"IRIS_HTTP_TIMEOUT": "junk"}) == \
+        tracker.HANDLER_TIMEOUT
+    assert tracker.handler_timeout({"IRIS_HTTP_TIMEOUT": "7.5"}) == 7.5
+    srv.RequestHandlerClass.timeout = 0.5
+    try:
+        base = threading.active_count()
+        c = socket.create_connection(("127.0.0.1", port), timeout=5)
+        c.sendall(b"GET /announce?info_ha")          # never completed
+        # The server must hang up on its own: recv returns b"" (EOF).
+        assert c.recv(16) == b""
+        c.close()
+        deadline = time.time() + 5
+        while threading.active_count() > base and time.time() < deadline:
+            time.sleep(0.05)
+        assert threading.active_count() <= base
     finally:
         srv.shutdown()

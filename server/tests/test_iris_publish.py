@@ -9,6 +9,7 @@ import time
 import pytest
 
 import bencode
+import bulkhash
 import catalog
 import publish
 import secrets_store
@@ -44,6 +45,59 @@ def test_publish_end_to_end(tmp_path):
     # catalog persisted + seeder invoked with the image's dir
     assert store.get_image("cat9k_iosxe.26.01.01") is not None
     assert captured["dir"] == str(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("mktorrent") is None,
+                    reason="mktorrent not installed")
+def test_signature_verified_writes_operator_field_not_the_reconcilers(tmp_path):
+    """#88: `iris-publish --signature-verified` used to write
+    cisco_signature_verified -- the SAME field the Cisco Bulk Hash
+    reconciler owns (catalog.apply_hash_verification) -- so the operator's
+    attestation was silently overwritten by the very next reconciler run.
+    The operator's mark now lands on its own field, untouched by the
+    reconciler, and the reconciler's field is untouched by publish()."""
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image payload" * 1000)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+
+    entry = publish.publish(
+        str(img), store,
+        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        image_id=None, signature_verified=True,
+        seeder=lambda torrent_bytes, image_dir: None)
+
+    # the operator's own attestation
+    assert entry["operator_attested_signature"] is True
+    # publish() never writes the reconciler's field at all
+    assert "cisco_signature_verified" not in entry
+
+    # The reconciler's first run (a mismatch, so it would previously have
+    # flipped the shared field to False) must not touch the operator's mark.
+    store.apply_hash_verification(
+        {entry["id"]: {"state": bulkhash.STATE_MISMATCH,
+                       "feed_sha512": "bb" * 64,
+                       "publish_date": "2026-08-01", "deferral": False}},
+        source="scheduled", now=1000)
+    after = store.get_image(entry["id"])
+    assert after["operator_attested_signature"] is True, \
+        "the reconciler must never overwrite the operator's attestation"
+    assert after["cisco_signature_verified"] is False
+    assert after["hash_verification"]["state"] == "mismatch"
+
+
+@pytest.mark.skipif(shutil.which("mktorrent") is None,
+                    reason="mktorrent not installed")
+def test_publish_without_signature_verified_flag_leaves_attestation_false(tmp_path):
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image payload" * 1000)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+    entry = publish.publish(
+        str(img), store,
+        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        image_id=None, signature_verified=False,
+        seeder=lambda torrent_bytes, image_dir: None)
+    assert entry["operator_attested_signature"] is False
+    assert "cisco_signature_verified" not in entry
 
 
 def test_derive_id_strips_known_suffixes():
@@ -179,3 +233,202 @@ def test_default_tracker_url_uses_current_never_previous(tmp_path, monkeypatch):
     assert url == "http://10.0.0.9:6969/announce?announce_token=%s" % current
     assert "PREVIOUSVALUE" not in url
     assert "key=" not in url
+
+
+# ---------------------------------------------------------------------------
+# The announce URL carries the seeder's private-tracker token and mktorrent
+# only takes it on argv. A failing mktorrent must never surface that argv --
+# not in the exception, not in a traceback, not on the CLI's stderr.
+# ---------------------------------------------------------------------------
+
+_TOKEN = "deadbeefcafef00d" * 2
+_TRACKER = "http://10.0.0.5:6969/announce?announce_token=" + _TOKEN
+
+
+def _stub_mktorrent(tmp_path, monkeypatch, rc=1):
+    """Put a failing `mktorrent` first on PATH."""
+    import os
+    import stat
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "mktorrent"
+    stub.write_text("#!/bin/sh\necho 'mktorrent: simulated failure' >&2\nexit %d\n" % rc)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    return stub
+
+
+def test_mktorrent_failure_never_exposes_the_announce_token(tmp_path, monkeypatch):
+    import os
+    import traceback
+    _stub_mktorrent(tmp_path, monkeypatch)
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image" * 100)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+    with pytest.raises(RuntimeError) as info:
+        publish.publish(str(img), store, _TRACKER, seeder=lambda b, d: None)
+    rendered = "".join(traceback.format_exception(info.value))
+    assert _TOKEN not in str(info.value)
+    assert _TOKEN not in rendered, "chained context would print mktorrent's argv"
+    assert "mktorrent exited 1" in str(info.value)
+    # nothing half-written is left for the startup re-seed to find
+    assert not os.path.exists(store.torrent_path("cat9k_iosxe.26.01.01"))
+    assert store.get_image("cat9k_iosxe.26.01.01") is None
+
+
+def test_cli_publish_failure_prints_no_token_and_no_traceback(tmp_path, monkeypatch,
+                                                              capsys):
+    _stub_mktorrent(tmp_path, monkeypatch)
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image" * 100)
+    rc = publish.main([str(img), "--state", str(tmp_path / "state"),
+                       "--tracker-url", _TRACKER])
+    out = capsys.readouterr()
+    assert rc == 1
+    assert _TOKEN not in out.err + out.out
+    assert "Traceback" not in out.err + out.out
+    assert "publish failed" in out.err
+
+
+def test_redact_strips_announce_credentials_and_known_secrets():
+    argv_text = ("Command '['mktorrent', '-p', '-a', '%s', '-o', 'x.torrent']' "
+                 "returned non-zero exit status 1." % _TRACKER)
+    assert _TOKEN not in publish.redact(argv_text)
+    assert _TOKEN not in publish.redact(argv_text, _TRACKER)
+    assert "announce_token=<redacted>" in publish.redact(argv_text)
+    assert publish.redact("legacy ?key=abc&x=1") == "legacy ?key=<redacted>&x=1"
+    assert publish.redact("plain error text") == "plain error text"
+    assert publish.redact(None) == ""
+
+
+@pytest.mark.skipif(shutil.which("mktorrent") is None,
+                    reason="mktorrent not installed")
+def test_publish_failure_after_mktorrent_rolls_back_the_torrent_file(tmp_path):
+    """A .torrent with no catalog row is exactly what the startup re-seed must
+    never find: roll it back when the seeder add (or the catalog write) fails."""
+    import os
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image" * 1000)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+
+    def failing_seeder(torrent_bytes, image_dir):
+        raise RuntimeError("aria2 RPC unreachable")
+
+    with pytest.raises(RuntimeError, match="aria2 RPC unreachable"):
+        publish.publish(str(img), store, "http://127.0.0.1:6969/announce?key=tok",
+                        seeder=failing_seeder)
+    assert not os.path.exists(store.torrent_path("cat9k_iosxe.26.01.01"))
+
+    def failing_save(entry):
+        raise OSError("state volume full")
+
+    store.save_image = failing_save
+    with pytest.raises(OSError, match="state volume full"):
+        publish.publish(str(img), store, "http://127.0.0.1:6969/announce?key=tok",
+                        seeder=lambda b, d: None)
+    assert not os.path.exists(store.torrent_path("cat9k_iosxe.26.01.01"))
+
+
+# ---------------------------------------------------------------------------
+# The canonical announce base must be derived the way the tracker listens and
+# the catalog personalizes, or the origin seeder announces to the wrong port.
+# ---------------------------------------------------------------------------
+
+def _secrets_with_seeder_token(tmp_path, monkeypatch):
+    store = {"devices": {}, "seeder": {}}
+    secrets_store.mint(store, "seeder", "announce_token", int(time.time()))
+    sec = tmp_path / "secrets.json"
+    secrets_store.save(store, str(sec))
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    monkeypatch.setenv("IRIS_TOKENS", str(tmp_path / "no-such-tokens.txt"))
+    return store["seeder"]["announce_token"]["value"]
+
+
+def test_default_tracker_url_honours_tracker_port(tmp_path, monkeypatch):
+    tok = _secrets_with_seeder_token(tmp_path, monkeypatch)
+    monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.5")
+    monkeypatch.setenv("IRIS_TRACKER_PORT", "7070")
+    monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)
+    assert publish.default_tracker_url() == \
+        "http://10.0.0.5:7070/announce?announce_token=%s" % tok
+
+
+def test_default_tracker_url_honours_tracker_announce_override(tmp_path, monkeypatch):
+    tok = _secrets_with_seeder_token(tmp_path, monkeypatch)
+    monkeypatch.delenv("IRIS_HOST_IP", raising=False)
+    monkeypatch.setenv("IRIS_TRACKER_ANNOUNCE", "http://tracker.lab:6969/announce")
+    assert publish.default_tracker_url() == \
+        "http://tracker.lab:6969/announce?announce_token=%s" % tok
+
+
+# ---------------------------------------------------------------------------
+# resume_torrent_rpc: the release path's inverse of the quarantine's
+# force-remove -- re-sync the canonical announce to the CURRENT credential,
+# never hand aria2 a duplicate info hash.
+# ---------------------------------------------------------------------------
+
+def _canonical(tmp_path, announce=b"http://10.0.0.5:6969/announce?announce_token=old"):
+    info = bencode.encode({b"name": b"img.bin", b"piece length": 16384,
+                           b"pieces": b"\0" * 20, b"length": 1})
+    data = (b"d8:announce%d:%s4:info" % (len(announce), announce)) + info + b"e"
+    path = tmp_path / "img.torrent"
+    path.write_bytes(data)
+    return path, hashlib.sha1(info).hexdigest()
+
+
+def test_resume_torrent_rpc_resyncs_announce_and_adds_when_inactive(tmp_path, monkeypatch):
+    path, info_hash = _canonical(tmp_path)
+    calls = []
+
+    def fake_rpc(rpc_url, rpc_secret, method, params, call_id="pub"):
+        calls.append((method, params))
+        if method == "aria2.tellActive":
+            return []
+        if method == "aria2.addTorrent":
+            return "gid-new"
+        raise AssertionError(method)
+
+    monkeypatch.setattr(publish, "_rpc_call", fake_rpc)
+    gid = publish.resume_torrent_rpc(str(path), str(tmp_path), info_hash,
+                                     tracker_url=_TRACKER, rpc_url="http://x",
+                                     rpc_secret="s")
+    assert gid == "gid-new"
+    assert [m for m, _ in calls] == ["aria2.tellActive", "aria2.addTorrent"]
+    # the canonical file now carries the current credential, info hash intact
+    data = path.read_bytes()
+    assert bencode.decode(data)[b"announce"] == _TRACKER.encode()
+    assert publish.torrent_info_hash(str(path)) == info_hash
+    # and that is what the seeder was handed, from the image's own directory
+    import base64
+    add_params = calls[1][1]
+    assert base64.b64decode(add_params[0]) == data
+    assert add_params[2]["dir"] == str(tmp_path)
+
+
+def test_resume_torrent_rpc_leaves_an_active_torrent_alone(tmp_path, monkeypatch):
+    path, info_hash = _canonical(tmp_path)
+    calls = []
+
+    def fake_rpc(rpc_url, rpc_secret, method, params, call_id="pub"):
+        calls.append(method)
+        if method == "aria2.tellActive":
+            return [{"gid": "g1", "infoHash": info_hash.upper()}]
+        raise AssertionError(method)
+
+    monkeypatch.setattr(publish, "_rpc_call", fake_rpc)
+    assert publish.resume_torrent_rpc(str(path), str(tmp_path), info_hash,
+                                      tracker_url=_TRACKER, rpc_url="http://x",
+                                      rpc_secret="s") is None
+    assert calls == ["aria2.tellActive"]
+
+
+def test_resume_torrent_rpc_without_a_known_tracker_keeps_bytes(tmp_path, monkeypatch):
+    path, info_hash = _canonical(tmp_path)
+    before = path.read_bytes()
+    monkeypatch.delenv("IRIS_HOST_IP", raising=False)
+    monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)
+    monkeypatch.setattr(publish, "_rpc_call",
+                        lambda *a, **k: [] if a[2] == "aria2.tellActive" else "g")
+    assert publish.resume_torrent_rpc(str(path), str(tmp_path), None,
+                                      rpc_url="http://x", rpc_secret="s") == "g"
+    assert path.read_bytes() == before

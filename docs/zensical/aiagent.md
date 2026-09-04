@@ -41,6 +41,22 @@ Review [Network Ports and Flows](network-ports.md) before bringing up the
 server. Devices need reachability to the server and to each other for the
 private swarm.
 
+### Settings that fail closed
+
+Several controls refuse to guess rather than doing something unsafe. Each
+stops with a message naming the variable, so the failure is legible, but
+knowing them in advance saves a stalled PoC:
+
+| You see | Why | What to set |
+| --- | --- | --- |
+| The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
+| A device refuses the SSH connection, naming legacy algorithms | Old SHA-1 key exchange and `ssh-rsa` host keys are no longer offered by default | `IRIS_SSH_LEGACY=1`, only for devices too old to offer anything current |
+| A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm which, then remove that host's entry from the known-hosts file under the IRIS state directory |
+| Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS no longer applies a routing protocol to the interfaces it creates unless asked | `SVI_IGP=isis` when the fabric runs IS-IS; leave unset otherwise |
+| IOx package staging aborts asking for an image digest | The cross-architecture emulation helper runs privileged, so it is pinned by digest rather than a moving tag | `BINFMT_IMAGE_DIGEST` to the audited digest, or preconfigure emulation on the host |
+
+Set the host-side ones in `server/.env`, which Compose passes through.
+
 ## Assistant operating rules
 
 Pick a deliberately economical assistant. This sequence is prescriptive
@@ -95,17 +111,16 @@ At the end of every step, state the next action required from me.
    credential works only before an admin account exists. The next sign-in opens
    the first-run setup wizard at `#setup`, a Magnetic Stepper with a step
    panel on the left and each step's own controls on the right: telemetry
-   destination, stage host, device packages, and now a fourth step, image
-   verification — the Cisco source check against the published Known Good
-   Values feed, configured inline (daily-schedule enable, refresh now, and
-   the offline feed-file import for air-gapped servers) rather than a link
-   out to Settings. Enable it before trusting staged images (see
-   [Validation](validation.md)). Any step can be skipped and resumed later —
-   a banner keeps offering the unfinished ones, and Settings › Setup reports
-   all five states, including a schedule that is configured but has not yet
-   produced a successful run. The device-packages step is the same check as
-   step 6 below; it cannot be completed from the console, because the
-   console container has no Docker socket.
+   destination, device packages, and image verification — the Cisco source
+   check against the published Known Good Values feed, configured inline
+   (daily-schedule enable, refresh now, and the offline feed-file import for
+   air-gapped servers) rather than a link out to Settings. Enable it before
+   trusting staged images (see [Validation](validation.md)). Any step can be
+   skipped and resumed later — a banner keeps offering the unfinished ones,
+   and Settings › Setup reports all four states, including a schedule that is
+   configured but has not yet produced a successful run. The device-packages
+   step is the same check as step 6 below; it cannot be completed from the
+   console, because the console container has no Docker socket.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog
@@ -202,6 +217,12 @@ first-run slate instead of deploying over live state:
    restart-looping container, never the first-run page). Then continue from
    step 3 of the guided sequence: the default first-run credential works again
    because no admin account exists in the fresh state.
+
+Adding a recovery recipient does **not** need any of this. `iris-bootstrap
+--add-recipient` and `--rekey` re-encrypt the existing state in place, keeping
+every device credential, the admin account and the pinned certificate.
+`--force` is the one that regenerates them all, and it now refuses to run
+without `--yes` and names what it would destroy first.
 
 The reset erases fleet rows, catalog entries and verification verdicts, the
 image-verification schedule, deployment records, settings, credential

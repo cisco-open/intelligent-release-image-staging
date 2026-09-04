@@ -107,7 +107,10 @@ def test_dockerfile_exposes_artifacts_seed_data_and_healthcheck():
     df = _read("Dockerfile")
     assert "EXPOSE 6969 8443 8000 6881 8080 9101" in df
     assert "EXPOSE 6800" not in df
-    assert "HEALTHCHECK" in df and "9101/healthz" in df
+    # /readyz, not /healthz: the latter is unconditional and let a container
+    # with a dead catalog/artifact listener stay `healthy` (IRIS-13-012).
+    assert "HEALTHCHECK" in df and "9101/readyz" in df
+    assert "9101/healthz" not in df
 
 
 def test_dockerfile_rejects_non_amd64_server_builds():
@@ -166,3 +169,37 @@ def test_compose_forwards_version_build_arg():
     # must live under build.args, NOT the runtime environment mapping — a
     # runtime entry would override the image-baked value with "" on restarts.
     assert "IRIS_VERSION" not in svc.get("environment", {})
+
+
+def test_compose_restores_the_licensed_font_by_bind_mount_only():
+    """#87: .dockerignore keeps the Cisco-licensed Sharp Sans typeface out of
+    the build context (so it can never enter an image layer or the release
+    tarball -- see test_dockerignore.py / test_make_release.bats), but a
+    deployment that independently holds the license must still be able to
+    restore it at runtime. The only sanctioned path is a Compose bind mount
+    -- never re-adding the file to the build context."""
+    import yaml
+    svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]
+    mounts = [v for v in svc["volumes"] if "SharpSans-Bold.woff2" in v]
+    assert len(mounts) == 1, "expected exactly one Sharp Sans bind mount"
+    mount = mounts[0]
+    # the exact runtime path server/gui_server.py's WEBROOT resolves to
+    # inside the image (WORKDIR /opt/iris; COPY server/ /opt/iris/server/)
+    assert mount.endswith(
+        ":/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"), mount
+    # driven by an env var, not a literal host path baked into the file —
+    # an operator without the license must get a safe no-op, not a broken
+    # `docker compose up` (a missing literal host path would fail the mount)
+    assert mount.startswith("${IRIS_SHARP_SANS_FONT_HOST:-"), mount
+    # the default source (between ":-" and the closing "}") must be a path
+    # virtually guaranteed to exist on any Linux Compose host, so the mount
+    # is a harmless no-op when the operator has not set the variable
+    default_source = mount.split(":-", 1)[1].split("}", 1)[0]
+    assert default_source == "/dev/null"
+
+    # the .dockerignore side of the fix (already covered by
+    # test_dockerignore.py) must still hold: the font stays excluded
+    root = os.path.dirname(_SERVER)
+    with open(os.path.join(root, ".dockerignore"), encoding="utf-8") as f:
+        di = f.read()
+    assert "server/webroot/fonts/SharpSans-Bold.woff2" in di

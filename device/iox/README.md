@@ -32,8 +32,11 @@ architecture-matched `aria2c` from `ARIA2C_BIN`, a local agent bundle, or
 `deliverables/aria2c-<arch>`, verifying each against `tools/aria2c.sha256` and
 failing closed on a mismatch. The build never downloads a client: an earlier
 network fallback could silently ship an unpatched third-party build into the
-image. Supply the pinned catalog cert with `CATALOG_PEM`, or set both
-`CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`.
+image. Supply the pinned catalog cert with `CATALOG_PEM` (certificate block
+only — a combined cert+key file such as the server's `IRIS_CERT` is refused),
+or set both `CATALOG_PEM_URL` and `CATALOG_PEM_FINGERPRINT`. The cert-only pem
+is also packaged as a top-level `iris-catalog.pem` in `artifacts.tar.gz`, the
+probe member `tools/check-package-freshness.sh` and the console read.
 
 ## Config delivery
 
@@ -47,22 +50,29 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 | env | conf key | notes |
 |---|---|---|
 | `IRIS_CATALOG_TOKEN` | `catalog_token` | **secret** — `iris-mint-enrollment <device_id>` on the server |
-| `IRIS_DEVICE_ID` | `device_id` | the device's mgmt IP (convention), e.g. `100.90.168.99` |
+| `IRIS_DEVICE_ID` | `device_id` | the device's mgmt IP (convention), e.g. `192.0.2.99` |
 | `IRIS_DEVICE_SSH_PASS` | `device_ssh_pass` | **secret** — login for SSH-to-self |
 | `IRIS_DEVICE_SSH_HOST` | `device_ssh_host` | required IOS SVI for SSH-to-self |
 | `IRIS_DEVICE_SSH_USER` | `device_ssh_user` | required scoped IOS user |
 | `IRIS_CATALOG_URL` | `catalog_url` | required reachable URL covered by the pinned cert |
 | `IRIS_TARGET_FS` | `target_fs` | optional writable IOS disk prefix; installer default `sdflash:` |
 | `IRIS_TELEMETRY` | `telemetry` | default `on` — post-staging telemetry reports + pull (set `off` to silence) |
+| `IRIS_SHARE_DIR` | `share_dir` | C9300 SSD-share path **inside the app** (paired with a `run-opts -v` bind mount); the agent lands its scratch there so the placement is a local disk write |
+| `IRIS_SHARE_IOS_PATH` | `share_ios_path` | the same share as IOS sees it, e.g. `usbflash1:iox_host_data_share`; both are required together for the C9300 share path below |
 
 The IOx agent reuses one short-lived SSH control connection for CLI and SCP
 work. This avoids opening a new VTY login for every filesystem check, transfer,
 and verification call during an agent tick.
 
-> **Security follow-up:** the device login is held in cleartext in the conf on SD.
-> Scope it (AAA `parser view` / command-authorization to `copy`/`dir`/`event
-> manager`), restrict the VTY ACL to VLAN 666, prefer SSH **key** auth, and issue
-> a rotating credential via the #27 secrets-broker. Pending security review.
+> **Residual risk — device login held in cleartext.** The generated
+> `iris-agent.conf` holds the SSH-to-self password in cleartext on the app's
+> persistent storage (SD on IE-3x00), mode `0600` and readable only inside the
+> app. There is no secrets broker; the credential is static until an operator
+> rotates it. Mitigate it at the device: scope the account with AAA
+> (`parser view` / command authorization limited to `copy`, `dir`, and `event
+> manager`), restrict the VTY ACL to the IRIS app subnet, and prefer SSH **key**
+> auth where the platform supports it. Rotating the credential means re-running
+> the installer with the new value.
 
 ## Deploy to the device (proven recipe)
 
@@ -89,8 +99,8 @@ and verification call during an agent tick.
    This is also the only manual prerequisite for **Console one-click onboarding**:
     once `iris-arm64.tar` is staged in `artifacts/`, the Console picks this installer
    automatically for IE-3x00/IR1101/IR18xx devices (by `model`/`platform`, or by
-   live auto-detection) — see the Console's Devices section in the top-level
-    README. Onboarding fails fast, before touching the device, if `iris-arm64.tar` is
+   live auto-detection) — see [Web Console](../../docs/zensical/console.md).
+   Onboarding fails fast, before touching the device, if `iris-arm64.tar` is
    missing.
 
 4. **On the device** — 3 gotchas, all required:
@@ -151,19 +161,31 @@ How the agent hands the downloaded image to IOS depends on the platform:
 - **C9k (share mount, the Console default)**: the app-hosting SSD share
   (`usbflash1:iox_host_data_share`, host-side `/vol/usb1/…`) is bind-mounted
   into the container, so the agent writes the image to the share ROOT as
-  `iris-staged.bin` at disk speed and runs an IOS-internal plain
-  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
-  over the SSH-to-self session — bootflash-root placement like Guest Shell
-  (the real image name comes from the copy; the agent attests placement by
-  dir presence and catalog byte size, and content integrity by its own
-  sha256 against the catalog), no image bytes on the CoPP-policed punt path.
-  IRIS uses only `iris-` prefixed filenames at the share root
+  `iris-staged.bin` at disk speed and places it at the bootflash root over
+  the SSH-to-self session with the same crash-safe, two-phase sequence
+  Guest Shell uses (see below) — no image bytes on the CoPP-policed punt
+  path. IRIS uses only `iris-` prefixed filenames at the share root
   (container-created subdirs lock the container out on this platform).
   Before the multi-GB copy the agent probes that IOS can actually read the
   share and otherwise falls back to the scp push below; the transient share
-  copy is removed after placement.
+  copy is removed after a verified placement.
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
-  SCP server (`ip scp server enable`, set by `install.sh`), then runs
-  `copy <target>guest-share/iris/<img> <target><img>` and confirms the
-  destination appears before reporting `ready`.
+  SCP server (`ip scp server enable`, set by `install.sh`), then places it at
+  the target-FS root with the same two-phase sequence.
+
+Both container paths place the image by running plain `copy`/`rename`
+commands DIRECTLY over the SSH-to-self vty rather than through the
+IRIS-COPYROOT EEM applet Guest Shell uses (`cli_ssh` drives `copy` to
+completion; EEM's `cli command "copy …"` is a no-op on this platform). The
+sequence itself is identical: `copy` first lands the bytes at a reserved
+temp name (`<img>.iris-tmp`), never at `<img>` directly — a copy failure or
+a power loss leaves `<img>` (an older copy, or the file the `BOOT` variable
+currently names) untouched — the agent reverifies the temp copy by dir
+presence and exact catalog byte size, and only once that passes does a
+single `rename` put it at `<img>` (a directory-entry update, not a data
+transfer). The agent attests the final placement the same way: dir presence
+and catalog byte size, plus its own sha256 against the catalog for content
+integrity. See [Crash-safe same-name
+replacement](../../docs/zensical/device-agents.md#crash-safe-same-name-replacement)
+for the full contract, shared with the Guest Shell path.

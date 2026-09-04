@@ -152,12 +152,12 @@ def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
     return str(d), str(served)
 
 
-def _call(d, served, admin="admin", stage_host=None,
+def _call(d, served, admin="admin",
          telemetry_override_endpoint=None, telemetry_override_enabled=None,
          telemetry_env_endpoint="", telemetry_env_enabled=False,
          image_verification_last_run=None):
     return setup_status.build_status(
-        d, served, os.path.join(d, "iris-catalog.pem"), admin, stage_host,
+        d, served, os.path.join(d, "iris-catalog.pem"), admin,
         telemetry_override_endpoint, telemetry_override_enabled,
         telemetry_env_endpoint, telemetry_env_enabled,
         image_verification_last_run=image_verification_last_run)
@@ -168,18 +168,11 @@ def test_all_ok(tmp_path):
     # every file this test just wrote, is >= the served cert's) -- the third
     # row must not keep an otherwise-clean packages card from reading 'ok'.
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    st = _call(d, served, stage_host={"configured": True, "username": "svc"})
+    st = _call(d, served)
     assert st["admin"]["state"] == "ok"
     assert st["admin"]["username"] == "admin"
-    assert st["stage_host"]["state"] == "ok"
     assert st["packages"]["state"] == "ok"
     assert len(st["packages"]["items"]) == 3
-
-
-def test_stage_host_unset(tmp_path):
-    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
-    st = _call(d, served, stage_host={"configured": False, "username": ""})
-    assert st["stage_host"]["state"] == "unset"
 
 
 # --- image verification card (KGV / Cisco Bulk Hash reconciler, Task 5) ---
@@ -318,7 +311,7 @@ def test_unreadable_served_cert_is_unknown_never_ok(tmp_path):
     d, _ = _artifacts(tmp_path, CERT_A, CERT_A)
     st = setup_status.build_status(
         d, str(tmp_path / "missing.pem"),
-        os.path.join(d, "iris-catalog.pem"), "admin", None)
+        os.path.join(d, "iris-catalog.pem"), "admin")
     assert st["packages"]["state"] == "unknown"
     assert st["packages"]["reference_fingerprint"] is None
 
@@ -481,7 +474,7 @@ def test_xr_package_unknown_when_served_cert_is_unreadable(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
     st = setup_status.build_status(
         d, str(tmp_path / "missing.pem"),
-        os.path.join(d, "iris-catalog.pem"), "admin", None)
+        os.path.join(d, "iris-catalog.pem"), "admin")
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
     assert xr["state"] == "unknown"
@@ -517,7 +510,7 @@ def test_xr_package_absent_does_not_outrank_a_stale_tar(tmp_path):
 
 def test_response_carries_no_secret_material(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A)
-    st = _call(d, served, stage_host={"configured": True, "username": "svc"},
+    st = _call(d, served,
               telemetry_override_endpoint="https://collector.example:4318",
               telemetry_override_enabled=True)
     blob = repr(st).lower()
@@ -558,7 +551,7 @@ def test_console_has_a_setup_pane_wired_to_the_endpoint():
 def test_setup_pane_explains_why_each_step_matters():
     """Each card carries operator-facing rationale, not just a status chip."""
     html = _webroot("index.html")
-    for phrase in ("pins this server", "Guest Shell", "stage host"):
+    for phrase in ("pins this server", "Guest Shell", "published anywhere"):
         assert phrase.lower() in html.lower()
 
 
@@ -583,14 +576,14 @@ def test_setup_pane_image_verification_card_now_enters_the_wizard():
     """Task 9 (USER DIRECTIVE: Setup becomes a real flow) supersedes the
     earlier decision this test used to pin -- image verification was kept
     out of the wizard because a scheduled/manual/offline check "cannot be
-    squeezed into first-run setup". Task 9's step 4 proves that decision
+    squeezed into first-run setup". Task 9's step proves that decision
     wrong: it mounts the SAME Settings > Image verification controls
-    (schedule, Refresh now, offline import) the wizard's telemetry/
-    stage-host steps already reuse from Settings, via mountImageVerification
-    (a move, not a template clone -- see its own comment in app.js for why).
-    So the Setup status card now sends the operator into the wizard, the
-    same precedent telemetry/stage-host/packages already follow, instead of
-    off to Settings on its own."""
+    (schedule, Refresh now, offline import) the wizard's telemetry step
+    already reuses from Settings, via mountImageVerification (a move, not a
+    template clone -- see its own comment in app.js for why). So the Setup
+    status card now sends the operator into the wizard, the same precedent
+    telemetry/packages already follow, instead of off to Settings on its
+    own."""
     html = _webroot("index.html")
     js = _webroot("app.js")
     assert 'id="setup-iv-chip"' in html
@@ -599,7 +592,7 @@ def test_setup_pane_image_verification_card_now_enters_the_wizard():
     assert 'href="#settings/bulkhash"' not in card
     assert "cisco" in card.lower()
     assert "s.image_verification.state" in js
-    # NOW a real fourth wizard step -- the opposite of the old decision
+    # NOW a real wizard step -- the opposite of the old decision
     assert "image_verification" in js.split(
         "var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
 
@@ -687,7 +680,7 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
     """A failed status fetch (non-ok response) or a thrown/network error
     must never leave the PREVIOUS render on screen -- that would be
     evidence-free chips still reading "done". Both paths must route
-    through the same reset, which must paint all five chips unknown and
+    through the same reset, which must paint all four chips unknown and
     clear the package table and remedy line (spec: never silently render a
     stale/empty checklist as if it were healthy)."""
     js = _webroot("app.js")
@@ -705,10 +698,10 @@ def test_refresh_setup_paints_unknown_on_failed_or_thrown_fetch():
 
     reset = js.split("function setupShowUnknown() {", 1)[1].split(
         "\n  }", 1)[0]
-    for chip_id in ("setup-admin-chip", "setup-td-chip", "setup-sh-chip",
+    for chip_id in ("setup-admin-chip", "setup-td-chip",
                     "setup-pkg-chip", "setup-iv-chip"):
         assert ("getElementById('%s')" % chip_id) in reset
-    assert reset.count("setupChip('unknown')") == 5
+    assert reset.count("setupChip('unknown')") == 4
     assert "#setup-pkg-table tbody" in reset
     assert "setup-pkg-remedy" in reset
 
@@ -765,22 +758,27 @@ def test_first_run_setup_hands_off_to_the_wizard():
 
 
 # ---------------------------------------------------------------------------
-# Task 9: the Magnetic Stepper flow -- a real fourth step (Image
+# Task 9: the Magnetic Stepper flow -- a real third step (Image
 # verification), the left-panel/right-content anatomy, and the M37 fold-in
 # (a configured-but-never-succeeded schedule reads differently from a truly
 # unconfigured one). Same source-guard idiom as the rest of this file: no JS
 # runtime harness exists in this repo, so these assert on the SOURCE TEXT.
+#
+# The stage-host step (#101) was removed: console onboarding always stages
+# per-device material locally, so the stage-host SSH credential the step
+# collected had no consumer. The wizard now has three steps, not four.
 # ---------------------------------------------------------------------------
 
-def test_wizard_steplist_carries_four_steps_including_image_verification():
+def test_wizard_steplist_carries_three_steps_including_image_verification():
     js = _webroot("app.js")
     steps = js.split("var WIZARD_STEPS = [", 1)[1].split("];", 1)[0]
-    for key in ("telemetry", "stage_host", "packages", "image_verification"):
+    for key in ("telemetry", "packages", "image_verification"):
         assert ("key: '%s'" % key) in steps, key
-    assert steps.count("{ id:") == 4
+    assert "stage_host" not in steps
+    assert steps.count("{ id:") == 3
 
 
-def test_wizard_step_four_is_image_verification_with_a_form_mount():
+def test_wizard_step_three_is_image_verification_with_a_form_mount():
     html = _webroot("index.html")
     wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
     assert 'id="wz-step-imageverification"' in wiz
@@ -804,14 +802,15 @@ def test_wizard_uses_the_left_panel_right_content_stepper_anatomy():
     panel = wiz.split('class="wz-panel"', 1)[1].split("</div>", 1)[0]
     assert 'id="wz-steplist"' in panel
     content = wiz.split('class="wz-content"', 1)[1]
-    for marker in ("wz-step-telemetry", "wz-step-stagehost", "wz-step-packages",
+    for marker in ("wz-step-telemetry", "wz-step-packages",
                    "wz-step-imageverification", 'id="wz-nav"'):
         assert marker in content, marker
+    assert "wz-step-stagehost" not in content
     assert ".wz-panel {" in css and "320px" in css.split(".wz-panel {", 1)[1].split("}", 1)[0]
 
 
 def test_image_verification_content_is_moved_not_cloned_between_setup_and_settings():
-    """Unlike the telemetry/stage-host forms (a <template>, cloned fresh per
+    """Unlike the telemetry form (a <template>, cloned fresh per
     mount, re-wired each time via FORM_MOUNTS), the Image verification
     controls bind their handlers once at load -- so relocating them must be a
     live DOM move (appendChild), never a second clone that would duplicate
@@ -880,3 +879,171 @@ def test_absent_package_state_renders_inactive_not_warning():
     levels = js.split("var SETUP_CHIP_LEVELS = {", 1)[1].split("\n  };", 1)[0]
     assert "absent: 'inactive'" in levels
     assert "absent: 'warning'" not in levels
+
+
+# The stage-host step was removed (#101): console onboarding always stages
+# locally (gui_onboard._build_env exports IRIS_STAGE_LOCAL=1 to every
+# recipe), so the stage-host credential the step collected had no consumer.
+# The stage-host-specific assertions that used to live here (the setup-status
+# card's required: false, and the wizard copy that used to warn onboarding
+# "cannot start" without it) covered only that now-deleted feature and were
+# deleted along with it. The general skip-optional-steps mechanism the old
+# test also exercised (telemetry and image_verification are still optional
+# items) survives below, now proved without reference to stage_host.
+
+def test_wizard_first_incomplete_step_skips_optional_items():
+    js = _webroot("app.js")
+    first = js.split("function wizardFirstIncompleteStep(", 1)[1].split("\n  }", 1)[0]
+    assert "required === false" in first
+    assert "SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]" in first
+
+
+# ---------------------------------------------------------------------------
+# Package layouts as device/iox/build.sh REALLY lays them out (review finding
+# IRIS-12-001). The _make_iox_package fixture above is the pre-2026-09-02
+# shape (a bare pem in artifacts.tar.gz); the two shapes below are what the
+# skopeo docker-archive build produces, with and without the top-level
+# pinned-cert probe member build.sh re-adds next to rootfs.tar.
+# ---------------------------------------------------------------------------
+
+def _classic_rootfs(baked_pem, legacy_dirs=False):
+    """A classic docker-archive rootfs.tar: manifest.json + <cfg>.json +
+    plain layer tars (skopeo style `<digest>.tar` plus the legacy
+    `<id>/layer.tar` symlink, or docker-save style `<id>/layer.tar` files).
+    The pem lives ONLY inside a layer, at the path the Dockerfile bakes."""
+    import hashlib
+    import json
+
+    def tar_bytes(members):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for name, data in members:
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                t.addfile(ti, io.BytesIO(data))
+        return buf.getvalue()
+
+    sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
+    base = tar_bytes([("etc/os-release", b"ID=debian\n"),
+                      ("opt/iris/bin/aria2c", b"\x7fELF fake " * 64)])
+    top = tar_bytes([("opt/iris/iris-catalog.pem", baked_pem.encode()),
+                     ("opt/iris/agent/iris_agent.py", b"AGENT = 1\n")])
+    d_base, d_top = sha(base), sha(top)
+    id_base, id_top = sha(b"legacy" + d_base.encode()), sha(b"legacy" + d_top.encode())
+    config = json.dumps({"architecture": "arm64", "rootfs": {
+        "type": "layers", "diff_ids": ["sha256:" + d_base, "sha256:" + d_top]}}).encode()
+    layers = ([id_base + "/layer.tar", id_top + "/layer.tar"] if legacy_dirs
+              else [d_base + ".tar", d_top + ".tar"])
+    manifest = json.dumps([{"Config": sha(config) + ".json",
+                            "RepoTags": ["iris-iox:arm64"], "Layers": layers}]).encode()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        def add(name, data):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+        add("manifest.json", manifest)
+        add("repositories", json.dumps({"iris-iox": {"arm64": id_top}}).encode())
+        add(sha(config) + ".json", config)
+        for lid, dig, blob in ((id_base, d_base, base), (id_top, d_top, top)):
+            add(lid + "/VERSION", b"1.0")
+            add(lid + "/json", json.dumps({"id": lid}).encode())
+            if legacy_dirs:
+                add(lid + "/layer.tar", blob)
+            else:
+                add(dig + ".tar", blob)
+                ti = tarfile.TarInfo(lid + "/layer.tar")
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = "../" + dig + ".tar"
+                t.addfile(ti)
+    return buf.getvalue()
+
+
+def _make_built_package(path, baked_pem, probe_pem=None, legacy_dirs=False):
+    """An outer IOx tar whose artifacts.tar.gz holds package.yaml + a classic
+    rootfs.tar (pem baked in a layer) and, when probe_pem is given, the
+    top-level iris-catalog.pem probe member -- exactly `ioxclient package .`
+    over build.sh's packaging directory."""
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
+        members = [("package.yaml", b"descriptor-schema-version: '2.8'\n"),
+                   ("rootfs.tar", _classic_rootfs(baked_pem, legacy_dirs))]
+        if probe_pem is not None:
+            members.append(("iris-catalog.pem", probe_pem.encode()))
+        for name, data in members:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    blob = inner.getvalue()
+    with tarfile.open(path, mode="w") as outer:
+        for name, data in (("package.yaml", b"descriptor-schema-version: '2.8'\n"),
+                           ("artifacts.tar.gz", blob)):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            outer.addfile(ti, io.BytesIO(data))
+
+
+def test_package_fingerprint_reads_the_probe_member_build_sh_packages(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_A, probe_pem=CERT_A)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_A)
+
+
+def test_package_fingerprint_falls_back_to_the_layer_baked_cert(tmp_path):
+    # a package built between the 2026-09-02 slimming and the probe member's
+    # restoration: no top-level pem, the cert only inside a layer tar. It
+    # used to read as "no-cert" -> unknown forever; it must report what it
+    # really pins.
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=None)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_B)
+
+
+def test_package_fingerprint_layer_fallback_handles_docker_save_dirs(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=None, legacy_dirs=True)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert reason == ""
+    assert fp == setup_status.fingerprint_pem(CERT_B)
+
+
+def test_package_fingerprint_prefers_the_probe_member_over_the_layer(tmp_path):
+    # the probe member is the contract; a divergent layer copy is a build bug
+    # this reader is not in a position to adjudicate, so it reports the member
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, CERT_B, probe_pem=CERT_A)
+    fp, reason = setup_status.package_fingerprint(p)
+    assert fp == setup_status.fingerprint_pem(CERT_A)
+
+
+def test_package_fingerprint_no_cert_anywhere_in_a_classic_package(tmp_path):
+    p = str(tmp_path / "iris-arm64.tar")
+    _make_built_package(p, "not a certificate", probe_pem=None)
+    # the baked "pem" is present but unparseable -> bad-cert, not no-cert
+    fp, reason = setup_status.package_fingerprint(p)
+    assert fp is None and reason == "bad-cert"
+    # and a rootfs that carries no pem at all -> no-cert
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as rt:
+            data = b"[]"
+            ti = tarfile.TarInfo("manifest.json")
+            ti.size = len(data)
+            rt.addfile(ti, io.BytesIO(data))
+        data = buf.getvalue()
+        ti = tarfile.TarInfo("rootfs.tar")
+        ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+    q = str(tmp_path / "iris-amd64.tar")
+    with tarfile.open(q, mode="w") as outer:
+        blob = inner.getvalue()
+        ti = tarfile.TarInfo("artifacts.tar.gz")
+        ti.size = len(blob)
+        outer.addfile(ti, io.BytesIO(blob))
+    fp, reason = setup_status.package_fingerprint(q)
+    assert fp is None and reason == "no-cert"

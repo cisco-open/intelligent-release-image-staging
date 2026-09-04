@@ -7,12 +7,26 @@ kind: Kustomization
 namespace: iris
 resources:
   - namespace.yaml
-  - configmap.yaml
   - pvc.yaml
   - deployment.yaml
   - service.yaml
 
+# The ConfigMap is GENERATED from iris-seed-server.env so its name carries a
+# content hash: editing the env file and re-applying rolls the Deployment,
+# where an in-place ConfigMap edit would leave the running pod on the old
+# values until someone restarted it by hand.
+configMapGenerator:
+  - name: iris-seed-server
+    envs:
+      - iris-seed-server.env
+
 # Change this mapping to an image reachable by every amd64 cluster node.
+# `docker-alpha` is a MUTABLE placeholder tag (this repo has no image-publish
+# step); deployment.yaml therefore pulls with imagePullPolicy: Always so a
+# rebuilt image under the same tag is picked up on the next rollout. Pin
+# `digest:` here (or a CalVer tag) once an image is published, and use
+#   kubectl -n iris rollout restart deployment/iris-seed-server
+# to re-pull after rebuilding under the same tag.
 images:
   - name: iris
     newName: iris

@@ -34,7 +34,14 @@ def _state():
                                       "observations": 71}}}}}
 
 
-def test_build_report_v2_exact_schema():
+def test_build_report_v2_exact_schema(monkeypatch):
+    # build_report_v2 reads IRIS_RUNTIME_MODE from the process environment
+    # (env > conf > "guestshell"), so the runtime_mode assertion below only
+    # holds when the variable is absent. The IOx image sets it to "container"
+    # in its Dockerfile, and this suite is run inside that image; control the
+    # variable here instead of inheriting whatever the runner has set. Same
+    # idiom as test_telemetry_report.py.
+    monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
     state = _state()
     rep = telemetry_report.build_report_v2(
         _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
@@ -126,3 +133,39 @@ def test_report_says_not_run_after_successful_placement():
     rep = telemetry_report.build_report_v2(
         _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
     assert rep["ios_copy_verify"] == {"state": "not_run"}
+
+
+# --- IRIS-10-002: unmeasured content and an unobserved start are ABSENT ---
+
+def test_unmeasured_content_and_unknown_start_are_absent_not_zero():
+    # No completion-tick stats (adopted image, RPC hiccup) and no started_ts
+    # (state lost, staged file survived): the report must not claim a
+    # measured 0/0 over a zero-length "complete" window.
+    state = {"img1": {"copied": True, "tele": {
+        "done_ts": 1100.0, "content_sha256_state": "verified"}}}
+    rep = telemetry_report.build_report_v2(
+        _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
+    assert rep["content"] == {}
+    assert rep["window"] == {"end": 1100.0, "complete": False}
+    assert rep["content_sha256"] == {"state": "verified", "algo": "sha256"}
+
+
+def test_window_is_incomplete_when_content_was_never_measured():
+    state = {"img1": {"copied": True, "tele": {
+        "started_ts": 1000.0, "done_ts": 1100.0}}}
+    rep = telemetry_report.build_report_v2(
+        _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
+    assert rep["window"] == {"start": 1000.0, "end": 1100.0, "complete": False}
+    assert rep["content"] == {}
+
+
+def test_a_measured_zero_is_still_reported_as_zero():
+    # A measured zero and an unmeasured field are different facts.
+    state = {"img1": {"copied": True, "tele": {
+        "started_ts": 1000.0, "done_ts": 1100.0,
+        "completed_content_bytes": 0, "total_content_bytes": 0}}}
+    rep = telemetry_report.build_report_v2(
+        _CFG, state, "img1", "staging-complete", 1200.5, "a" * 32, "b" * 32)
+    assert rep["content"] == {"completed_content_bytes": 0,
+                              "total_content_bytes": 0}
+    assert rep["window"]["complete"] is True

@@ -27,22 +27,19 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 ### Finishing setup
 
-Creating the admin is the first of five things a new server needs. The sign-in
+Creating the admin is the first of four things a new server needs. The sign-in
 straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
 Stepper, not a linking checklist: a step panel on the left, the active step's
-own controls on the right — which walks the other four in order:
+own controls on the right — which walks the other three in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
    health are published. Already satisfied if the deployment environment sets
    `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
    shows as done rather than being hidden.
-2. **Stage host** — the credentials IRIS uses to reach the Docker host that
-   builds and serves device onboarding material. Without them, onboarding over
-   the Docker path cannot start.
-3. **Device packages** — whether each served IOx package still pins the
+2. **Device packages** — whether each served IOx package still pins the
    certificate this server hands to devices, plus the IOS-XR agent RPM
    (`iris-xr.rpm`), checked differently — see below.
-4. **Image verification** — the Cisco Bulk Hash source check against every
+3. **Image verification** — the Cisco Bulk Hash source check against every
    staged image. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
    the offline feed-file import. These are the same controls Settings ›
@@ -68,10 +65,24 @@ the session rather than permanently, because a package that goes stale later is
 a silent failure with no other symptom, and a banner dismissed for good would
 hide precisely the case this exists to catch.
 
-Settings › Setup keeps reporting the same five states afterwards, for checking
+Settings › Setup keeps reporting the same four states afterwards, for checking
 a server long after it was installed — including a schedule for image
 verification that is configured but has not yet produced a successful run,
 worded distinctly from one never configured at all.
+
+### Branding
+
+The console's headings render in Cisco's Sharp Sans Bold typeface where it is
+available, and in the browser's default sans-serif font otherwise
+(`font-display: swap`) — a cosmetic difference only, never a functional one.
+The `.woff2` file is excluded from the Docker build context and the release
+tarball (`.dockerignore`): Cisco's license for it does not permit
+redistribution, so it can never ship inside the image. A deployment that
+independently holds the license restores it at runtime, without ever
+touching the image, by bind-mounting the file over Compose's
+`IRIS_SHARP_SANS_FONT_HOST` variable — see [Reference](reference.md) —
+before `docker compose up`. Left unset, the console looks identical apart
+from the fallback font.
 
 ## Console areas
 
@@ -242,25 +253,59 @@ onboard again.
 
 ## Bulk device actions
 
-The Devices toolbar acts on every checked row, so a CSV import can be finished
-without touching each device.
+The Devices toolbar acts on the current *selection*, so a CSV import can be
+finished without touching each device.
 
-Above it, the filter bar narrows what is rendered — free text across device, IP
-and model, plus management type, **Agent install**, credential, telemetry, peer policy
-and status. Only matching rows are drawn, so filtering and then **select all**
-is how you act on a subset instead of hand-picking rows out of the whole fleet.
-The **Status** choices are generated from the same derivation the Status column
-renders, so every state a row can show can be filtered for. Each dropdown
-choice shows the same sentence-case label the column renders: `Onboarding`,
-`Undeploying`, `Waiting for heartbeat`, `Onboard failed`, `Undeploy failed`,
-`Staged`, `Placement failed`, `Image(s) failed`, `Copying to IOS storage`,
-`Staging (other)`, `Enrolled`, `Not enrolled`, and `Offline (no recent
-heartbeat)` — but its `<option>` value, and the wire status the cell itself
-carries, is the lowercase/kebab form underneath: `onboarding`, `undeploying`,
+Above it, the filter bar narrows what the table shows — free text across
+device, IP and model, plus management type, **Agent install**, credential,
+telemetry, peer policy and status. Filtering happens on the server, not just
+in the browser: every one of these controls (and the free-text search) is
+applied by the same `GET /api/devices` request the table polls, so the count
+next to the filter bar and the rows on screen can never disagree about what
+"matches" means, no matter how large the fleet is. The **Status** choices are
+generated from the same derivation the Status column renders, so every state
+a row can show can be filtered for. Each dropdown choice shows the same
+sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
+for heartbeat`, `Onboard failed`, `Undeploy failed`, `Staged`, `Placement
+failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
+`Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
+`<option>` value, and the wire status the cell itself carries, is the
+lowercase/kebab form underneath: `onboarding`, `undeploying`,
 `waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
 `placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
+
+### Paging and selection at fleet scale
+
+A fleet larger than 200 devices (after filtering) pages: the table shows 200
+rows at a time with **Previous**/**Next** controls and a "Page *X* of *Y*"
+readout next to the results count, instead of re-fetching and re-rendering
+every device on every 10-second poll. This is deliberately the *last* piece
+of this design, not the first — a table that silently showed a page as if it
+were the whole fleet, or a **select all** that silently meant "this page,"
+would be worse than a slow table, so two things had to be true first:
+
+- Every filter above is enforced **server-side**, so a page can never hold
+  rows the filter bar disagrees with.
+- Selection is tracked by **device ID**, not by which checkboxes happen to be
+  rendered. Checking rows on page 1, turning to page 2, and checking more
+  there keeps every earlier check — the selection count in the bulk bar
+  always reflects everything you have checked across every page, filter
+  change, and 10-second poll, not just what is currently on screen.
+
+The header checkbox (above the **Device** column) only ever selects or
+clears the page currently on screen — with paging, it cannot mean anything
+else, and its accessible name says "on this page" to make that explicit.
+Once every row on a page is checked, the bulk bar offers **Select all *N*
+matching devices**, naming the server's own count for the active filter. That
+control performs a real walk of every remaining page under the current
+filter and adds each device's ID to the selection; it is never a shortcut
+that quietly re-checks the header box. Once every matching device really is
+selected, the bar says so plainly ("All *N* matching devices selected")
+rather than leaving you to infer it from a checkbox state. Clearing the
+selection (**Cancel**) always clears the full cross-page set, not just the
+rows in view.
 
 | Control | What it does | Confirms first |
 | --- | --- | --- |
@@ -269,7 +314,7 @@ filtered on `deployed` (rendered `Staged`) can still have gone quiet.
 | Undeploy selected | Runs record-driven cleanup on each device. | Yes — one dialog for the whole selection, naming what teardown removes and preserves |
 | Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
-| *credential for selected* + **Apply** | Assigns one credential profile to every checked device. Leaving the picker on either blank entry clears the credential instead. | No |
+| *Set credential…* + **Apply** | Assigns one credential profile to every checked device. The picker opens on a disabled placeholder, so Apply with nothing chosen does nothing; choosing *no credential (clear the assignment)* clears it instead. The modal does not open while the profile list has failed to load. | Only when clearing — a dialog naming the device count |
 | Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
 
 A device can have up to ten images assigned at once, staged and transferred in
@@ -287,7 +332,9 @@ says so and **Apply** asks you to confirm before it posts. Applying an empty pic
 deliberate unassign and confirms first, whether for one device or for the
 whole selection: unchecking an image stops its torrent and frees the staging
 copy, but leaves any already-staged file on the device's boot filesystem,
-still tracked by IRIS.
+still tracked by IRIS — see
+[Unassigned image park](device-agents.md#unassigned-image-park) for what
+reclaims that space and when.
 
 The **Adopt** dialog names the whole selection. It warns that you should only
 adopt a device whose inventory row matches what is really on the box, points at
@@ -316,6 +363,18 @@ just rescued. It behaves the same on every platform, including a router, which
 has no other way to clear an agent with no deployment record — it cannot be adopted, and
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
+
+An IOx onboard that failed while the app was activating is also **not** a case
+for Force. It leaves the app installed but never started, which preflight reads
+as a resumable retry: press Onboard again and the second attempt finds the
+package's layers already cached. See
+[First install of a new package version](iox.md#first-install-of-a-new-package-version).
+
+One refusal is **not** a case for Force or for adopt: an Undeploy that answers
+`503` naming an unreadable `deployment_records.json`. The records exist and
+cannot be parsed, so nothing yet knows whether IRIS deployed this device.
+Repair or remove that file — adopting the device instead would write a
+deployment record asserting a deployment nobody verified.
 
 Once a forced teardown succeeds, every deployment record the device still held is marked
 `abandoned` — only on success, because failing to reach a device is not proof
@@ -407,19 +466,19 @@ tab strip. Each sub-page is deep-linkable: `#settings/setup`,
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: five
-cards — **admin account**, **telemetry destination**, **stage-host
-credentials**, **device packages**, and **image verification** — each
-carrying a live status chip and a short rationale, meant to be revisited any
-time after installing a server rather than completed in one sitting. The
-admin card links to Settings › General; the telemetry, stage-host, and image
-verification cards all open the setup flow (`#setup`), which hosts those
-controls as steps 1, 2, and 4. The telemetry card also names the endpoint in
-effect and whether it is a console override or the deployment default. Every
-card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown`, plus a
-sixth reading unique to image verification — a schedule that is configured
-but has not yet produced a successful run, worded distinctly ("Configured —
-no successful run yet") from one never configured at all. `absent` and
+The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+cards — **admin account**, **telemetry destination**, **device packages**, and
+**image verification** — each carrying a live status chip and a short
+rationale, meant to be revisited any time after installing a server rather
+than completed in one sitting. The admin card links to Settings › General; the
+telemetry and image verification cards both open the setup flow (`#setup`),
+which hosts those controls as steps 1 and 3. The telemetry card also names the
+endpoint in effect and whether it is a console override or the deployment
+default. Every card's status is one of `ok`, `unset`, `stale`, `absent`, or
+`unknown`, plus a sixth reading unique to image verification — a schedule
+that is configured but has not yet produced a successful run, worded
+distinctly ("Configured — no successful run yet") from one never configured
+at all. `absent` and
 `unknown` both mean the server could not determine the state; a failed or
 malformed status fetch shows every chip as `unknown` rather than leaving a
 previous, possibly stale, render on screen. Neither is ever presented as

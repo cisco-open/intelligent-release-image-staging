@@ -6,8 +6,11 @@
 
 """IRIS catalog: HTTPS JSON API + torrent serving. State is JSON files
 under the state dir, written atomically and re-read per request. Bearer-token
-auth on every endpoint. The server publishes images and a per-device
-install-approval flag but NEVER triggers install (spec §6). Stdlib only."""
+auth on every endpoint. The server publishes images and each device's
+staging approval (the ordered set of images it may STAGE) but NEVER triggers
+install (spec §6). main() refuses to start over plain HTTP unless
+IRIS_CATALOG_ALLOW_PLAINTEXT=1 opts in explicitly -- every route answers
+device bearer tokens. Stdlib only."""
 import gzip
 import hashlib
 import io
@@ -18,6 +21,7 @@ import os
 import re
 import secrets
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -25,11 +29,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import audit
 import auth
+import bounded_pool
 import bulkhash
+import credential_cache
+import keyed_state
 import live_samples
 import secretfs
 import secrets_store
 import torrent_personalize
+import transfer_lifecycle
 
 # A device may hold an ordered set of approved images at once (issue: multi-
 # image assignment); this bounds the set so policy.json rows and the console
@@ -111,7 +119,10 @@ def _atomic_write_json(path, obj):
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".state-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=2, sort_keys=True)
+            # allow_nan=False: a NaN/Infinity that slipped past ingest would
+            # otherwise be written as a bare token no browser JSON parser
+            # accepts, poisoning every reader of the file. Fail loudly here.
+            json.dump(obj, f, indent=2, sort_keys=True, allow_nan=False)
         if mode is not None:
             os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -122,6 +133,120 @@ def _atomic_write_json(path, obj):
 
 # Global POST body cap (also applied to gzip-DECOMPRESSED bodies — bomb guard).
 MAX_BODY_BYTES = 65536
+
+# Per-connection socket inactivity timeout for the HTTP handler (seconds). A
+# client that stalls mid-request -- a partial request line, or a declared
+# Content-Length it never finishes sending -- would otherwise pin its handler
+# thread, file descriptor and stack for the life of the server, before any
+# authentication. Overridable with IRIS_HTTP_TIMEOUT; non-positive/garbage
+# falls back to the default rather than disabling the guard.
+HANDLER_TIMEOUT = 30.0
+
+
+def handler_timeout(env=None):
+    raw = (os.environ if env is None else env).get("IRIS_HTTP_TIMEOUT")
+    try:
+        value = float(raw) if raw else HANDLER_TIMEOUT
+    except (TypeError, ValueError):
+        return HANDLER_TIMEOUT
+    return value if value > 0 else HANDLER_TIMEOUT
+
+
+# Bound on how long a TLS handshake may occupy its worker thread.
+_HANDSHAKE_TIMEOUT = 30
+
+# Opt-in to serve the catalog over plain HTTP when no certificate is
+# available. Same name pattern as gui_server's IRIS_GUI_ALLOW_PLAINTEXT, so
+# an operator learns one convention for every listener. Only main() consults
+# this -- make_server() itself still accepts certfile=None unconditionally,
+# which the test suite relies on to run a plain-HTTP server without opting
+# in globally.
+_PLAINTEXT_OPT_IN_ENV = "IRIS_CATALOG_ALLOW_PLAINTEXT"
+
+
+def _plaintext_allowed():
+    return os.environ.get(_PLAINTEXT_OPT_IN_ENV, "") == "1"
+
+
+class _CatalogServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer with a fleet-sized accept backlog that completes
+    the TLS handshake in the WORKER thread, and a bounded pool of
+    concurrently running handler threads.
+
+    Three stdlib defaults are wrong for a device-facing listener:
+
+    * ``request_queue_size`` is 5. Every device in the fleet contacts this
+      server on the same heartbeat cadence, so a rollout burst overflows the
+      accept queue and the kernel answers with RSTs; agents see a connection
+      reset rather than a slow answer.
+    * Wrapping the LISTENING socket makes socketserver run the whole
+      handshake inside accept() on the single serve_forever thread, so one
+      client that connects and never sends a ClientHello stalls every other
+      device. Here accept() hands back the plain socket and the wrap happens
+      per connection, bounded by _HANDSHAKE_TIMEOUT.
+    * ``ThreadingMixIn.process_request`` spawns one thread per connection
+      with no cap -- see bounded_pool.py for why that is unsafe and how the
+      mixin below bounds it without risking a deadlock on a long-lived
+      connection.
+
+    Same mechanism as gui_server._ConsoleServer and artifact_server._Server.
+    """
+
+    request_queue_size = 128
+    tls_context = None
+    # The catalog has no long-lived connections of its own (no SSE, no
+    # device-held streams) -- every request is a bounded JSON exchange or a
+    # small .torrent fetch. Sized to the fleet-sized accept backlog above so
+    # a burst that fills the kernel queue can still be drained rather than
+    # rejected outright.
+    max_concurrent_requests = 256
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(request,
+                                                       server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's
+                # problem and nobody else's.
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)   # Handler.timeout re-arms it
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
+
+
+def _reject_constant(name):
+    # json.loads' default parse_constant ACCEPTS the non-standard NaN /
+    # Infinity / -Infinity literals; nothing downstream can serialise them
+    # for a browser, so they are a 400 at the door.
+    raise ValueError("non-finite number literal: %s" % name)
+
+
+def parse_json_body(body):
+    """json.loads for a device POST body. Refuses the NaN/Infinity literals
+    (ValueError) and maps a pathologically nested body's RecursionError to a
+    ValueError so every malformed body is a 400 rather than a dropped
+    connection. An empty body reads as {}."""
+    try:
+        return json.loads(body or b"{}", parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValueError("body too deeply nested")
+
+
+class StateFileError(RuntimeError):
+    """A state file under the state dir EXISTS but cannot be read or parsed
+    (or its top level is not a JSON object). Distinct from a missing file,
+    which is the empty store. Routes map it to 503; writers never replace
+    the file's content while it is in this state."""
 
 _REPORT_KEYS = ("ts", "image_id", "event", "transfer", "link", "peers",
                 "peers_total", "agent")
@@ -317,10 +442,10 @@ def _sanitize_report_v2(data):
     ``report_id`` is the ring dedupe key. No token/secret ever appears in a
     raised message (a report carries none, but the discipline is explicit)."""
     report_id = data.get("report_id")
-    if not isinstance(report_id, str) or not _HEX32.match(report_id):
+    if not isinstance(report_id, str) or not _HEX32.fullmatch(report_id):
         raise ValueError("bad report_id")
     transfer_id = data.get("transfer_id")
-    if not isinstance(transfer_id, str) or not _HEX32.match(transfer_id):
+    if not isinstance(transfer_id, str) or not _HEX32.fullmatch(transfer_id):
         raise ValueError("bad transfer_id")
     event = data.get("event")
     if event not in _REPORT_EVENTS:
@@ -328,7 +453,7 @@ def _sanitize_report_v2(data):
     rrid = data.get("report_request_id")
     if event == "pull":
         if rrid is not None and (not isinstance(rrid, str)
-                                 or not _HEX32.match(rrid)):
+                                 or not _HEX32.fullmatch(rrid)):
             raise ValueError("bad report_request_id")
     else:
         if rrid is not None:
@@ -339,33 +464,61 @@ def _sanitize_report_v2(data):
     if not math.isfinite(created) or created < 0:
         raise ValueError("bad report_created_at")
     image_id = data.get("image_id")
-    if not isinstance(image_id, str) or not _IMAGE_RE.match(image_id):
+    if not isinstance(image_id, str) or not _IMAGE_RE.fullmatch(image_id):
         raise ValueError("bad image_id")
 
+    # ``window`` and ``content`` are optional: an agent that measured nothing
+    # (no transfer window opened, no aria2 stats in hand) may omit them or
+    # send null, and the stored report then omits the key -- not measured is
+    # never rendered as a zero-length window or zero bytes. When present the
+    # block is validated strictly, exactly as before.
     win = data.get("window")
-    if not isinstance(win, dict):
-        raise ValueError("bad window")
-    for key in ("start", "end"):
-        v = win.get(key)
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise ValueError("bad window.%s" % key)
-        if not math.isfinite(v) or v < 0:
-            raise ValueError("bad window.%s" % key)
-    if win["start"] > win["end"]:
-        raise ValueError("bad window order")
-    if not isinstance(win.get("complete"), bool):
-        raise ValueError("bad window.complete")
+    win_out = None
+    if win is not None:
+        if not isinstance(win, dict):
+            raise ValueError("bad window")
+        # ``end`` is always observed (the agent writes the report at that
+        # instant). ``start`` is per-key optional for the same reason the
+        # whole block is: an image adopted in place, or one whose started_ts
+        # was lost with a state file, has no observed opening edge, and the
+        # agent omits the key rather than collapsing it onto the end. A
+        # window with no start is stored open-ended, never as zero-length.
+        end = win.get("end")
+        if isinstance(end, bool) or not isinstance(end, (int, float)):
+            raise ValueError("bad window.end")
+        if not math.isfinite(end) or end < 0:
+            raise ValueError("bad window.end")
+        start = win.get("start")
+        if start is not None:
+            if isinstance(start, bool) or not isinstance(start, (int, float)):
+                raise ValueError("bad window.start")
+            if not math.isfinite(start) or start < 0:
+                raise ValueError("bad window.start")
+            if start > end:
+                raise ValueError("bad window order")
+        if not isinstance(win.get("complete"), bool):
+            raise ValueError("bad window.complete")
+        win_out = {"end": float(end), "complete": bool(win["complete"])}
+        if start is not None:
+            win_out["start"] = float(start)
 
     content = data.get("content")
-    if not isinstance(content, dict):
-        raise ValueError("bad content")
-    content_out = {
-        "completed_content_bytes": _bounded_report_int(
-            content.get("completed_content_bytes"), _CONTENT_CAP),
-        "total_content_bytes": _bounded_report_int(
-            content.get("total_content_bytes"), _CONTENT_CAP)}
-    if content_out["completed_content_bytes"] > content_out["total_content_bytes"]:
-        raise ValueError("completed content exceeds total")
+    content_out = None
+    # An EMPTY content block means the same thing as an absent one: the
+    # completion tick took no aria2 reading. The agent sends {} on that path
+    # (adopted image, RPC hiccup at completion), and a measured zero must
+    # stay distinguishable from an unmeasured field.
+    if content is not None and content != {}:
+        if not isinstance(content, dict):
+            raise ValueError("bad content")
+        content_out = {
+            "completed_content_bytes": _bounded_report_int(
+                content.get("completed_content_bytes"), _CONTENT_CAP),
+            "total_content_bytes": _bounded_report_int(
+                content.get("total_content_bytes"), _CONTENT_CAP)}
+        if content_out["completed_content_bytes"] \
+                > content_out["total_content_bytes"]:
+            raise ValueError("completed content exceeds total")
 
     csha = data.get("content_sha256")
     if not isinstance(csha, dict) or csha.get("state") not in \
@@ -442,23 +595,28 @@ def _sanitize_report_v2(data):
     report = {"v": 2, "schema": "v2", "report_id": report_id,
               "transfer_id": transfer_id, "report_request_id": rrid,
               "report_created_at": float(created), "image_id": image_id,
-              "event": event,
-              "window": {"start": float(win["start"]),
-                         "end": float(win["end"]),
-                         "complete": bool(win["complete"])},
-              "content": content_out, "content_sha256": content_sha256,
+              "event": event, "content_sha256": content_sha256,
               "ios_copy_verify": {"state": iocv["state"]},
               "sampling": sampling_out, "stage_state": stage_state,
               "peers": rows, "peers_total": peers_total,
               "peers_rows_dropped": peers_dropped,
               "peers_truncated": data["peers_truncated"] or peers_dropped > 0,
               "peers_saturated": data["peers_saturated"]}
+    if win_out is not None:
+        report["window"] = win_out
+    if content_out is not None:
+        report["content"] = content_out
     transfer_records = data.get("peer_transfer_records")
     if transfer_records is not None:
         # Optional and stored only when sent: an absent block means NOT
-        # MEASURED and must stay absent all the way to the reader.
+        # MEASURED and must stay absent all the way to the reader. Without a
+        # window the capture instant is bounded only by the report itself.
         report["peer_transfer_records"] = _sanitize_peer_transfer_records(
-            transfer_records, float(win["start"]), float(created))
+            transfer_records,
+            # No window, or a window with no observed start, leaves the
+            # capture instant bounded only by the report itself.
+            (win_out or {}).get("start", 0.0),
+            float(created))
     agent = data.get("agent")
     if isinstance(agent, dict):
         report["agent"] = _cap_strings(agent)
@@ -469,9 +627,13 @@ def _sanitize_report_v2(data):
 
 def _cap_strings(value):
     """Recursively cap every string in *value* (keys included) at
-    _REPORT_STR_MAX chars.  Non-container, non-string values pass through."""
+    _REPORT_STR_MAX chars.  Non-container, non-string values pass through,
+    except a non-finite float (``1e999`` parses as inf), which raises: it
+    cannot be stored or served as JSON."""
     if isinstance(value, str):
         return value[:_REPORT_STR_MAX]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite number in report")
     if isinstance(value, dict):
         return {str(k)[:_REPORT_STR_MAX]: _cap_strings(v)
                 for k, v in value.items()}
@@ -547,6 +709,22 @@ def _sanitize_report(data):
     return report
 
 
+def _normalize_policy(rec):
+    """One raw policy row, normalised to ``{approved_image_id: first-or-None,
+    approved_image_ids: [..]}``. Shared by ``get_policy``,
+    ``device_policy_view`` and ``set_policy``'s compare-and-set so all three
+    read a row the same way from ONE keyed lookup."""
+    if not isinstance(rec, dict):
+        return {"approved_image_id": None, "approved_image_ids": []}
+    ids = rec.get("approved_image_ids")
+    if not isinstance(ids, list):
+        one = rec.get("approved_image_id")
+        ids = [one] if one else []
+    ids = [str(i) for i in ids if i]
+    return {"approved_image_id": ids[0] if ids else None,
+            "approved_image_ids": ids}
+
+
 class PolicyConflict(Exception):
     """A conditional set_policy() whose expectation no longer held.
 
@@ -595,9 +773,19 @@ class QuarantineStillMismatched(Exception):
 class CatalogStore:
     TELEMETRY_RING = 5      # newest reports kept per device (hard disk bound)
     SEEN_REPORT_IDS = 256   # durable per-device seen v2 report_id ledger bound
+    # Durable per-device transfer attestations kept, one slot per TRANSFER.
+    # Sized well clear of the real working set: a device may hold
+    # MAX_ASSIGNED_IMAGES (10) plans at once, so this is six full
+    # re-assignment generations, and the tracker consumes an attestation
+    # within one sample pass (15 s) of it being written. It is deliberately
+    # far larger than TELEMETRY_RING because the ring is shared by every image
+    # and every report KIND on the device while this ledger holds one row per
+    # transfer -- see _remember_attestation.
+    ATTESTATIONS = 64
     PULL_TTL = 600          # seconds a console pull directive stays pending
 
-    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None):
+    def __init__(self, state_dir, audit_path=None, seeder_remove_fn=None,
+                 seeder_add_fn=None):
         self.state_dir = state_dir
         self.torrents_dir = os.path.join(state_dir, "torrents")
         os.makedirs(self.torrents_dir, exist_ok=True)
@@ -614,6 +802,14 @@ class CatalogStore:
         # oldest purged FIFO) and is purged with the device.
         self.report_ledger_path = os.path.join(state_dir,
                                                 "report_ledger.json")
+        # Durable per-device transfer attestations: the fact that a terminal
+        # report bearing a given transfer_id arrived with a VERIFIED content
+        # sha256, and when the server took it in. Written at ingest and read
+        # by the tracker's transfer-lifecycle pass. It exists because the
+        # report ring above cannot be that pass's only source -- see
+        # _remember_attestation.
+        self.attestations_path = os.path.join(state_dir,
+                                              "transfer-attestations.json")
         # Cisco Bulk Hash reconciliation (KGV reconciler): the FULL last
         # verdict reconcile() produced for each image, keyed by image_id --
         # {state, feed_sha512, publish_date, deferral, checked_at, source}.
@@ -636,13 +832,55 @@ class CatalogStore:
         # be a cycle; the caller that wants the side effect injects it).
         self.audit_path = audit_path
         self._seeder_remove = seeder_remove_fn
+        # The inverse of seeder_remove_fn, for release_quarantine(): called
+        # as seeder_add_fn(torrent_path, image_dir, info_hash) to put the
+        # canonical torrent back into the seeder (publish.resume_torrent_rpc
+        # in main()). None (unwired) is a no-op, like seeder_remove_fn.
+        self._seeder_add = seeder_add_fn
+        # --- keyed incremental durable state (see keyed_state) -------------
+        # Every per-device store above is one ROW per device in a bucketed
+        # shard directory (devices.d/ and friends), not one whole-fleet JSON
+        # document. A heartbeat, a policy read, a terminal report or a
+        # pull-directive check locks, parses and rewrites only the shard its
+        # own device lands in; each used to hold one global lock on the whole
+        # document while it re-parsed and re-serialised the entire fleet, so
+        # the per-device cost -- and the serialisation between unrelated
+        # devices -- grew with fleet size. A legacy whole-fleet document is
+        # migrated into shards on first use. The durability contract is
+        # unchanged: atomic temp+os.replace, allow_nan=False, and an existing
+        # but unreadable shard raises StateFileError rather than reading as
+        # empty or being overwritten by the next writer.
+        self._devices = self._keyed(self.devices_path)
+        self._policies = self._keyed(self.policy_path)
+        self._pulls = self._keyed(self.pull_path)
+        self._reports = self._keyed(self.telemetry_path)
+        self._report_ids = self._keyed(self.report_ledger_path)
+        self._attestations = self._keyed(self.attestations_path)
+
+    @staticmethod
+    def _keyed(path):
+        """A keyed store for the per-device state at *path*, carrying this
+        class's own fail-closed error type."""
+        return keyed_state.KeyedState(path, error=StateFileError)
 
     def _read(self, path):
+        """One state file as a dict. A MISSING file is the empty store (first
+        boot, legacy bootstrap). An EXISTING file that cannot be opened or
+        parsed, or whose top level is not an object, raises StateFileError
+        instead of reading as {}: served as empty, a corrupt policy.json is a
+        fleet-wide unassign every agent acts on, and the next set_policy
+        would replace the recoverable content with a single row."""
         try:
             with open(path) as f:
-                return json.load(f)
-        except (OSError, ValueError):
+                data = json.load(f)
+        except FileNotFoundError:
             return {}
+        except (OSError, ValueError) as exc:
+            raise StateFileError("state file unreadable: %s (%s)"
+                                 % (path, type(exc).__name__))
+        if not isinstance(data, dict):
+            raise StateFileError("state file is not a JSON object: %s" % path)
+        return data
 
     # --- images ---
     def save_image(self, entry):
@@ -672,53 +910,62 @@ class CatalogStore:
     # --- devices ---
     def record_heartbeat(self, device_id, data, now=None):
         now = time.time() if now is None else now
-        with secrets_store.store_lock(self.devices_path):
-            sw = self._read(self.devices_path)
-            rec = {"device_id": device_id, "last_seen": now}
-            rec.update(data)
-            sw[device_id] = rec
-            _atomic_write_json(self.devices_path, sw)
+        rec = {"device_id": device_id, "last_seen": now}
+        rec.update(data)
+        # One shard, one lock: a heartbeat no longer rewrites the fleet.
+        self._devices.put(device_id, rec)
 
     def get_device(self, device_id):
-        return self._read(self.devices_path).get(device_id)
+        return self._devices.get(device_id)
 
     def forget_device(self, device_id):
-        """Drop a device's stored heartbeat/staging record (devices.json).
+        """Drop a device's stored heartbeat/staging record.
         Called on a successful undeploy so the console stops reporting a wiped
         device as 'deployed' from its last live heartbeat. Returns True iff a
         record existed. The image ASSIGNMENT (policy) and telemetry history
         are intentionally left untouched — a re-onboard restages the same
         image, and the reports are historical."""
-        with secrets_store.store_lock(self.devices_path):
-            sw = self._read(self.devices_path)
-            existed = sw.pop(device_id, None) is not None
-            if existed:
-                _atomic_write_json(self.devices_path, sw)
-        return existed
+        return self._devices.delete(device_id)
 
-    def list_devices(self):
-        return list(self._read(self.devices_path).values())
+    def list_devices(self, now=None):
+        """Every heartbeat record. O(fleet) by nature — the console's fleet
+        table, never a per-device request.
+
+        Piggybacks reclaiming any pull directive left EXPIRED by a device
+        that never heartbeats or reports again (pending_request() only reaps
+        the queried device's own row, so such a device's directive would
+        otherwise sit in pull_requests.d/ until the device is purged from the
+        fleet). This call is already O(fleet), so sweeping the pull-directive
+        store here adds no new whole-fleet scan on any per-device path."""
+        now = time.time() if now is None else now
+
+        def reap(key, ent):
+            if not isinstance(ent, dict):
+                return keyed_state.DELETE if ent is not None else None
+            if now >= ent.get("expires_at", 0):
+                return keyed_state.DELETE
+            return None
+
+        self._pulls.sweep(reap)
+        return list(self._devices.snapshot().values())
 
     def purge_device(self, device_id):
         """Remove ALL per-device catalog state: the heartbeat record, the
         image assignment (policy), the telemetry history, the seen-report-id
-        ledger, and any pending pull directive. Called when the console deletes
-        a device from the fleet — a device that is deleted and added back must
+        ledger, the durable transfer attestations, and any pending pull
+        directive. Called when the console deletes a device from the fleet — a device that is deleted and added back must
         come back unassigned, or a stale assignment would silently restage the
         old image. Contrast forget_device(), which drops only the heartbeat
         record on undeploy and deliberately keeps the assignment. Returns
         True iff any state existed."""
         existed = self.forget_device(device_id)
-        for path in (self.policy_path, self.telemetry_path, self.pull_path,
-                     self.report_ledger_path):
-            with secrets_store.store_lock(path):
-                data = self._read(path)
-                if data.pop(device_id, None) is not None:
-                    existed = True
-                    _atomic_write_json(path, data)
+        for state in (self._policies, self._reports, self._pulls,
+                      self._report_ids, self._attestations):
+            if state.delete(device_id):
+                existed = True
         return existed
 
-    # --- policy (install-approval gate) ---
+    # --- policy (per-device staging approval) ---
     def image_policy_lock(self):
         """Cross-process serializer for image-existence/assignment decisions.
 
@@ -763,7 +1010,15 @@ class CatalogStore:
         reconciler currently has quarantined (see apply_hash_verification()/
         release_quarantine()) -- unassigning (an *ids* that DROPS a
         quarantined id, or an empty *ids*) is always allowed; only naming
-        one in the set being written is refused."""
+        one in the set being written is refused.
+
+        Every write also maintains the row's ``plans`` map -- one transfer
+        plan (plan_id, transfer_id, planned_at, info_hash) per image id in
+        the set, minted here and carried forward verbatim for any id that
+        was already assigned. This is the sole mint site for both ids; see
+        the comment at the write below for why the merge is load-bearing.
+        A refused write -- PolicyConflict or QuarantinedImage -- mints
+        nothing, because both checks run before any plan is computed."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -790,24 +1045,88 @@ class CatalogStore:
                         raise ValueError("no such image")
                     if entry.get("quarantined"):
                         raise QuarantinedImage(iid, entry.get("hash_verification"))
-            with secrets_store.store_lock(self.policy_path):
-                # Inside the same lock the write takes: a check outside it
-                # would be a compare-and-set with a gap wide enough for the
-                # very race it exists to catch.
+            # The compare-and-set, the plan merge and the write all happen
+            # inside ONE call under the device row's own shard lock: a check
+            # outside it would be a compare-and-set with a gap wide enough for
+            # the very race it exists to catch. Cross-device serialisation is
+            # image_policy_lock's job (held above), so narrowing this lock from
+            # the whole fleet's policy document to one device's shard loses
+            # nothing.
+            def write_row(prev):
                 if expect_image_ids is not None:
-                    current = self.get_policy(device_id)["approved_image_ids"]
+                    current = _normalize_policy(prev)["approved_image_ids"]
                     if [str(i) for i in expect_image_ids] != current:
                         raise PolicyConflict(current)
-                pol = self._read(self.policy_path)
+                # --- transfer plans: minted here, and ONLY here ---
+                # A plan is the server's durable name for one intended
+                # transfer of one image to one device: a plan_id, the
+                # transfer_id the device will adopt and stamp on every
+                # observation and terminal report, the instant the decision
+                # was made, and the info_hash the tracker will see announced.
+                # Minting at assignment time (rather than on the device, at
+                # download time) is what makes two consecutive assignments of
+                # the SAME image distinguishable -- an unassign+reassign
+                # inside one agent tick window is invisible to the device, so
+                # a device-minted id would silently merge the two into one.
+                #
+                # The write below replaces the WHOLE row, so the plans map has
+                # to be merged forward explicitly: an image id that was
+                # already in the set keeps its existing plan row verbatim.
+                # Without this merge every Apply -- including one that only
+                # adds or removes some OTHER image, and including the
+                # quarantine auto-unassign path, which rewrites the row for
+                # devices it is not otherwise touching -- would re-mint a new
+                # transfer_id for every image the device is already pulling,
+                # restarting each in-flight transfer's identity and orphaning
+                # every report already in flight under the old id.
+                #
+                # An id that LEAVES the set simply has no entry in the new
+                # map, so a later re-assignment mints a genuinely new plan --
+                # which is exactly the distinction the replan case needs.
+                #
+                # Both ids are 32 lowercase hex (secrets.token_hex(16)):
+                # transfer_id is re-validated against _HEX32 on ingest (see
+                # _sanitize_report_v2 above and live_samples), and a value
+                # that fails it would fail the device's WHOLE report, so the
+                # shape is a hard requirement rather than a convention.
+                # A carried-forward row is re-validated for the same reason:
+                # policy.json is an operator-editable file on disk, and a
+                # hand-edited or truncated plan row must be re-minted here
+                # rather than travel to the device and poison its reports.
+                prev_row = prev if isinstance(prev, dict) else {}
+                prev_plans = prev_row.get("plans")
+                prev_plans = prev_plans if isinstance(prev_plans, dict) else {}
+                planned_at = time.time()
+                plans = {}
+                for iid in ids:
+                    row = prev_plans.get(iid)
+                    if isinstance(row, dict) \
+                            and _HEX32.fullmatch(str(row.get("plan_id", ""))) \
+                            and _HEX32.fullmatch(
+                                str(row.get("transfer_id", ""))):
+                        plans[iid] = row        # carry forward -- NEVER re-mint
+                        continue
+                    # info_hash is captured from the catalog entry set_policy
+                    # already has in hand, so the tracker can join an announce
+                    # back to this plan without re-reading catalog.json at a
+                    # later, possibly changed, moment. None on the legacy
+                    # bootstrap path where catalog.json does not exist yet.
+                    entry = self.get_image(iid) or {}
+                    plans[iid] = {"plan_id": secrets.token_hex(16),
+                                  "transfer_id": secrets.token_hex(16),
+                                  "planned_at": planned_at,
+                                  "info_hash": entry.get("info_hash_hex")}
                 # Keep writing approved_image_id (first-or-None) alongside
                 # approved_image_ids: raw policy.json readers that predate the
                 # ordered set (gui_server's device-view merge and Overview
                 # aggregation both read list_policies() directly, not through
                 # get_policy()'s normalisation) must keep seeing an assignment
                 # without themselves knowing about the plural key.
-                pol[device_id] = {"approved_image_id": ids[0] if ids else None,
-                                  "approved_image_ids": ids}
-                _atomic_write_json(self.policy_path, pol)
+                return {"approved_image_id": ids[0] if ids else None,
+                        "approved_image_ids": ids,
+                        "plans": plans}
+
+            self._policies.update(device_id, write_row)
 
     def get_policy(self, device_id):
         """The device's approvals, normalised: every historical row shape
@@ -822,19 +1141,54 @@ class CatalogStore:
         authoritative: ``approved_image_id`` is recomputed here as its first
         element and never trusted from disk, so a raw edit or a stale write
         that leaves the two keys disagreeing can't desync what callers see."""
-        rec = self._read(self.policy_path).get(device_id)
-        if not isinstance(rec, dict):
-            return {"approved_image_id": None, "approved_image_ids": []}
-        ids = rec.get("approved_image_ids")
-        if not isinstance(ids, list):
-            one = rec.get("approved_image_id")
-            ids = [one] if one else []
-        ids = [str(i) for i in ids if i]
-        return {"approved_image_id": ids[0] if ids else None,
-                "approved_image_ids": ids}
+        return _normalize_policy(self._policies.get(device_id))
+
+    def device_policy_view(self, device_id):
+        """The WIRE projection of a device's policy: what GET
+        /v1/devices/<id>/policy serves to the agent.
+
+        get_policy() is the INTERNAL contract and is deliberately left at its
+        two keys -- set_policy's own compare-and-set, the heartbeat
+        live-sample admission gate and the v2 ingest gate all read it, and
+        several tests pin its exact shape as the guard that it never widens.
+        This wrapper adds the one thing the device needs and nothing else.
+
+        Only ``plan_id`` and ``transfer_id`` are projected. ``planned_at`` and
+        ``info_hash`` stay server-side: the agent has no use for either (it
+        gets its info_hash from the personalised torrent), and shipping a
+        field is a promise to keep shipping it.
+
+        A plan row is projected only when BOTH ids are 32 lowercase hex and
+        the image is in the normalised approved set. Anything else -- a
+        hand-edited policy.json, a row for an image that has since been
+        unassigned -- is omitted rather than sent through: the agent's
+        adoption path rejects a malformed id anyway, and a transfer_id that
+        fails _HEX32 would fail the device's whole report on the way back."""
+        # ONE keyed read for both the normalised view and the plans map (it
+        # used to be two whole-fleet parses of policy.json per device poll).
+        rec = self._policies.get(device_id)
+        view = _normalize_policy(rec)
+        rows = rec.get("plans") if isinstance(rec, dict) else None
+        rows = rows if isinstance(rows, dict) else {}
+        plans = {}
+        for image_id in view["approved_image_ids"]:
+            row = rows.get(image_id)
+            if not isinstance(row, dict):
+                continue
+            plan_id = str(row.get("plan_id", ""))
+            transfer_id = str(row.get("transfer_id", ""))
+            if not _HEX32.fullmatch(plan_id) \
+                    or not _HEX32.fullmatch(transfer_id):
+                continue
+            plans[image_id] = {"plan_id": plan_id,
+                               "transfer_id": transfer_id}
+        view["plans"] = plans
+        return view
 
     def list_policies(self):
-        return self._read(self.policy_path)
+        """Every device's raw policy row. O(fleet) by nature — console tables
+        and the quarantine auto-unassign sweep, never a per-device request."""
+        return self._policies.snapshot()
 
     # --- Cisco Bulk Hash reconciliation: verdict storage + quarantine ---
     # (KGV reconciler). apply_hash_verification() is the only writer of
@@ -842,6 +1196,14 @@ class CatalogStore:
     # mismatch can START a quarantine; release_quarantine() is the only
     # place one can END. set_policy() (above) is the single enforcement
     # point for "a quarantined image may never be assigned".
+    #
+    # cisco_signature_verified is this subsystem's OWN verdict field --
+    # neither method here may ever read or write publish.py's
+    # operator_attested_signature (the operator's own `iris-publish
+    # --signature-verified` attestation). IRIS-03-009/#88: the two used to
+    # share one field, so an operator's mark was silently overwritten by the
+    # very next reconciler run. They are now separate and both durable; keep
+    # them that way.
 
     def _audit_event(self, **kwargs):
         """Best-effort audit emit for the quarantine path. self.audit_path
@@ -877,6 +1239,33 @@ class CatalogStore:
             return True
         except Exception:   # seeder unreachable is non-fatal, but retried
             return False
+
+    def _resume_seeding(self, image_id, entry):
+        """Inverse of _stop_seeding, for release_quarantine(): hand the
+        canonical torrent back to the seeder from the directory the image
+        was published from. The quarantine force-removed it from aria2 and
+        nothing else ever re-adds a torrent (the startup re-seed skips
+        quarantined and unknown torrents on purpose), so without this a
+        released-then-assigned image has no origin seeder and every device
+        assigned it stalls at 0% with no error anywhere.
+
+        Returns (ok, reason): ok is True on success and for the not-wired
+        no-op; reason is a short, credential-free string (an exception class
+        name, never its text -- RPC/URL exceptions may carry request
+        material) when ok is False."""
+        if self._seeder_add is None:
+            return True, ""
+        image_dir = entry.get("source_dir")
+        if not isinstance(image_dir, str) or not os.path.isdir(image_dir):
+            # Never guess by basename: bt-seed-unverified would serve
+            # same-named bytes under this torrent's piece hashes.
+            return False, "image source_dir unavailable"
+        try:
+            self._seeder_add(self.torrent_path(image_id), image_dir,
+                             entry.get("info_hash_hex"))
+            return True, ""
+        except Exception as exc:
+            return False, exc.__class__.__name__
 
     def apply_hash_verification(self, verdicts, source, now=None):
         """Apply Cisco Bulk Hash reconciliation *verdicts* -- Task 1's
@@ -1205,8 +1594,24 @@ class CatalogStore:
             detail=("override: sha512 still does not match the Cisco Bulk "
                     "Hash feed" if still_mismatching else
                     "released: sha512 now matches the Cisco Bulk Hash feed"))
+        # The quarantine took the torrent out of the seeder; the release
+        # puts it back (see _resume_seeding). The release itself is already
+        # durable above -- a failed re-add is flagged in the result and
+        # audited, not hidden, so the operator knows the image has no origin
+        # seeder until it is resolved (a container restart re-seeds every
+        # catalogued, non-quarantined torrent).
+        resumed, reason = self._resume_seeding(image_id, entry)
+        if self._seeder_add is not None:
+            self._audit_event(
+                event="image_quarantine_release_seeding", category="image",
+                action="seed", target=image_id, actor=actor,
+                result="ok" if resumed else "fail",
+                detail="origin seeding resumed" if resumed else
+                       "origin seeding NOT resumed (%s): no seeder until "
+                       "fixed or the container restarts" % reason)
         return {"released": True, "override": still_mismatching,
-                "state": entry["hash_verification"]["state"]}
+                "state": entry["hash_verification"]["state"],
+                "seeding_resumed": resumed}
 
     # --- device telemetry reports (bounded ring, issue #13) ---
     def record_telemetry(self, device_id, report):
@@ -1241,26 +1646,38 @@ class CatalogStore:
         else:
             report.setdefault("_event_id", secrets.token_hex(16))
             rid = None
-        with secrets_store.store_lock(self.telemetry_path):
-            tel = self._read(self.telemetry_path)
-            ring = tel.get(device_id)
+        outcome = {}
+
+        def append(ring):
             ring = ring if isinstance(ring, list) else []
             duplicate = rid is not None and (
                 any(isinstance(r, dict) and r.get("report_id") == rid
                     for r in ring)
                 or self._report_id_seen(device_id, rid))
-            if not duplicate:
-                ring.append(report)
-                tel[device_id] = ring[-self.TELEMETRY_RING:]
-                _atomic_write_json(self.telemetry_path, tel)
-                if rid is not None:
-                    # Record the id in the durable bounded ledger AFTER the ring
-                    # write. A crash between the two only means the ring still
-                    # remembers this id (it is the newest), so a retry before
-                    # the ledger catches up still dedupes on the ring — no
-                    # double count, and the ledger makes it durable past
-                    # eviction.
-                    self._remember_report_id(device_id, rid)
+            outcome["duplicate"] = duplicate
+            if duplicate:
+                return None             # dedupe no-op: the shard is untouched
+            return (ring + [report])[-self.TELEMETRY_RING:]
+
+        # One device's ring in one shard, under that shard's lock: a report no
+        # longer parses and rewrites every device's ring to append to one.
+        self._reports.update(device_id, append)
+        duplicate = outcome["duplicate"]
+        if not duplicate and rid is not None:
+            # Record the id in the durable bounded ledger AFTER the ring
+            # write. A crash between the two only means the ring still
+            # remembers this id (it is the newest), so a retry before
+            # the ledger catches up still dedupes on the ring — no
+            # double count, and the ledger makes it durable past
+            # eviction.
+            self._remember_report_id(device_id, rid)
+        # AFTER the ring write, and deliberately NOT gated on `duplicate`.
+        # The write is idempotent (first-write-wins per transfer_id), and a
+        # crash between the ring write and this one leaves a retry -- itself a
+        # ring dedupe no-op -- as the only thing that can still record the
+        # attestation. Recording it there costs at worst a slightly later
+        # ingest instant; skipping it costs the plan its promotion forever.
+        self._remember_attestation(device_id, report)
         if is_v2:
             # Match-gated (spec §10.2b): only a pull report whose
             # report_request_id equals the stored request clears it. A v2
@@ -1278,59 +1695,118 @@ class CatalogStore:
             self.clear_report_request(device_id)
 
     def get_telemetry(self, device_id):
-        reports = self._read(self.telemetry_path).get(device_id, [])
+        reports = self._reports.get(device_id)
         return reports if isinstance(reports, list) else []
 
     def _report_id_seen(self, device_id, rid):
         """True iff *rid* is in the device's durable seen-report-id ledger.
         Read fresh (small bounded file); tolerant of a missing/garbage file."""
-        led = self._read(self.report_ledger_path).get(device_id)
+        led = self._report_ids.get(device_id)
         return isinstance(led, list) and rid in led
 
     def _remember_report_id(self, device_id, rid):
         """Append *rid* to the device's durable seen-report-id ledger, bounded
         FIFO at SEEN_REPORT_IDS (oldest purged). Idempotent: an id already
         present is not re-appended, so the ledger never grows on retries."""
-        with secrets_store.store_lock(self.report_ledger_path):
-            led = self._read(self.report_ledger_path)
-            seen = led.get(device_id)
+        def remember(seen):
             seen = seen if isinstance(seen, list) else []
             if rid in seen:
-                return
-            seen.append(rid)
-            led[device_id] = seen[-self.SEEN_REPORT_IDS:]
-            _atomic_write_json(self.report_ledger_path, led)
+                return None             # already durable; no write
+            return (seen + [rid])[-self.SEEN_REPORT_IDS:]
+
+        self._report_ids.update(device_id, remember)
+
+    def get_transfer_attestations(self):
+        """The whole durable attestation ledger, ``{device_id: [row, ...]}``.
+
+        The tracker reads the FILE directly on its sample pass (it runs in a
+        different process); this accessor is for callers that already hold a
+        store, and for the tests that pin the ledger's shape."""
+        return self._attestations.snapshot()
+
+    def _remember_attestation(self, device_id, report):
+        """Record that *report* attested completed, VERIFIED content.
+
+        WHY A SECOND STORE AND NOT JUST THE RING. The tracker's
+        transfer-lifecycle pass promotes a plan only on a terminal report
+        bearing that plan's own transfer_id, and it re-derives that fact by
+        reading telemetry.json at most once per sample pass. That ring keeps
+        TELEMETRY_RING (5) reports PER DEVICE, shared by every image assigned
+        to it and by every report kind. A device finishing several images
+        inside one 60 s agent tick -- ten are assignable, and a flash-tight
+        device posts a `seeding-only` report and then a `staging-complete`
+        upgrade for each -- pushes the earliest terminal report out of the ring
+        before any pass sees it. That fact is then NOT DERIVABLE FROM ANYWHERE:
+        the plan latches its seeder observation, never its checksum, and sits
+        at `planned` with no seeding_started ever emitted, for good. The same
+        loss hits any report that lands while the tracker is restarting.
+
+        So the fact is recorded HERE, at ingest, where it is known for certain,
+        keyed by transfer so that one row per plan holds one slot however much
+        other traffic the device posts. Bounded FIFO at ATTESTATIONS per
+        device and purged with the device, like the report-id ledger beside it.
+
+        FIRST-WRITE-WINS per transfer_id: the tracker latches the EARLIEST
+        attesting instant, so a retry or a `staging-complete` upgrade of an
+        already-attested `seeding-only` transfer must not move the value.
+
+        Not every report attests -- transfer_lifecycle.attestation_from_report
+        owns that rule, and owning it in ONE place is what keeps this write and
+        the tracker's read of the ring from drifting apart about what counts.
+        """
+        fact = transfer_lifecycle.attestation_from_report(report)
+        if fact is None:
+            return
+        def remember(rows):
+            rows = [r for r in rows if isinstance(r, dict)] \
+                if isinstance(rows, list) else []
+            if any(r.get("transfer_id") == fact["transfer_id"] for r in rows):
+                return None             # first-write-wins; no write
+            return (rows + [fact])[-self.ATTESTATIONS:]
+
+        self._attestations.update(device_id, remember)
 
     # --- pull directives (console-requested fresh reports) ---
     def request_report(self, device_id, now):
         """Flag *device_id* for a fresh report with a random 32-hex
         ``request_id`` (spec §10.2b). Returns False when a non-expired directive
         is already pending (one per device)."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            ent = pr.get(device_id)
+        refused = []
+
+        def arm(ent):
             if isinstance(ent, dict) and now < ent.get("expires_at", 0):
-                return False
-            pr[device_id] = {"request_id": secrets.token_hex(16),
-                             "requested_at": now,
-                             "expires_at": now + self.PULL_TTL}
-            _atomic_write_json(self.pull_path, pr)
-            return True
+                refused.append(True)
+                return None             # already pending; no write
+            return {"request_id": secrets.token_hex(16),
+                    "requested_at": now,
+                    "expires_at": now + self.PULL_TTL}
+
+        self._pulls.update(device_id, arm)
+        return not refused
 
     def pending_request(self, device_id, now):
         """The full non-expired pull directive dict for *device_id* (carrying
-        ``request_id``), or None. Reaps expired entries lazily."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            expired = [d for d, ent in pr.items()
-                       if not isinstance(ent, dict)
-                       or now >= ent.get("expires_at", 0)]
-            for d in expired:
-                del pr[d]
-            if expired:
-                _atomic_write_json(self.pull_path, pr)
-            ent = pr.get(device_id)
-            return dict(ent) if isinstance(ent, dict) else None
+        ``request_id``), or None.
+
+        Reaps THIS DEVICE's expired directive lazily. It used to reap the
+        whole fleet's, which meant every heartbeat parsed — and, whenever any
+        directive anywhere had lapsed, rewrote — the entire pull document.
+        Another device's lapsed directive is reclaimed on that device's own
+        next heartbeat or pull, or when it is purged from the fleet; it is a
+        bounded, single, expired row that no reader ever honours, because
+        every read applies the same expiry test."""
+        found = []
+
+        def reap(ent):
+            if not isinstance(ent, dict):
+                return keyed_state.DELETE if ent is not None else None
+            if now >= ent.get("expires_at", 0):
+                return keyed_state.DELETE
+            found.append(dict(ent))
+            return None                 # still pending: no write
+
+        self._pulls.update(device_id, reap)
+        return found[0] if found else None
 
     def pending_report(self, device_id, now):
         """Heartbeat directive for *device_id*: a dict
@@ -1351,16 +1827,15 @@ class CatalogStore:
         newer request. A ``None`` request id (v2 completion/seeding) or the
         default sentinel (v1 legacy bridge / explicit clear) clears
         unconditionally."""
-        with secrets_store.store_lock(self.pull_path):
-            pr = self._read(self.pull_path)
-            ent = pr.get(device_id)
+        def clear(ent):
             if not isinstance(ent, dict):
-                return
+                return None
             if request_id not in ("__unset__", None) \
                     and ent.get("request_id") != request_id:
-                return          # mismatched id: do not clear a newer request
-            del pr[device_id]
-            _atomic_write_json(self.pull_path, pr)
+                return None     # mismatched id: do not clear a newer request
+            return keyed_state.DELETE
+
+        self._pulls.update(device_id, clear)
 
 
 def _id_list(value, cap=16):
@@ -1369,13 +1844,83 @@ def _id_list(value, cap=16):
     else up to *cap* non-empty strings. cap > MAX_ASSIGNED_IMAGES so a
     misbehaving agent cannot bloat the heartbeat store unbounded.
 
-    A non-list, or a list holding anything other than strings, is rejected
+    A non-list, or a list holding anything other than image-id-shaped
+    strings (_IMAGE_RE: at most 128 chars of [A-Za-z0-9._-]), is rejected
     wholesale as None rather than silently filtered down to [] — a filtered
     [] would be indistinguishable from a real agent's "nothing staged yet",
     turning malformed input into meaningful data instead of failing closed."""
-    if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+    if not isinstance(value, list) or not all(
+            isinstance(i, str) and (not i or _IMAGE_RE.fullmatch(i))
+            for i in value):
         return None
     return [i for i in value[:cap] if i]
+
+
+# Heartbeat field whitelist (spec §6 bounds). The heartbeat is the device's
+# WHOLE stored record and is rewritten into devices.json on every tick, then
+# copied verbatim into the console's /api/devices JSON -- so every field is
+# typed and capped here. A value of the wrong type stores as None (the same
+# "absent" the console already handles for a legacy agent) rather than
+# failing the heartbeat, which would cost the device its policy poll.
+_HEARTBEAT_STR_CAPS = {"current_image_id": 128, "version": 128,
+                       "stage_state": 64, "stage_error": 1024,
+                       "target_fs": 64, "model": 128}
+_HEARTBEAT_BYTES_CAP = 2 ** 63 - 1
+
+
+def _hb_str(value, cap):
+    return value[:cap] if isinstance(value, str) else None
+
+
+def _hb_bytes(value):
+    """A non-negative, finite byte count as int, else None (bool is not a
+    count; NaN/inf never arrive -- parse_json_body refuses the literals, but
+    1e999 parses as inf and is refused here)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        value = int(value)
+    if not isinstance(value, int) or not 0 <= value <= _HEARTBEAT_BYTES_CAP:
+        return None
+    return value
+
+
+def _hb_bool(value):
+    return value if isinstance(value, bool) else None
+
+
+def sanitize_heartbeat(data, src_ip):
+    """The stored heartbeat record for one device POST body (a dict)."""
+    return {
+        "current_image_id": _hb_str(data.get("current_image_id"),
+                                    _HEARTBEAT_STR_CAPS["current_image_id"]),
+        "free_flash_bytes": _hb_bytes(data.get("free_flash_bytes")),
+        "version": _hb_str(data.get("version"), _HEARTBEAT_STR_CAPS["version"]),
+        "stage_state": _hb_str(data.get("stage_state"),
+                               _HEARTBEAT_STR_CAPS["stage_state"]),
+        "stage_error": _hb_str(data.get("stage_error"),
+                               _HEARTBEAT_STR_CAPS["stage_error"]),
+        "target_fs": _hb_str(data.get("target_fs"),
+                             _HEARTBEAT_STR_CAPS["target_fs"]),
+        "model": _hb_str(data.get("model"), _HEARTBEAT_STR_CAPS["model"]),
+        "telemetry_enabled": _hb_bool(data.get("telemetry_enabled")),
+        "telemetry_stream_enabled": _hb_bool(
+            data.get("telemetry_stream_enabled")),
+        # Multi-image staging state (issue: multi-image assignment).
+        # Sanitised via _id_list: absence/malformed input stores None
+        # (a legacy or misbehaving agent), never an invented [] --
+        # the console's fallback logic keys off staged_image_ids
+        # being None to fall back to the singular stage_state/
+        # current_image_id pair.
+        "staged_image_ids": _id_list(data.get("staged_image_ids")),
+        "errored_image_ids": _id_list(data.get("errored_image_ids")),
+        # The heartbeat's source IP is the agent's Guest Shell IP — the
+        # SAME IP it announces to the tracker with — so the swarm map can
+        # join this device's model onto its swarm peer by IP.
+        "swarm_ip": src_ip,
+    }
 
 
 def _device_image_view(entry):
@@ -1400,6 +1945,14 @@ class Catalog:
                  deployment_open=True, deployment_checkpoint=None):
         self.store = store
         self.secrets_path = secrets_path
+        # One stat-validated snapshot of the secret store and its strict
+        # authorization index, shared by every request. Each request used to
+        # re-parse the whole store and rebuild a fleet-wide reverse index to
+        # resolve ONE credential; the snapshot rebuilds only when the store
+        # file's stat identity changes, which every mint/rotate/revoke causes
+        # (they all os.replace the file), in this process or in a CLI beside
+        # it. See credential_cache.
+        self.credentials = credential_cache.CredentialResolver(secrets_path)
         self.live_table = live_table
         self.stream_settings = stream_settings
         self.audit_path = (audit_path
@@ -1428,10 +1981,14 @@ class Catalog:
                      or os.path.isfile(self.deployment_checkpoint)))
 
     def _load_store(self):
-        """Load the secrets store fresh from disk; return (store_dict, index)."""
-        store_dict = secrets_store.load(self.secrets_path)
-        index = secrets_store.build_index(store_dict)
-        return store_dict, index
+        """The secret store and the STRICT catalog authorization index, from
+        one cached snapshot (spec §6: only the strict index authorizes).
+
+        The returned store dict and index are SHARED and read-only. Every
+        mutation path re-reads the store under ``secrets_store.store_lock``
+        with its own ``secrets_store.load`` — see ``_handle_token_refresh``."""
+        return self.credentials.view(
+            "catalog", secrets_store.build_catalog_auth_index)
 
     def _announce_base_url(self):
         """Return the tracker announce base URL (no query), or None.
@@ -1466,7 +2023,26 @@ class Catalog:
             canonical = f.read()
         return torrent_personalize.personalize(canonical, announce_url)
 
+    _STATE_UNAVAILABLE = (503, {"error": "state unavailable"})
+
     def route_get(self, path, auth_ctx=None, store_dict=None):
+        try:
+            return self._route_get(path, auth_ctx=auth_ctx,
+                                   store_dict=store_dict)
+        except StateFileError:
+            # An existing state file that cannot be read: refuse the request
+            # rather than serve an empty (fleet-wide unassign) answer.
+            return self._json(*self._STATE_UNAVAILABLE)
+
+    def route_post(self, path, body, src_ip=None, store=None, index=None,
+                   token=None):
+        try:
+            return self._route_post(path, body, src_ip=src_ip, store=store,
+                                    index=index, token=token)
+        except StateFileError:
+            return self._json(*self._STATE_UNAVAILABLE)
+
+    def _route_get(self, path, auth_ctx=None, store_dict=None):
         parts = path.strip("/").split("/")
         if parts == ["v1", "images"]:
             return self._json(200, {"images": [
@@ -1483,7 +2059,12 @@ class Catalog:
             return self._json(200, {"devices": self.store.list_devices()})
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "policy":
-            return self._json(200, self.store.get_policy(parts[2]))
+            # device_policy_view, not get_policy: the agent adopts the
+            # server-minted transfer_id from the ``plans`` map, and this poll
+            # is the earliest point of the agent's tick -- ahead of the
+            # download and of every telemetry touch -- so the id is in hand
+            # before anything can mint one of its own.
+            return self._json(200, self.store.device_policy_view(parts[2]))
         return self._json(404, {"error": "not found"})
 
     # Extra response headers the handler must emit for a personalized torrent
@@ -1542,38 +2123,19 @@ class Catalog:
         except OSError:
             return self._json(404, {"error": "no such torrent"})
 
-    def route_post(self, path, body, src_ip=None, store=None, index=None,
-                   token=None):
+    def _route_post(self, path, body, src_ip=None, store=None, index=None,
+                    token=None):
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "heartbeat":
             try:
-                data = json.loads(body or b"{}")
+                data = parse_json_body(body)
             except ValueError:
                 return self._json(400, {"error": "bad json"})
-            self.store.record_heartbeat(parts[2], {
-                "current_image_id": data.get("current_image_id"),
-                "free_flash_bytes": data.get("free_flash_bytes"),
-                "version": data.get("version"),
-                "stage_state": data.get("stage_state"),
-                "stage_error": data.get("stage_error"),
-                "target_fs": data.get("target_fs"),
-                "model": data.get("model"),
-                "telemetry_enabled": data.get("telemetry_enabled"),
-                "telemetry_stream_enabled": data.get("telemetry_stream_enabled"),
-                # Multi-image staging state (issue: multi-image assignment).
-                # Sanitised via _id_list: absence/malformed input stores None
-                # (a legacy or misbehaving agent), never an invented [] --
-                # the console's fallback logic keys off staged_image_ids
-                # being None to fall back to the singular stage_state/
-                # current_image_id pair.
-                "staged_image_ids": _id_list(data.get("staged_image_ids")),
-                "errored_image_ids": _id_list(data.get("errored_image_ids")),
-                # The heartbeat's source IP is the agent's Guest Shell IP — the
-                # SAME IP it announces to the tracker with — so the swarm map can
-                # join this device's model onto its swarm peer by IP.
-                "swarm_ip": src_ip,
-            })
+            if not isinstance(data, dict):
+                return self._json(400, {"error": "bad json"})
+            self.store.record_heartbeat(
+                parts[2], sanitize_heartbeat(data, src_ip))
             # Live telemetry (spec §3/§10.1): a v2 `telemetry_observation`
             # envelope supersedes the legacy v1 `sample` on v2 agents; a bad
             # envelope/sample NEVER fails the heartbeat — reject-and-count.
@@ -1650,7 +2212,7 @@ class Catalog:
         if len(parts) == 4 and parts[:2] == ["v1", "devices"] \
                 and parts[3] == "telemetry":
             try:
-                data = json.loads(body or b"{}")
+                data = parse_json_body(body)
             except ValueError:
                 return self._json(400, {"error": "bad json"})
             try:
@@ -1826,7 +2388,8 @@ class Catalog:
 
     @staticmethod
     def _json(status, obj):
-        return (status, "application/json", json.dumps(obj).encode())
+        return (status, "application/json",
+                json.dumps(obj, allow_nan=False).encode())
 
 
 def make_server(host, port, store, secrets_path, certfile=None,
@@ -1840,38 +2403,56 @@ def make_server(host, port, store, secrets_path, certfile=None,
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
 
     class Handler(BaseHTTPRequestHandler):
+        # Socket inactivity timeout: StreamRequestHandler.setup applies it
+        # with settimeout, so a stalled readline/read raises TimeoutError and
+        # handle_one_request closes the connection instead of pinning the
+        # thread forever (IRIS-02-003).
+        timeout = handler_timeout()
+
         def _guard(self, parts, token):
             """Route-aware guard.
 
-            Device-bound routes (heartbeat, telemetry): require the current
-            device catalog_token resolving to that device's principal.
-            token-refresh additionally accepts that same device's one previous
-            token for idempotent delivery recovery; it grants no other route.
+            Device-bound routes (heartbeat, telemetry, policy): require the
+            current device catalog_token resolving to that device's
+            principal. token-refresh additionally accepts that same device's
+            one previous token for idempotent delivery recovery; it grants no
+            other route.
 
-            Shared routes (images, torrents, devices-list, policy): require
-            any valid catalog-scoped record.
+            Shared routes (images, torrents, devices-list): require any valid
+            catalog-scoped record. Policy is device-bound rather than shared
+            because device_policy_view() carries per-transfer ids
+            (plan_id/transfer_id, spec §9) minted for THIS device's
+            assignment -- a shared route would let any enrolled device walk
+            /v1/devices then /v1/devices/<id>/policy for every id and read
+            every other device's plan/transfer ids.
 
             Returns ``(store_dict, index, auth_ctx)`` on success (auth_ctx is a
             typed ``auth.AuthContext`` for the resolved principal) or
             ``(None, None, None)`` on auth failure. Every authorization decision
             is made through the STRICT catalog auth index (spec §6): the broad
-            ``secrets_store.build_index`` never authorizes (it is loaded here
-            only as route_post compatibility data).
+            ``secrets_store.build_index`` never authorizes, and is no longer
+            built at all — it was rebuilt across the whole fleet on every
+            request and its only consumer, token-refresh, discards it and
+            re-reads the store under the store lock.
             """
-            store_dict, index = cat._load_store()
-            now = time.time()
             try:
-                strict = secrets_store.build_catalog_auth_index(store_dict)
+                store_dict, strict = cat._load_store()
             except secrets_store.DuplicateCredentialError:
                 # Hard config error: duplicate catalog credential ownership.
                 # Fail closed for every request; never a silent overwrite.
                 return None, None, None
+            # route_post compatibility slot only: the broad reverse index is
+            # never an authorization surface, and token-refresh (its only
+            # consumer's only route) re-reads the store under the store lock.
+            index = None
+            now = time.time()
 
             # Determine if this is a device-bound route
             is_device_bound = (
                 len(parts) == 4
                 and parts[:2] == ["v1", "devices"]
-                and parts[3] in ("heartbeat", "token-refresh", "telemetry")
+                and parts[3] in ("heartbeat", "token-refresh", "telemetry",
+                                 "policy")
             )
 
             if is_device_bound:
@@ -1964,6 +2545,16 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 self._send((401, "application/json",
                             json.dumps({"error": "unauthorized"}).encode()))
                 return
+            # A chunked (or otherwise length-less) POST is refused rather than
+            # read as an empty body: on the heartbeat route an empty body IS
+            # the device's whole stored record, so silently accepting one
+            # would blank every field the console relies on.
+            if self.headers.get("Transfer-Encoding") \
+                    or self.headers.get("Content-Length") is None:
+                self._send((411, "application/json",
+                            json.dumps({"error": "content-length required"}
+                                       ).encode()))
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
@@ -2006,11 +2597,13 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def log_message(self, *args):
             pass
 
-    srv = ThreadingHTTPServer((host, port), Handler)
+    srv = _CatalogServer((host, port), Handler)
     if certfile:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        # Handshake per connection in the worker thread, NOT by wrapping the
+        # listening socket: see _CatalogServer.
+        srv.tls_context = ctx
     return srv
 
 
@@ -2022,6 +2615,20 @@ def main():
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     cert = os.environ.get("IRIS_CERT", "/etc/iris/tls/cert.pem")
     certfile = cert if os.path.exists(cert) else None
+    if certfile is None and not _plaintext_allowed():
+        # The catalog answers device bearer tokens on every route; a
+        # plaintext listener puts every one of them on the wire in clear
+        # text. Same fail-closed contract as the console
+        # (gui_server.main / IRIS_GUI_ALLOW_PLAINTEXT): refuse to start
+        # rather than silently downgrade. The shipped docker-entrypoint.sh
+        # always provisions IRIS_CERT, so this is only reachable running
+        # catalog.py directly outside the supported deployment.
+        print("iris-catalog: no certificate found (IRIS_CERT=%s); refusing "
+              "to serve the catalog over plain HTTP -- it answers device "
+              "bearer tokens on every route. Set %s=1 to opt in "
+              "deliberately (loopback or an isolated lab network only)."
+              % (cert, _PLAINTEXT_OPT_IN_ENV), file=sys.stderr, flush=True)
+        sys.exit(2)
     live_table = live_samples.LiveTable()
     stream_settings = live_samples.StreamSettings(
         os.path.join(state_dir, "telemetry-settings.json"))

@@ -483,9 +483,19 @@ def test_export_loop_skips_when_auto_off_or_fresh(tmp_path):
 
 
 def test_export_loop_survives_a_raising_export_fn(tmp_path):
+    # Rewritten (IRIS-05-005): the old version asserted an HOURLY retry of a
+    # raising export, which was the defect -- nothing recorded the failure,
+    # so export_due stayed true and the console kept the stale "ok". Now a
+    # raising attempt is recorded like any failed attempt (last_result moves
+    # to fail:, last_run_ts advances, the trail gets its fail line) and the
+    # loop backs off to the daily cadence; the loop itself still survives.
+    spath = audit_export.settings_path(str(tmp_path))
     audit_export.write_settings(
-        audit_export.settings_path(str(tmp_path)), _valid_settings(auto=True))
+        spath, dict(_valid_settings(auto=True),
+                    last_run_ts=1000, last_result="ok:audit-old.jsonl.age"))
     hits = []
+    audits = []
+    clock = {"t": 10 ** 6}
 
     def boom(*a, **k):
         hits.append(1)
@@ -495,14 +505,29 @@ def test_export_loop_survives_a_raising_export_fn(tmp_path):
     t = threading.Thread(
         target=audit_export.export_loop,
         args=(stop, "/fake/a", str(tmp_path), lambda: {"password": "p"}),
-        kwargs={"first_delay": 0.01, "wake": 0.02, "export_fn": boom},
+        kwargs={"first_delay": 0.01, "wake": 0.02, "export_fn": boom,
+                "audit_fn": lambda **kw: audits.append(kw),
+                "now_fn": lambda: clock["t"]},
         daemon=True)
     t.start()
+    deadline = time.time() + 3.0
+    while len(hits) < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.1)
+    assert len(hits) == 1                       # no hourly retry storm
+    recorded = audit_export.read_settings(spath)
+    assert recorded["last_run_ts"] == clock["t"]
+    assert recorded["last_result"].startswith("fail:export failed: kaboom")
+    assert audits and audits[0]["result"] == "fail" \
+        and audits[0]["event"] == "audit_export"
+    assert not audit_export.export_due(recorded, clock["t"])
+    # A day later the loop (still alive) tries again.
+    clock["t"] += 86400 + 1
     deadline = time.time() + 3.0
     while len(hits) < 2 and time.time() < deadline:
         time.sleep(0.01)
     stop.set(); t.join(3.0)
-    assert len(hits) >= 2 and t.is_alive() is False   # loop outlived the raise
+    assert len(hits) == 2 and t.is_alive() is False   # loop outlived the raise
 
 
 # ---- console routes (test_gui_server.py style) ----------------------------

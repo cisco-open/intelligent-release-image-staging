@@ -26,7 +26,12 @@
 
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"--enable-rpc=true"* ]] || return 1
-  [[ "$output" == *"--rpc-secret=secretval"* ]] || return 1
+  # The secret is delivered through a 0600 conf file, never the argv (which
+  # any local user can read via /proc/<pid>/cmdline) -- IRIS-13-016.
+  [[ "$output" != *"--rpc-secret="* ]] || return 1
+  [[ "$output" == *"--conf-path=$tmp/state/seeder.aria2.conf"* ]] || return 1
+  [ "$(cat "$tmp/state/seeder.aria2.conf")" = "rpc-secret=secretval" ] || return 1
+  [ "$(stat -c %a "$tmp/state/seeder.aria2.conf")" = "600" ] || return 1
   [[ "$output" == *"--enable-dht=false"* ]] || return 1
   [[ "$output" == *"--enable-peer-exchange=false"* ]] || return 1
   [[ "$output" == *"--seed-ratio=0.0"* ]] || return 1

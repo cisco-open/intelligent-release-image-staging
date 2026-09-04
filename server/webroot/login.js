@@ -10,11 +10,17 @@ document.getElementById('login-form').addEventListener('submit', async function 
     username: document.getElementById('u').value,
     password: document.getElementById('p').value
   };
-  var res = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  var res;
+  try {
+    res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    err.textContent = 'Could not reach the server. Check the connection and try again.';
+    return;
+  }
   if (res.ok) {
     var j = await res.json().catch(function () { return {}; });
     if (j.setup && j.setup_grant) {
@@ -33,7 +39,17 @@ document.getElementById('login-form').addEventListener('submit', async function 
       return;
     }
     window.location.href = '/';
-  } else {
+  } else if (res.status === 429) {
+    // throttled: the credential was NOT checked, so never call it wrong --
+    // that only makes the operator retry and extend the lockout
+    var wait = parseInt(res.headers.get('Retry-After') || '', 10);
+    err.textContent = 'Too many login attempts. Try again' +
+      (wait > 0 ? ' in ' + wait + ' second' + (wait === 1 ? '' : 's') : ' shortly') + '.';
+  } else if (res.status === 503) {
+    err.textContent = 'The server is busy; try again in a moment.';
+  } else if (res.status === 401) {
     err.textContent = 'Invalid username or password.';
+  } else {
+    err.textContent = 'Sign-in failed (' + res.status + '). Try again.';
   }
 });

@@ -287,7 +287,7 @@ def test_an_applying_record_authorizes_teardown(tmp_path):
     never read, and never would be: the device could not be undeployed (no
     readable record), could not be adopted (routers never can) and could not be
     re-onboarded (preflight refuses the live Guest Shell). That is exactly how
-    100.90.168.116 was stranded in the lab.
+    192.0.2.116 was stranded in the lab.
     """
     store = deployment_records.DeploymentRecordStore(str(tmp_path))
     store.create(_record(record_id="r-applying", device_id="dev-1"))
@@ -410,4 +410,79 @@ def test_abandoned_record_never_blocks_or_authorises(tmp_path):
     store.transition(rid, "active")
     store.retire_device("edge-01", "device deleted from the fleet")
     assert store.active_for_device("edge-01") is None
+    assert store.recoverable_for_device("edge-01") is None
+
+
+def test_unparseable_store_refuses_writes_and_is_left_intact(tmp_path):
+    """A present-but-corrupt deployment_records.json used to read as an
+    EMPTY store, and the next create/transition rewrote it with one record --
+    deleting every device's teardown authority in one silent step."""
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="r1"))
+    with open(store.path, "w") as stream:
+        stream.write("{not json")
+    for write in (lambda: store.create(_record(record_id="r2")),
+                  lambda: store.adopt(_record(record_id="r3")),
+                  lambda: store.transition("r1", "applying"),
+                  lambda: store.update_planned(
+                      "r1", plan_hash="b" * 64, resolved={}, preflight={},
+                      resources=[]),
+                  lambda: store.recover_interrupted(),
+                  lambda: store.retire_device("edge-01", "test")):
+        with pytest.raises(ValueError, match="unreadable"):
+            write()
+    with open(store.path) as stream:
+        assert stream.read() == "{not json"
+    # reads degrade to an empty view rather than raising
+    assert store.get("r1") is None and store.list() == []
+    assert store.recoverable_for_device("edge-01") is None
+    # ... except for a caller that asks for strict, which must be able to tell
+    # "this device has no record" apart from "no record is readable at all"
+    # before it advises an operator to adopt the device (issue #103).
+    with pytest.raises(deployment_records.RecordStoreUnreadable,
+                       match="unreadable"):
+        store.recoverable_for_device("edge-01", strict=True)
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store.active_for_device("edge-01", strict=True)
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store.list(strict=True)
+    # and the strict write failures are the same distinguishable type
+    assert issubclass(deployment_records.RecordStoreUnreadable, ValueError)
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store.create(_record(record_id="r4"))
+    # a missing file is still an empty store that writes can create
+    import os
+    os.unlink(store.path)
+    assert store.create(_record(record_id="r9"))["state"] == "planned"
+
+
+def test_activation_abandons_stale_recoverable_siblings(tmp_path):
+    """A sibling left unknown/needs-reconcile/drifted survived a successful
+    re-onboard, so once the new record was removed it resurfaced as teardown
+    authority -- a full recorded teardown rendered from its stale VLAN/SVI
+    numbers against a box that no longer carries any of it."""
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
+    for record_id, stale in (("u", "unknown"), ("n", "needs-reconcile"),
+                             ("d", "drifted")):
+        store.create(_record(record_id=record_id))
+        if stale == "drifted":
+            store.transition(record_id, "unknown")   # drifted is not reachable from planned
+        store.transition(record_id, stale)
+    store.create(_record(record_id="p"))                 # a queued job's record
+    store.create(_record(record_id="other", device_id="edge-02"))
+    store.transition("other", "unknown")
+
+    store.create(_record(record_id="b"))
+    store.transition("b", "applying")
+    store.transition("b", "active")
+    for record_id in ("u", "n", "d"):
+        retired = store.get(record_id)
+        assert retired["state"] == "abandoned", record_id
+        assert "activation of record b" in retired["evidence"]["reason"]
+        assert retired["timestamps"]["finished_at"] == 100
+    assert store.get("p")["state"] == "planned"          # in flight: untouched
+    assert store.get("other")["state"] == "unknown"      # other device: untouched
+
+    store.transition("b", "applying")
+    store.transition("b", "removed")
     assert store.recoverable_for_device("edge-01") is None

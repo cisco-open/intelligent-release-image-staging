@@ -18,8 +18,18 @@
 #   DefaultPieceStorage.cc:502 fires the BT hook the instant the last piece lands
 #   and the very next statement is group->enableSeedOnly(): the peers that just
 #   fed us are still connected, so this is the one instant when the knowledge is
-#   complete. RequestGroupMan.cc:270 fires the generic hook from executeStopHook,
-#   i.e. after seeding ENDS, when those peers are long gone.
+#   as complete as it can be. RequestGroupMan.cc:270 fires the generic hook from
+#   executeStopHook, i.e. after seeding ENDS, when those peers are long gone.
+#
+#   THE GAP THIS DOES NOT CLOSE (board #68): "still connected" does not hold for
+#   a peer that was ONLY seeding to us. Our own getPeers still has to round-trip
+#   a fork+exec+curl+TCP connect before aria2's single-threaded RPC loop can
+#   serve it, and a pure-seeder peer has nothing left to exchange with us the
+#   instant we finish, so it can already be gone by then -- hardware-reproduced
+#   twice, identically, in the first-device-of-a-wave case (fed only by the
+#   origin seeder). The bounded re-ask below (see "RETRY ON AN EMPTY ANSWER")
+#   narrows that window; it cannot close it outright without a change to when
+#   aria2 itself prunes a finished peer, which is out of this script's reach.
 #
 # HOW aria2 INVOKES US (util.cc:2320-2342)
 #   execlp(command, command, gid, numFiles, firstFilename, NULL) -- a bare
@@ -36,9 +46,11 @@
 #
 # CONTRACT WITH THE AGENT
 #   Writes "$3.peers.json" atomically (temp + mv) into the stage dir, which is
-#   guest-writable by construction and is NOT touched by the agent's stale
-#   artifact sweep (that only removes .bin/.torrent/.aria2). The next one-shot
-#   EEM tick folds it into the terminal report and deletes it -- see
+#   guest-writable by construction. The agent's stale-artifact sweep
+#   (iris_agent purge_others) KEEPS the sidecar of every image still assigned
+#   and removes only those of images that have left the set, so a snapshot
+#   waiting for its own image's completion tick survives the sweep. That
+#   one-shot EEM tick folds it into the terminal report and deletes it -- see
 #   telemetry_report.parse_peer_transfer_snapshot() for the reader.
 #   The RPC response body is embedded VERBATIM: this script parses no JSON, so
 #   there is nothing here to get wrong about numbers. Validation is the agent's.
@@ -91,28 +103,52 @@ REQ='[{"jsonrpc":"2.0","id":"peers","method":"aria2.getPeers","params":["token:'
 # so a snapshot this hook writes is always one the agent can read.
 MAX_BODY=1000000
 
-BODY=`curl -s -f --connect-timeout 1 --max-time 2 --max-filesize "$MAX_BODY" \
-  -H 'Content-Type: application/json' --data-binary "$REQ" \
-  "http://127.0.0.1:$PORT/jsonrpc" 2>/dev/null` || exit 0
+# RETRY ON AN EMPTY ANSWER (board #68). getSessionInfo's result is always a
+# JSON OBJECT ("{...}"), never an array, so the literal fragment '"result":[]'
+# in this two-call batch can only ever be getPeers' own empty array -- no JSON
+# parsing needed to tell "no peers" apart from "no result at all" (still
+# handled below, unchanged). Up to two extra asks, a beat apart, cost nothing
+# on the ordinary path (a non-empty first answer stops the loop immediately,
+# byte-for-byte the single-request behavior this replaces) and give a peer
+# that is mid-disconnect one or two more chances to still be counted. Every
+# attempt re-asks aria2 for the truth AT THAT INSTANT -- this can only turn an
+# already-empty answer into a real measurement, never into an estimate, and it
+# cannot make a genuinely empty swarm answer anything other than empty.
+attempt=1
+while :; do
+  BODY=`curl -s -f --connect-timeout 1 --max-time 2 --max-filesize "$MAX_BODY" \
+    -H 'Content-Type: application/json' --data-binary "$REQ" \
+    "http://127.0.0.1:$PORT/jsonrpc" 2>/dev/null` || exit 0
 
-# Time-bounded for the same reason: aria2 is local and already holds the answer
-# in memory, so a stall means something is wrong, and a bounded delay before
-# enableSeedOnly() is the worst this can ever cost a transfer. Over any bound
-# curl exits non-zero and the `|| exit 0` drops the snapshot -- no file, no
-# partial write, no output, like every other failure path here.
+  # Time-bounded for the same reason: aria2 is local and already holds the
+  # answer in memory, so a stall means something is wrong. Over any bound curl
+  # exits non-zero and the `|| exit 0` drops the snapshot -- no file, no
+  # partial write, no output, like every other failure path here.
 
-# Second size check, on what is about to be WRITTEN. curl enforces
-# --max-filesize only where the length is declared up front; aria2's RPC does
-# declare it (HttpServerBodyCommand builds the whole body before sending), but
-# an answer from something that is not aria2 -- a captive portal, a proxy on a
-# hijacked port -- may arrive chunked, and the bound has to hold whoever
-# answered. ${#BODY} is POSIX and costs nothing: the body is already in memory.
-[ "${#BODY}" -le "$MAX_BODY" ] || exit 0
+  # Second size check, on what is about to be WRITTEN. curl enforces
+  # --max-filesize only where the length is declared up front; aria2's RPC does
+  # declare it (HttpServerBodyCommand builds the whole body before sending),
+  # but an answer from something that is not aria2 -- a captive portal, a
+  # proxy on a hijacked port -- may arrive chunked, and the bound has to hold
+  # whoever answered. ${#BODY} is POSIX and costs nothing: the body is already
+  # in memory.
+  [ "${#BODY}" -le "$MAX_BODY" ] || exit 0
 
-case "$BODY" in
-  *'"result"'*) ;;
-  *) exit 0 ;;             # error object, empty body, captive garbage -> drop
-esac
+  case "$BODY" in
+    *'"result"'*) ;;
+    *) exit 0 ;;           # error object, empty body, captive garbage -> drop
+  esac
+
+  case "$BODY" in
+    *'"result":[]'*)
+      [ "$attempt" -ge 3 ] && break    # bounded: an empty swarm stays empty
+      sleep 1
+      attempt=$((attempt + 1))
+      continue
+      ;;
+  esac
+  break
+done
 
 OUT="$FILE.peers.json"
 TMP="$OUT.tmp.$$"

@@ -142,13 +142,13 @@ SPDX-License-Identifier: Apache-2.0
         </div>
         <div class="flow-shell">
           <div class="step-list" role="tablist" aria-label="IRIS workflow steps">
-            <button class="step active" type="button" role="tab" aria-selected="true" data-step="publish">Publish</button>
-            <button class="step" type="button" role="tab" aria-selected="false" data-step="assign">Assign</button>
-            <button class="step" type="button" role="tab" aria-selected="false" data-step="download">Download</button>
-            <button class="step" type="button" role="tab" aria-selected="false" data-step="verify">Verify</button>
-            <button class="step" type="button" role="tab" aria-selected="false" data-step="report">Report</button>
+            <button class="step active" type="button" role="tab" id="flow-tab-publish" aria-controls="flow-detail" aria-selected="true" data-step="publish">Publish</button>
+            <button class="step" type="button" role="tab" id="flow-tab-assign" aria-controls="flow-detail" aria-selected="false" data-step="assign">Assign</button>
+            <button class="step" type="button" role="tab" id="flow-tab-download" aria-controls="flow-detail" aria-selected="false" data-step="download">Download</button>
+            <button class="step" type="button" role="tab" id="flow-tab-verify" aria-controls="flow-detail" aria-selected="false" data-step="verify">Verify</button>
+            <button class="step" type="button" role="tab" id="flow-tab-report" aria-controls="flow-detail" aria-selected="false" data-step="report">Report</button>
           </div>
-          <article class="flow-detail" aria-live="polite">
+          <article class="flow-detail" id="flow-detail" role="tabpanel" tabindex="0" aria-live="polite">
             <h3 id="flow-title">Publish an image</h3>
             <p id="flow-body">The operator publishes one Cisco image or patch. IRIS records the hashes and creates private swarm metadata for the fleet.</p>
             <code id="flow-command">iris-publish /opt/images/&lt;image&gt;.bin</code>
@@ -159,18 +159,20 @@ SPDX-License-Identifier: Apache-2.0
       <section id="operators" class="section-grid reverse">
         <div class="path-panel">
           <div class="path-tabs" role="tablist" aria-label="Operator paths">
-            <button class="path-tab active" type="button" role="tab" aria-selected="true" data-path="guest">Catalyst 9000</button>
-            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="router">Catalyst 8000</button>
-            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="xr">Cisco 8000 Series</button>
-            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="iox">Industrial Ethernet</button>
-            <button class="path-tab" type="button" role="tab" aria-selected="false" data-path="server">Server</button>
+            <button class="path-tab active" type="button" role="tab" id="path-tab-guest" aria-controls="path-body" aria-selected="true" data-path="guest">Catalyst 9000</button>
+            <button class="path-tab" type="button" role="tab" id="path-tab-router" aria-controls="path-body" aria-selected="false" data-path="router">Catalyst 8000</button>
+            <button class="path-tab" type="button" role="tab" id="path-tab-xr" aria-controls="path-body" aria-selected="false" data-path="xr">Cisco 8000 Series</button>
+            <button class="path-tab" type="button" role="tab" id="path-tab-iox" aria-controls="path-body" aria-selected="false" data-path="iox">Industrial Ethernet</button>
+            <button class="path-tab" type="button" role="tab" id="path-tab-server" aria-controls="path-body" aria-selected="false" data-path="server">Server</button>
           </div>
-          <div class="path-body" aria-live="polite">
+          <div class="path-body" id="path-body" role="tabpanel" tabindex="0" aria-live="polite">
             <h3 id="path-title">Catalyst 9000 Guest Shell</h3>
             <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting storage.</p>
             <ul id="path-list">
+              <!-- Kept in step with paths.guest in app.js, which re-renders this
+                   list whenever the default tab is re-selected. -->
               <li>Installs catalog trust material.</li>
-              <li>Runs the agent every 60 seconds.</li>
+              <li>Downloads image pieces through the private swarm.</li>
               <li>Stages approved images to device storage.</li>
             </ul>
           </div>

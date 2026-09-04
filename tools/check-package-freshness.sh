@@ -115,12 +115,18 @@ fi
 
 # 3. Each IOx package pins a copy at build time -- compare it to the reference.
 STALE=()
+# An ABSENT package is not a fresh one. It was never added to STALE, so a run
+# where neither tar exists used to print "verified ... contents inspected" and
+# exit 0 having inspected nothing -- a green result that means the opposite of
+# what it says, on exactly the check an operator uses before a rollout.
+ABSENT=()
 echo
 echo "pinned certificate per served package"
 for PKG in iris-amd64.tar iris-arm64.tar; do
   P="$ARTIFACTS_DIR/$PKG"
   if [ ! -f "$P" ]; then
     printf '  %-18s %s\n' "$PKG" "absent"
+    ABSENT+=("$PKG")
     continue
   fi
   BUILT="$(date -r "$P" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
@@ -128,10 +134,32 @@ for PKG in iris-amd64.tar iris-arm64.tar; do
   ( cd "$TMP/pk" && tar xf "$P" artifacts.tar.gz 2>/dev/null ) || true
   FP=""
   if [ -f "$TMP/pk/artifacts.tar.gz" ]; then
+    # The PINNED-CERT PROBE MEMBER: device/iox/build.sh packages a top-level
+    # iris-catalog.pem next to rootfs.tar for exactly this check (and for
+    # server/setup_status.py's package_fingerprint, which mirrors it).
     C="$(tar tzf "$TMP/pk/artifacts.tar.gz" 2>/dev/null | grep -i 'catalog\.pem' | head -1 || true)"
     if [ -n "$C" ]; then
       ( cd "$TMP/pk" && tar xzf artifacts.tar.gz "$C" 2>/dev/null ) || true
       FP="$(fingerprint "$TMP/pk/$C")"
+    fi
+    # Fallback for a package built without the probe member (builds between
+    # the 2026-09-02 packaging slimming and its restoration): walk the
+    # classic docker-archive rootfs.tar's layer tars for the path the
+    # Dockerfile bakes the cert at, so such a package reports what it REALLY
+    # pins instead of a permanent NO PINNED CERT FOUND (finding IRIS-12-001).
+    if [ -z "$FP" ] && tar tzf "$TMP/pk/artifacts.tar.gz" 2>/dev/null | grep -qx 'rootfs.tar'; then
+      ( cd "$TMP/pk" && tar xzf artifacts.tar.gz rootfs.tar 2>/dev/null ) || true
+      if [ -f "$TMP/pk/rootfs.tar" ]; then
+        while IFS= read -r L; do
+          [ -n "$L" ] || continue
+          if tar xOf "$TMP/pk/rootfs.tar" "$L" 2>/dev/null \
+               | tar xOf - opt/iris/iris-catalog.pem > "$TMP/pk/baked.pem" 2>/dev/null \
+             && [ -s "$TMP/pk/baked.pem" ]; then
+            FP="$(fingerprint "$TMP/pk/baked.pem")"
+            if [ -n "$FP" ]; then break; fi
+          fi
+        done < <(tar tf "$TMP/pk/rootfs.tar" 2>/dev/null | grep '\.tar$' || true)
+      fi
     fi
   fi
   if [ -z "$FP" ]; then
@@ -188,7 +216,8 @@ else
 fi
 
 echo
-if [ ${#STALE[@]} -eq 0 ] && [ "$CATALOG_DRIFT" -eq 0 ] && [ "$XR_STATE" != "stale" ]; then
+if [ ${#STALE[@]} -eq 0 ] && [ ${#ABSENT[@]} -eq 0 ] \
+     && [ "$CATALOG_DRIFT" -eq 0 ] && [ "$XR_STATE" != "stale" ]; then
   echo "verified: both IOx tars pin the live catalog certificate (contents inspected)."
   case "$XR_STATE" in
     ok) echo "verified: the XR RPM was built after that certificate -- by build time only, contents not inspected." ;;
@@ -198,6 +227,12 @@ if [ ${#STALE[@]} -eq 0 ] && [ "$CATALOG_DRIFT" -eq 0 ] && [ "$XR_STATE" != "sta
   exit 0
 fi
 
+if [ ${#ABSENT[@]} -gt 0 ]; then
+  echo "NOT STAGED: ${ABSENT[*]}"
+  echo "Nothing was inspected for these, so nothing is verified for them. Console"
+  echo "onboarding has no package to serve for that architecture until one is built"
+  echo "(tools/stage-iox-package.sh --arch amd64|arm64)."
+fi
 if [ ${#STALE[@]} -gt 0 ]; then
   echo "STALE: ${STALE[*]}"
   echo "Devices deployed from these packages will install and report RUNNING, then"

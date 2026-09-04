@@ -27,6 +27,14 @@
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
+#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/iox/entrypoint.sh);
+#     off by default for flash write endurance. Forwarded verbatim as an
+#     -e run-opts value so the container actually sees an operator's opt-in --
+#     previously this script dropped it silently and the entrypoint's own
+#     default always won.
+#   INSTALL_TIMEOUT=300  ACTIVATE_TIMEOUT=300  START_TIMEOUT=300  STATE_POLL=5
+#     (seconds; the app-hosting lifecycle polls -- see the note by their
+#     defaults below)
 set -euo pipefail
 
 DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
@@ -81,8 +89,74 @@ DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
+# Same fail-closed default as device/iox/entrypoint.sh's own IRIS_LOG parsing
+# -- this is only the plumbing that lets an operator's opt-in actually reach
+# it; the default stays off either way.
+IRIS_LOG="${IRIS_LOG:-off}"
+# App-hosting lifecycle poll budgets, in seconds. The FIRST install of a new
+# package version is far slower than a repeat install of the same one: the IOx
+# runtime has to load the package's docker layers into its image cache before
+# the app can activate, and a byte-identical package the box has run before
+# activates in seconds because those layers are already cached. The old flat
+# 90 s activate budget was shorter than that first-time load on an IE-3400, so
+# a first install reported failure while the activation actually completed a
+# minute or two later -- and the failed run left the app-hosting config behind,
+# so the console's retry was refused by preflight. Same idiom and same 300 s
+# default as device/xr-install.sh's ACTIVATE_TIMEOUT.
+#
+# Deliberately FLAT, not scaled by package size: every wait below returns as
+# soon as the state is reached, so a generous ceiling costs a successful
+# install nothing and only lengthens the already-failing case, while a
+# size-derived budget would add a second failure mode (no size available, or a
+# size read from an advisory HEAD that is allowed to fail) to a knob that only
+# needs a ceiling. Override any of them per-device instead.
+INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"
+ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-300}"
+START_TIMEOUT="${START_TIMEOUT:-300}"
+STATE_POLL="${STATE_POLL:-5}"
+for _budget in INSTALL_TIMEOUT ACTIVATE_TIMEOUT START_TIMEOUT STATE_POLL; do
+  _value="${!_budget}"
+  case "$_value" in
+    ''|*[!0-9]*) echo "ERROR: $_budget must be a whole number of seconds" >&2; exit 2 ;;
+  esac
+  [ "$_value" -gt 0 ] \
+    || { echo "ERROR: $_budget must be greater than zero" >&2; exit 2; }
+done
+unset _budget _value
 [[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
   || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
+
+# The values below ride inside the double-quoted `run-opts N "-e K=V"` lines
+# of the app-hosting block (appid_block). A literal double-quote or newline
+# in any of them breaks out of that token or splices in extra config lines;
+# the paste discards IOS's errors, so the malformed line was silently
+# DROPPED, the app started without the variable, died on its entrypoint's
+# required-env guard, and the installer timed out at wait_state RUNNING --
+# after [1/9] had already torn down the previously working app. Same guard
+# device/xr-install.sh applies to its docker-run-opts; reject early, before
+# anything on the device is touched. A password is allowed to contain
+# whitespace (it stays inside the quotes); the identity/URL values are not.
+_no_quotes_or_newlines() {
+  case "$2" in
+    *'"'*|*$'\n'*)
+      echo "ERROR: $1 must not contain a double quote or newline" >&2
+      exit 1 ;;
+  esac
+  if [ "${3:-}" = "no-whitespace" ]; then
+    case "$2" in *[[:space:]]*)
+      echo "ERROR: $1 contains whitespace, which would split the quoted run-opts value" >&2
+      exit 1 ;;
+    esac
+  fi
+}
+_no_quotes_or_newlines DEVICE_SSH_PASS "$DEVICE_SSH_PASS"
+_no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN" no-whitespace
+_no_quotes_or_newlines CATALOG_URL "$CATALOG_URL" no-whitespace
+_no_quotes_or_newlines DEVICE_ID "$DEVICE_ID" no-whitespace
+_no_quotes_or_newlines DEVICE_SSH_USER "$DEVICE_SSH_USER" no-whitespace
+# IRIS_LOG rides the same quoted run-opts value as everything else above;
+# reuse the one guard rather than trusting a bare on/off-shaped value.
+_no_quotes_or_newlines IRIS_LOG "$IRIS_LOG" no-whitespace
 APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
@@ -196,12 +270,13 @@ app-hosting appid $APPID
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
   run-opts 9 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
+  run-opts 10 "-e IRIS_LOG=$IRIS_LOG"
 EOF
 if [ -n "$SHARE_HOST_PATH" ]; then
 cat <<EOF
-  run-opts 10 "-e IRIS_SHARE_DIR=/mnt/share"
-  run-opts 11 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
-  run-opts 12 "-v $SHARE_HOST_PATH:/mnt/share"
+  run-opts 11 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 12 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 13 "-v $SHARE_HOST_PATH:/mnt/share"
 EOF
 fi
 echo "end"
@@ -236,10 +311,12 @@ app_state() {
     | awk -v a="$APPID" '$1==a{print $2}'
 }
 
+LAST_APP_STATE=""
 wait_state() {  # $1=target state, $2=timeout_s
   local t=0 s
   while [ "$t" -lt "$2" ]; do
-    sleep 5; t=$((t + 5)); s="$(app_state)"
+    sleep "$STATE_POLL"; t=$((t + STATE_POLL)); s="$(app_state)"
+    LAST_APP_STATE="$s"
     if [ -n "$s" ]; then
       echo "    [$t s] $APPID state: $s"
     else
@@ -394,8 +471,11 @@ install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$P
 # RUN redacts device secrets. Print only the IOS lifecycle response, not the
 # interactive SSH prompt/command echo that surrounds it.
 printf '%s\n' "$install_out" | grep -E 'Installing package|Failed to install|%IOX|%APP' || true
-wait_state DEPLOYED 120 || {
-  echo "  ERROR: app installation did not reach DEPLOYED within 120 seconds." >&2
+wait_state DEPLOYED "$INSTALL_TIMEOUT" || {
+  echo "  ERROR: app installation did not reach DEPLOYED within $INSTALL_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  echo "         Full IOS response to 'app-hosting install appid $APPID':" >&2
+  printf '%s\n' "$install_out" >&2
   echo "         The partial app-hosting configuration has been removed; IOx/VLAN/trust setup remains for retry." >&2
   clear_partial_app_config
   exit 1
@@ -403,14 +483,29 @@ wait_state DEPLOYED 120 || {
 sleep 8                                       # let the install op fully settle
 activate_out="$(printf 'app-hosting activate appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$activate_out" | grep -E 'Activating|Failed to activate|%IOX|%APP' || true
-wait_state ACTIVATED 90 || {
-  echo "  ERROR: app activation did not reach ACTIVATED within 90 seconds." >&2
+wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {
+  echo "  ERROR: app activation did not reach ACTIVATED within $ACTIVATE_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  # UNFILTERED: the grep above keeps the success path readable, but when the
+  # wait fails the swallowed lines are the whole diagnosis (device-run.sh has
+  # already redacted the device secrets it knows).
+  echo "         Full IOS response to 'app-hosting activate appid $APPID':" >&2
+  printf '%s\n' "$activate_out" >&2
+  echo "         The app-hosting configuration is LEFT IN PLACE: the activation may still be" >&2
+  echo "         in flight while the IOx runtime loads this package's layers into its image" >&2
+  echo "         cache. Check 'show app-hosting list', then simply re-run this installer --" >&2
+  echo "         it tears the app down and redeploys, and the console preflight treats a" >&2
+  echo "         DEPLOYED/ACTIVATED (never started) app as a resumable retry rather than a" >&2
+  echo "         collision. The second attempt finds the layers cached and is much faster." >&2
   exit 1
 }
 start_out="$(printf 'app-hosting start appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$start_out" | grep -E 'Starting|Failed to start|%IOX|%APP' || true
-wait_state RUNNING 90 || {
-  echo "  ERROR: app start did not reach RUNNING within 90 seconds." >&2
+wait_state RUNNING "$START_TIMEOUT" || {
+  echo "  ERROR: app start did not reach RUNNING within $START_TIMEOUT seconds." >&2
+  echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
+  echo "         Full IOS response to 'app-hosting start appid $APPID':" >&2
+  printf '%s\n' "$start_out" >&2
   exit 1
 }
 

@@ -24,7 +24,9 @@ from urllib.parse import urlparse
 
 import audit
 import auth
+import bounded_pool
 import ipaddress
+import keyed_state
 import live_samples
 import metrics
 import otlp
@@ -32,6 +34,7 @@ import peer_enforcement as _peer_enforcement
 import peer_ledger as _peer_ledger
 import peer_policy as _peer_policy
 import telemetry_destination
+import transfer_lifecycle as _transfer_lifecycle
 from peer_registry import PeerRegistry
 
 DEFAULT_INTERVAL = 15
@@ -360,8 +363,35 @@ class ExportHealth:
         }
 
 
+# (OTLP metric name, unit, kind, stats() key) for the durable plan store.
+# The bounds this store applies are only bounds an operator can check if the
+# numbers behind them leave the process, so every counter TransferLifecycle
+# keeps is published here: occupancy against its cap, the rollout signal
+# (awaiting_report), the delivery backlog (unconfirmed) and the four ways a
+# record or a row can be lost. Flat, attribute-free gauges and sums -- plan,
+# device and image ids are high-cardinality and belong to the OTLP logs
+# pipeline (design §10.8/§10.9), never to a metric label.
+_LIFECYCLE_METRICS = (
+    ("iris.transfer.lifecycle.plans", "{plan}", "gauge", "plans"),
+    ("iris.transfer.lifecycle.plan_cap", "{plan}", "gauge", "plan_cap"),
+    ("iris.transfer.lifecycle.awaiting_report", "{plan}", "gauge",
+     "plans_awaiting_report"),
+    ("iris.transfer.lifecycle.unconfirmed", "{event}", "gauge",
+     "plans_unconfirmed"),
+    ("iris.transfer.lifecycle.dropped_unemitted", "{plan}", "sum",
+     "plans_dropped_unemitted"),
+    ("iris.transfer.lifecycle.live_evicted", "{plan}", "sum",
+     "plans_live_evicted"),
+    ("iris.transfer.lifecycle.retired_undelivered", "{event}", "sum",
+     "events_retired_undelivered"),
+    ("iris.transfer.lifecycle.promoted_recovered", "{plan}", "sum",
+     "plans_promoted_recovered"),
+)
+
+
 def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
-                   legacy_participants=None, seeder_torrents=None):
+                   legacy_participants=None, seeder_torrents=None,
+                   lifecycle=None):
     """Canonical OTLP metric points (design §10.9). OTLP dotted names, units,
     and low-cardinality image-level attrs ONLY. Ambiguous active/stalled and
     all per-device/per-peer gauges are RETIRED (high-cardinality history lives
@@ -447,6 +477,12 @@ def _metric_points(rows, extras, now, export_signals=None, peer_status=None,
         if val is None:
             continue
         pts.append({"name": name, "unit": unit, "kind": "gauge",
+                    "value": _int(val), "attrs": {}, "ts": now})
+    for name, unit, kind, key in _LIFECYCLE_METRICS:
+        val = (lifecycle or {}).get(key)
+        if val is None:
+            continue
+        pts.append({"name": name, "unit": unit, "kind": kind,
                     "value": _int(val), "attrs": {}, "ts": now})
     return pts
 
@@ -543,9 +579,21 @@ class Telemetry:
                  metrics_exporter=None, export_health=None,
                  device_metrics=False, dest_settings=None,
                  env_endpoint="", env_enabled=False, headers=None,
-                 policy_info=None, enforcement_info=None, peer_ledger=None):
+                 policy_info=None, enforcement_info=None, peer_ledger=None,
+                 assignments_info=None, transfer_lifecycle=None,
+                 attestations_info=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
+        # event.id -> (plan_id, event, transfer_id) for every lifecycle record
+        # this process has put on the queue and not yet seen acknowledged. The
+        # queue's delivered-callback hands back event.ids and nothing else, so
+        # this is how a delivery is turned back into the durable marker it
+        # confirms. Bounded by the store's outstanding set, and pruned to it on
+        # every pass that enumerates it (_emit_transfer_lifecycle). Declared
+        # BEFORE configure_dedupe below, because that wires the callback that
+        # reads it.
+        self._lifecycle_queued = {}
+        self._lifecycle_lock = threading.Lock()
         # Task 22: the OTLP log queue is a STABLE object owned by the hub for
         # the whole process; only the destination transport is mutable and
         # swapped on a console destination change/disable/re-enable, so
@@ -560,8 +608,13 @@ class Telemetry:
         else:
             self.log_queue = otlp.LogQueue()
             self._log_transport = None
+        # ONE delivered-callback slot, two consumers: report ids advance the
+        # in-process replay guard, lifecycle ids write the durable delivery
+        # marker. They are fanned out from a single wrapper rather than
+        # competing for the slot -- whichever registered last would otherwise
+        # silently disable the other.
         self.log_queue.configure_dedupe(
-            _otlp_record_event_id, self._reports_delivered)
+            _otlp_record_event_id, self._log_delivered)
         # Sender override hook (tests). Applied to every rebuilt transport.
         self._log_sender = None
         self.rpc = rpc
@@ -623,6 +676,31 @@ class Telemetry:
         #   enforcement_info() -> peer-enforcement.json dict (or None)
         self._policy_info = policy_info
         self._enforcement_info = enforcement_info
+        # Optional callable -> the catalog's policy.json ({device_id: {…,
+        # "plans": {image_id: {plan_id, transfer_id, planned_at,
+        # info_hash}}}}), and the tracker's own TransferLifecycle
+        # store. Together they drive the iris.transfer.lifecycle events
+        # (planned -> seeding_started).
+        #
+        # `assignments_info` is NOT `policy_info`: that one is peer-policy
+        # (per-participant network intent) and is a different file, a different
+        # shape and a different subsystem. The names are one letter of intent
+        # apart and would be silently interchangeable at the call site, so they
+        # are deliberately kept distinct here rather than overloaded.
+        #
+        # Both default to None, and every lifecycle stage returns immediately
+        # when either is unwired, so direct-construction callers (the whole
+        # test suite, standalone runs) behave exactly as they did before this
+        # existed: no store touched, no records queued.
+        self._assignments_info = assignments_info
+        self.transfer_lifecycle = transfer_lifecycle
+        # The catalog's durable per-device transfer attestations. Read
+        # alongside the report ring, never instead of it: the ring is capped
+        # at five entries shared by every image on a device, so a terminal
+        # report can rotate out of it between two sample passes and the
+        # checksum precondition would then be unrecoverable. See
+        # transfer_lifecycle.verified_facts.
+        self._attestations_info = attestations_info
         # Per-process report ids already queued. Bound this set to the current
         # stored ring universe on every scan: a new hub deliberately replays the
         # ring at-least-once, while equal received_at values never shadow one
@@ -639,7 +717,8 @@ class Telemetry:
         # tests/standalone -> the poll still runs, nothing is accumulated.
         self.peer_ledger = peer_ledger
         self._ledger_pruned_at = 0.0
-        self._counters = {"announces_total": 0}
+        self._counters = {"announces_total": 0, "announces_refused_total": 0,
+                          "announces_refused_expired_total": 0}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         # When no registry is supplied, own one wired to our event hook — this
@@ -689,12 +768,16 @@ class Telemetry:
                 principal = ("%s:%s" % (ptype, pid)) if ptype and pid else None
                 left = match.get("left")
                 try:
+                    # evictable: a sampled record (one per connection per
+                    # 2 s pass) may be dropped under pressure; it must never
+                    # evict a lifecycle/report/policy/tracker record.
                     self.log_queue.emit(otlp.build_peer_rate_record({
                         "principal": principal, "info_hash": info_hash,
                         "image_id": image_id, "ip": ip, "port": port,
                         "send_bps": bps, "left": left,
                         "role": "seeder" if left == 0 else "leecher",
-                        "ts": now, "event_id": secrets.token_hex(16)}))
+                        "ts": now, "event_id": secrets.token_hex(16)}),
+                        evictable=True)
                 except Exception:
                     pass
 
@@ -706,6 +789,21 @@ class Telemetry:
     def note_announce(self):
         with self._lock:
             self._counters["announces_total"] += 1
+
+    def note_announce_refused(self, expired=False):
+        """A /announce or /scrape credential was refused (IRIS-111): the
+        operator-visible half of the fix. Without this a rotated-out
+        credential expiring past SEEDER_PREV_TTL produces a 403 with no
+        counter anywhere -- iris_legacy_announce_participants then reads 0
+        identically whether the fleet fully migrated or every un-migrated
+        device just aged out and can no longer authenticate to be counted.
+        ``expired`` (see auth.AnnounceAuthError.expired) narrows that to
+        credentials that are KNOWN and simply timed out, as opposed to
+        garbage/unknown ones."""
+        with self._lock:
+            self._counters["announces_refused_total"] += 1
+            if expired:
+                self._counters["announces_refused_expired_total"] += 1
 
     # --- /metrics provider ---
     def metrics_text(self):
@@ -727,6 +825,7 @@ class Telemetry:
                                # render() was covered directly by tests, so
                                # nothing caught it -- test the ENDPOINT.
                                swarm_bytes=self.peer_ledger_totals(),
+                               lifecycle=self._transfer_lifecycle_numbers(),
                                image_sizes=self._image_size_metrics(),
                                seeder_torrents=self._seeder_torrent_metrics(
                                    time.time()))
@@ -902,14 +1001,14 @@ class Telemetry:
             self._torrent_upload_bps = seeder.get("torrent_upload_bps", {})
         # Per-peer CURRENT send rate (measured) + the per-torrent control-state
         # uploadLength gauge, tagged with aria2's session id. The gauge is
-        # surfaced as-is on an unchanged session (increases and image-size
-        # overshoot are legitimate), and RE-BASELINED — never bridged — on a
-        # changed session id OR an observed decrease without a session change
-        # (both mean a new counter epoch / control-state loss). The DURABLE
-        # per-edge attribution built alongside it survives that reset: the
-        # ledger banks each observed delta as it happens, so an epoch that
-        # invalidates every baseline costs the bytes of one sample interval,
-        # not the accumulated history.
+        # reported VERBATIM every pass -- increases, image-size overshoot and
+        # a reset to a lower value after an aria2 restart are all simply the
+        # current reading; nothing here bridges across a counter epoch. The
+        # DURABLE per-edge attribution built alongside it is where epochs
+        # matter, and peer_ledger.observe handles them: the ledger banks each
+        # observed delta as it happens, so a session change that invalidates
+        # every baseline costs the bytes of one sample interval, not the
+        # accumulated history.
         if polls_ok:
             self._peer_up = peer_up
             self._upload_len = {}
@@ -929,17 +1028,9 @@ class Telemetry:
             self._torrent_upload_bps = {}
             self._torrent_observed_at = 0.0
             self._seeder = {"rpc_up": False}
-        new_epoch = (self._session_id is not None
-                     and session_id != self._session_id)
         self._session_id = session_id
         for info_hash, now_len in (upload_lengths or {}).items():
-            last = self._upload_len.get(info_hash)
-            # On a new session epoch, or a decrease within the same epoch,
-            # report the current counter verbatim (re-baseline). Otherwise
-            # the gauge simply tracks the counter.
             self._upload_len[info_hash] = now_len
-            if not new_epoch and last is not None and now_len < last:
-                continue            # decrease: rebaseline, do not bridge
 
     def _observe_peer_bytes(self, peer_bytes, upload_lengths, session_id, now):
         """Bank this sample's per-connection counters and queue one
@@ -981,7 +1072,10 @@ class Telemetry:
                 if role is not None:
                     record["role"] = "seeder" if role else "leecher"
                 try:
-                    self.log_queue.emit(otlp.build_peer_bytes_record(record))
+                    # evictable: the ledger already holds these bytes
+                    # durably; the record is a chart point, not the account.
+                    self.log_queue.emit(otlp.build_peer_bytes_record(record),
+                                        evictable=True)
                 except Exception:
                     pass
         self._prune_peer_ledger(now)
@@ -1015,17 +1109,41 @@ class Telemetry:
         self.sample_seeder(now)
         if self._live_info is not None:
             try:
-                self._transfers, self._extras = aggregate_transfers(
-                    self._live_info(),
+                live_doc = self._live_info()
+                transfers, extras = aggregate_transfers(
+                    live_doc,
                     self._images_info() if self._images_info else {}, now)
+                if not isinstance(live_doc, dict):
+                    # No snapshot to read: the catalog's cumulative rejected
+                    # count is UNKNOWN, not zero. It is exported as a
+                    # monotonic sum / Prometheus counter, and a 0 here would
+                    # read as a counter reset followed by a phantom burst of
+                    # rejections when the value comes back. Carry the last
+                    # known value (a stale-but-present snapshot carries its
+                    # own last-written count, see aggregate_transfers).
+                    extras["samples_rejected_total"] = self._extras.get(
+                        "samples_rejected_total", 0)
+                self._transfers, self._extras = transfers, extras
             except Exception:
                 pass                        # telemetry never breaks on bad input
+        # Latch OUTSIDE the exporter guard (see _observe_transfer_lifecycle):
+        # the facts behind a seeding event are durable observations, and a
+        # deployment that enables OTLP export later must be able to publish the
+        # plans that were already in flight while it was off.
+        try:
+            self._observe_transfer_lifecycle(now)
+        except Exception:
+            pass                            # telemetry never breaks on bad input
         if self.exporter is not None and self._reports_info is not None:
             try:
                 self._export_new_reports()
             except Exception:
                 pass                        # telemetry never breaks on bad input
         if self.exporter is not None:
+            try:
+                self._emit_transfer_lifecycle()
+            except Exception:
+                pass                        # telemetry never breaks on bad input
             delivered = self._flush_logs(now)
         if self.metrics_exporter is not None:
             # Every pass exports the latest snapshot (conflation, spec 7.5) —
@@ -1039,8 +1157,150 @@ class Telemetry:
                 export_signals=signals,
                 peer_status=self._peer_status_numbers(),
                 legacy_participants=self._legacy_participant_count(),
-                seeder_torrents=self._seeder_torrent_metrics(now)))
+                seeder_torrents=self._seeder_torrent_metrics(now),
+                lifecycle=self._transfer_lifecycle_numbers()))
             self.export_health.record(ok, "metrics", now)
+
+    def _observe_transfer_lifecycle(self, now):
+        """Latch this pass's transfer-lifecycle facts into the durable store.
+
+        The tracker is the only process that can do this at all: it owns the
+        PeerRegistry (precondition 3 — this device is announcing left=0 on the
+        image's torrent under its own authenticated principal) while the
+        catalog's policy.json and telemetry.json give it the plan set and the
+        device's verified terminal reports (preconditions 1+2). No other
+        process sees all three at once.
+
+        Called OUTSIDE sample()'s exporter guard on purpose. Latching is a
+        durable observation, not an export: a fleet running with OTLP export
+        switched off still accumulates its facts, so turning the destination on
+        later publishes the plans that were already in flight instead of
+        silently losing their start instants. Emission is the separate
+        `_emit_transfer_lifecycle` stage, which does sit behind the guard.
+
+        `observe()` is called on EVERY pass, including one that finds no live
+        plans: it is also what cancels a row whose assignment was withdrawn and
+        what prunes retired rows, so short-circuiting on an empty plan set
+        would leave a fleet's worth of rows open forever. (A transiently
+        unreadable policy.json therefore reads as "nothing assigned" for one
+        pass; the store reopens such a row when the plan reappears, which is
+        why that read failure is survivable rather than terminal.)
+        """
+        store = self.transfer_lifecycle
+        if store is None or self._assignments_info is None:
+            return
+        live = _transfer_lifecycle.live_plans_from_policy(
+            self._assignments_info())
+        # Each fact source is read defensively on its own: these are separate
+        # cross-process JSON files plus one in-process registry, and losing one
+        # of them must cost only the facts it carries. An empty reports map
+        # simply latches no checksum this pass; an empty snapshot latches no
+        # seeder. Both latches are first-write-wins and durable, so a pass that
+        # sees less than the last one can never retract what was already
+        # observed.
+        try:
+            reports = (self._reports_info() or {}) \
+                if self._reports_info is not None else {}
+        except Exception:
+            reports = {}
+        try:
+            images = self._images_info() if self._images_info else {}
+        except Exception:
+            images = {}
+        try:
+            snapshot = self._registry.snapshot(now=now)
+        except Exception:
+            snapshot = {}
+        try:
+            attestations = (self._attestations_info() or {}) \
+                if self._attestations_info is not None else {}
+        except Exception:
+            attestations = {}
+        verified = _transfer_lifecycle.verified_facts(live, reports,
+                                                      attestations)
+        seeder = _transfer_lifecycle.seeder_facts(live, snapshot, images)
+        store.observe(live, verified, seeder, now)
+
+    def _emit_transfer_lifecycle(self):
+        """Queue every lifecycle record the collector has not acknowledged.
+
+        MARK AFTER THE EFFECT, NEVER BEFORE. `LogQueue.emit` returns a bool and
+        `is not False` is the house signal for "the queue accepted it" (the
+        same test `tracker._export_outbox` uses to advance its watermark). On a
+        refusal — a zero-capacity queue — the marker stays unwritten and the
+        next pass retries with a byte-identical record, because both the
+        timestamps and the deterministic `event.id` were latched into the row
+        before any record was built. Writing the marker first would instead
+        lose the event for good.
+
+        ACCEPTANCE IS NOT DELIVERY, so the enqueue marker is not the end of it.
+        A FULL queue does not refuse: it evicts its oldest record and returns
+        True, and a record already queued can be evicted by later announce
+        traffic before any flush succeeds. The store therefore keeps a row
+        outstanding until `mark_delivered_many` confirms a successful send, and
+        this pass re-queues any outstanding record the queue no longer holds —
+        `contains` first, exactly as `_export_new_reports` does, so a record
+        still waiting is never queued twice.
+
+        The retry only runs with a live transport. With no destination wired
+        nothing can ever be acknowledged, so re-queueing evicted records would
+        do nothing but churn a bounded queue and evict other signals to make
+        room for records that cannot leave either.
+
+        The residual window is a crash between a successful send and its
+        marker, which re-emits the SAME record under the SAME `event.id` —
+        at-least-once with a backend-dedupable id, the contract peer_policy's
+        outbox already states.
+        """
+        store = self.transfer_lifecycle
+        if store is None:
+            return
+        retry = self._log_transport is not None
+        due = store.outstanding_emissions() if retry \
+            else store.pending_emissions()
+        # Build first, register second, emit third. Registering before the
+        # emit closes the window where a flush delivers a record whose
+        # event.id is not yet in the map and the delivery is lost.
+        records = []
+        for plan_id, row, event in due:
+            record = otlp.build_transfer_lifecycle_record(row, event)
+            event_id = _otlp_record_event_id(record)
+            if event_id is None:
+                continue                # unkeyed: nothing could confirm it
+            emitted = row.get("emitted")
+            records.append((event_id, record,
+                            (plan_id, event, row.get("transfer_id")),
+                            isinstance(emitted, dict) and event in emitted))
+        with self._lifecycle_lock:
+            for event_id, _record, item, _marked in records:
+                self._lifecycle_queued[event_id] = item
+            # Anything else in the map belongs to a row that has since been
+            # acknowledged, evicted or pruned, so the map stays the size of
+            # what the store still owes rather than growing an entry per plan
+            # for the life of the process. Dropping an entry costs nothing:
+            # only a delivery consumes one, a delivery needs a transport, and
+            # with a transport the next pass re-registers the whole
+            # outstanding set anyway.
+            live = {event_id for event_id, _r, _i, _m in records}
+            for event_id in [key for key in self._lifecycle_queued
+                             if key not in live]:
+                del self._lifecycle_queued[event_id]
+        marks = []
+        for event_id, record, item, marked in records:
+            if self.log_queue.contains(event_id):
+                continue                # still queued or in flight
+            if self.log_queue.emit(record) is False:
+                continue                # refused: stays pending for next pass
+            if not marked:
+                marks.append(item)
+        # One locked read-modify-write for the whole pass. Marking one at a
+        # time re-serialised and re-renamed the entire store per event, on the
+        # thread that then has to flush telemetry. Each item carries its
+        # expected transfer_id, which makes the mark refuse a row that was
+        # replaced by a NEW plan for the same device+image between the read
+        # above and this write: without it the new plan would inherit the old
+        # one's marker and never be published.
+        store.mark_emitted_many(marks)
 
     def _export_new_reports(self):
         """Emit one OTLP log record per stored device report not yet queued.
@@ -1154,8 +1414,42 @@ class Telemetry:
                 for did, rec in devices.items()
                 if isinstance(rec, dict) and rec.get("swarm_ip")}
 
+    def _log_delivered(self, event_ids):
+        """The queue's single delivered-callback, fanned out to both owners.
+
+        Called from `LogQueue.flush` ONLY after a send succeeded, with the
+        event.ids of the batch that went out. Reports first: that guard is a
+        plain set update and cannot fail, so the lifecycle store's file write
+        can never cost the report path its cursor.
+        """
+        self._reports_delivered(event_ids)
+        self._lifecycle_delivered(event_ids)
+
     def _reports_delivered(self, event_ids):
         self._seen_report_event_ids.update(event_ids)
+
+    def _lifecycle_delivered(self, event_ids):
+        """Turn delivered event.ids back into durable delivery markers.
+
+        This is the ONLY thing that retires a lifecycle event: everything
+        before it says the record reached a queue that may still drop it. A
+        failed write leaves the row outstanding, so the next pass re-queues the
+        same record under the same event.id — at-least-once, backend-dedupable,
+        which is the right way round to fail.
+        """
+        store = self.transfer_lifecycle
+        marks = []
+        with self._lifecycle_lock:
+            for event_id in event_ids or ():
+                item = self._lifecycle_queued.pop(event_id, None)
+                if item is not None:
+                    marks.append(item)
+        if store is None or not marks:
+            return
+        try:
+            store.mark_delivered_many(marks)
+        except Exception:
+            pass                        # telemetry is never on the critical path
 
     # --- live per-peer swarm view (for the swarm map) ---
     def swarm_snapshot(self, now=None):
@@ -1373,6 +1667,30 @@ class Telemetry:
                 out["health"] = health
         return out or None
 
+    def _transfer_lifecycle_numbers(self):
+        """``TransferLifecycle.stats()`` for the metric surfaces, or None.
+
+        The store applies two hard bounds (MAX_PLANS, PLAN_RETENTION) and
+        counts every row and record they cost. Until this existed nothing read
+        those counters, so a fleet past its cap, or a collector outage long
+        enough to age out unacknowledged records, presented to an operator as
+        lifecycle events that simply never arrived -- indistinguishable from a
+        fleet that never seeded. Read fresh each pass; the store is small and
+        the tracker is its only writer.
+
+        None on any failure, and the renderers omit the whole block rather
+        than publishing zeros: an unreadable store is NOT a store with nothing
+        in it, and a fabricated zero here would read as "the bound never bit".
+        """
+        store = self.transfer_lifecycle
+        if store is None:
+            return None
+        try:
+            stats = store.stats()
+        except Exception:
+            return None
+        return stats if isinstance(stats, dict) else None
+
     def _sample_interval(self):
         """Seconds until the next pass. Fast while any connection is live —
         the per-connection counters are ephemeral, so a slow tick is bytes
@@ -1438,7 +1756,11 @@ def from_env(env=None):
 
     def _on_transition(name):
         try:
-            audit.append_event(audit_path, name, "tracker",
+            # category so the console's audit filter can find these; actor
+            # system; no device_id (the old "tracker" pseudo-device made
+            # the event look like a device's).
+            audit.append_event(audit_path, name, category="telemetry",
+                               actor="system", target="otlp-export",
                                detail="otlp export state change")
         except Exception:
             pass                            # audit must never break telemetry
@@ -1451,8 +1773,17 @@ def from_env(env=None):
     state_dir = env.get("IRIS_STATE", "/var/lib/iris")
     device_info = lambda: _read_devices(state_dir)
     reports_info = lambda: _read_reports(state_dir)
+    # The catalog's durable per-device transfer attestations, written at
+    # ingest. The report ring alone cannot carry the checksum precondition:
+    # it holds five entries per DEVICE, shared by every image and report kind,
+    # so a burst of completions evicts a terminal report before the tracker's
+    # next pass reads it.
+    attestations_info = lambda: _read_attestations(state_dir)
     live_info = lambda: _read_live_samples(state_dir)
     images_info = lambda: _read_images(state_dir)
+    # The catalog's assignment file, carrying the plan ids minted by
+    # set_policy. Read fresh per pass like every other cross-process file here.
+    assignments_info = lambda: _read_assignments(state_dir)
     # Per-participant policy/enforcement facts (spec §7/§10.3). Read the tracker
     # process's own durable stores — same process, no cross-process identity
     # assumption. peer-policy resolves the current authoritative/LKG/fail-closed
@@ -1470,6 +1801,14 @@ def from_env(env=None):
         ledger = _peer_ledger.PeerLedger(state_dir)
     except OSError:
         ledger = None
+    # Durable plan lifecycle. Same rule as the ledger: an unwritable state dir
+    # costs the lifecycle events and nothing else, and the identity those
+    # events carry lives in policy.json regardless, so nothing is lost that a
+    # later pass over a writable directory cannot rebuild.
+    try:
+        lifecycle = _transfer_lifecycle.TransferLifecycle(state_dir)
+    except OSError:
+        lifecycle = None
     hub = Telemetry(rpc=rpc, interval=interval,
                     device_info=device_info, reports_info=reports_info,
                     live_info=live_info, images_info=images_info,
@@ -1481,7 +1820,10 @@ def from_env(env=None):
                     headers=headers,
                     policy_info=policy_info,
                     enforcement_info=enforcement_info,
-                    peer_ledger=ledger)
+                    peer_ledger=ledger,
+                    assignments_info=assignments_info,
+                    transfer_lifecycle=lifecycle,
+                    attestations_info=attestations_info)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.
@@ -1490,13 +1832,35 @@ def from_env(env=None):
 
 
 def _read_devices(state_dir):
-    """The catalog's devices.json ({device_id: heartbeat record}) or {} if it
-    isn't there yet / unreadable. Read fresh each call (cheap JSON file)."""
-    try:
-        with open(os.path.join(state_dir, "devices.json")) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """The catalog's heartbeat records ({device_id: record}) or {} if they
+    aren't there yet / are unreadable. Read fresh each call.
+
+    The catalog writes this as KEYED state (``devices.d/``, see
+    keyed_state.read_all), one row per device rather than one whole-fleet
+    document; read_all also still reads a legacy ``devices.json`` that has not
+    been migrated yet, so this reader spans both."""
+    return keyed_state.read_all(os.path.join(state_dir, "devices.json"))
+
+
+def _read_assignments(state_dir):
+    """The catalog's policy.json ({device_id: assignment record, including its
+    per-image ``plans`` map}) or {} if it isn't there yet / unreadable / not a
+    dict. Read fresh each call, like _read_devices.
+
+    This is the ASSIGNMENT policy written by CatalogStore.set_policy — not
+    peer-policy.json, which _read_policy handles and which is an unrelated
+    subsystem. Returning {} on an unreadable file is safe here only because the
+    lifecycle store reopens a plan that reappears: no id lives in this
+    process, so a transient read failure costs one pass, never an identity."""
+    return keyed_state.read_all(os.path.join(state_dir, "policy.json"))
+
+
+def _read_attestations(state_dir):
+    """The catalog's transfer-attestations.json ({device_id: [attestation,
+    ...]}) or {} if it isn't there yet / unreadable / not a dict. Read fresh
+    each call (small, bounded file). Telemetry never breaks on bad input."""
+    return keyed_state.read_all(
+        os.path.join(state_dir, "transfer-attestations.json"))
 
 
 def _read_reports(state_dir):
@@ -1504,12 +1868,7 @@ def _read_reports(state_dir):
     reports]}) or {} if it isn't there yet / unreadable / not a dict. Read
     fresh each call (small, ring-bounded file — 5 reports x <=16 KB per
     device). Telemetry never breaks on bad input."""
-    try:
-        with open(os.path.join(state_dir, "telemetry.json")) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return keyed_state.read_all(os.path.join(state_dir, "telemetry.json"))
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,
@@ -1875,7 +2234,20 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
         write_interval = live_samples.SNAPSHOT_WRITE_INTERVAL
     empty = ([], {"stream_devices": 0, "samples_rejected_total": 0})
     if not isinstance(live_doc, dict):
+        # Unknown, not zero: the hub latches its last known count (sample()).
         return empty
+    # The rejected count is the catalog's cumulative counter as last WRITTEN.
+    # A stale snapshot makes the live rows unknown (they are omitted below),
+    # but the counter it carries is still the newest value anyone has -- the
+    # catalog never resets it while running and simply stops writing once
+    # the table empties -- so it is reported from a stale document too.
+    # Emitting 0 there made every wake-from-idle look like a counter reset
+    # followed by a burst of rejections that never happened.
+    try:
+        rejected = int((live_doc.get("counters") or {}).get(
+            "samples_rejected_total") or 0)
+    except (TypeError, ValueError, AttributeError):
+        rejected = 0
     try:
         written_at = float(live_doc.get("written_at", 0))
         if now - written_at > 2 * write_interval:
@@ -1892,7 +2264,8 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
                         "sampling_class_constrained": 0,
                         "zero_receive_devices": 0, "stale": True,
                         "freshness_age_seconds": int(now - written_at)})
-            return stale_rows, empty[1]
+            return stale_rows, {"stream_devices": 0,
+                                "samples_rejected_total": rejected}
     except (TypeError, ValueError):
         return empty
     counters = live_doc.get("counters") or {}
@@ -2086,6 +2459,19 @@ def parse_health_listeners(spec, default=None):
     return out
 
 
+class _MetricsServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
+    """ThreadingHTTPServer with a bounded pool of concurrently running
+    handler threads -- see bounded_pool.py. No TLS here (:9101 is a plain
+    monitoring/health surface, gated by IRIS_METRICS_HOST rather than a
+    cert) and no long-lived connections: every route answers one JSON/text
+    body and closes. Sized generously above any realistic scrape
+    concurrency; request_queue_size raised for the same reason as the other
+    listeners (a burst of health probes should queue, not RST)."""
+
+    request_queue_size = 128
+    max_concurrent_requests = 64
+
+
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                         health=None, swarm_public=False, listeners=None):
     """HTTP server. `/healthz` is always served (JSON; `health` is an optional
@@ -2160,7 +2546,10 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                     self._send(403, body, "application/json; charset=utf-8")
                     return
                 try:
-                    body = json.dumps(swarm_provider()).encode()
+                    # allow_nan=False: the console proxies this body to a
+                    # browser JSON.parse, which rejects NaN/Infinity tokens.
+                    body = json.dumps(swarm_provider(),
+                                      allow_nan=False).encode()
                 except Exception:
                     body = b"{}"
                 self._send(200, body, "application/json; charset=utf-8")
@@ -2175,4 +2564,4 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
         def log_message(self, *args):
             pass
 
-    return ThreadingHTTPServer((host, port), Handler)
+    return _MetricsServer((host, port), Handler)

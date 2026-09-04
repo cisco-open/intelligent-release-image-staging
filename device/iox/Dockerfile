@@ -16,10 +16,19 @@ LABEL org.opencontainers.image.title="IRIS IOx staging agent" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 # openssh-client + sshpass: the SSH-to-self CLI transport (cli_ssh._default_runner)
-# procps: pkill/pgrep for the aria2c supervisor in entrypoint.sh
 # ca-certificates/curl: TLS roots + diagnostics
+# procps: ps, top, free, uptime and /bin/kill. The supervisor does NOT need
+# them -- it owns aria2c by the exact PID of its own tracked child and never
+# shells out to pgrep/pkill. They are here for the operator: without procps a
+# `docker exec`/app-hosting shell on a device cannot run `ps` or `top` at all,
+# which is the first thing anyone reaches for when an agent misbehaves on a
+# switch they cannot easily get to. Costs ~0.9 MB on x86_64 (~1.5 MB on
+# aarch64), and the image is about to be frozen for signing -- after that it
+# cannot be added back. Deliberate call: keep field debuggability.
+# The Alpine XR image needs no equivalent; busybox already provides all of
+# these, which is why only this image carries the package.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssh-client sshpass procps ca-certificates curl \
+      openssh-client sshpass ca-certificates curl procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Architecture-matched statically-linked aria2c staged by build.sh.
@@ -44,6 +53,7 @@ ENV PATH="/opt/iris/bin:${PATH}" \
     IRIS_TICK_SECONDS="60" \
     IRIS_MAX_PEERS="10" \
     IRIS_TELEMETRY="on" \
+    IRIS_LOG="off" \
     IRIS_CATALOG_CA="/opt/iris/iris-catalog.pem"
 
 WORKDIR /opt/iris

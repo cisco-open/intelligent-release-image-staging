@@ -25,7 +25,7 @@ IRIS also measures that distribution rather than only performing it. Every rollo
 | Management types | Per-device **routed**, **inband**, **router-routed**, **router-nat**, or **xr-host**, with a record-backed deployment lifecycle. |
 | Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
 | Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
-| IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to bootflash through the SSD share). |
+| IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to `flash:` through the SSD share; the CLI installer's own default is `sdflash:`). |
 | IOS-XR appmgr agent | Cisco 8000-series path that runs on the router's own network stack and stages directly to `harddisk:` through a bind mount. |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
 | Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer transfer records naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |

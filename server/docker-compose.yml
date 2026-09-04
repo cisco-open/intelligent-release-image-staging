@@ -30,7 +30,8 @@
 # THROWAWAY container, not through this service: `compose run` inherits the
 # cap_drop below, so the chown is denied even as --user 0 — and `chown -R` still
 # exits 0, so the failure looks like success. Volume names carry the compose
-# project prefix (`server_` for the default project name here):
+# project prefix (`iris_` from the `name:` below; `server_` on a deployment
+# created before that line existed — see the migration note there):
 #   docker run --rm -u 0 \
 #     -v server_iris-state:/var/lib/iris \
 #     -v server_iris-config:/etc/iris \
@@ -41,6 +42,25 @@
 # admin setup while preserving iris-images leaves the published .bin files
 # root-owned mode 0600, and the non-root server cannot read them (the Images
 # screen then lists them as "not readable by the server").
+
+# COMPOSE PROJECT NAME — declared, never derived. Without this line Compose
+# names the project after this file's parent directory, which is always
+# "server", so a second checkout of this repository on a host that already runs
+# IRIS resolves to the SAME project and the SAME named volumes as the live
+# deployment: `up` adopts the production container, `run --rm iris
+# iris-bootstrap` re-bootstraps production state, and `down -v` deletes it.
+#
+# The value is deliberately "server", the same name the directory used to
+# derive, so declaring it changes NOTHING for an existing deployment: the
+# volumes it already has (`server_iris-state` and friends) stay exactly where
+# they are and no migration is needed. What the line buys is that the name is
+# now a fact of this file rather than an accident of where it was checked out,
+# so it can no longer change under a rename or a second clone.
+#
+# COMPOSE_PROJECT_NAME (and `-p`) still override this, which is how you run a
+# dev stack beside a live one — set IRIS_CONTAINER too, since container names
+# are host-global. See docs/zensical/server.md -> "Compose project name".
+name: server
 services:
   iris:
     platform: linux/amd64
@@ -58,7 +78,11 @@ services:
         # at `up` time (e.g. a restart), losing the version.
         IRIS_VERSION: "${IRIS_VERSION:-}"
     image: iris:latest
-    container_name: iris
+    # Container names are host-global, so this is overridable for the same
+    # reason the project name is. IRIS_CONTAINER is the variable the rest of
+    # tools/ already honours, so one setting names the container and points the
+    # helpers at it.
+    container_name: "${IRIS_CONTAINER:-iris}"
     init: true
     # The image already declares USER iris (uid 10001); restated here so
     # `docker compose run`/`exec` and any future image override can't silently
@@ -98,12 +122,76 @@ services:
       # The published console host port, so the Settings page can show the real
       # one (the container always listens on 8080 internally).
       IRIS_GUI_PUBLISH: "${IRIS_GUI_PUBLISH:-}"
+      # Device/stage-host SSH trust (lab/iris-ssh-policy.sh): host keys are
+      # recorded on first contact under /var/lib/iris/ssh/known_hosts (the
+      # persistent state volume) and must match afterwards. Legacy SHA-1 KEX /
+      # ssh-rsa / CBC algorithms that old IOS-XE images need are opt-in.
+      IRIS_SSH_LEGACY: "${IRIS_SSH_LEGACY:-0}"
+      # Routed Guest Shell installs: `isis` adds `ip router isis` to the IRIS
+      # SVI (fabrics such as an SD-Access underlay must learn the IRIS
+      # subnet); the default `none` injects nothing into the operator's IGP.
+      # Fleet-wide default until the deployment record carries it per device.
+      SVI_IGP: "${SVI_IGP:-none}"
+      # ---- Optional deployment knobs documented in the reference ----
+      # Compose injects ONLY what this block names: exporting a variable in the
+      # shell or listing it in server/.env does nothing unless it appears here.
+      # Every one of these is documented in docs/zensical/reference.md, so each
+      # is passed through. Where an EMPTY value would not mean the same thing as
+      # "unset" to the reader on the other side, the code's own default is
+      # restated as the fallback rather than the empty string.
+      IRIS_HTTP_TIMEOUT: "${IRIS_HTTP_TIMEOUT:-}"
+      # int() with no guard in tracker.py, and an empty value would build
+      # "http://<host>:/announce" in the catalog -- restate the default.
+      # Changing it needs the 6969 port mapping below changed to match.
+      IRIS_TRACKER_PORT: "${IRIS_TRACKER_PORT:-6969}"
+      IRIS_TRACKER_ANNOUNCE: "${IRIS_TRACKER_ANNOUNCE:-}"
+      IRIS_REQUIRE_IDENTITY_GATE: "${IRIS_REQUIRE_IDENTITY_GATE:-}"
+      IRIS_ENDPOINT_TTL: "${IRIS_ENDPOINT_TTL:-}"
+      IRIS_GUI_ALLOW_PLAINTEXT: "${IRIS_GUI_ALLOW_PLAINTEXT:-}"
+      IRIS_CATALOG_ALLOW_PLAINTEXT: "${IRIS_CATALOG_ALLOW_PLAINTEXT:-}"
+      IRIS_ARTIFACTS_ALLOW_PLAINTEXT: "${IRIS_ARTIFACTS_ALLOW_PLAINTEXT:-}"
+      IRIS_HEALTH_LISTENERS: "${IRIS_HEALTH_LISTENERS:-}"
+      IRIS_AUDIT_RETENTION_DAYS: "${IRIS_AUDIT_RETENTION_DAYS:-}"
+      IRIS_AUDIT_MAX_EVENTS: "${IRIS_AUDIT_MAX_EVENTS:-}"
+      # int() with no guard on the other side -- an empty string would raise and
+      # the console would never start, so the code default is restated here.
+      IRIS_ONBOARD_CONCURRENCY: "${IRIS_ONBOARD_CONCURRENCY:-25}"
+      IRIS_ENROLL_TTL: "${IRIS_ENROLL_TTL:-3600}"
+      IRIS_ONBOARD_JOB_TIMEOUT: "${IRIS_ONBOARD_JOB_TIMEOUT:-}"
+      IRIS_ONBOARD_REAP_GRACE: "${IRIS_ONBOARD_REAP_GRACE:-}"
+      # Seeder announce-token overlap (secrets_store.SEEDER_PREV_TTL). One
+      # value for every process: the deadline is computed from it, not stored.
+      IRIS_SEEDER_PREV_TTL: "${IRIS_SEEDER_PREV_TTL:-}"
+      IRIS_XR_SESSION_TIMEOUT: "${IRIS_XR_SESSION_TIMEOUT:-}"
+      IRIS_DEVICE_ENABLE_ALWAYS: "${IRIS_DEVICE_ENABLE_ALWAYS:-}"
+      # Device/stage-host SSH host identity (lab/iris-ssh-policy.sh): pin one
+      # key, point at a known_hosts file, or leave both unset for the default
+      # record-on-first-contact under $IRIS_STATE/ssh.
+      IRIS_SSH_HOST_KEY: "${IRIS_SSH_HOST_KEY:-}"
+      IRIS_SSH_KNOWN_HOSTS: "${IRIS_SSH_KNOWN_HOSTS:-}"
+      # Seeder concurrency (server/seed-launch.sh).
+      SEED_MAX_CONCURRENT: "${SEED_MAX_CONCURRENT:-1000}"
+      # Telemetry listener + swarm surface. An empty IRIS_METRICS_PORT DISABLES
+      # the listener and an empty IRIS_SWARM_URL breaks the console's swarm
+      # proxy, so both restate the code default.
+      IRIS_METRICS_PORT: "${IRIS_METRICS_PORT:-9101}"
+      IRIS_METRICS_HOST: "${IRIS_METRICS_HOST:-0.0.0.0}"
+      IRIS_SWARM_URL: "${IRIS_SWARM_URL:-http://127.0.0.1:9101/swarm}"
+      IRIS_SWARM_PUBLIC: "${IRIS_SWARM_PUBLIC:-}"
+      # OTLP collector authentication. Values are secrets: prefer the _FILE
+      # form with a Docker secret over putting the header in server/.env.
+      IRIS_OTLP_HEADERS: "${IRIS_OTLP_HEADERS:-}"
+      IRIS_OTLP_HEADERS_FILE: "${IRIS_OTLP_HEADERS_FILE:-}"
+      IRIS_OTLP_DEVICE_METRICS: "${IRIS_OTLP_DEVICE_METRICS:-}"
+      IRIS_EVENTS_URL_TEMPLATE: "${IRIS_EVENTS_URL_TEMPLATE:-}"
       # At-rest encryption (age). The master identity is mounted as a Docker
       # secret (read-only, RAM-backed); plaintext is decrypted to a tmpfs at
       # /run/iris and never touches the persistent iris-config volume.
       IRIS_AGE_KEY_FILE: "/run/secrets/iris_age_key"
       # Comma-separated age PUBLIC keys: primary + an offline break-glass
       # recipient so a lost primary key doesn't make the store unrecoverable.
+      # Adding a recipient later: `iris-bootstrap --rekey` re-encrypts the
+      # existing state to this list (never --force, which mints new secrets).
       IRIS_AGE_RECIPIENTS: "${IRIS_AGE_RECIPIENTS:?Set IRIS_AGE_RECIPIENTS to primary,break-glass age public keys}"
       # Declare every persistent/runtime path in the container environment so
       # one-shot commands launched with `docker compose exec` see the same paths
@@ -150,6 +238,23 @@ services:
       # source — so self-provisioning it is expected.
       - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
       - iris-images:/var/lib/iris-images
+      # Cisco-licensed console typeface (Sharp Sans Bold). .dockerignore keeps
+      # it OUT of the build context and every image layer -- Cisco's license
+      # does not permit redistributing it inside the image (or the release
+      # tarball; tools/make-release.sh's allowlist excludes it too) -- so the
+      # console falls back to its default font stack (font-display: swap,
+      # server/webroot/styles.css) without it. A deployment that
+      # INDEPENDENTLY holds the Sharp Sans license restores it at RUNTIME,
+      # never inside the image, by pointing IRIS_SHARP_SANS_FONT_HOST at the
+      # .woff2 file on the Compose host:
+      #   IRIS_SHARP_SANS_FONT_HOST=/path/to/SharpSans-Bold.woff2 \
+      #     docker compose -f server/docker-compose.yml up -d
+      # Left unset, this mounts /dev/null (present on every Linux host) --
+      # a harmless, always-present no-op every other deployment never has to
+      # think about: the console reads an empty file, the browser rejects it
+      # as an invalid font and falls back exactly as it does when the path
+      # is absent altogether.
+      - "${IRIS_SHARP_SANS_FONT_HOST:-/dev/null}:/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"
     # plaintext secrets live ONLY here, in RAM — never on the iris-config
     # volume. The mount options make the tmpfs owned by the non-root runtime
     # uid and private to it — without them docker mounts it root:root and the

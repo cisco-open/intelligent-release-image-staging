@@ -205,3 +205,23 @@ def test_mint_enrollment_too_many_args_returns_rc2(tmp_path, monkeypatch):
     mod = _load_cli()
     rc = mod.main(["dev-1", "extra"])
     assert rc == 2
+
+
+def test_mint_enrollment_refuses_corrupt_store(tmp_path, monkeypatch, capsys):
+    """A present-but-unreadable store is refused, not treated as empty.
+
+    Regression for IRIS-01-002: minting against a skeleton returned for a
+    corrupt store would persist an otherwise-empty store over the durable
+    ciphertext, destroying every other device's credentials.
+    """
+    sp = str(tmp_path / "secrets.json")
+    with open(sp, "w") as f:
+        f.write("not json at all")
+    monkeypatch.setenv("IRIS_SECRETS", sp)
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+
+    mod = _load_cli()
+    rc = mod.main(["dev-1"])
+    assert rc == 1
+    assert "unreadable" in capsys.readouterr().err

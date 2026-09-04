@@ -8,12 +8,15 @@ import http.client
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 
 import pytest
 
 import catalog
+import keyed_state
 import secrets_store
 
 
@@ -58,10 +61,12 @@ def _store_with_images(tmp_path, ids):
 
 
 def _write_policy_json(store, rows):
-    """Write *rows* (device_id -> raw policy record) straight to
-    policy.json, bypassing set_policy -- stands in for a row written by a
-    previous release."""
-    catalog._atomic_write_json(store.policy_path, rows)
+    """Write *rows* (device_id -> raw policy record) straight into the keyed
+    policy store, bypassing set_policy -- stands in for a row written by a
+    previous release. Policy is keyed per device now, so this writes rows,
+    not a whole-fleet document."""
+    for device_id, row in rows.items():
+        store._policies.put(device_id, row)
 
 
 # ---------------------------------------------------------------------------
@@ -269,17 +274,17 @@ def test_heartbeat_stores_target_fs(tmp_path):
 def test_route_post_records_model_and_source_ip(tmp_path):
     """A heartbeat over the real HTTP path (exercising _guard's device-bound
     auth) records the device-supplied model and the source IP."""
-    srv, port = _serve(tmp_path, "tok", device_id="100.92.9.3")
+    srv, port = _serve(tmp_path, "tok", device_id="203.0.113.3")
     try:
         status, _, _ = _req(
-            port, "POST", "/v1/devices/100.92.9.3/heartbeat", token="tok",
+            port, "POST", "/v1/devices/203.0.113.3/heartbeat", token="tok",
             body=json.dumps({"current_image_id": "img1", "free_flash_bytes": 9,
                              "version": "26.01.01",
                              "model": "C9300-48UXM"}))
         assert status == 200
     finally:
         srv.shutdown()
-    rec = catalog.CatalogStore(str(tmp_path)).get_device("100.92.9.3")
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("203.0.113.3")
     assert rec["model"] == "C9300-48UXM"
     # swarm_ip is the real connection's source address (127.0.0.1 in-test),
     # captured by the handler, not a value the test fabricated past the guard.
@@ -1751,6 +1756,91 @@ def test_record_telemetry_ring_keeps_newest_five(tmp_path):
     assert s.get_telemetry("ghost") == []
 
 
+def test_a_verified_terminal_report_is_attested_past_ring_eviction(tmp_path):
+    """The ring is five deep PER DEVICE, shared by every image assigned to it
+    and every report kind, and the tracker reads it at most once per sample
+    pass. A device finishing several images inside one agent tick pushes the
+    earliest terminal report out before any pass sees it, and the plan it
+    attested then has no derivable checksum precondition anywhere: it sits at
+    `planned` and never emits seeding_started.
+
+    The fact is therefore recorded at INGEST into a durable per-device ledger
+    keyed by transfer, which outlives the ring by design.
+    """
+    s = catalog.CatalogStore(str(tmp_path))
+    first = _v2(report_id="a" * 32, transfer_id="1" * 32, image_id="img-a")
+    s.record_telemetry("dev-1", first)
+    for n in range(6):
+        s.record_telemetry("dev-1", _v2(report_id="%032x" % n,
+                                        transfer_id="%032x" % (n + 100),
+                                        image_id="img-%d" % n))
+
+    ring = s.get_telemetry("dev-1")
+    assert len(ring) == catalog.CatalogStore.TELEMETRY_RING
+    assert not any(r["transfer_id"] == "1" * 32 for r in ring)   # evicted
+
+    rows = s.get_transfer_attestations()["dev-1"]
+    kept = [r for r in rows if r["transfer_id"] == "1" * 32]
+    assert len(kept) == 1
+    assert kept[0]["image_id"] == "img-a"
+    assert kept[0]["observed_at"] == 90.0            # window.end, device clock
+    assert kept[0]["report_created_at"] == 100.0     # device clock
+    assert kept[0]["received_at"] > 0                # server ingest clock
+    # Read back through a second store object: it is on disk, not in memory.
+    assert catalog.CatalogStore(str(tmp_path)).get_transfer_attestations() \
+        == s.get_transfer_attestations()
+
+
+def test_an_attestation_is_first_write_wins_and_bounded_per_device(tmp_path):
+    """The tracker latches the EARLIEST attesting instant, so a retry, or the
+    `staging-complete` upgrade of an already-attested `seeding-only`
+    transfer, must not move the recorded value. One slot per transfer, bounded
+    FIFO like the report-id ledger beside it."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32, transfer_id="1" * 32,
+                                    event="seeding-only"))
+    first = s.get_transfer_attestations()["dev-1"][0]["received_at"]
+    s.record_telemetry("dev-1", _v2(report_id="b" * 32, transfer_id="1" * 32,
+                                    event="staging-complete"))
+    rows = s.get_transfer_attestations()["dev-1"]
+    assert len(rows) == 1
+    assert rows[0]["received_at"] == first
+
+    cap = catalog.CatalogStore.ATTESTATIONS
+    for n in range(cap + 3):
+        s.record_telemetry("dev-1", _v2(report_id="%032x" % (n + 500),
+                                        transfer_id="%032x" % (n + 500)))
+    rows = s.get_transfer_attestations()["dev-1"]
+    assert len(rows) == cap
+    assert not any(r["transfer_id"] == "1" * 32 for r in rows)   # oldest first
+
+
+def test_a_report_that_attests_nothing_leaves_no_attestation(tmp_path):
+    """Only a terminal report with a VERIFIED content sha256 and a well-formed
+    transfer id attests. A pull snapshot is not a completion claim, a mismatch
+    is not a verification, and a v1 report carries no transfer id to bind."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32, event="pull",
+                                    report_request_id="c" * 32))
+    s.record_telemetry("dev-1", _v2(report_id="b" * 32,
+                                    content_sha256={"state": "mismatch"}))
+    s.record_telemetry("dev-1", _v2(report_id="c" * 32, transfer_id="short"))
+    s.record_telemetry("dev-1", _report())          # v1: no transfer id
+    assert s.get_transfer_attestations() == {}
+
+
+def test_purge_device_takes_the_attestations_with_it(tmp_path):
+    """A device deleted and added back must not inherit an attestation for a
+    transfer that happened on the old one -- the same rule that empties every
+    other per-device store."""
+    s = catalog.CatalogStore(str(tmp_path))
+    s.record_telemetry("dev-1", _v2(report_id="a" * 32))
+    s.record_telemetry("dev-2", _v2(report_id="b" * 32))
+    assert set(s.get_transfer_attestations()) == {"dev-1", "dev-2"}
+    assert s.purge_device("dev-1") is True
+    assert set(s.get_transfer_attestations()) == {"dev-2"}
+
+
 def test_concurrent_record_telemetry_loses_no_reports(tmp_path):
     """N threads recording one report each for a DIFFERENT device against one
     CatalogStore must leave every report on disk and telemetry.json valid —
@@ -1794,14 +1884,43 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.request_report("dev-1", now + 10) is False
     # TTL expiry: at now + PULL_TTL the directive is expired...
     assert s.pending_report("dev-1", now + 600) is None
-    # ...and was lazily deleted from pull_requests.json
-    with open(str(tmp_path / "pull_requests.json")) as f:
-        assert "dev-1" not in json.load(f)
+    # ...and was lazily deleted from the device's keyed pull row
+    assert s._pulls.get("dev-1") is None
     # a new request after expiry succeeds
     assert s.request_report("dev-1", now + 600) is True
     # explicit clear
     s.clear_report_request("dev-1")
     assert s.pending_report("dev-1", now + 601) is None
+
+
+def test_list_devices_reaps_expired_pull_directive_for_a_device_that_never_returns(tmp_path):
+    """A device that was issued a pull directive and then never heartbeats or
+    reports again used to leave its expired row in pull_requests.d/ forever
+    (pending_request() only reaps the QUERIED device's own row, and nothing
+    else ever queries a vanished device). list_devices() is already an
+    O(fleet) console operation, so it piggybacks the reclaim -- without
+    reintroducing a fleet-wide sweep on any per-device path."""
+    s = catalog.CatalogStore(str(tmp_path))
+    now = 1000.0
+    assert s.request_report("ghost", now) is True
+    assert s._pulls.get("ghost") is not None      # row exists before expiry
+
+    # ghost never heartbeats or reports again; time passes well past the TTL,
+    # and nothing ever queries "ghost" directly again.
+    later = now + catalog.CatalogStore.PULL_TTL + 1
+    s.list_devices(later)
+
+    assert s._pulls.get("ghost") is None          # reclaimed by the sweep
+
+
+def test_list_devices_leaves_unexpired_pull_directive_alone(tmp_path):
+    """The fleet-wide sweep in list_devices() must not clear a directive that
+    has not expired yet."""
+    s = catalog.CatalogStore(str(tmp_path))
+    now = 1000.0
+    assert s.request_report("dev-1", now) is True
+    s.list_devices(now + 1)
+    assert s._pulls.get("dev-1") is not None
 
 
 def test_record_telemetry_clears_pull_request(tmp_path):
@@ -1859,6 +1978,37 @@ def test_telemetry_rejects_wrong_device_token(tmp_path):
         status, _ = _post(port, "/v1/devices/device-b/telemetry", tok_b,
                           json.dumps(_report()).encode())
         assert status == 200
+    finally:
+        srv.shutdown()
+
+
+def test_policy_rejects_wrong_device_token(tmp_path):
+    """Device B's VALID catalog token must NOT read device A's policy —
+    'policy' must be in _guard's device-bound tuple, otherwise any enrolled
+    device could walk /v1/devices then /v1/devices/<id>/policy for every id
+    and read every other device's plan_id/transfer_id (#42)."""
+    sp = _secrets_path(tmp_path)
+    tok_a = _mint_catalog_token(sp, "device-a")
+    tok_b = _mint_catalog_token(sp, "device-b")
+    s = _store(tmp_path)
+    s.set_policy("device-a", approved_image_ids=["img1"])
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        status, _, body = _req(port, "GET", "/v1/devices/device-a/policy",
+                               token=tok_b)
+        assert status == 401, "wrong-device token must be rejected"
+        assert b"plan_id" not in body and b"transfer_id" not in body
+        # the same token IS accepted for its own device
+        status, _, body = _req(port, "GET", "/v1/devices/device-b/policy",
+                               token=tok_b)
+        assert status == 200
+        # and device A's own token still works for device A
+        status, _, body = _req(port, "GET", "/v1/devices/device-a/policy",
+                               token=tok_a)
+        assert status == 200
+        assert b"plan_id" in body and b"transfer_id" in body
     finally:
         srv.shutdown()
 
@@ -2319,14 +2469,14 @@ def test_peer_transfer_records_total_includes_the_origin_and_says_so():
     telemetry.classify_peer_transfer_records's job, off the authenticated
     service:seeder principal -- the sanitizer stores the measurement as made
     and adds no attribution of its own."""
-    rows = [{"ip": "100.90.168.20", "session_bytes_from_peer": 7110,
+    rows = [{"ip": "192.0.2.10", "session_bytes_from_peer": 7110,
              "session_bytes_to_peer": 0, "has_complete_file": True},
             {"ip": "10.0.0.7", "session_bytes_from_peer": 2890,
              "session_bytes_to_peer": 0, "has_complete_file": True}]
     block = catalog._sanitize_report(
         _v2(peer_transfer_records=_transfer_records(rows=rows)))["peer_transfer_records"]
     assert block["bytes_from_all_senders_total"] == 10000
-    assert {r["ip"] for r in block["rows"]} == {"100.90.168.20", "10.0.0.7"}
+    assert {r["ip"] for r in block["rows"]} == {"192.0.2.10", "10.0.0.7"}
     # has_complete_file is aria2's isSeeder(): "holds the whole file", true for
     # both rows here. It never marks the origin, and nothing stored claims it
     # does -- no origin/peer key is invented at ingest.
@@ -2586,3 +2736,712 @@ def test_peer_transfer_records_survives_the_store_bound(tmp_path):
     assert len(stored["peer_transfer_records"]["rows"]) == 32
     assert stored["peer_transfer_records"]["bytes_from_all_senders_total"] == sum(
         r["session_bytes_from_peer"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Transfer plans: set_policy is the SOLE mint site for (plan_id, transfer_id)
+#
+# A plan is the server's durable name for one intended transfer of one image
+# to one device. Minting it at assignment time -- rather than on the device at
+# download time -- is what makes two consecutive assignments of the SAME image
+# distinguishable: an unassign+reassign inside one agent tick window is
+# invisible to the agent, so a device-minted id would silently merge the two
+# transfers into one. Everything below pins the two facts the tracker's
+# lifecycle telemetry rests on: a plan is NEVER re-minted while its image
+# stays assigned, and a re-assignment after a real unassign ALWAYS gets a new
+# one.
+#
+# The exact-dict-equality assertions on get_policy() further up this file
+# (test_store_heartbeat_and_policy, test_policy_unassign_with_empty_list,
+# test_purge_device_clears_all_state) are deliberately left as they were: they
+# are the regression guard that the internal contract did not widen when the
+# wire projection did.
+# ---------------------------------------------------------------------------
+
+def _plans(store, device_id):
+    """The device's RAW plans map straight off policy.json.
+
+    Read through list_policies() rather than get_policy(): get_policy()
+    deliberately does not expose plans, and reading the raw row is also how
+    the tracker's lifecycle pass sees it, so these tests fail if the on-disk
+    shape drifts even when the wire projection still looks right."""
+    rec = store.list_policies().get(device_id) or {}
+    return rec.get("plans") or {}
+
+
+def _is_hex32(value):
+    return isinstance(value, str) and catalog._HEX32.match(value) is not None
+
+
+def test_get_policy_still_returns_exactly_two_keys(tmp_path):
+    """Named explicitly so the guarantee is a stated one rather than an
+    accident of the older assertions above.
+
+    get_policy() is the INTERNAL contract: set_policy's own compare-and-set,
+    the heartbeat live-sample admission gate and the v2 ingest gate all read
+    it. Widening it would change what those three see; the plans map reaches
+    the device through device_policy_view() instead."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert set(store.get_policy("d1")) == {"approved_image_id",
+                                           "approved_image_ids"}
+    # and on a device that has never been assigned anything
+    assert set(store.get_policy("never-seen")) == {"approved_image_id",
+                                                   "approved_image_ids"}
+
+
+def test_assignment_mints_a_plan_and_transfer_id_on_every_caller_shape(tmp_path):
+    """set_policy is the single funnel for every production assignment path --
+    the console /assign route, the iris-assign CLI (and so every
+    apply-assignments row), and this class's own quarantine auto-unassign --
+    so a plan can only be missed if set_policy itself misses it. All three
+    shapes are exercised here."""
+    # the plural kwarg: the console and the CLI's multi-image form
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert sorted(_plans(store, "d1")) == ["img-a", "img-b"]
+
+    # the singular kwarg: rows and callers from the single-image era
+    store.set_policy("d2", approved_image_id="img-a")
+    assert sorted(_plans(store, "d2")) == ["img-a"]
+
+    # the quarantine auto-unassign path, which rewrites the row from inside
+    # the catalog itself. Imported locally: this module's own imports are the
+    # older set and this is the only test here that needs the reconciler's
+    # state constants.
+    import bulkhash
+    store.apply_hash_verification(
+        {"img-b": {"state": bulkhash.STATE_MISMATCH, "feed_sha512": "bb" * 64,
+                   "publish_date": "2026-08-01", "deferral": False}},
+        source="scheduled", now=1000)
+    # the quarantined image is gone from the set AND from the plans map, and
+    # the survivor still has a plan -- the auto-unassign rewrites the whole
+    # row, so a dropped plans map would show up here
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    assert sorted(_plans(store, "d1")) == ["img-a"]
+    assert _is_hex32(_plans(store, "d1")["img-a"]["transfer_id"])
+
+
+def test_minted_ids_are_32_lowercase_hex_and_distinct_from_each_other(tmp_path):
+    """The shape is a hard requirement, not a convention: transfer_id is
+    re-validated against _HEX32 on ingest (_sanitize_report_v2 and the live
+    sample path), and a value that failed it would fail the device's WHOLE
+    report. plan_id shares the shape; the two must never be the same value,
+    or a plan and its transfer would be indistinguishable in telemetry."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    seen = set()
+    for image_id, row in _plans(store, "d1").items():
+        assert _is_hex32(row["plan_id"]), image_id
+        assert _is_hex32(row["transfer_id"]), image_id
+        assert row["plan_id"] != row["transfer_id"]
+        seen.add(row["plan_id"])
+        seen.add(row["transfer_id"])
+    # four distinct ids across the two plans: no id is shared between images
+    assert len(seen) == 4
+
+
+def test_repeat_apply_of_the_same_set_carries_the_same_plan_and_transfer_id_forward(tmp_path):
+    """Re-applying an unchanged set must be a no-op for identity.
+
+    The row write replaces the WHOLE record, so without the explicit
+    merge-forward every Apply would re-mint a transfer_id for every image the
+    device is already pulling -- restarting each in-flight transfer's identity
+    and orphaning every report already on the wire under the old id."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    before = _plans(store, "d1")
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    assert _plans(store, "d1") == before
+    # re-ordering the same membership is still the same set of transfers
+    store.set_policy("d1", approved_image_ids=["img-b", "img-a"])
+    assert _plans(store, "d1") == before
+
+
+def test_adding_an_image_mints_only_the_new_plan_and_leaves_the_others_alone(tmp_path):
+    """Adding a third image to a device already pulling two must not disturb
+    the two in flight -- the common console Apply, and the one that would
+    otherwise restart every transfer on the device."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b", "img-c"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    before = _plans(store, "d1")
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b", "img-c"])
+    after = _plans(store, "d1")
+    assert after["img-a"] == before["img-a"]
+    assert after["img-b"] == before["img-b"]
+    assert _is_hex32(after["img-c"]["plan_id"])
+    assert after["img-c"]["plan_id"] not in (before["img-a"]["plan_id"],
+                                             before["img-b"]["plan_id"])
+    # removing one leaves the others verbatim and drops only its own plan
+    store.set_policy("d1", approved_image_ids=["img-a", "img-c"])
+    assert "img-b" not in _plans(store, "d1")
+    assert _plans(store, "d1")["img-a"] == before["img-a"]
+    assert _plans(store, "d1")["img-c"] == after["img-c"]
+
+
+def test_unassign_then_reassign_mints_a_distinct_plan_and_transfer_id(tmp_path):
+    """The replan case, and the reason the ids are minted here at all.
+
+    An image id that LEAVES the set has no entry in the new plans map, so the
+    re-assignment mints a genuinely new plan. On the device this whole cycle
+    can happen inside one ~60s tick window and is invisible to the agent --
+    which is exactly why a device-minted id cannot keep the two transfers
+    apart, and why the server must."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    first = _plans(store, "d1")["img-a"]
+    store.set_policy("d1", approved_image_ids=[])
+    assert _plans(store, "d1") == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    second = _plans(store, "d1")["img-a"]
+    assert second["plan_id"] != first["plan_id"]
+    assert second["transfer_id"] != first["transfer_id"]
+    assert _is_hex32(second["plan_id"]) and _is_hex32(second["transfer_id"])
+
+
+def test_a_refused_conditional_apply_mints_nothing(tmp_path):
+    """PolicyConflict is raised inside the policy lock and BEFORE any plan is
+    computed, so a losing race leaves no orphan plan behind -- a plan row for
+    an image the device was never assigned would be a transfer the tracker
+    waits on forever."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    before = _plans(store, "d1")
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["img-b"],
+                         expect_image_ids=[])
+    assert _plans(store, "d1") == before
+    assert "img-b" not in _plans(store, "d1")
+
+
+def test_a_quarantined_image_mints_nothing(tmp_path):
+    """QuarantinedImage is likewise raised before any plan is computed. A
+    quarantined image is never staged, so it must never acquire the plan that
+    would tell the tracker to expect a transfer of it."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    entry = store.get_image("img-a")
+    entry["quarantined"] = True
+    store.save_image(entry)
+    store.set_policy("d1", approved_image_ids=[])
+    with pytest.raises(catalog.QuarantinedImage):
+        store.set_policy("d1", approved_image_ids=["img-a"])
+    assert _plans(store, "d1") == {}
+    assert store.get_policy("d1")["approved_image_ids"] == []
+
+
+def test_device_policy_view_carries_plans_and_get_policy_does_not(tmp_path):
+    """device_policy_view() is the WIRE projection -- what GET
+    /v1/devices/<id>/policy serves the agent -- and carries exactly the two
+    ids the agent adopts. planned_at and info_hash stay server-side: the
+    agent has no use for either (its info_hash comes from the personalised
+    torrent), and shipping a field is a promise to keep shipping it.
+
+    'plans' is ALWAYS present, possibly empty, so the agent's adoption loop
+    can read it unconditionally."""
+    store = _store_with_images(tmp_path, ["img-a", "img-b"])
+    store.set_policy("d1", approved_image_ids=["img-a", "img-b"])
+    view = store.device_policy_view("d1")
+    assert set(view) == {"approved_image_id", "approved_image_ids", "plans"}
+    assert view["approved_image_ids"] == ["img-a", "img-b"]
+    assert sorted(view["plans"]) == ["img-a", "img-b"]
+    for image_id, row in view["plans"].items():
+        assert set(row) == {"plan_id", "transfer_id"}, image_id
+        assert row["plan_id"] == _plans(store, "d1")[image_id]["plan_id"]
+        assert row["transfer_id"] == _plans(store, "d1")[image_id]["transfer_id"]
+    # the internal contract is untouched by the projection
+    assert set(store.get_policy("d1")) == {"approved_image_id",
+                                           "approved_image_ids"}
+    # an unassigned device still gets the key, so the agent can read it blind
+    assert store.device_policy_view("never-seen") == {
+        "approved_image_id": None, "approved_image_ids": [], "plans": {}}
+
+
+def test_a_hand_edited_plan_row_is_not_served_and_is_re_minted_on_the_next_apply(tmp_path):
+    """policy.json is an operator-editable file on disk. A truncated or
+    hand-edited id must not reach the device: transfer_id is re-validated
+    against _HEX32 on ingest, so a malformed one would fail the device's
+    whole report on the way back. Such a row is omitted from the wire
+    projection and re-minted at the next set_policy rather than carried
+    forward."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    raw = store.list_policies()
+    raw["d1"]["plans"]["img-a"]["transfer_id"] = "NOT-HEX"
+    _write_policy_json(store, raw)
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert _is_hex32(row["plan_id"]) and _is_hex32(row["transfer_id"])
+    assert store.device_policy_view("d1")["plans"]["img-a"]["transfer_id"] \
+        == row["transfer_id"]
+
+
+def test_plan_row_captures_the_catalog_info_hash(tmp_path):
+    """The plan captures the info_hash the tracker will see announced, from
+    the catalog entry set_policy already has in hand, so the lifecycle pass
+    can join an announce back to this plan without re-reading catalog.json at
+    a later, possibly changed, moment."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert row["info_hash"] == "cc" * 20
+    assert isinstance(row["planned_at"], float)
+    assert row["planned_at"] <= time.time()
+
+
+def test_plan_row_info_hash_is_none_on_the_legacy_bootstrap_path(tmp_path):
+    """set_policy stays usable with no catalog.json at all (the legacy
+    bootstrap callers -- the existence check is explicitly skipped then), and
+    a plan is still minted. There is simply no info_hash to capture, and the
+    row says so with a null rather than omitting the key."""
+    store = catalog.CatalogStore(str(tmp_path))       # no save_image() at all
+    assert not os.path.exists(store.catalog_path)
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    row = _plans(store, "d1")["img-a"]
+    assert row["info_hash"] is None
+    assert _is_hex32(row["plan_id"]) and _is_hex32(row["transfer_id"])
+
+
+def test_purge_device_removes_the_plans_with_the_policy_row(tmp_path):
+    """The plans live IN the policy row, so purge_device already takes them
+    with it -- no second store to keep in step. A device deleted and added
+    back must get brand-new plan ids, or it could inherit an 'already seeded'
+    marker for a transfer that never happened on the new device."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    first = _plans(store, "d1")["img-a"]
+    assert store.purge_device("d1") is True
+    assert _plans(store, "d1") == {}
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    second = _plans(store, "d1")["img-a"]
+    assert second["plan_id"] != first["plan_id"]
+    assert second["transfer_id"] != first["transfer_id"]
+    # forget_device (undeploy) deliberately keeps the assignment, so it also
+    # keeps the plan: the same transfer is still the one in flight
+    kept = _plans(store, "d1")["img-a"]
+    store.record_heartbeat("d1", {"current_image_id": "img-a"}, now=222)
+    assert store.forget_device("d1") is True
+    assert _plans(store, "d1")["img-a"] == kept
+
+
+def test_a_legacy_row_with_no_plans_key_reads_back_and_gains_plans_on_the_next_apply(tmp_path):
+    """A row written by a previous release has no plans key at all. It must
+    read back cleanly through both accessors -- with an empty plans map on
+    the wire, which the agent treats as 'no plan, mint your own as before' --
+    and gain a real plan at the next set_policy, with no migration step."""
+    store = _store_with_images(tmp_path, ["img-a"])
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a",
+                                      "approved_image_ids": ["img-a"]}})
+    assert store.get_policy("d1")["approved_image_ids"] == ["img-a"]
+    view = store.device_policy_view("d1")
+    assert view["approved_image_ids"] == ["img-a"]
+    assert view["plans"] == {}
+    # the single-image-era row shape (no plural key) reads the same way
+    _write_policy_json(store, {"d1": {"approved_image_id": "img-a"}})
+    assert store.device_policy_view("d1")["plans"] == {}
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert _is_hex32(_plans(store, "d1")["img-a"]["transfer_id"])
+    assert set(store.device_policy_view("d1")["plans"]["img-a"]) == {
+        "plan_id", "transfer_id"}
+
+
+# ===========================================================================
+# Review wave: shard 02 (catalog protocol) regressions
+# ===========================================================================
+
+# --- IRIS-02-001: a corrupt/unreadable state file fails closed -------------
+
+def test_corrupt_policy_state_is_not_read_as_empty_and_is_never_rewritten(tmp_path):
+    """Reviewer probe P1: a trailing comma in the policy state used to make
+    every device's policy read as the empty set (a fleet-wide unassign the
+    agent acts on) and the next set_policy rewrote the file with a single row,
+    losing every other assignment and its plan ids for good.
+
+    Policy is keyed per device now, so the corruption is injected into the
+    shard that actually holds dev-2 -- and the blast radius is narrower on
+    purpose: a device in another shard keeps working, while every read or
+    write that must touch the damaged shard still fails closed and never
+    overwrites it."""
+    s = _store_with_images(tmp_path, ["img-a", "img-b"])
+    s.set_policy("dev-1", approved_image_ids=["img-a"])
+    s.set_policy("dev-2", approved_image_ids=["img-b"])
+    shard = os.path.join(keyed_state.shard_dir(s.policy_path),
+                         "%02x.json" % keyed_state.bucket_of("dev-2"))
+    good = open(shard).read()
+    with open(shard, "w") as f:
+        f.write(good.rstrip().rstrip("}") + ",}\n")
+    corrupt = open(shard).read()
+    for call in (lambda: s.get_policy("dev-2"),
+                 lambda: s.device_policy_view("dev-2"),
+                 lambda: s.list_policies(),
+                 lambda: s.set_policy("dev-2", approved_image_ids=["img-b"])):
+        with pytest.raises(catalog.StateFileError):
+            call()
+    assert open(shard).read() == corrupt      # untouched
+    # Repairing the file restores everything that was there.
+    with open(shard, "w") as f:
+        f.write(good)
+    assert s.get_policy("dev-2")["approved_image_ids"] == ["img-b"]
+    assert s.get_policy("dev-1")["approved_image_ids"] == ["img-a"]
+
+
+def test_missing_state_file_is_still_the_empty_store(tmp_path):
+    s = catalog.CatalogStore(str(tmp_path))
+    assert s.get_policy("nobody") == {"approved_image_id": None,
+                                      "approved_image_ids": []}
+    assert s.list_devices() == []
+    assert s.get_device("nobody") is None
+
+
+def test_state_file_that_is_not_an_object_or_is_unreadable_fails_closed(tmp_path):
+    s = catalog.CatalogStore(str(tmp_path))
+    with open(s.devices_path, "w") as f:
+        f.write("[]")
+    with pytest.raises(catalog.StateFileError):
+        s.list_devices()
+    with pytest.raises(catalog.StateFileError):
+        s.record_heartbeat("sw-1", {"model": "x"})
+    assert open(s.devices_path).read() == "[]"
+    os.remove(s.devices_path)
+    os.mkdir(s.devices_path)                 # exists, unreadable as a file
+    with pytest.raises(catalog.StateFileError):
+        s.list_devices()
+
+
+def test_corrupt_policy_json_is_503_on_the_wire_not_an_empty_policy(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        s = catalog.CatalogStore(str(tmp_path))
+        s.set_policy("sw-9", approved_image_ids=["img1"])
+        with open(s.policy_path, "w") as f:
+            f.write("{not json")
+        status, _, body = _req(port, "GET", "/v1/devices/sw-9/policy",
+                               token="tok")
+        assert status == 503
+        assert json.loads(body) == {"error": "state unavailable"}
+        # The heartbeat consults the policy for the live-sample gate: the
+        # heartbeat itself must not be lost to a 500 with no body either.
+        status, _, body = _req(port, "POST", "/v1/devices/sw-9/heartbeat",
+                               token="tok", body=json.dumps({"model": "x"}))
+        assert status in (200, 503)
+        assert json.loads(body)
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-002 / IRIS-02-004: heartbeat and report ingest validation -----
+
+def _hand_post(port, path, body, token="tok", extra_headers=""):
+    """POST with a hand-built request so the header set is exactly ours."""
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    req = ("POST %s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n"
+           "Content-Type: application/json\r\n%s" % (path, token, extra_headers))
+    if body is not None:
+        req += "Content-Length: %d\r\n" % len(body)
+    c.sendall(req.encode() + b"\r\n" + (body or b""))
+    data = b""
+    try:
+        while True:
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+            if b"\r\n\r\n" in data:
+                head, _, rest = data.partition(b"\r\n\r\n")
+                clen = [ln for ln in head.split(b"\r\n")
+                        if ln.lower().startswith(b"content-length:")]
+                if clen and len(rest) >= int(clen[0].split(b":")[1]):
+                    break
+    except socket.timeout:
+        pass
+    c.close()
+    if not data:
+        return None, b""
+    head, _, rest = data.partition(b"\r\n\r\n")
+    return int(head.split(b" ")[1]), rest
+
+
+def test_heartbeat_rejects_nan_and_infinity_literals(tmp_path):
+    """Reviewer probe P2b: NaN/Infinity parsed, were stored verbatim and
+    re-emitted as bare tokens in devices.json and /api/devices, which no
+    browser JSON parser accepts -- one device broke the fleet view."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        status, body = _hand_post(
+            port, "/v1/devices/sw-1/heartbeat",
+            b'{"free_flash_bytes": NaN, "version": Infinity}')
+        assert status == 400
+        assert json.loads(body) == {"error": "bad json"}
+        status, _ = _hand_post(port, "/v1/devices/sw-1/telemetry",
+                              b'{"event": "pull", "ts": NaN}')
+        assert status == 400
+    finally:
+        srv.shutdown()
+    assert catalog.CatalogStore(str(tmp_path)).get_device("sw-1") is None
+
+
+def test_heartbeat_fields_are_typed_and_capped(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        body = json.dumps({
+                "current_image_id": "img1",
+                "version": 7,                       # wrong type
+                "model": {"nested": [1, 2, 3]},     # wrong type
+                "stage_state": 12345,
+                "stage_error": "E" * 40000,
+                "target_fs": "flash:",
+                "telemetry_enabled": "yes",
+                "staged_image_ids": ["S" * 20000],
+                "errored_image_ids": ["img1", "bad id"]})
+        # 1e999 is a legal JSON number that Python parses as inf (it is not
+        # one of the literals parse_constant refuses).
+        body = body[:-1] + ', "free_flash_bytes": 1e999}'
+        status, _, _ = _req(port, "POST", "/v1/devices/sw-1/heartbeat",
+                            token="tok", body=body)
+        assert status == 200
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["current_image_id"] == "img1"
+    assert rec["free_flash_bytes"] is None
+    assert rec["version"] is None
+    assert rec["model"] is None
+    assert rec["stage_state"] is None
+    assert len(rec["stage_error"]) == 1024
+    assert rec["target_fs"] == "flash:"
+    assert rec["telemetry_enabled"] is None
+    assert rec["staged_image_ids"] is None       # not an image id shape
+    assert rec["errored_image_ids"] is None      # rejected wholesale
+    assert "NaN" not in json.dumps(
+        keyed_state.read_all(os.path.join(str(tmp_path), "devices.json")))
+
+
+def test_heartbeat_well_typed_fields_round_trip_unchanged(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        _req(port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+             body=json.dumps({"current_image_id": "img1",
+                              "free_flash_bytes": 123456789,
+                              "version": "17.18.1", "model": "C9300-48P",
+                              "stage_state": "ready", "stage_error": None,
+                              "target_fs": "flash:", "telemetry_enabled": True,
+                              "telemetry_stream_enabled": False,
+                              "staged_image_ids": ["img1"],
+                              "errored_image_ids": []}))
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["free_flash_bytes"] == 123456789
+    assert rec["version"] == "17.18.1" and rec["model"] == "C9300-48P"
+    assert rec["telemetry_enabled"] is True
+    assert rec["telemetry_stream_enabled"] is False
+    assert rec["staged_image_ids"] == ["img1"]
+    assert rec["errored_image_ids"] == []
+
+
+def test_v1_report_with_non_finite_float_is_400(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-9")
+    try:
+        rep = {"event": "pull", "ts": 1e999, "transfer": {"total_bytes": 5}}
+        status, _ = _post(port, "/v1/devices/sw-9/telemetry", "tok",
+                          json.dumps(rep).encode())
+        assert status == 400
+    finally:
+        srv.shutdown()
+    assert catalog.CatalogStore(str(tmp_path)).get_telemetry("sw-9") == []
+
+
+def test_state_writer_and_json_response_refuse_nan(tmp_path):
+    with pytest.raises(ValueError):
+        catalog._atomic_write_json(str(tmp_path / "x.json"),
+                                   {"v": float("nan")})
+    assert not os.path.exists(str(tmp_path / "x.json"))
+    with pytest.raises(ValueError):
+        catalog.Catalog._json(200, {"v": float("inf")})
+
+
+def test_heartbeat_non_object_or_deeply_nested_body_is_400(tmp_path):
+    """Reviewer probe P2a / nest.py: a list/null/string body raised
+    AttributeError and a 60 KiB nest of brackets RecursionError -- both
+    escaped the handler and closed the socket with no status line."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        for body in (b"[]", b"null", b'"x"',
+                     b"[" * 30000 + b"]" * 30000):
+            status, resp = _hand_post(port, "/v1/devices/sw-1/heartbeat", body)
+            assert status == 400, body[:10]
+            assert json.loads(resp) == {"error": "bad json"}
+        status, resp = _hand_post(port, "/v1/devices/sw-1/telemetry",
+                                 b"[" * 30000 + b"]" * 30000)
+        assert status == 400
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-006: a length-less (chunked) POST is 411, not an empty body ---
+
+def test_chunked_post_is_411_and_does_not_blank_the_heartbeat(tmp_path):
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    try:
+        _req(port, "POST", "/v1/devices/sw-1/heartbeat", token="tok",
+             body=json.dumps({"current_image_id": "img1", "model": "C9300"}))
+        status, resp = _hand_post(
+            port, "/v1/devices/sw-1/heartbeat", None,
+            extra_headers="Transfer-Encoding: chunked\r\n")
+        assert status == 411
+        assert json.loads(resp) == {"error": "content-length required"}
+        status, _ = _hand_post(port, "/v1/devices/sw-1/heartbeat", None)
+        assert status == 411                   # no length header at all
+    finally:
+        srv.shutdown()
+    rec = catalog.CatalogStore(str(tmp_path)).get_device("sw-1")
+    assert rec["current_image_id"] == "img1" and rec["model"] == "C9300"
+
+
+# --- IRIS-02-003: the handler has a socket timeout -------------------------
+
+def test_handler_socket_timeout_releases_a_stalled_connection(tmp_path):
+    """Reviewer probe P4: six stalled clients pinned six handler threads
+    forever. With the handler timeout, the server hangs up on its own and
+    the thread count returns to baseline."""
+    srv, port = _serve(tmp_path, "tok", device_id="sw-1")
+    assert srv.RequestHandlerClass.timeout == catalog.HANDLER_TIMEOUT
+    assert catalog.handler_timeout({"IRIS_HTTP_TIMEOUT": "-1"}) == \
+        catalog.HANDLER_TIMEOUT
+    assert catalog.handler_timeout({"IRIS_HTTP_TIMEOUT": "12"}) == 12.0
+    srv.RequestHandlerClass.timeout = 0.5
+    try:
+        base = threading.active_count()
+        stalled = []
+        for i in range(2):
+            c = socket.create_connection(("127.0.0.1", port), timeout=5)
+            if i == 0:
+                c.sendall(b"POST /v1/devices/sw-1/heart")     # partial line
+            else:
+                c.sendall(b"POST /v1/devices/sw-1/heartbeat HTTP/1.1\r\n"
+                          b"Host: x\r\nAuthorization: Bearer tok\r\n"
+                          b"Content-Length: 5000\r\n\r\n{\"a\":")  # short body
+            stalled.append(c)
+        for c in stalled:
+            assert c.recv(16) == b""       # server closed it on its own
+            c.close()
+        deadline = time.time() + 5
+        while threading.active_count() > base and time.time() < deadline:
+            time.sleep(0.05)
+        assert threading.active_count() <= base
+    finally:
+        srv.shutdown()
+
+
+# --- IRIS-02-005: plan rows are matched whole -------------------------------
+
+def test_plan_row_with_trailing_newline_is_not_served_and_is_re_minted(tmp_path):
+    s = _store_with_images(tmp_path, ["img-a"])
+    s.set_policy("d1", approved_image_ids=["img-a"])
+    rows = s.list_policies()
+    rows["d1"]["plans"]["img-a"]["transfer_id"] = "c" * 32 + "\n"
+    _write_policy_json(s, rows)
+    assert s.device_policy_view("d1")["plans"] == {}
+    s.set_policy("d1", approved_image_ids=["img-a"])
+    tid = s.list_policies()["d1"]["plans"]["img-a"]["transfer_id"]
+    assert catalog._HEX32.fullmatch(tid)
+
+
+# --- IRIS-02-009: stage-only wording -----------------------------------------
+
+def test_module_prose_no_longer_describes_an_install_approval():
+    src = open(catalog.__file__).read()
+    assert "install-approval flag" not in src
+    assert "install-approval gate" not in src
+
+
+def test_catalog_tls_handshake_is_not_on_the_accept_thread(tmp_path):
+    """The device-facing listener must not hand its whole accept loop to one
+    silent client, and must not use the stdlib backlog of 5.
+
+    Wrapping the LISTENING socket makes socketserver run the TLS handshake
+    inside accept() on the single serve_forever thread, so a client that
+    connects and never sends a ClientHello (a port scan, a TCP health check,
+    a stalled NAT'd agent) stalls every device in the fleet. The handshake
+    belongs in the worker thread, as it already does for the console and the
+    artifact server.
+    """
+    import ssl as _ssl
+    import subprocess
+    key = str(tmp_path / "k.pem")
+    crt = str(tmp_path / "c.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt, "-subj", "/CN=iris"],
+        check=True, capture_output=True)
+    combined = str(tmp_path / "combined.pem")
+    with open(combined, "w") as out:
+        for part in (crt, key):
+            with open(part) as f:
+                out.write(f.read())
+
+    state = str(tmp_path / "state")
+    os.makedirs(state, exist_ok=True)
+    store = catalog.CatalogStore(state)
+    srv = catalog.make_server("127.0.0.1", 0, store,
+                              str(tmp_path / "secrets.json"),
+                              certfile=combined)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert srv.request_queue_size >= 128        # not the stdlib 5
+        assert not isinstance(srv.socket, _ssl.SSLSocket)  # listener stays plain
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)
+        time.sleep(0.3)                              # never sends a ClientHello
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        conn = http.client.HTTPSConnection("127.0.0.1", port, context=ctx,
+                                           timeout=5)
+        conn.request("GET", "/v1/does-not-exist")    # served, so TLS completed
+        assert conn.getresponse().status in (401, 404)
+        conn.close()
+        idle.close()
+    finally:
+        srv.shutdown()
+
+
+_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_main_refuses_plaintext_without_opt_in_then_serves_with_it(tmp_path):
+    """IRIS-105: catalog.main() used to silently fall back to plain HTTP
+    whenever no certificate was found -- every route on this listener answers
+    a device bearer token, so a plaintext catalog serves them in the clear.
+    Now it fails CLOSED (exit 2, naming the opt-in) exactly like the console's
+    IRIS_GUI_ALLOW_PLAINTEXT contract, unless IRIS_CATALOG_ALLOW_PLAINTEXT=1
+    opts in explicitly; port 0 so no fixed port is ever bound."""
+    host = "127.0.0.1"
+    env = dict(os.environ)
+    env["IRIS_CATALOG_HOST"] = host
+    env["IRIS_CATALOG_PORT"] = "0"
+    env["IRIS_STATE"] = str(tmp_path / "state")
+    env["IRIS_SECRETS"] = str(tmp_path / "secrets.json")
+    env["IRIS_CERT"] = str(tmp_path / "nonexistent-cert.pem")
+    env.pop("IRIS_CATALOG_ALLOW_PLAINTEXT", None)
+    refused = subprocess.run([sys.executable, "catalog.py"], cwd=_SERVER_DIR,
+                             env=env, capture_output=True, timeout=30)
+    assert refused.returncode == 2
+    assert b"IRIS_CATALOG_ALLOW_PLAINTEXT=1" in refused.stderr
+
+    env["IRIS_CATALOG_ALLOW_PLAINTEXT"] = "1"
+    proc = subprocess.Popen([sys.executable, "catalog.py"], cwd=_SERVER_DIR,
+                            env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    try:
+        line = proc.stdout.readline()
+        assert b"catalog on http://" in line, (line, proc.stderr.read())
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)

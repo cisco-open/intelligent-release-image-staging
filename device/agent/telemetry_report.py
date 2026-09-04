@@ -5,7 +5,7 @@
 """Pure telemetry-report logic for the IRIS device agent (issue #13).
 
 Everything here is deterministic and side-effect free (single exception:
-build_report reads the IRIS_RUNTIME_MODE env var, mirroring cli_ssh.select_cli's
+build_report_v2 reads the IRIS_RUNTIME_MODE env var, mirroring cli_ssh.select_cli's
 runtime gate), so it is fully unit-testable off-box. All I/O — aria2 RPC
 sampling, the report POST, syslog — lives in iris_agent._telemetry_tick and
 CatalogClient. Stdlib only (no requests/psutil): the agent runs in Guest Shell
@@ -18,13 +18,31 @@ keys: a bump clears 'copied' flags and forces a fleet-wide ~1.2 GB re-copy):
       = observation order, capped at STATE_PEER_SET_CAP), 'started_ts',
       'done_ts', 'total_bytes', 'elapsed_s', 'avg_bps', 'sha_ok',
       'report_pending', 'report_attempts', 'report_next_ts',
-      'report_sent_ts', 'event'}
+      'report_sent_ts', 'report_transfer_id', 'event'}
+('report_transfer_id' is the transfer identity the last terminal report was
+ARMED under — the one comparison that tells an already-staged image the server
+has no completion evidence under its CURRENT identity; see adopt_plan's rename
+case and iris_agent._telemetry_tick.)
 ('other' and 'last_sample_ts' are legacy byte-integration keys — new code
 removes them on sight; see observe_peers.)
 
 tele['peer_transfer_records'] holds the one exact per-peer byte measurement (folded in
 from the aria2 --on-bt-download-complete hook's sidecar; see
 parse_peer_transfer_snapshot). It is a counter read once, never a sampled rate.
+
+tele['plan_id'] + tele['transfer_id'] are the transfer identity the SERVER
+minted at assignment time and this agent adopted from the policy body (see
+adopt_plan, called from iris_agent._stage_image once that image's catalog
+lookup and filename whitelist have passed — adopting any earlier materialises a
+record for an image the device may never stage, and the park pass cannot retire
+one of those); tele['replan_verify'] is the one-shot flag adopt_plan raises when
+a new plan lands on an image that is already staged and placed. All three obey the
+ADDITIVE-ONLY rule above: they are per-image keys under state[img_id]['tele'],
+they add no TOP-LEVEL state key, and iris_agent._STATE_SCHEMA must NOT be bumped
+for them — a bump clears every 'copied' flag and re-copies ~1.2 GB per device
+across the whole fleet to gain nothing (an agent that reads a state file written
+before these keys existed simply finds them absent, which is exactly the
+no-server-plan case adopt_plan and ensure_transfer_id already handle).
 """
 import ipaddress
 import json
@@ -116,12 +134,18 @@ def ensure_transfer_id(state, img_id):
     one on the first observation of an image with no stored transfer (spec §2).
     Stable across ticks for the same cycle. The image-change boundary needs no
     call here: an image that leaves the assignment set is parked, and the park
-    pass calls clear_transfer() on it (dropping transfer_id + sample_seq), so
+    pass calls clear_transfer() on it (dropping transfer_id, sample_seq and the
+    content-hash verdict that described the transfer they identified), so
     the next acquisition of that id mints fresh — an A->B->A sequence yields
     three distinct ids. P1
     boundaries (changed hash / local loss) keep the same image id and its stored
     transfer, so they intentionally reuse the existing id — dedupe/freshness
-    still advance via report_id/sample_seq."""
+    still advance via report_id/sample_seq. This is now the FALLBACK path: when
+    the server sends a plan for this image, adopt_plan has already stored its
+    transfer_id earlier in the tick (in _stage_image, ahead of the
+    steady-state short-circuit and of every aria_add) and this get-or-mint
+    returns that value untouched, so a mint here means the server offered no
+    plan."""
     tele = _tele(state, img_id)
     tid = tele.get("transfer_id")
     if not tid:
@@ -131,8 +155,8 @@ def ensure_transfer_id(state, img_id):
 
 
 def clear_transfer(state, img_id):
-    """Drop only the transfer identity + sequence for an image, leaving the rest
-    of its state intact.
+    """Drop the transfer identity + sequence + the content-hash verdict for an
+    image, leaving the rest of its state intact.
 
     This IS the production acquisition-cycle boundary, and there is exactly
     one caller of it: iris_agent's park pass (_reconcile_set), which runs when
@@ -144,11 +168,231 @@ def clear_transfer(state, img_id):
     cycle (state.pop(prev), from the single-image agent) no longer happens and
     this narrower clear owns the boundary. The pure v2 unit tests
     (test_telemetry_v2) call it directly to simulate that boundary in
-    isolation."""
+    isolation.
+
+    WHY THE VERIFY VERDICT GOES WITH THE IDENTITY (board #28).
+    content_sha256_state is scoped to the TRANSFER, not to the image id: it is
+    "this transfer hashed these bytes and they matched". Left behind here it
+    outlived the transfer it described — park deletes the stage copy, the image
+    comes back into the set, a FRESH transfer_id is minted and aria2 re-downloads
+    from zero, and every report built while those bytes were still in flight
+    shipped content_sha256={'state':'verified'} for a transfer in which
+    sha256_matches() had not run at all. The honest replacement is the ABSENCE
+    of a verdict, which content_sha256_state() reads back as 'not_checked' —
+    never a fresh verdict invented here (this module has no filesystem access
+    and measures nothing), and never the stale one kept "because it was probably
+    still true". The download path re-records 'verified' at its own decision
+    point the moment it has actually hashed the new bytes."""
     tele = (state.get(img_id) or {}).get("tele")
     if isinstance(tele, dict):
         tele.pop("transfer_id", None)
         tele.pop("sample_seq", None)
+        tele.pop("content_sha256_state", None)
+
+
+def adopt_plan(state, img_id, plan_id, transfer_id):
+    """Adopt the SERVER-MINTED plan for `img_id` from the policy body. Returns
+    None (nothing adopted), 'same' (already on this plan), 'adopted' (a transfer
+    that was already running under a device-minted id is now named by the
+    server — nothing is reset), or 'new' (a plan boundary was crossed and the
+    image's telemetry bag was reset).
+
+    WHY THE SERVER MINTS AND THE DEVICE ADOPTS. Two facts the device cannot
+    know made a device-minted transfer_id unable to answer "when was this
+    transfer decided, and when did it start seeding":
+      * The id is minted too late. ensure_transfer_id's first call of a tick is
+        _build_observation, which the download path reaches only AFTER aria2
+        has already been told to start — so the device's own id can never date
+        the DECISION, only the observation of it.
+      * The id cannot separate two plans. The acquisition-cycle boundary the
+        device does own is the park pass (clear_transfer), and it fires only
+        when the agent OBSERVES an image leaving the assignment set at a ~60 s
+        tick boundary. An unassign+reassign of the same image inside one tick
+        window is invisible: the record never goes stale, park never runs, and
+        the second plan silently inherits the first plan's id.
+    The server has both instants exactly, because every assignment path funnels
+    through one write. So it mints, and this function is the whole of the
+    device's half, called from _stage_image once that image's catalog lookup
+    and filename whitelist have passed: seeding tele['transfer_id'] here is
+    what makes every
+    downstream reader (the observation envelope, the heartbeat, both report
+    builders, the RPC-down envelope) inherit the server's id with no further
+    plumbing, since ensure_transfer_id is a get-or-mint and the only writer of
+    that key in the tree.
+
+    WHY BOTH IDS ARE VALIDATED AS 32 LOWERCASE HEX, AND WHY REJECTION IS
+    SILENT. transfer_id is re-validated against the same shape on the server at
+    ingest, and a non-hex id there fails the WHOLE report or heartbeat envelope
+    — so a garbage id adopted here would cost the device its telemetry, not
+    just its plan. Anything that does not validate is therefore refused while
+    touching NO state, which also makes the old-server and no-plans cases free:
+    they leave ensure_transfer_id's mint path exactly as it is today.
+
+    WHY 'same' TOUCHES NOTHING. Every steady tick re-reads the policy and calls
+    this. Rewriting the bag on an unchanged plan would reset sample_seq, drop a
+    frozen report mid-retry and disarm a pending terminal report, i.e. break a
+    transfer in flight once a minute. Equality of BOTH ids is the test: an
+    identical plan_id with a different transfer_id is a server that re-minted,
+    and that is a real boundary.
+
+    WHY A BAG WITH NO plan_id AT ALL IS 'adopted', NOT A BOUNDARY (board #44).
+    An agent upgraded onto an existing state file finds, for every image it
+    already staged, tele['transfer_id'] (device-minted) and NO plan_id —
+    _STATE_SCHEMA is deliberately not bumped for these keys, so the old bag is
+    read as-is. Comparing plan_ids there answers "different" for EVERY image on
+    EVERY device although no assignment changed, and the first tick after the
+    upgrade then paid the full price of a boundary twice over: replan_verify
+    was raised on every already-staged image, so the whole fleet started a
+    ~1.2 GB SHA-256 of its staged file inside roughly one EEM tick window,
+    holding the agent's exclusive lock (and therefore its heartbeats) for the
+    minutes that takes, on switches whose CPU is forwarding production traffic;
+    and the wholesale reset below discarded every armed-but-undelivered
+    terminal report in the fleet at the same instant.
+
+    Nothing about that upgrade is a transfer boundary: the same bytes, acquired
+    in the same acquisition cycle, are simply being NAMED by the server for the
+    first time. So this case writes plan_id, takes the server's transfer_id in
+    place of the device-minted one, and touches NOTHING else — no reset, no
+    replan_verify, no re-hash. Every measurement in the bag was made on this
+    same acquisition and stays true of it, content_sha256_state included: it is
+    a rename of a running transfer, not evidence borrowed from a previous one.
+    Only a change from one KNOWN plan_id to a different one (or a re-mint under
+    the same plan_id) is a real boundary.
+
+    The one thing the rename owes the server is a terminal report under the new
+    name: the report already delivered named the device-minted id, and the
+    server matches reports to plans by transfer_id alone. So the id the last
+    terminal report was armed under is preserved in `report_transfer_id`, which
+    is what _telemetry_tick compares against to attest an already-staged image
+    exactly ONCE under its new identity (board #30) — one small POST, jittered,
+    instead of a fleet-wide re-hash.
+
+    WHY 'new' REPLACES THE BAG WHOLESALE rather than popping keys. Everything in
+    tele — sample_seq, frozen_report, event, report_pending/attempts/next_ts/
+    sent_ts, started_ts, done_ts, content_sha256_state, peers, peers_v2,
+    peer_transfer_records — is scoped to the transfer that is now over, and
+    carrying any of it forward would attest the NEW transfer with the OLD
+    transfer's evidence. Wholesale replacement is also the fix for a future
+    key: a field added later is dropped at the boundary by construction instead
+    of being forgotten in a pop list. state[img_id]'s own keys ('done', 'sha',
+    'copied', 'root_file') are facts about the FILE on disk, not about the
+    transfer, and legitimately survive.
+
+    WHY replan_verify. A second plan for an image the device ALREADY has staged
+    and placed would otherwise never produce a terminal report under the new
+    transfer_id: _stage_image short-circuits on state[img_id]['done'] and
+    ['copied'] with phase 'steady', and a terminal report is armed only on
+    phase 'copied'/'seeding-only'. Those two flags live in the image record,
+    not in this bag, so no amount of telemetry reset reaches them. Raising the
+    flag here — only on a real plan boundary, and only when the image is
+    already done AND copied — tells the short-circuit to re-hash the staged
+    file ONCE (take_replan_verify) so the new transfer is attested by evidence
+    gathered UNDER the new transfer, never by a checksum inherited from the
+    previous one.
+
+    WHY 'done' AND 'copied' ARE NOT PROOF THE BYTES ARE STILL THERE, and who
+    settles that. Both flags are facts this record last believed, not a stat of
+    the filesystem, and the park pass deliberately leaves them set while
+    DELETING the staged file (it keeps only the root copy). So a
+    park-then-replan raises the flag over content that has to be re-downloaded
+    first. This function cannot tell — it has no filesystem access by design,
+    which is what keeps it pure and testable — so the flag is raised
+    optimistically here and the caller settles it: _stage_image's steady-state
+    short-circuit consumes it when the staged file really is present, and its
+    re-acquire fall-through (the RECHECK branch) DROPS it when it is not, so a
+    stale flag can never survive a re-download and re-hash ~1.2 GB that the
+    download path just hashed anyway. The park pass drops it too, for a flag
+    that outlived a tick through a crash."""
+    if not isinstance(plan_id, str) or not _HEX32.match(plan_id):
+        return None
+    if not isinstance(transfer_id, str) or not _HEX32.match(transfer_id):
+        return None
+    rec = state.get(img_id)
+    rec = rec if isinstance(rec, dict) else None
+    tele = rec.get("tele") if rec is not None else None
+    if isinstance(tele, dict) and tele.get("plan_id") == plan_id \
+            and tele.get("transfer_id") == transfer_id:
+        return "same"
+    if isinstance(tele, dict) and tele.get("transfer_id") \
+            and "plan_id" not in tele:
+        # RENAME, NOT A BOUNDARY (board #44) — see the docstring. A running
+        # transfer the device named itself is being named by the server for the
+        # first time; nothing about the bytes, the measurements or the verify
+        # verdict changed, so nothing is reset and no re-hash is asked for.
+        old_tid = tele["transfer_id"]
+        if old_tid != transfer_id and "report_transfer_id" not in tele and (
+                tele.get("report_sent_ts") is not None
+                or tele.get("report_pending")
+                or tele.get("frozen_report") is not None):
+            # A terminal report for this transfer exists (delivered, or frozen
+            # and still being retried) and it names the OLD id. Recording that
+            # is what lets _telemetry_tick notice the server has no report
+            # under the new name and arm exactly one.
+            tele["report_transfer_id"] = old_tid
+        tele["plan_id"] = plan_id
+        tele["transfer_id"] = transfer_id
+        return "adopted"
+    fresh = {"plan_id": plan_id, "transfer_id": transfer_id}
+    if rec is not None and rec.get("done") and rec.get("copied"):
+        fresh["replan_verify"] = True
+    # CARRY AN ARMED-BUT-UNDELIVERED TERMINAL REPORT ACROSS THE BOUNDARY.
+    # The wholesale reset above is what makes the new transfer's telemetry
+    # honest -- none of the previous transfer's measurements may attest this
+    # one. But a report that was already FROZEN and is still being retried is
+    # not a measurement of the new transfer at all: it is a finished statement
+    # about the OLD one, carrying the old transfer_id inside the frozen body,
+    # and the server matches it back to the old plan by that id. Dropping it
+    # here loses the previous transfer's only completion evidence, and nothing
+    # ever re-arms it -- the image is already done+copied, so _stage_image
+    # takes the steady-state short-circuit and never rebuilds a report for a
+    # transfer that has finished. That is a silent data loss on every plan
+    # boundary. (It used to be fleet-wide on the first tick after an agent
+    # upgrade too, where every staged image crossed a boundary at once for
+    # want of a stored plan_id; that case is now 'adopted' above and resets
+    # nothing at all.)
+    #
+    # Only the DELIVERY MACHINERY travels: what the retry loop at
+    # iris_agent.py:525-543 needs to finish sending the frozen body, the id
+    # that body names (report_transfer_id, so the new transfer can still see
+    # that no report speaks for IT), plus avg_bps, which it reads to classify
+    # the link tier (a property of the link, not of the transfer).
+    # Deliberately NOT carried: sample_seq (the
+    # new transfer starts its own sequence), event, peers, peer_transfer_records
+    # and the byte/timing measurements -- and above all content_sha256_state,
+    # which is the whole point of the reset: a 'verified' inherited from the
+    # previous transfer would attest content this transfer never hashed.
+    if isinstance(tele, dict) and tele.get("report_pending"):
+        for k in ("frozen_report", "report_pending", "report_attempts",
+                  "report_next_ts", "report_transfer_id", "avg_bps"):
+            if k in tele:
+                fresh[k] = tele[k]
+    state.setdefault(img_id, {})["tele"] = fresh
+    return "new"
+
+
+def take_replan_verify(state, img_id):
+    """Consume the one-shot re-verify flag adopt_plan raised on a plan boundary
+    for an already-staged image: True exactly once per boundary, False forever
+    after.
+
+    Pop-and-return, never a plain read: the caller re-hashes a ~1.2 GB staged
+    file when this answers True, and a flag that survived its own consumption
+    would re-hash on every 60 s tick for the life of the assignment. Popping
+    before the hash runs is deliberate too — a hash that fails is a decision
+    already made (the staged copy is discarded), not a reason to try again next
+    tick.
+
+    Also called for its SIDE EFFECT, with the answer thrown away, wherever the
+    flag has become meaningless: _stage_image's re-acquire fall-through (the
+    staged bytes it would have hashed are gone or stale, and the download path
+    about to run hashes the replacements itself) and the park pass (the image
+    left the set and park deleted the staged copy). Both are the same idea as
+    the pop above — the flag is a one-shot permission to hash content that is
+    sitting right there, and it must not outlive that content."""
+    tele = (state.get(img_id) or {}).get("tele")
+    if not isinstance(tele, dict):
+        return False
+    return bool(tele.pop("replan_verify", False))
 
 
 def next_sample_seq(state, img_id):
@@ -283,8 +527,13 @@ def classify(state, avg_bps):
     """Link tier, first match wins (spec section 1 table):
       bad         -> fail_streak >= FAIL_STREAK_BAD (defer with backoff)
       constrained -> median RTT > RTT_CONSTRAINED_MS, or the last download
-                     averaged below SLOW_BPS (send trimmed payload)
-      good        -> otherwise (send full report)
+                     averaged below SLOW_BPS
+      good        -> otherwise
+    The tier drives STREAMING CADENCE only (STREAM_TIER_TICKS): a constrained
+    link is sampled less often, it is NOT sent a smaller payload. The v1
+    report's `link.trimmed` is therefore a constant False, and v2 dropped the
+    field with the rest of the `link` section. Payload trimming was removed
+    with v2 — do not re-document it here without re-implementing it.
     avg_bps may be None/0 (no completed download yet) -> not constraining."""
     link = state.get("link") or {}
     if int(link.get("fail_streak", 0)) >= FAIL_STREAK_BAD:
@@ -360,58 +609,6 @@ def observe_peers(tele, peers, now=None):
             elif len(v2) < STATE_PEER_SET_CAP:
                 v2[ip] = {"first_observed": float(now),
                           "last_observed": float(now), "observations": 1}
-
-
-def build_report(cfg, state, img_id, event, now):
-    """Assemble the report body (exact shape: spec section 2). Pure read of
-    cfg/state — the caller (iris_agent._telemetry_tick) owns sampling, jitter
-    and the POST. event: 'staging-complete' | 'seeding-only' | 'pull'.
-    peers/peers_total are participation-only (see observe_peers); rows
-    beyond PEER_CAP are counted in peers_total but not named."""
-    st = state.get(img_id) or {}
-    tele = st.get("tele") or {}
-    link = state.get("link") or {}
-    rtts = link.get("rtt_ms") or []
-    avg_bps = int(tele.get("avg_bps", 0) or 0)
-    if st.get("copied"):
-        stage_state = "ready"
-    elif st.get("blocked_no_space"):
-        stage_state = "flash_full_seeding_only"
-    else:
-        stage_state = "staging"
-    # Participation only: rows carry just the observed peer IPs in observation
-    # order. peers_total = distinct IPs observed (saturates at
-    # STATE_PEER_SET_CAP); rows beyond PEER_CAP are counted, not named.
-    # Per-peer BYTES exist now -- aria2-next 2.5.6 keeps a cumulative per-peer
-    # session counter and the completion hook reads it (parse_peer_transfer_snapshot)
-    # -- but they are a v2-only block. v1 has no place to put them and no
-    # server-side classifier to tell the origin's bytes from a peer's, so this
-    # path stays participation-only rather than shipping an unattributed total.
-    # Keys-only read: also safe on legacy {ip: [rx, tx]} state (pull-before-
-    # first-observe), where values are ignored anyway.
-    observed = tele.get("peers") or {}
-    peer_rows = [{"ip": ip} for ip in list(observed)[:PEER_CAP]]
-    runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
-                    or cfg.get("runtime_mode") or "guestshell")
-    return {
-        "ts": int(now),
-        "image_id": img_id,
-        "event": event,
-        "transfer": {"total_bytes": int(tele.get("total_bytes", 0) or 0),
-                     "elapsed_s": round(float(tele.get("elapsed_s", 0) or 0), 1),
-                     "avg_bps": avg_bps,
-                     "sha_ok": bool(tele.get("sha_ok", False)),
-                     "stage_state": stage_state},
-        "link": {"tier": classify(state, avg_bps),
-                 "rtt_ms_median": int(round(_median(rtts))),
-                 "rtt_samples": len(rtts),
-                 "hb_failures": int(link.get("fail_streak", 0)),
-                 "trimmed": False},
-        "peers": peer_rows,
-        "peers_total": len(observed),
-        "agent": {"version": cfg.get("agent_version", "unknown"),
-                  "runtime_mode": runtime_mode},
-    }
 
 
 def _report_peer_rows_v2(tele):
@@ -736,8 +933,8 @@ def report_peer_transfer_records(tele, window_start=None, created=None):
     measurement that cannot be placed in the window is dropped here instead of
     costing the terminal report. That is reachable without any bug: a transfer
     whose started_ts was never recorded (agent state lost while the staged file
-    survived) collapses window.start onto done_ts, which is strictly after the
-    hook fired. Dropping is also the honest outcome — the alternative,
+    survived) has no window start at all, so the caller bounds the records at
+    done_ts, which is strictly after the hook fired. Dropping is also the honest outcome — the alternative,
     stretching window.start back to captured_at, would misstate the transfer
     window to save a byte count."""
     block = (tele or {}).get("peer_transfer_records")
@@ -791,18 +988,38 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
     peer_rows, peers_total, truncated, saturated = _report_peer_rows_v2(tele)
     runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
                     or cfg.get("runtime_mode") or "guestshell")
-    completed = int(tele.get("completed_content_bytes",
-                             tele.get("total_bytes", 0)) or 0)
-    total = int(tele.get("total_content_bytes",
-                         tele.get("total_bytes", 0)) or 0)
+    # Content-at-end bytes are a MEASUREMENT (aria2's tellStatus at the
+    # completion tick) and are emitted only when one was taken. A completion
+    # tick with no stats — an operator-staged image adopted in place (aria2
+    # never had a gid for it), an RPC hiccup on that exact tick, a state file
+    # lost while the staged file survived — used to report a "measured" 0/0
+    # over a zero-length "complete" window, indistinguishable from a real
+    # reading. A measured zero and an unmeasured field are different facts
+    # (peer_transfer_records already lives by that rule): the keys are ABSENT
+    # when unmeasured, never invented. Same for window.start: an unrecorded
+    # started_ts is left absent rather than collapsed onto the end, and the
+    # window is `complete` only when both ends were observed by this agent
+    # and the transfer inside it was measured.
+    content = {}
+    measured = tele.get("completed_content_bytes", tele.get("total_bytes"))
+    if measured is not None:
+        completed = int(measured or 0)
+        content["completed_content_bytes"] = completed
+        content["total_content_bytes"] = int(
+            tele.get("total_content_bytes", completed) or completed)
     sha_state = content_sha256_state(state, img_id)
     content_sha256 = {"state": sha_state}
     if sha_state in ("verified", "mismatch"):
         content_sha256["algo"] = "sha256"
     end = float(tele.get("done_ts", now) or now)
     start = window_start
-    if start is None:
-        start = float(tele.get("started_ts", end) or end)
+    if start is None and tele.get("started_ts") is not None:
+        start = float(tele["started_ts"])
+    window = {"end": end,
+              "complete": bool(window_complete) and start is not None
+              and bool(content)}
+    if start is not None:
+        window["start"] = start
     report = {
         "v": 2,
         "report_id": report_id,
@@ -811,10 +1028,8 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "report_created_at": float(now),
         "image_id": img_id,
         "event": event,
-        "window": {"start": start, "end": end,
-                   "complete": bool(window_complete)},
-        "content": {"completed_content_bytes": completed,
-                    "total_content_bytes": total},
+        "window": window,
+        "content": content,
         "content_sha256": content_sha256,
         "ios_copy_verify": {"state": ios_copy_verify_state(state, img_id)},
         "sampling": {
@@ -831,7 +1046,11 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
         "agent": {"version": cfg.get("agent_version", "unknown"),
                   "runtime_mode": runtime_mode},
     }
-    transfer_records = report_peer_transfer_records(tele, window_start=start, created=now)
+    # An unknown start still cannot PLACE a capture inside the window, so the
+    # records keep the documented drop (bounded at the end) rather than
+    # riding along on a window whose start nobody observed.
+    transfer_records = report_peer_transfer_records(
+        tele, window_start=start if start is not None else end, created=now)
     if transfer_records is not None:
         # Optional by construction: the key is absent, not zeroed, when nothing
         # was measured (report_peer_transfer_records explains what absence means).
@@ -881,17 +1100,6 @@ def pull_request_id(resp):
     return None
 
 
-def trim_report(report):
-    """Constrained-tier copy: per-peer rows dropped, link marked trimmed.
-    Returns a NEW dict (fresh 'link' too) — the original stays intact so a
-    later pull can still send the full detail from state."""
-    out = dict(report)
-    out["peers"] = []
-    out["link"] = dict(report.get("link") or {})
-    out["link"]["trimmed"] = True
-    return out
-
-
 def pull_requested(resp):
     """True ONLY for a dict heartbeat response carrying report_requested: true.
     Tolerates None (send failed), strings, lists and other captive-portal
@@ -911,7 +1119,6 @@ STREAM_TIER_TICKS = {"good": 1, "constrained": 4}   # 'bad' streams nothing
 STREAM_EVERY_MIN = 1
 STREAM_EVERY_MAX = 60
 STREAM_DIRECTIVE_FRESH_TICKS = 3    # expire without heartbeat renewal
-SAMPLE_V = 1
 
 
 def stream_enabled(cfg):
@@ -988,24 +1195,3 @@ def should_sample(state, tele, tier, now):
     interval_ticks = max(STREAM_TIER_TICKS[tier], every)
     last = float(tele.get("stream_last_ts", 0) or 0)
     return (now - last) >= (interval_ticks - 0.5) * TICK_SECONDS
-
-
-def build_sample(img_id, phase, stats, tier):
-    """The v1 wire sample (spec section 5.1) or None when nothing should be
-    sent. stats is the aria2 tellStatus subset (string values, exactly what
-    _aria_stats_impl already fetches). run_once phase 'seeding-only' maps to
-    wire 'seeding' (the server checks enums exactly). A seeder with zero
-    connections streams nothing."""
-    if phase not in ("downloading", "seeding-only") or not stats:
-        return None
-    if tier not in STREAM_TIER_TICKS:
-        return None
-    conns = int(stats.get("connections", "0") or 0)
-    wire = "downloading" if phase == "downloading" else "seeding"
-    if wire == "seeding" and conns <= 0:
-        return None
-    return {"v": SAMPLE_V, "image_id": img_id, "phase": wire,
-            "done_bytes": int(stats.get("completedLength", "0") or 0),
-            "down_bps": int(stats.get("downloadSpeed", "0") or 0),
-            "up_bps": int(stats.get("uploadSpeed", "0") or 0),
-            "peers": conns, "tier": tier}

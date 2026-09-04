@@ -754,3 +754,82 @@ def test_release_quarantine_serializes_with_a_concurrent_catalog_writer(tmp_path
 
     assert done == [True]
     assert s.get_image("img1")["quarantined"] is False
+
+
+# ---------------------------------------------------------------------------
+# Release resumes origin seeding: the quarantine force-removed the torrent
+# from aria2 and nothing else ever re-adds one, so a released-then-assigned
+# image otherwise has no seeder until the next container restart.
+# ---------------------------------------------------------------------------
+
+def _store_with_seeder_add(tmp_path, add_fn):
+    added = []
+    s = catalog.CatalogStore(str(tmp_path), audit_path=str(tmp_path / "audit.jsonl"),
+                             seeder_remove_fn=lambda ih: None,
+                             seeder_add_fn=add_fn or (lambda *a: added.append(a)))
+    s.added = added
+    return s
+
+
+def test_release_quarantine_resumes_seeding_from_the_recorded_source_dir(tmp_path):
+    src = tmp_path / "images"; src.mkdir()
+    s = _store_with_seeder_add(tmp_path, None)
+    _seed(s, sha512="aa" * 64, info_hash_hex="deadbeef" * 5, source_dir=str(src))
+    (tmp_path / "torrents" / "img1.torrent").write_bytes(b"d")
+    s.apply_hash_verification({"img1": _verdict(bulkhash.STATE_MISMATCH,
+                                                feed_sha512="bb" * 64)},
+                              source="scheduled")
+    assert s.added == []                                    # not while quarantined
+    result = s.release_quarantine("img1", actor="console:admin", override=True)
+    assert result["seeding_resumed"] is True
+    assert s.added == [(s.torrent_path("img1"), str(src), "deadbeef" * 5)]
+    seed_events = [e for e in _audit_events(s)
+                   if e.get("event") == "image_quarantine_release_seeding"]
+    assert len(seed_events) == 1 and seed_events[0]["result"] == "ok"
+    assert seed_events[0]["actor"] == "console:admin"
+
+
+def test_release_quarantine_flags_and_audits_a_failed_seeder_add(tmp_path):
+    src = tmp_path / "images"; src.mkdir()
+
+    def unreachable(*a):
+        raise OSError("connection refused http://127.0.0.1:6800 token:xyz")
+
+    s = _store_with_seeder_add(tmp_path, unreachable)
+    _seed(s, sha512="aa" * 64, source_dir=str(src))
+    s.apply_hash_verification({"img1": _verdict(bulkhash.STATE_MISMATCH,
+                                                feed_sha512="bb" * 64)},
+                              source="scheduled")
+    result = s.release_quarantine("img1", actor="console:admin", override=True)
+    assert result["released"] is True                       # release is durable
+    assert result["seeding_resumed"] is False               # but not hidden
+    assert s.get_image("img1")["quarantined"] is False
+    seed_events = [e for e in _audit_events(s)
+                   if e.get("event") == "image_quarantine_release_seeding"]
+    assert len(seed_events) == 1 and seed_events[0]["result"] == "fail"
+    assert "OSError" in seed_events[0]["detail"]
+    assert "token" not in seed_events[0]["detail"]
+    assert "http" not in seed_events[0]["detail"]
+
+
+def test_release_quarantine_never_guesses_a_missing_source_dir(tmp_path):
+    s = _store_with_seeder_add(tmp_path, None)
+    _seed(s, sha512="aa" * 64, source_dir=str(tmp_path / "gone-away"))
+    s.apply_hash_verification({"img1": _verdict(bulkhash.STATE_MISMATCH,
+                                                feed_sha512="bb" * 64)},
+                              source="scheduled")
+    result = s.release_quarantine("img1", actor="console:admin", override=True)
+    assert result["seeding_resumed"] is False
+    assert s.added == []
+
+
+def test_release_quarantine_unwired_seeder_add_is_a_safe_noop(tmp_path):
+    s = _store(tmp_path)                                    # no seeder_add_fn
+    _seed(s, sha512="aa" * 64)
+    s.apply_hash_verification({"img1": _verdict(bulkhash.STATE_MISMATCH,
+                                                feed_sha512="bb" * 64)},
+                              source="scheduled")
+    result = s.release_quarantine("img1", actor="console:admin", override=True)
+    assert result["seeding_resumed"] is True
+    assert not [e for e in _audit_events(s)
+                if e.get("event") == "image_quarantine_release_seeding"]

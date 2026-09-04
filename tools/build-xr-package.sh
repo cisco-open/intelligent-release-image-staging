@@ -18,7 +18,7 @@
 #      build.yaml (name iris-xr, release ThinXR_7.3.15).
 #   4. run its ./appmgr_build.
 #   5. BEWARE: that tool prints "Done building" EVEN ON FAILURE -- a lab
-#      incident on 100.90.168.20 lost time to trusting it. This script does
+#      incident on 192.0.2.10 lost time to trusting it. This script does
 #      NOT trust the message or the exit code: it verifies an RPM actually
 #      landed under RPMS/ and fails honestly, with the tool's own log tail,
 #      when it did not. RPMS/ is cleared before every run so a stale RPM
@@ -26,22 +26,20 @@
 #      this run's output.
 #   6. copy the RPM found under RPMS/ to OUT/iris-xr.rpm.
 #
-# NOTE on the xr-appmgr-build build.yaml schema: the plan and lab notes
-# confirm two keys precisely -- name: iris-xr, release: ThinXR_7.3.15. The
-# remaining keys below (version/arch/type/image) are this script's
-# best-effort reading of the tool's shape from the lab transcript (the
-# actual produced filename was irisprobe-0.1.0-ThinXR_7.3.15.x86_64.rpm) and
-# have NOT been independently confirmed against the tool's own docs/schema.
-# Confirm/adjust against the real clone at ~/.cache/iris/xr-appmgr-build (or
-# APPMGR_BUILD_DIR) the first time this runs for real (this plan's Task 5).
+# The build.yaml schema written below (packages list; name / release /
+# target-release / version / sources / config-dir / data-dir /
+# copy_hostname / copy_ems_cert) is the one hardware-proven by the
+# 2026-08-28 spike and by every lab RPM since (Cisco 8201 and 8010-R1, see
+# docs/zensical/validation.md). Do not "adjust" a key here without
+# re-proving the RPM on real hardware.
 #
 # Inputs (env overridable):
 #   CATALOG_PEM              pinned server cert -- CERTIFICATE BLOCK ONLY.
 #                             Default: fetched from CATALOG_PEM_URL. A file
 #                             carrying a PRIVATE KEY block (the combined
 #                             cert+key shape IRIS_CERT points at server-side)
-#                             is refused outright -- see device/iox/build.sh
-#                             for the identical discipline.
+#                             is refused outright; device/iox/build.sh
+#                             applies the same refusal to the IOx package.
 #   CATALOG_PEM_URL           required when CATALOG_PEM is not supplied.
 #   CATALOG_PEM_FINGERPRINT   expected SHA-256 fingerprint of the catalog
 #                             cert (format "SHA256:AA:BB:..."). Required
@@ -80,6 +78,10 @@
 #                             executable ./appmgr_build, this script does
 #                             NOT re-clone (a mismatched pinned commit only
 #                             warns -- it does not block a local override).
+#                             The clone only ever goes into a path that does
+#                             not exist yet or is an empty directory; an
+#                             existing non-empty directory without
+#                             ./appmgr_build is refused, never deleted.
 #   APPMGR_BUILD_CMD            the build tool's entry point, run from inside
 #                             APPMGR_BUILD_DIR (default ./appmgr_build).
 set -euo pipefail
@@ -117,6 +119,21 @@ PKG_VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 [ -r "$DOCKERFILE" ] || { echo "!! missing $DOCKERFILE (device/xr/Dockerfile -- build Task 1 first)" >&2; exit 1; }
 [ -r "$ENTRYPOINT" ] || { echo "!! missing $ENTRYPOINT (device/xr/entrypoint.sh -- build Task 1 first)" >&2; exit 1; }
 
+# Staleness guard (issue #72, same mechanism device/iox/build.sh guards
+# against): this build bakes in device/agent AS IT SITS IN THIS CHECKOUT
+# ($REPO) -- a worktree that has fallen behind main under device/agent,
+# device/verify_image.py or device/xr ships an older agent with nothing in
+# the built RPM saying so. See tools/agent-source-freshness.sh. Sourcing is
+# ITSELF best-effort -- a checkout old enough to predate this guard has no
+# tools/agent-source-freshness.sh to source, and that must degrade to "the
+# check is skipped," never to a raw "No such file or directory" abort.
+if [ -r "$REPO/tools/agent-source-freshness.sh" ]; then
+  # shellcheck source=tools/agent-source-freshness.sh
+  . "$REPO/tools/agent-source-freshness.sh"
+  iris_check_agent_freshness "$REPO" "device/agent device/verify_image.py device/xr" \
+    || exit 1
+fi
+
 CTX="$(mktemp -d)"
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$CTX/agent" "$CTX/agent_bin" "$OUT"
@@ -150,8 +167,8 @@ else
   echo ">> cert fingerprint verified: $got"
 fi
 grep -q "BEGIN CERTIFICATE" "$CTX/iris-catalog.pem" || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
-# CATALOG_PEM discipline (same intent as device/iox/build.sh): bake ONLY the
-# certificate block into the image. A combined cert+key file (the shape
+# CATALOG_PEM discipline (device/iox/build.sh enforces the same): bake ONLY
+# the certificate block into the image. A combined cert+key file (the shape
 # server/setup_status.py reads for IRIS_CERT, server-side) must never be
 # handed to CATALOG_PEM -- refuse outright rather than silently shipping
 # private key material to devices.
@@ -172,9 +189,10 @@ IMAGE_TAR_NAME="${RPM_NAME}.tar.gz"
 if [ "$DRY_RUN" -eq 1 ]; then
   cat <<PLAN
 >> [dry-run] would stage x86_64 aria2c + agent python + Dockerfile/entrypoint.sh into a build context
->> [dry-run] would run: docker build --platform linux/amd64 -t $IMAGE_TAG <context>
+>> [dry-run] would run: docker build --pull --platform linux/amd64 -t $IMAGE_TAG <context>
 >> [dry-run] would reuse an existing xr-appmgr-build clone at $APPMGR_BUILD_DIR
-   or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there
+   or clone $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT there (only into a
+   missing or empty directory -- an existing non-empty one is refused, never deleted)
 >> [dry-run] would run: docker save $IMAGE_TAG -o $APPMGR_BUILD_DIR/$IMAGE_TAR_NAME
 >> [dry-run] would clear $APPMGR_BUILD_DIR/RPMS/ and write $APPMGR_BUILD_DIR/build.yaml:
 packages:
@@ -189,7 +207,8 @@ packages:
 >> [dry-run] would run: (cd $APPMGR_BUILD_DIR && $APPMGR_BUILD_CMD -b build.yaml)
 >> [dry-run] would verify an RPM landed under $APPMGR_BUILD_DIR/RPMS/*.rpm -- its own
    "Done building" message is not trusted, on either exit code or output --
-   and copy that RPM to $OUT/iris-xr.rpm
+   and copy that RPM to $OUT/iris-xr.rpm (via $OUT/.iris-xr.rpm.tmp + mv, so a
+   served path is never read half-written)
 PLAN
   exit 0
 fi
@@ -252,13 +271,30 @@ cp "$REPO/VERSION" "$CTX/agent/VERSION"
 cp "$DOCKERFILE" "$ENTRYPOINT" "$CTX/"
 
 echo ">> docker build ($IMAGE_TAG)"
-docker build --platform linux/amd64 -t "$IMAGE_TAG" "$CTX"
+# --pull for the same reason device/iox/build.sh gives: a floating base tag
+# is only as current as the build host's cache (issue #13). IRIS_NO_PULL=1
+# keeps the cached base for an A/B build.
+PULL_FLAG="--pull"; [ -n "${IRIS_NO_PULL:-}" ] && PULL_FLAG="--pull=false"
+docker build "$PULL_FLAG" --platform linux/amd64 -t "$IMAGE_TAG" "$CTX"
 
 echo ">> resolving ios-xr/xr-appmgr-build"
 mkdir -p "$(dirname "$APPMGR_BUILD_DIR")"
 if [ ! -x "$APPMGR_BUILD_DIR/appmgr_build" ]; then
+  # Never delete a path taken from the environment: APPMGR_BUILD_DIR is
+  # operator-overridable, and a typo (a parent directory, a clone whose
+  # script lost its exec bit) must not cost the operator its contents.
+  if [ -e "$APPMGR_BUILD_DIR" ]; then
+    if [ ! -d "$APPMGR_BUILD_DIR" ] || [ -n "$(ls -A "$APPMGR_BUILD_DIR" 2>/dev/null)" ]; then
+      cat >&2 <<EOF
+!! APPMGR_BUILD_DIR=$APPMGR_BUILD_DIR exists but holds no executable ./appmgr_build,
+   and it is not an empty directory -- refusing to clone over it. Point
+   APPMGR_BUILD_DIR at a fresh path (or an existing xr-appmgr-build clone),
+   or remove that directory yourself if it is disposable.
+EOF
+      exit 1
+    fi
+  fi
   echo ">> cloning $APPMGR_BUILD_REPO_URL @ $APPMGR_BUILD_COMMIT -> $APPMGR_BUILD_DIR"
-  rm -rf "$APPMGR_BUILD_DIR"
   git clone "$APPMGR_BUILD_REPO_URL" "$APPMGR_BUILD_DIR"
   git -C "$APPMGR_BUILD_DIR" checkout "$APPMGR_BUILD_COMMIT"
 else
@@ -320,7 +356,7 @@ echo ">> running $APPMGR_BUILD_CMD -b build.yaml in $APPMGR_BUILD_DIR"
 cat "$LOG"
 
 # xr-appmgr-build prints "Done building" EVEN ON FAILURE (lab-confirmed on
-# 100.90.168.20) -- neither that message nor a zero exit code above is
+# 192.0.2.10) -- neither that message nor a zero exit code above is
 # treated as success. The only trustworthy signal is an RPM actually
 # sitting in RPMS/.
 RPM_FILE="$(find "$APPMGR_BUILD_DIR/RPMS" -type f -name '*.rpm' 2>/dev/null | sort | tail -n1)"
@@ -328,7 +364,7 @@ if [ -z "$RPM_FILE" ] || [ ! -f "$RPM_FILE" ]; then
   cat >&2 <<EOF
 !! xr-appmgr-build did not produce an RPM.
    Its "Done building" message and exit code are not proof of success (it
-   prints that even on failure -- confirmed on 100.90.168.20). No file
+   prints that even on failure -- confirmed on 192.0.2.10). No file
    matched $APPMGR_BUILD_DIR/RPMS/*.rpm after the run. Last 40 lines of its
    output:
 EOF
@@ -337,6 +373,10 @@ EOF
 fi
 
 echo ">> found RPM: $RPM_FILE"
-cp "$RPM_FILE" "$OUT/iris-xr.rpm"
+# Placed atomically: --out artifacts/ is the SERVED directory, and
+# device/xr-install.sh scp's artifacts/iris-xr.rpm to the router -- a copy
+# in progress must never be readable as a (truncated) package.
+cp "$RPM_FILE" "$OUT/.iris-xr.rpm.tmp"
+mv -f "$OUT/.iris-xr.rpm.tmp" "$OUT/iris-xr.rpm"
 echo ">> done: $OUT/iris-xr.rpm"
 ls -la "$OUT/iris-xr.rpm"

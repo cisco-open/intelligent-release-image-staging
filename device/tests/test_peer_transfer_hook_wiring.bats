@@ -29,25 +29,28 @@ setup() {
   HOOK_SRC="$DEVICE/agent/peer-transfer-hook.sh"
   TMPD="$BATS_TEST_TMPDIR/w"
   mkdir -p "$TMPD/bin" "$TMPD/stage"
-  # a recording aria2c, plus stubs so the supervisor's process management does
-  # not touch the machine running the tests
+  # a recording aria2c. No other stubs: the supervisor only ever signals the
+  # PID it launched itself, so nothing here can touch the machine running the
+  # tests.
   printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\nenv > "%s/env.txt"\n' \
     "$TMPD" "$TMPD" > "$TMPD/bin/aria2c-stub"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMPD/bin/pkill"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMPD/bin/sleep"
-  chmod +x "$TMPD/bin/aria2c-stub" "$TMPD/bin/pkill" "$TMPD/bin/sleep"
+  chmod +x "$TMPD/bin/aria2c-stub"
 }
 
 # Run the REAL start_aria2c out of entrypoint.sh (not a re-implementation), so
 # a regression in the launch line fails here. $1 is the HOOK value under test.
+# aria2c is launched as a tracked background child, so wait for it before
+# reading what the stub recorded.
 run_start_aria2c() {
   PATH="$TMPD/bin:$PATH" bash -c '
     set -eu
     ARIA2="'"$TMPD"'/bin/aria2c-stub"
     RPC_PORT=6800; MAX_PEERS=10; STAGE_DIR="'"$TMPD"'/stage"
     HOOK="'"$1"'"
-    eval "$(awk "/^start_aria2c\(\)/,/^}/" "'"$ENTRYPOINT"'")"
+    eval "$(awk "/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/" "'"$ENTRYPOINT"'")"
+    ARIA2_PID=""; ARIA2_START=""
     start_aria2c "supervisorsecret"
+    wait "$ARIA2_PID"
   '
 }
 
@@ -103,6 +106,17 @@ run_start_aria2c() {
   run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   [ "$status" -eq 0 ]
   grep -qx "IRIS_RPC_SECRET=supervisorsecret" "$TMPD/env.txt"
+}
+
+@test "entrypoint runs aria2c as a tracked child, not a detached daemon" {
+  # --daemon=true would double-fork aria2c out of the supervisor's reach and
+  # force it back onto process-name matching (pgrep/pkill, i.e. procps). The
+  # child's PID is recorded instead, and that PID -- inherited environment and
+  # all -- is the one the hook runs under.
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$(cat "$TMPD/launched.txt")" != *"--daemon"* ]] || return 1
+  grep -q 'ARIA2_PID=\$!' "$ENTRYPOINT"
 }
 
 @test "entrypoint exports the RPC port the hook must call back on" {

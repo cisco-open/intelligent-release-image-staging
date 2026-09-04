@@ -74,6 +74,39 @@ def test_render_announces_total_counter():
     assert "iris_tracker_announces_total 42" in out
 
 
+def test_render_announces_refused_counters():
+    """IRIS-111: a refused announce is now a counted, operator-visible
+    signal, with a separate bucket for a KNOWN credential that simply
+    expired (the SEEDER_PREV_TTL overlap case)."""
+    out = metrics.render([], {}, {"announces_refused_total": 5,
+                                  "announces_refused_expired_total": 3})
+    assert "# TYPE iris_tracker_announces_refused_total counter" in out
+    assert "iris_tracker_announces_refused_total 5" in out
+    assert ("# TYPE iris_tracker_announces_refused_expired_total counter"
+            in out)
+    assert "iris_tracker_announces_refused_expired_total 3" in out
+
+
+def test_render_announces_refused_counters_default_to_zero():
+    # existing callers that never pass these keys keep working
+    out = metrics.render([], {}, {})
+    assert "iris_tracker_announces_refused_total 0" in out
+    assert "iris_tracker_announces_refused_expired_total 0" in out
+
+
+def test_legacy_participants_help_does_not_assert_migration_alone():
+    """IRIS-111: '0 = fully migrated' was flatly wrong once an un-migrated
+    fleet can be locked out of the count entirely (the same class of bug as
+    the package-freshness check that printed 'verified' after inspecting
+    zero packages) -- the HELP text must no longer assert that on its own,
+    and must point at the counter that disambiguates it."""
+    out = metrics.render([], {}, {}, extras={"legacy_announce_participants": 0})
+    help_line = next(line for line in out.splitlines()
+                     if line.startswith("# HELP iris_legacy_announce_participants"))
+    assert "0 = fully migrated" not in help_line
+    assert "iris_tracker_announces_refused_expired_total" in help_line
+
+
 def test_label_values_are_escaped():
     swarm = [{"info_hash": "a", "image": 'na"me\\x', "seeders": 0,
               "leechers": 0, "peers": 0, "bytes_remaining": 0, "completed": 0}]
@@ -242,7 +275,10 @@ class TestSwarmByteAttribution:
         text = self._render()
         for name, mtype in (("iris_origin_sent_bytes_total", "counter"),
                             ("iris_peer_attributed_bytes_total", "counter"),
-                            ("iris_peer_unattributed_bytes_total", "counter"),
+                            # gauge (IRIS-05-004): the residue steps DOWN when
+                            # a device is traced late, so a counter type
+                            # would make rate() invent bursts.
+                            ("iris_peer_unattributed_bytes_total", "gauge"),
                             ("iris_swarm_peers_attributed", "gauge"),
                             ("iris_swarm_peers_saturated", "gauge")):
             assert "# HELP %s " % name in text, name
@@ -262,10 +298,23 @@ class TestSwarmByteAttribution:
         # so these are counters and never reset to a gauge-shaped zero.
         text = self._render()
         for name in ("iris_origin_sent_bytes_total",
-                     "iris_peer_attributed_bytes_total",
-                     "iris_peer_unattributed_bytes_total"):
+                     "iris_peer_attributed_bytes_total"):
             assert "# TYPE %s counter" % name in text, name
             assert "# TYPE %s gauge" % name not in text, name
+
+    def test_residue_is_a_gauge_because_it_steps_down(self):
+        # Rewritten from the counter assertion (IRIS-05-004): the residue is
+        # origin minus attributed, and tracing a device late lowers it. As a
+        # counter, Prometheus rate()/increase() and cumulative-to-delta
+        # pipelines read every step-down as a reset and invent untraced
+        # bytes exactly when tracing improved. The name keeps its _total
+        # suffix so existing dashboards keep resolving.
+        text = self._render()
+        assert "# TYPE iris_peer_unattributed_bytes_total gauge" in text
+        assert "# TYPE iris_peer_unattributed_bytes_total counter" not in text
+        help_line = [ln for ln in text.splitlines()
+                     if ln.startswith("# HELP iris_peer_unattributed_bytes_total")][0]
+        assert "never rate()" in help_line
 
     def test_no_per_peer_labels_on_any_new_family(self):
         # The design rule at the top of metrics.py: per-device/per-peer detail

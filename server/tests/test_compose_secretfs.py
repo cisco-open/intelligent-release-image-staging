@@ -7,9 +7,9 @@ secrets, the master age key as a read-only Docker secret, and the recipient
 + key-file env. Parsed as YAML — no docker daemon required."""
 import os
 
-import pytest
-
-yaml = pytest.importorskip("yaml")
+# Direct import, not importorskip: see requirements-dev.txt -- these compose
+# assertions are security properties and must not silently skip.
+import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(HERE, "..", "docker-compose.yml")

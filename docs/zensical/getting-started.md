@@ -20,6 +20,7 @@ It uses the command line throughout because it starts from an empty host. Once t
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
 | Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
+| `BINFMT_IMAGE_DIGEST` — only if you deploy IE-3x00 IOx | The bring-up below stages **both** IOx packages, and the arm64 build needs Docker's ARM64 emulation. On an amd64 host that has never registered it, the build fails closed rather than pull an unpinned image, and the bring-up command exits non-zero *after* the server is already up and reachable. Export the audited `tonistiigi/binfmt` sha256 digest — see [IOx: Build and stage for Console onboarding](iox.md#build-and-stage-for-console-onboarding) — or skip the arm64 package if you deploy no IE-3x00. |
 
 ## Configure the server
 
@@ -71,7 +72,18 @@ tools/get-aria2c.sh amd64
 tools/start-compose-server.sh
 ```
 
-`iris-bootstrap` is idempotent and does not overwrite existing encrypted state.
+`iris-bootstrap` never overwrites existing encrypted state on a plain run: a
+volume that already holds all three `.age` files (and whose files decrypt with
+the mounted identity) is left untouched, and a volume holding only some of them
+is refused rather than silently regenerated. Name the one missing file with
+`--repair <secrets.json|rpc-secret|tls/key.pem>` to recreate just that file. To
+add a break-glass recipient later, run
+`IRIS_AGE_RECIPIENTS=<primary>,<break-glass> iris-bootstrap --rekey`, which
+re-encrypts the existing store without touching any token, key, or the pinned
+certificate. `--force --yes` is disaster recovery only: it mints new secrets and
+a new certificate, so every onboarded device must be re-onboarded and every
+prebuilt package rebuilt. Both recipients on the first bootstrap avoids all of
+this.
 The running container exposes the tracker, catalog, artifact server, seeder data
 port, console, and telemetry endpoints. Plaintext secrets are decrypted into
 `/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
@@ -80,6 +92,19 @@ rest.
 `start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
 container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
 `iris-amd64.tar` for Catalyst 9300 IOx, both pinned to the current server certificate.
+
+!!! warning "The arm64 package needs ARM64 emulation"
+    That step builds arm64 first. On an amd64 host with no ARM64 binfmt handler
+    registered it stops at
+    `set BINFMT_IMAGE_DIGEST to an audited tonistiigi/binfmt sha256 digest`,
+    and because it runs *after* the health gate the failure is easy to miss: the
+    console is already reachable, the command exits non-zero, and **neither**
+    IOx package exists. Export `BINFMT_IMAGE_DIGEST` before running the
+    bring-up, or — if you only deploy Guest Shell C9300s and no IE-3x00 — skip
+    the IOx packages entirely and stage the amd64 one on its own later with
+    `tools/stage-iox-package.sh --arch amd64`. Verify what was actually built
+    with `tools/check-package-freshness.sh`, or the console's Settings › Setup
+    *Device packages* card.
 
 ## Create the console admin
 
@@ -135,7 +160,7 @@ management-type-aware CSV v2. Each device declares `routed`, `inband`,
 `router-routed`, `router-nat`, or `xr-host` as its `management_type`:
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
 ```
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
@@ -164,8 +189,14 @@ routed-only and refuses a v2 (`management_type`) header:
 
 ```bash
 # legacy routed inventory only
-tools/gen-device-installers.sh fleet/devices.csv
+tools/gen-device-installers.sh path/to/legacy-routed.csv
 ```
+
+It takes the old positional columns
+`device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip`, and no template for that
+format ships — `fleet/devices.csv.example` is CSV v2 and the generator refuses
+it. It exists for sites that still hold such a file; anything new goes through
+the console.
 
 It requires the running `iris` container to mint enrollment tokens and read
 the server certificate; set `IRIS_CONTAINER=<name>` if yours is named
@@ -194,7 +225,7 @@ tools/apply-assignments.sh fleet/assignments.csv
 This requires the running `iris` container by that name; set
 `IRIS_CONTAINER=<name>` if yours differs.
 
-Agents poll the catalog on a short interval, download the approved image, verify it, and stage it on the target storage. A changed assignment causes the agent to clean up the previous staged image before staging the replacement.
+Agents poll the catalog on a short interval, download the approved image, verify it, and stage it on the target storage. A changed assignment **parks** the previous image rather than deleting it: its torrent stops and its staging copy is freed, but the copy already placed on the storage root is deliberately kept, and is reclaimed only when a later placement needs the room. Size storage for the images you want resident at once — see [Unassigned image park](device-agents.md#unassigned-image-park).
 
 ## Open the console
 

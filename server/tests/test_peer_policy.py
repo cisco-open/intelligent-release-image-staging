@@ -20,7 +20,7 @@ DEV1 = Principal("device", "iris8kv-1")
 DEV2 = Principal("device", "iris8kv-2")
 DEV_SEEDER = Principal("device", "seeder")
 SVC = Principal("service", "seeder")
-LEGACY = Principal("legacy", "100.92.100.77:6881")
+LEGACY = Principal("legacy", "198.51.100.77:6881")
 
 
 def _base():
@@ -199,14 +199,6 @@ class TestMutualPermit:
 
 
 class TestQuarantineImmutable:
-    def test_quarantine_materialized_on_validate_when_absent(self):
-        doc = _base()
-        del doc["acls"]["quarantine"]
-        doc2 = peer_policy.ensure_reserved(doc)
-        assert doc2["acls"]["quarantine"]["reserved"] is True
-        assert doc2["acls"]["quarantine"]["rules"] == [
-            {"seq": 10, "action": "deny", "match": {"type": "any"}}]
-
     def test_reject_rename_or_rule_edit_of_quarantine(self):
         doc = _base()
         doc["acls"]["quarantine"]["rules"] = [

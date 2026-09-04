@@ -340,8 +340,17 @@ def export_loop(stop_event, audit_path, state_dir, secrets_fn, audit_fn=None,
                 continue
             password = ((secrets_fn() if secrets_fn is not None else None)
                         or {}).get("password", "")
-            ok, detail = (export_fn or export_once)(
-                audit_path, settings, password, state_dir, now_fn=now_fn)
+            try:
+                ok, detail = (export_fn or export_once)(
+                    audit_path, settings, password, state_dir, now_fn=now_fn)
+            except Exception as exc:
+                # A raising attempt (tempfile.TemporaryDirectory on a full
+                # /tmp, say) is a failed attempt like any other -- the
+                # start_export posture: last_result/last_run_ts move so the
+                # console stops reporting the previous success and the
+                # retry backs off to daily, and the trail gets its fail line.
+                ok, detail = False, "export failed: %s" % exc
+                _record_result(settings_path(state_dir), ok, detail, now_fn)
             if audit_fn is not None:
                 audit_fn(event="audit_export", category="settings",
                          action="export", target="audit-export",

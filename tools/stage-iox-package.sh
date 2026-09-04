@@ -51,8 +51,20 @@ case "$ARCH" in
   *) echo "!! --arch must be amd64 or arm64 (got $ARCH)" >&2; exit 2 ;;
 esac
 
-if [ "$ARCH" = arm64 ] && ! docker run --rm --platform linux/arm64 \
-    alpine:3.20 true >/dev/null 2>&1; then
+# Is arm64 emulation already registered? Ask the kernel first
+# (/proc/sys/fs/binfmt_misc/qemu-aarch64 exists and is enabled) -- that needs
+# no network and pulls nothing. Only when binfmt_misc is not readable at all
+# (non-Linux Docker hosts, a restricted /proc) fall back to the floating-tag
+# container probe, which is a network fetch of an unpinned image.
+arm64_emulation_ready() {
+  local reg=/proc/sys/fs/binfmt_misc/qemu-aarch64
+  if [ -d /proc/sys/fs/binfmt_misc ]; then
+    [ -r "$reg" ] && grep -q '^enabled' "$reg"
+    return
+  fi
+  docker run --rm --platform linux/arm64 alpine:3.20 true >/dev/null 2>&1
+}
+if [ "$ARCH" = arm64 ] && ! arm64_emulation_ready; then
   echo ">> enabling Docker arm64 emulation for the arm64 IOx package build"
   : "${BINFMT_IMAGE_DIGEST:?set BINFMT_IMAGE_DIGEST to an audited tonistiigi/binfmt sha256 digest}"
   [[ "$BINFMT_IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] \
@@ -114,7 +126,10 @@ SRC="$BUILD_OUT/$PKG_NAME"
 [ -f "$SRC" ] || { echo "!! build did not produce $SRC" >&2; exit 1; }
 
 if [ "$PLACE_WITH_DOCKER" -eq 1 ]; then
-  docker cp "$SRC" "$IRIS_CONTAINER:/srv/artifacts/$PKG_NAME"
+  # Same atomic discipline as the host branch below: a device fetching the
+  # package mid-copy must read the old file or the new one, never a torn one.
+  docker cp "$SRC" "$IRIS_CONTAINER:/srv/artifacts/.$PKG_NAME.tmp"
+  docker exec "$IRIS_CONTAINER" mv -f "/srv/artifacts/.$PKG_NAME.tmp" "/srv/artifacts/$PKG_NAME"
   echo ">> staged $PKG_NAME -> $IRIS_CONTAINER:/srv/artifacts/$PKG_NAME"
   docker exec "$IRIS_CONTAINER" ls -la "/srv/artifacts/$PKG_NAME"
 else

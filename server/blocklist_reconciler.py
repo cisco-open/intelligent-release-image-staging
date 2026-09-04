@@ -77,6 +77,53 @@ def derive_denied_set(policy_result, durable_endpoints, pending_endpoints,
         revoked_principals, protected_seeder_ip)
 
 
+def denied_retention(policy_result, revoked_principals):
+    """Endpoint-row retention predicate for ``peer_endpoints.fresh_endpoints``
+    / ``prune`` (``keep(principal_type, principal_id, ipv4) -> bool``).
+
+    A row is kept past ``ENDPOINT_TTL`` while its principal is revoked or
+    while the current valid policy denies that principal at that address
+    (its own ACL -- the quarantine assignment). Without this the seeder block
+    for a quarantined or revoked device lapsed 15 minutes after its last
+    attributable announce, i.e. exactly when the device stopped cooperating;
+    the device still holds the seeder's address and the info_hash and needs
+    no tracker to connect. The row ages out normally once the device is
+    un-quarantined, and ``clear_principal`` drops it on re-onboard."""
+    revoked = set(revoked_principals or ())
+    doc = policy_result.document
+
+    def keep(ptype, pid, ipv4):
+        if "%s:%s" % (ptype, pid) in revoked:
+            return True
+        if policy_result.fail_closed:
+            return False
+        return peer_policy.evaluate(doc, _Struct(ptype, pid), ipv4)[0] == "deny"
+    return keep
+
+
+def denied_endpoint_ips(policy_result, durable_endpoints, revoked_principals):
+    """Every address a durable endpoint row attributes to a DEVICE principal
+    that is revoked or that the policy denies at that address.
+
+    Unlike :func:`derive_denied_set` this ignores shared permit/deny
+    conflicts and the protected seeder address: it answers the fail-closed
+    question the tracker asks before a ``legacy`` credential (a previous
+    seeder token, which any device that ever received a torrent carrying it
+    still holds) may discover peers or be discovered -- "did a quarantined or
+    revoked device announce from this address?"."""
+    revoked = set(revoked_principals or ())
+    doc = policy_result.document
+    out = set()
+    for key, ptype, pid, ip in _endpoint_ips(durable_endpoints):
+        if ptype != "device":
+            continue
+        if key in revoked or (not policy_result.fail_closed and
+                              peer_policy.evaluate(
+                                  doc, _Struct(ptype, pid), ip)[0] == "deny"):
+            out.add(ip)
+    return out
+
+
 def _derive_valid(doc, durable_endpoints, pending_endpoints,
                   revoked_principals, protected_seeder_ip):
     # Merge durable + pending; a key present in both contributes both IPs.
