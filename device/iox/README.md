@@ -143,11 +143,11 @@ itself remains unchanged and does not need rebuilding.
      and is applied with **no explicit `exit` lines** (IOS auto-pops; explicit
      exits silently drop the app-vnic). Use the VLAN, guest address, and SVI
      selected for this device (see the block below).
-   - `app-hosting install appid iris package flash:<package>.tar` →
+   - `app-hosting install appid iris package flash:<package>.tar` → `activate` →
      `app-hosting data appid iris copy flash:iris-catalog.pem
-     iris-catalog.pem` → `activate` → `start` (DEPLOYED → application-data
-     certificate → ACTIVATED → RUNNING). Deliver the certificate after install
-     and before activation.
+     iris-catalog.pem` → `start` (DEPLOYED → ACTIVATED → application-data
+     certificate → RUNNING). Activation mounts application storage. Deliver the
+     certificate before starting the app; a failed copy leaves it unstarted.
 
    ```
    app-hosting appid iris

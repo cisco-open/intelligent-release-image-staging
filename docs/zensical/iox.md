@@ -49,7 +49,8 @@ The IOx package contains no deployment certificate. On every onboarding,
 `device/iox/install.sh` validates the current public certificate from the
 served artifacts directory, pushes it with the package, and uses IOS-XE's
 `app-hosting data` channel to place it in the app's application-data directory
-after installation and before activation. The entrypoint requires and validates
+after activation and before app start. Activation mounts application storage;
+the `DEPLOYED` state cannot accept the copy. The entrypoint requires and validates
 that runtime-delivered certificate before it starts either the catalog client
 or the aria2 tracker client.
 

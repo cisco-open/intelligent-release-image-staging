@@ -239,12 +239,14 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "IOx install delivers the public certificate through application data before activation" {
+@test "IOx install delivers the public certificate after activation and before start" {
   install="$BATS_TEST_DIRNAME/../install.sh"
   data_line="$(grep -n 'app-hosting data appid %s copy' "$install" | head -1 | cut -d: -f1)"
   activate_line="$(grep -n '^activate_out=' "$install" | head -1 | cut -d: -f1)"
-  [ -n "$data_line" ] && [ -n "$activate_line" ]
-  [ "$data_line" -lt "$activate_line" ]
+  start_line="$(grep -n '^start_out=' "$install" | head -1 | cut -d: -f1)"
+  [ -n "$data_line" ] && [ -n "$activate_line" ] && [ -n "$start_line" ]
+  [ "$activate_line" -lt "$data_line" ]
+  [ "$data_line" -lt "$start_line" ]
   grep -q 'Successfully copied file' "$install"
 }
 
@@ -357,7 +359,9 @@ case "$cmds" in
     echo "---------------------------------------------------------"
     # unset FAKE_APP_STATE == no app installed (the default for every test
     # that never gets as far as the lifecycle)
-    if [ -n "${FAKE_APP_STATE:-}" ]; then
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ] && [ -s "$FAKE_LIFECYCLE_FILE" ]; then
+      echo "iris                                     $(cat "$FAKE_LIFECYCLE_FILE")"
+    elif [ -n "${FAKE_APP_STATE:-}" ]; then
       echo "iris                                     ${FAKE_APP_STATE}"
     else
       echo "No App found"
@@ -371,21 +375,38 @@ case "$cmds" in
 esac
 case "$cmds" in
   *"app-hosting install appid"*)
+    [ -z "${FAKE_LIFECYCLE_FILE:-}" ] || echo DEPLOYED > "$FAKE_LIFECYCLE_FILE"
     echo "Installing package 'flash:iris-arm64.tar' for 'iris'. Use 'show app-hosting list' for progress."
     ;;
 esac
 case "$cmds" in
   *"app-hosting data appid iris copy"*)
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ]; then
+      if [ "$(cat "$FAKE_LIFECYCLE_FILE")" != ACTIVATED ] || [ "${FAKE_CA_COPY_FAILURE:-0}" = 1 ]; then
+        echo '% Error: application data unavailable; app must be ACTIVATED'
+        exit 0
+      fi
+      touch "$FAKE_LIFECYCLE_FILE.ca"
+    fi
     echo "Successfully copied file /flash/iris-catalog.pem to iris as iris-catalog.pem"
     ;;
 esac
 case "$cmds" in
   *"app-hosting activate appid"*)
+    [ -z "${FAKE_LIFECYCLE_FILE:-}" ] || echo ACTIVATED > "$FAKE_LIFECYCLE_FILE"
     # The second line is deliberately one the success-path grep filter drops,
     # so a test can tell an unfiltered dump from a filtered one.
     echo "sw1#app-hosting activate appid iris"
     echo "${FAKE_ACTIVATE_DETAIL:-% Error: activation is still loading the app image}"
     ;;
+esac
+case "$cmds" in
+  *"app-hosting start appid"*)
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ] && [ -f "$FAKE_LIFECYCLE_FILE.ca" ]; then
+      echo RUNNING > "$FAKE_LIFECYCLE_FILE"
+    fi
+    ;;
+  *"copy running-config startup-config"*) echo '[OK]' ;;
 esac
 exit 0
 STUB
@@ -473,6 +494,32 @@ _iox_env() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a valid PEM certificate"* ]]
   [ ! -s "$command_log" ]
+}
+
+_iox_fast_lifecycle() {
+  _iox_stub_setup
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/bin/sleep"
+  chmod +x "$STUBDIR/bin/sleep"
+  export FAKE_LIFECYCLE_FILE="$BATS_TEST_TMPDIR/lifecycle-state"
+  export FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/lifecycle-commands"
+}
+
+@test "certificate delivery succeeds when application data requires ACTIVATED state" {
+  _iox_fast_lifecycle
+  run _iox_env bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_LIFECYCLE_FILE")" = RUNNING ]
+  [ -f "$FAKE_LIFECYCLE_FILE.ca" ]
+  [[ "$output" == *"current catalog certificate delivered"* ]]
+}
+
+@test "failed application data copy leaves the activated IRIS app unstarted" {
+  _iox_fast_lifecycle
+  run _iox_env FAKE_CA_COPY_FAILURE=1 bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$FAKE_LIFECYCLE_FILE")" = ACTIVATED ]
+  run grep -F 'app-hosting start appid iris' "$FAKE_COMMAND_LOG"
+  [ "$status" -ne 0 ]
 }
 
 @test "ip routing missing: real run exits non-zero with the PREREQ line" {

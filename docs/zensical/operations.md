@@ -521,9 +521,8 @@ The canonical device image, both IOx wrappers (`iris-arm64.tar` and
 platform installers available from the CLI, and every path delivers the
 current public certificate beside the package instead:
 
-- IOx copies it into app-hosting application data after package installation
-  and before activation. The container reads that runtime file from CAF's app
-  data directory.
+- IOx copies it into app-hosting application data after activation and before
+  app start. The container reads that runtime file from CAF's app data directory.
 - IOS-XR copies it to `harddisk:/iris-catalog.pem`, which the appmgr container
   reads through its `/hostmount` harddisk bind mount.
 - Guest Shell receives the same current public certificate with its other

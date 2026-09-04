@@ -522,7 +522,7 @@ if [ "$DRY" -eq 1 ]; then
   printf 'scp -O <artifacts>/%s %s@%s:%s%s\n' "$PKG" '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$PKG"
   printf 'scp -O <public-certificate> %s@%s:%s%s\n' '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$CATALOG_CA_REMOTE"
   echo "===== SIGNATURE POLICY ($PACKAGE_SIGNATURE_MODE): signed packages keep verification enabled; unsigned packages disable it ====="
-  echo "===== app-hosting install -> application-data certificate copy -> activate -> start appid $APPID, then persist ====="
+  echo "===== app-hosting install -> activate -> application-data certificate copy -> start appid $APPID, then persist ====="
   if [ "$MANAGEMENT_TYPE" = "inband" ]; then
     echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
   fi
@@ -676,18 +676,6 @@ wait_state DEPLOYED "$INSTALL_TIMEOUT" || {
   exit 1
 }
 sleep 8                                       # let the install op fully settle
-data_out="$(printf 'app-hosting data appid %s copy %s%s %s\n' \
-  "$APPID" "$PKG_FS" "$CATALOG_CA_REMOTE" "$CATALOG_CA_REMOTE" | RUN 2>&1 || true)"
-case "$data_out" in
-  *"Successfully copied file"*)
-    echo "  current catalog certificate delivered to IOx application data" ;;
-  *)
-    echo "  ERROR: could not deliver the catalog certificate to IOx application data." >&2
-    echo "         Full IOS response to 'app-hosting data appid $APPID copy':" >&2
-    printf '%s\n' "$data_out" >&2
-    echo "         The app remains DEPLOYED and has not been activated; correct the application-data copy problem and retry." >&2
-    exit 1 ;;
-esac
 activate_out="$(printf 'app-hosting activate appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$activate_out" | grep -E 'Activating|Failed to activate|%IOX|%APP' || true
 wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {
@@ -706,6 +694,21 @@ wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {
   echo "         collision. The second attempt finds the layers cached and is much faster." >&2
   exit 1
 }
+# CAF mounts application storage during activation. DEPLOYED rejects file
+# management on IE-3400; copy trust only after ACTIVATED, while the entrypoint
+# has not yet run. A failed copy must never proceed to app start.
+data_out="$(printf 'app-hosting data appid %s copy %s%s %s\n' \
+  "$APPID" "$PKG_FS" "$CATALOG_CA_REMOTE" "$CATALOG_CA_REMOTE" | RUN 2>&1 || true)"
+case "$data_out" in
+  *"Successfully copied file"*)
+    echo "  current catalog certificate delivered to IOx application data" ;;
+  *)
+    echo "  ERROR: could not deliver the catalog certificate to IOx application data." >&2
+    echo "         Full IOS response to 'app-hosting data appid $APPID copy':" >&2
+    printf '%s\n' "$data_out" >&2
+    echo "         The app remains ACTIVATED and has not been started; correct the application-data copy problem and retry." >&2
+    exit 1 ;;
+esac
 start_out="$(printf 'app-hosting start appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$start_out" | grep -E 'Starting|Failed to start|%IOX|%APP' || true
 wait_state RUNNING "$START_TIMEOUT" || {

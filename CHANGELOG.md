@@ -84,6 +84,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   verify wrapper SHA-256 against adjacent provenance manifests and separately
   compare served and distributed certificates; they do not claim current-source
   freshness or native-signature verification.
+  IOx copies the certificate after app activation mounts application storage
+  and before app start; a failed copy leaves the app unstarted.
 - **IOx and IOS-XR appmgr now package one canonical multi-architecture device
   image and run one entrypoint.** `IRIS_DEVICE_PLATFORM=iox|xr-appmgr` is the
   required selector and is persisted for restart/upgrade; missing or unknown
