@@ -18,6 +18,7 @@ import random
 import re
 import shutil
 import sys
+import tempfile
 import time
 
 import agent_config
@@ -80,23 +81,18 @@ def _root_copy_tmp_name(fname):
     return fname + flash_target.ROOT_COPY_TMP_SUFFIX
 
 
-def _guestshell_root_local_path(stage_dir, target_prefix, fname):
-    """Return Guest Shell's local view of an IOS root file, or None.
+def _guestshell_root_ios_path(stage_dir, target_prefix, fname):
+    """Return a canonical IOS root path; Guest Shell mounts only guest-share.
 
-    Guest Shell exposes ``flash:`` and ``bootflash:`` at ``/flash`` and
-    ``/bootflash`` respectively.  Only derive a root path when stage_dir is
-    the exact, installer-owned ``<root>/guest-share/iris`` directory for the
-    target IOS filesystem.  Refusing all other shapes is intentional: a
-    configured path containing ``..``, a different mount, or a mismatched
-    target prefix must never turn a hash probe into access to an unrelated
-    local file.
+    The container's /flash and /bootflash do not expose IOS root files. Only
+    the installer-owned share can carry a native IOS hash receipt.
     """
     roots = {"flash:": "/flash", "bootflash:": "/bootflash"}
     root = roots.get(target_prefix)
     if (root is None or stage_dir != root + "/guest-share/iris"
             or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
         return None
-    return os.path.join(root, fname)
+    return target_prefix + fname
 
 # Board #60: a park-pass record that has no root_file AND that the catalog no
 # longer answers for at all (e.g. the aria_add call site's bare
@@ -165,7 +161,9 @@ Deps = collections.namedtuple(
             "version copy_to_root purge_others reclaim root_present "
             "remove_stage aria_remove detect_mode target_fs running_image "
             "reclaimable reclaim_bundle model refresh aria_stats aria_peers "
-            "io_transfer checkpoint aria_session copy_in_place")
+            "io_transfer checkpoint aria_session copy_in_place "
+            "root_file_size verify_root")
+Deps.__new__.__defaults__ = (None, None)
 
 
 def _atomic_write_state(state_path, state):
@@ -852,10 +850,10 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
 
 
 def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
-    """Attest a pre-existing IOS root file through Guest Shell's local mount.
+    """Attest a pre-existing IOS root file through native IOS size and SHA.
 
     Returns ``("adopted", None)`` only after the root bytes have the catalog
-    size and SHA-256 and any IRIS-reserved ``.iris-tmp`` leftover is confirmed
+    size and SHA-512 and any IRIS-reserved ``.iris-tmp`` leftover is confirmed
     gone. ``("absent", None)`` means ordinary copy placement may proceed.
     ``("not-applicable", None)`` keeps non-Guest-Shell/noncanonical platforms
     on their existing placement path. Every ambiguous read or content mismatch
@@ -869,13 +867,13 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
     if cfg.get("device_platform"):
         return "not-applicable", None
     fname = image["filename"]
-    root_path = _guestshell_root_local_path(
+    root_path = _guestshell_root_ios_path(
         cfg.get("stage_dir"), target_prefix, fname)
     if root_path is None:
         return "not-applicable", None
 
     try:
-        observed = deps.file_size(root_path)
+        observed = deps.root_file_size(fname, target_prefix)
     except Exception as e:
         error = ("existing IOS root file could not be inspected safely: %s"
                  % e)
@@ -891,21 +889,26 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
         return "blocked", error
 
     try:
-        matches = deps.verify(root_path, image["sha256"])
+        digest = image.get("sha512")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{128}", digest):
+            raise ValueError("catalog SHA-512 is missing or malformed")
+        matches = deps.verify_root(fname, target_prefix, digest)
     except Exception as e:
-        error = ("existing IOS root file SHA-256 could not be verified: %s"
+        error = ("existing IOS root file SHA-512 could not be verified: %s"
                  % e)
         deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
         return "blocked", error
     if not matches:
-        error = ("existing IOS root file SHA-256 does not match the catalog; "
+        error = ("existing IOS root file SHA-512 does not match the catalog; "
                  "left in place")
         deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
         return "blocked", error
 
-    tmp_path = root_path + flash_target.ROOT_COPY_TMP_SUFFIX
+    tmp_name = _root_copy_tmp_name(fname)
     try:
-        tmp_size = deps.file_size(tmp_path)
+        if deps.root_file_size(fname, target_prefix) != expected:
+            raise ValueError("IOS root size changed during SHA-512 verification")
+        tmp_size = deps.root_file_size(tmp_name, target_prefix)
     except Exception as e:
         error = ("IRIS temp-copy state could not be inspected safely: %s" % e)
         deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
@@ -913,7 +916,7 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
     if tmp_size is not None:
         _reclaim_failed_root_copy(deps, target_prefix, image)
         try:
-            tmp_size = deps.file_size(tmp_path)
+            tmp_size = deps.root_file_size(tmp_name, target_prefix)
         except Exception as e:
             error = ("IRIS temp-copy cleanup could not be confirmed: %s" % e)
             deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
@@ -925,7 +928,7 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
             return "blocked", error
 
     deps.emit("ROOTCOPY-ADOPTED",
-              "%s already exists at %s with catalog size and SHA-256; "
+              "%s already exists at %s with catalog size and SHA-512; "
               "adopted without replacement" % (fname, target_prefix))
     return "adopted", None
 
@@ -1995,10 +1998,11 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                 state["stage_fs"] = target_prefix
                 now = time.time()
 
-                # C9300 Guest Shell exposes the IOS flash root through the
-                # same local mount as guest-share. IOS `rename` does not
+                # Guest Shell mounts only guest-share, not the IOS root.
+                # IOS `rename` does not
                 # overwrite a same-named destination on affected releases, so
-                # first attest those existing bytes locally. This runs BEFORE
+                # first attest those existing bytes through native IOS SHA.
+                # This runs BEFORE
                 # the copy terminal/backoff and space gates: an upgraded agent
                 # must be able to recover a hardware-stranded good destination
                 # plus full-size .iris-tmp without needing room for a third
@@ -2024,7 +2028,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         st["root_adopt_checked"] = True
                         st["copy_terminal"] = True
                         st["stage_error"] = adoption_error
-                        st["copy_next_ts"] = now + _ROOT_COPY_BACKOFF_BASE
+                        # Hashing itself can outlast a backoff interval. Start
+                        # the retry delay when it finishes, not before launch.
+                        st["copy_next_ts"] = time.time() + _ROOT_COPY_BACKOFF_BASE
                     elif (adoption == "absent"
                           and st.get("root_adopt_checked")):
                         # The operator removed a previously conflicting root
@@ -3031,6 +3037,140 @@ def _dir_size_of(dir_out, fname):
         return None
     m = re.search(_DIR_ROW_RE_TMPL % re.escape(fname), dir_out)
     return int(m.group(1)) if m else None
+
+
+def _ios_root_file_size(fname, prefix, cli_execute_fn):
+    """Strict native size: only explicit IOS ENOENT proves absence."""
+    if (prefix not in ("flash:", "bootflash:")
+            or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
+        raise ValueError("invalid IOS root path")
+    path = prefix + fname
+    output = cli_execute_fn("dir " + path)
+    if not isinstance(output, str):
+        raise ValueError("IOS root directory response unavailable")
+    # IOS may spell the same root path with a slash after the colon.
+    missing = r"%%Error opening %s/?%s \(No such file or directory\)" % (
+        re.escape(prefix), re.escape(fname))
+    if re.search(r"(?m)^" + missing + r"\s*$", output) and _dir_size_of(output, fname) is None:
+        return None
+    if "%Error" in output or "% Invalid" in output:
+        raise ValueError("IOS root directory read failed")
+    size = _dir_size_of(output, fname)
+    if size is None:
+        raise ValueError("IOS root directory response is ambiguous")
+    return size
+
+
+def _parse_ios_sha512(output, root_path):
+    """Accept one native hash bound to the exact requested IOS filename."""
+    pattern = r"(?m)^verify /sha512 \(%s\) = ([0-9a-fA-F]{128})\s*$" % re.escape(root_path)
+    hashes = re.findall(pattern, output)
+    if (len(hashes) != 1 or output.count("verify /sha512") != 1
+            or "%Error" in output or "% Invalid" in output):
+        raise ValueError("IOS SHA-512 response is missing or ambiguous")
+    return hashes[0].lower()
+
+
+def _verify_guestshell_root(fname, prefix, digest, stage_dir,
+                           cli_configure_fn, sleep_fn=None,
+                           poll_attempts=125, poll_interval_s=5):
+    """Read-only IOS SHA in a bounded asynchronous EEM policy.
+
+    Native verify must never run in Guest Shell's synchronous CLI session:
+    long native commands can hang that transport. A one-shot countdown runs
+    on EEM with a 600-second maxrun. The agent polls only its fresh private
+    share directory, and requires a completion receipt written AFTER IOS
+    finishes and closes the hash output. No image is copied or modified.
+    """
+    root_path = _guestshell_root_ios_path(stage_dir, prefix, fname)
+    if root_path is None or not isinstance(digest, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{128}", digest):
+        raise ValueError("invalid native root hash request")
+    import fcntl
+    # main() already serializes ticks. Keep a dedicated lock and durable lease
+    # too: after a killed agent, the native EEM job may still be hashing. A
+    # launch whose CLI result was lost has no safe inferred completion time.
+    lock_path = os.path.join(stage_dir, ".iris-root-hash.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another IOS root hash is running") from None
+        lease_path = os.path.join(stage_dir, ".iris-root-hash.json")
+        try:
+            with open(lease_path) as stream:
+                lease = json.load(stream)
+        except FileNotFoundError:
+            lease = {}
+        if not isinstance(lease, dict):
+            raise ValueError("IOS root hash lease is unreadable")
+        if lease:
+            expiry = lease.get("expires")
+            if not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+                raise RuntimeError("previous IOS root hash launch is unconfirmed; "
+                                   "operator must inspect its EEM policy")
+            if time.time() < expiry:
+                raise RuntimeError("previous IOS root hash may still be running")
+        return _run_guestshell_root_hash(
+            root_path, prefix, digest, stage_dir, lease_path, cli_configure_fn,
+            sleep_fn, poll_attempts, poll_interval_s)
+
+
+def _run_guestshell_root_hash(root_path, prefix, digest, stage_dir, lease_path,
+                             cli_configure_fn, sleep_fn, poll_attempts,
+                             poll_interval_s):
+    sleep = time.sleep if sleep_fn is None else sleep_fn
+    directory = tempfile.mkdtemp(prefix=".iris-root-hash-", dir=stage_dir)
+    receipt_dir = prefix + "guest-share/iris/" + os.path.basename(directory)
+    result_path = os.path.join(directory, "result")
+    done_path = os.path.join(directory, "done")
+    finished = False
+    lease = {"path": root_path, "sha512": digest.lower(), "expires": None}
+    try:
+        _atomic_write_state(lease_path, lease)
+        cli_configure_fn([
+            "no event manager applet IRIS-ROOT-HASH",
+            "event manager applet IRIS-ROOT-HASH authorization bypass",
+            "event timer countdown time 2 maxrun 600",
+            'action 010 cli command "enable"',
+            'action 020 cli command "verify /sha512 %s"' % root_path,
+            'action 030 file open result %s/result w' % receipt_dir,
+            'action 040 file write result "$_cli_result"',
+            'action 050 file close result',
+            'action 060 file open done %s/done w' % receipt_dir,
+            'action 070 file write done "complete"',
+            'action 080 file close done',
+        ])
+        # Start the crash-recovery budget after configuration returns, never
+        # before a possibly slow launch. Unknown launch errors retain None.
+        lease["expires"] = time.time() + 625
+        _atomic_write_state(lease_path, lease)
+        for _ in range(poll_attempts):
+            try:
+                with open(done_path) as stream:
+                    complete = stream.read(11) in (
+                        "complete", "complete\n", "complete\r\n")
+            except FileNotFoundError:
+                complete = False
+            if complete:
+                finished = True
+                with open(result_path) as stream:
+                    output = stream.read(262145)
+                if len(output) > 262144:
+                    raise ValueError("IOS SHA-512 response exceeds size limit")
+                return _parse_ios_sha512(output, root_path) == digest.lower()
+            sleep(poll_interval_s)
+        raise TimeoutError("bounded IOS SHA-512 policy did not produce a receipt")
+    finally:
+        try:
+            cli_configure_fn(["no event manager applet IRIS-ROOT-HASH"])
+            if finished or (lease["expires"] is not None
+                            and time.time() >= lease["expires"]):
+                _atomic_write_state(lease_path, {})
+        finally:
+            # This unique directory contains only this call's hash receipts.
+            shutil.rmtree(directory)
 
 
 def _root_present_from_dir(dir_out, fname, expected_size=None):
@@ -4130,7 +4270,11 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 aria_stats=aria_stats, aria_peers=aria_peers,
                 io_transfer=_container_iox,
                 checkpoint=checkpoint, aria_session=aria_session,
-                copy_in_place=False)
+                copy_in_place=False,
+                root_file_size=lambda name, prefix: _ios_root_file_size(
+                    name, prefix, cli_execute),
+                verify_root=lambda name, prefix, digest: _verify_guestshell_root(
+                    name, prefix, digest, cfg["stage_dir"], cli_configure))
 
 
 def main():  # pragma: no cover

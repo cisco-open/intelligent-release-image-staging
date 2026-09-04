@@ -118,6 +118,8 @@ def make_deps(catalog, sizes, verify_ok=True, free=9_000_000_000,
             __import__("copy").deepcopy(state)),
         aria_session=lambda: None,
         copy_in_place=False,
+        root_file_size=lambda name, prefix: sizes.get(prefix + name),
+        verify_root=lambda name, prefix, digest: verify_ok,
     )
     return (deps, emitted, boot, aria_calls, copied, purged, reclaimed,
             bundle_reclaimed)
@@ -138,16 +140,16 @@ def test_ios_stage_prefix_keeps_guestshell_fallback_but_iox_fails_closed():
 
 
 def test_guestshell_root_path_is_derived_only_from_canonical_stage_mount():
-    assert iris_agent._guestshell_root_local_path(
-        "/flash/guest-share/iris", "flash:", "cat9k.bin") == "/flash/cat9k.bin"
-    assert iris_agent._guestshell_root_local_path(
+    assert iris_agent._guestshell_root_ios_path(
+        "/flash/guest-share/iris", "flash:", "cat9k.bin") == "flash:cat9k.bin"
+    assert iris_agent._guestshell_root_ios_path(
         "/bootflash/guest-share/iris", "bootflash:", "router.bin"
-    ) == "/bootflash/router.bin"
-    assert iris_agent._guestshell_root_local_path(
+    ) == "bootflash:router.bin"
+    assert iris_agent._guestshell_root_ios_path(
         "/flash/guest-share/iris", "bootflash:", "cat9k.bin") is None
-    assert iris_agent._guestshell_root_local_path(
+    assert iris_agent._guestshell_root_ios_path(
         "/flash/guest-share/iris/..", "flash:", "cat9k.bin") is None
-    assert iris_agent._guestshell_root_local_path(
+    assert iris_agent._guestshell_root_ios_path(
         "/flash/guest-share/iris", "flash:", "../cat9k.bin") is None
 
 
@@ -619,8 +621,8 @@ def test_copy_gate_charges_exactly_size_plus_headroom_no_more():
 # --- Board #149: IOS-XE 17.18.03 does not overwrite an existing same-name
 # destination with `rename`. Hardware left both the verified destination and
 # a full `.iris-tmp`, then the retry path hit terminal/backoff and the copy
-# space gate. Guest Shell can read the flash root through its existing local
-# mount, so it must attest/adopt correct bytes before any of those gates. ---
+# space gate. Guest Shell mounts only guest-share, so adoption must inspect
+# native IOS root bytes before any of those gates. ---
 
 def test_guestshell_adopts_verified_same_name_root_and_cleans_only_temp(
         monkeypatch):
@@ -629,10 +631,10 @@ def test_guestshell_adopts_verified_same_name_root_and_cleans_only_temp(
     monkeypatch.setattr(iris_agent.time, "time", lambda: now)
     cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
     image = {"id": "img1", "filename": "cat9k_iosxe.17.18.03.SPA.bin",
-             "size": size, "sha256": "abc"}
+             "size": size, "sha256": "abc", "sha512": "b" * 128}
     cat = FakeCatalog({"approved_image_id": "img1"}, image)
     stage = cfg["stage_dir"] + "/" + image["filename"]
-    root = "/flash/" + image["filename"]
+    root = "flash:" + image["filename"]
     temp = root + ".iris-tmp"
     sizes = {stage: size, root: size, temp: size}
     deps, emitted, _, _, copied, _, _, _ = make_deps(
@@ -647,9 +649,10 @@ def test_guestshell_adopts_verified_same_name_root_and_cleans_only_temp(
     def reclaim_bundle(prefix, names):
         cleanup.append((prefix, list(names)))
         for name in names:
-            sizes.pop("/flash/" + name, None)
+            sizes.pop(prefix + name, None)
 
-    deps = deps._replace(verify=verify, reclaim_bundle=reclaim_bundle)
+    deps = deps._replace(verify=verify, reclaim_bundle=reclaim_bundle,
+                         verify_root=lambda name, prefix, sha: verify(prefix + name, sha))
     state = {
         "schema_version": iris_agent._STATE_SCHEMA,
         "image_id": "img1",
@@ -685,10 +688,10 @@ def test_guestshell_adopts_verified_same_name_root_and_cleans_only_temp(
 def test_guestshell_does_not_adopt_until_temp_cleanup_is_proven():
     cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
     image = {"id": "img1", "filename": "cat9k.bin", "size": 5,
-             "sha256": "abc"}
+             "sha256": "abc", "sha512": "b" * 128}
     cat = FakeCatalog({"approved_image_id": "img1"}, image)
     stage = cfg["stage_dir"] + "/cat9k.bin"
-    root = "/flash/cat9k.bin"
+    root = "flash:cat9k.bin"
     temp = root + ".iris-tmp"
     # make_deps records the requested reclaim but deliberately does not mutate
     # sizes, modeling an IOS/EEM cleanup that silently no-ops.
@@ -709,10 +712,10 @@ def test_guestshell_same_size_root_hash_mismatch_fails_closed(monkeypatch):
     monkeypatch.setattr(iris_agent.time, "time", lambda: now)
     cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
     image = {"id": "img1", "filename": "cat9k.bin", "size": 5,
-             "sha256": "abc"}
+             "sha256": "abc", "sha512": "b" * 128}
     cat = FakeCatalog({"approved_image_id": "img1"}, image)
     stage = cfg["stage_dir"] + "/cat9k.bin"
-    root = "/flash/cat9k.bin"
+    root = "flash:cat9k.bin"
     sizes = {stage: 5, root: 5}
     deps, emitted, _, _, copied, _, _, bundle_reclaimed = make_deps(
         cat, sizes, free=0)
@@ -722,7 +725,8 @@ def test_guestshell_same_size_root_hash_mismatch_fails_closed(monkeypatch):
         verified.append(path)
         return path == stage
 
-    deps = deps._replace(verify=verify)
+    deps = deps._replace(verify=verify,
+                         verify_root=lambda name, prefix, sha: verify(prefix + name, sha))
     state = {}
     assert iris_agent.run_once(cfg, deps, state) == "complete"
     assert verified == [stage, root]
@@ -733,7 +737,7 @@ def test_guestshell_same_size_root_hash_mismatch_fails_closed(monkeypatch):
     assert state["img1"]["copy_terminal"] is True
     assert state["img1"]["root_adopt_checked"] is True
     assert state["img1"]["copy_next_ts"] == now + 5 * 60
-    assert "SHA-256 does not match" in state["img1"]["stage_error"]
+    assert "SHA-512 does not match" in state["img1"]["stage_error"]
     assert cat.heartbeats[-1]["stage_state"] == "copy_failed"
     assert not any(m == "FLASH-FULL" for m, _ in emitted)
 
@@ -741,18 +745,16 @@ def test_guestshell_same_size_root_hash_mismatch_fails_closed(monkeypatch):
 def test_guestshell_unknown_root_read_fails_closed_without_copy():
     cfg = dict(CFG, stage_dir="/bootflash/guest-share/iris")
     image = {"id": "img1", "filename": "router.bin", "size": 5,
-             "sha256": "abc"}
+             "sha256": "abc", "sha512": "b" * 128}
     cat = FakeCatalog({"approved_image_id": "img1"}, image)
     stage = cfg["stage_dir"] + "/router.bin"
     deps, _, _, _, copied, _, _, bundle_reclaimed = make_deps(
         cat, {stage: 5})
 
-    def file_size(path):
-        if path == "/bootflash/router.bin":
-            raise OSError("mount read failed")
-        return 5 if path == stage else None
+    def root_file_size(name, prefix):
+        raise OSError("IOS directory read failed")
 
-    deps = deps._replace(file_size=file_size,
+    deps = deps._replace(root_file_size=root_file_size,
                          target_fs=lambda: ("bootflash:", 9_000_000_000))
     state = {}
     assert iris_agent.run_once(cfg, deps, state) == "complete"
@@ -3730,7 +3732,7 @@ def test_deps_gains_telemetry_and_io_transfer_fields_appended_at_end():
     # Contract: these fields are appended (so pre-existing positional
     # construction and index-based code stay valid). The defaults keep legacy
     # test scenarios on the Guest Shell path unchanged.
-    assert iris_agent.Deps._fields[-6:] == (
+    assert iris_agent.Deps._fields[-8:-2] == (
         "aria_stats", "aria_peers", "io_transfer", "checkpoint",
         "aria_session", "copy_in_place")
     cat = FakeCatalog({"approved_image_id": None}, None)
@@ -4530,7 +4532,8 @@ def test_deps_contract_has_no_arbitrary_ios_passthrough():
     # replacement is the single read-only fact the reclaim paths needed.
     assert "ios" not in iris_agent.Deps._fields
     assert "boot_image" in iris_agent.Deps._fields
-    assert len(iris_agent.Deps._fields) == 27
+    assert iris_agent.Deps._fields[-2:] == ("root_file_size", "verify_root")
+    assert len(iris_agent.Deps._fields) == 29
 
 
 # =====================================================================

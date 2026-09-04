@@ -955,6 +955,32 @@ its own `transfer_id`, so its plans emit `planned` and never `seeding_started`.
 There is deliberately **no** fallback that promotes a plan from a report bearing
 some other transfer's id.
 
+## GuestShell root-hash recovery
+
+Guest Shell's [same-name adoption](device-agents.md#crash-safe-same-name-replacement)
+uses the native `IRIS-ROOT-HASH` EEM policy only when an IOS root file already
+exists. The policy has a 600-second maximum runtime. The agent waits up to
+625 seconds for its unique completion receipt, then removes the policy and
+its own receipt directory. An unavailable hash, ambiguous IOS directory
+response, catalog mismatch, or failed cleanup reports `copy_failed` and leaves
+the destination image unchanged. Normal copied placement does not use this
+policy.
+
+The stage directory contains `.iris-root-hash.lock` and
+`.iris-root-hash.json` to serialize jobs across interrupted agent processes.
+A known running job blocks another launch until its 625-second lease expires.
+If the launch result was lost, the lease has no known expiry and the error
+asks for operator inspection; a later tick must not assume that native work
+has stopped.
+
+To recover that unconfirmed launch, remove the `IRIS-ROOT-HASH` applet from
+running configuration, allow at least 625 seconds for any previously started
+job to finish, and inspect the EEM job history. Then remove only
+`<stage_dir>/.iris-root-hash.json`; the next ordinary agent tick can retry.
+Do not remove the lock file while the agent is running, the staged image, the
+IOS root image, or a `BOOT` target. Normal undeploy removes the hash applet
+alongside the other IRIS applets.
+
 ## Device container environment variables
 
 These are the production environment variables understood by the unified IOx

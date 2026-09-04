@@ -127,6 +127,7 @@ config_teardown() {
 cat <<EOF
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-ROOT-HASH
 no event manager applet IRIS-RECLAIM
 no event manager applet IRIS-RECLAIM-BUNDLE
 EOF

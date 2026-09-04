@@ -25,10 +25,11 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "dry-run removes both EEM applets" {
+@test "dry-run removes timer, copy, and interrupted hash applets" {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no event manager applet IRIS-AGENT"* ]] && \
-  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
+  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]] && \
+  [[ "$output" == *"no event manager applet IRIS-ROOT-HASH"* ]]
 }
 
 @test "dry-run also removes the on-demand reclaim applets" {

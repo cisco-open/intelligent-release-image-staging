@@ -23,6 +23,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"no interface VirtualPortGroup10"* ]]
   [[ "$output" == *"no app-hosting appid guestshell"* ]]
+  [[ "$output" == *"no event manager applet IRIS-ROOT-HASH"* ]]
   [[ "$output" == *"delete /force /recursive bootflash:guest-share/iris"* ]]
   [[ "$output" == *"delete /force bootflash:guest-share/bootstrap.sh"* ]]
   [[ "$output" != *"delete /force /recursive bootflash:guest-share"$'\n'* ]]

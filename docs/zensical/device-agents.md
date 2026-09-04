@@ -279,12 +279,24 @@ The agent loop is deliberately boring:
 Placing an image under a name IRIS finds already on the storage root — the
 operator's ordinary republish flow, or a name the `BOOT` variable currently
 points at — never deletes the old file first. On Guest Shell, the agent first
-uses the existing local `flash:` / `bootflash:` mount to compare that root
-file's exact size and SHA-256 with the catalog. An exact match is adopted in
+reads the root file's size through IOS and compares its native SHA-512 with
+the catalog. Guest Shell mounts only `guest-share`, so its local `/flash`
+directory cannot attest the IOS root. A one-shot `IRIS-ROOT-HASH` EEM policy
+runs the read-only hash with a 600-second limit and returns the result through
+a unique receipt under the IRIS share. The filename and digest must match,
+and IOS must report the expected size both before and after hashing.
+An exact match is adopted in
 place, including on IOS releases where `rename` will not overwrite an existing
 destination. An unreadable or mismatched root file is left untouched and
 reported as `copy_failed`; replacing it is an explicit operator decision, not
 a destructive guess by IRIS.
+
+Native hash jobs are serialized. A failed hash waits five minutes after
+completion before another attempt; adoption does not rehash an already placed
+image. An interrupted launch whose completion cannot be determined remains
+blocked for operator inspection. See [root-hash recovery](reference.md#guestshell-root-hash-recovery).
+Ordinary placement continues to verify the downloaded SHA-256 and the copied
+file's exact IOS byte size; it does not run native `verify`.
 
 When no destination exists, IOS-XE stages the new bytes under a reserved temp
 name (`<image>.iris-tmp`), verifies presence and exact byte size there, and
@@ -304,8 +316,9 @@ not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name
 leftover on an install-mode device is not automatically reclaimed by
 either path. The narrow exception is Guest Shell adoption of an already
 size-and-SHA-verified root file: if the failed attempt's reserved
-`<image>.iris-tmp` also exists, IRIS reclaims exactly that temp name and
-re-stats it before reporting the root ready. If cleanup cannot be proved, the
+`<image>.iris-tmp` also exists, IRIS reclaims exactly that temp name after
+checking the running image and `BOOT` targets, then confirms its absence
+through IOS before reporting the root ready. If cleanup cannot be proved, the
 agent fails closed instead of claiming adoption. Either way, IRIS only ever
 attempts the low-space reclaim once per acquisition cycle for a given image —
 a content republish under the same id, an image returning from park, or that

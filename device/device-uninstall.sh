@@ -103,10 +103,12 @@ config_teardown() {
 # Every EEM applet the agent may have left in running-config: the 60s bootstrap
 # timer (IRIS-AGENT), the copy-to-root applet (IRIS-COPYROOT), and the
 # low-space reclaim applets the agent creates on demand and never self-removes
-# (IRIS-RECLAIM / IRIS-RECLAIM-BUNDLE). All no-ops if absent.
+# (IRIS-RECLAIM / IRIS-RECLAIM-BUNDLE), plus a hash policy left by an
+# interrupted same-name adoption. All no-ops if absent.
 cat <<EOF
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-ROOT-HASH
 no event manager applet IRIS-RECLAIM
 no event manager applet IRIS-RECLAIM-BUNDLE
 EOF

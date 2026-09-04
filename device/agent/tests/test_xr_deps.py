@@ -288,12 +288,12 @@ def _build(tmp_path, **extra):
 
 
 def test_build_deps_fills_every_field_of_the_deps_contract(tmp_path):
-    """All 27 fields, or run_once dies mid-tick on an attribute nobody
-    noticed was missing."""
+    """XR fills every shared field and leaves GuestShell-only probes unused."""
     _cfg_out, deps = _build(tmp_path)
-    assert len(iris_agent.Deps._fields) == 27
-    for field in iris_agent.Deps._fields:
+    assert len(iris_agent.Deps._fields) == 29
+    for field in iris_agent.Deps._fields[:-2]:
         assert getattr(deps, field) is not None, field
+    assert deps.root_file_size is None and deps.verify_root is None
 
 
 def test_build_deps_reports_the_xr_platform_facts(tmp_path):

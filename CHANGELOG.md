@@ -300,11 +300,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   misleading different-images warning.
 - **Guest Shell can recover a verified C9300 image stranded by IOS's
   same-name rename behavior.** Before retrying final root placement, the agent
-  attests an existing canonical `flash:` or `bootflash:` file by catalog size
-  and SHA-256 and adopts it only on an exact match, while reclaiming only the
+  attests an existing canonical `flash:` or `bootflash:` file by native IOS
+  size and a bounded asynchronous SHA-512 check against the catalog, then
+  adopts it only on an exact match, while reclaiming only the
   reserved IRIS `.iris-tmp` copy. Unknown or mismatched bytes remain untouched
-  and fail closed; no install, activation, reload, or boot-variable change is
-  performed.
+  and fail closed. Ordinary placement retains its download SHA-256 and IOS
+  byte-size checks; no install, activation, reload, or boot-variable change
+  is performed.
 - **The IOS-XR appmgr container log is now bounded and rotated instead of
   growing without limit.** IOS-XR has no syslog path for `emit()`'s
   `%IRIS-6-<MNEMONIC>` diagnostics — they go only to the container's own
