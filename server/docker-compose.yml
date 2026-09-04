@@ -238,6 +238,23 @@ services:
       # source — so self-provisioning it is expected.
       - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
       - iris-images:/var/lib/iris-images
+      # Cisco-licensed console typeface (Sharp Sans Bold). .dockerignore keeps
+      # it OUT of the build context and every image layer -- Cisco's license
+      # does not permit redistributing it inside the image (or the release
+      # tarball; tools/make-release.sh's allowlist excludes it too) -- so the
+      # console falls back to its default font stack (font-display: swap,
+      # server/webroot/styles.css) without it. A deployment that
+      # INDEPENDENTLY holds the Sharp Sans license restores it at RUNTIME,
+      # never inside the image, by pointing IRIS_SHARP_SANS_FONT_HOST at the
+      # .woff2 file on the Compose host:
+      #   IRIS_SHARP_SANS_FONT_HOST=/path/to/SharpSans-Bold.woff2 \
+      #     docker compose -f server/docker-compose.yml up -d
+      # Left unset, this mounts /dev/null (present on every Linux host) --
+      # a harmless, always-present no-op every other deployment never has to
+      # think about: the console reads an empty file, the browser rejects it
+      # as an invalid font and falls back exactly as it does when the path
+      # is absent altogether.
+      - "${IRIS_SHARP_SANS_FONT_HOST:-/dev/null}:/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"
     # plaintext secrets live ONLY here, in RAM — never on the iris-config
     # volume. The mount options make the tmpfs owned by the non-root runtime
     # uid and private to it — without them docker mounts it root:root and the

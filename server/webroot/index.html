@@ -235,6 +235,12 @@
             <h3>Cisco Bulk Hash verification</h3>
             <p id="ii-verdict"></p>
             <p class="muted" id="ii-verdict-detail"></p>
+            <!-- The reconciler's own automated verdict (above) and the
+                 operator's own attestation at publish time (below) are
+                 distinct facts on distinct fields (cisco_signature_verified
+                 vs operator_attested_signature, #88) -- shown separately so
+                 neither is mistaken for the other. -->
+            <p class="muted" id="ii-operator-attestation"></p>
             <div id="ii-release-block" hidden>
               <h3>Release from quarantine</h3>
               <p class="muted">This image's hash did not match Cisco's feed.
@@ -697,18 +703,8 @@
               <div class="form-mount" id="wz-td-mount"></div>
             </div>
 
-            <div class="wz-step" id="wz-step-stagehost" hidden>
-              <h3>2. Stage host <span id="wz-sh-chip"></span></h3>
-              <p class="muted">Optional. The Console and the artifact server share one
-                container, so onboarding stages per-device material locally and never
-                opens an SSH hop to a stage host; this credential is not passed to any
-                installer. Skip this step unless you have a reason to keep a stage-host
-                login on file.</p>
-              <div class="form-mount" id="wz-sh-mount"></div>
-            </div>
-
             <div class="wz-step" id="wz-step-packages" hidden>
-              <h3>3. Device packages <span id="wz-pkg-chip"></span></h3>
+              <h3>2. Device packages <span id="wz-pkg-chip"></span></h3>
               <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
                 C9300 with app-hosting) install a package that pins this server's
                 certificate at build time. If that certificate changes, existing
@@ -727,7 +723,7 @@
             </div>
 
             <div class="wz-step" id="wz-step-imageverification" hidden>
-              <h3>4. Image verification <span id="wz-iv-chip"></span></h3>
+              <h3>3. Image verification <span id="wz-iv-chip"></span></h3>
               <p class="muted">Confirms every staged image's hash against Cisco's
                 Bulk Hash feed before it is trusted. Without at least one successful
                 check, IRIS cannot vouch that a staged image is the genuine,
@@ -749,7 +745,7 @@
           <h2 class="page-title">Settings</h2>
         </div>
         <div id="settings-pane-setup" hidden>
-          <p class="muted">Five things to complete after installing a server.
+          <p class="muted">Four things to complete after installing a server.
             They can be done in any order, and this page keeps reporting their
             state so you can come back and check.</p>
 
@@ -767,14 +763,6 @@
             reports and export health reach the dashboards. Without a
             destination configured, none of it is published anywhere.</p>
           <p class="muted" id="setup-td-note"></p>
-          <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
-          </div>
-
-          <div class="card">
-          <h3>Stage host (optional) <span id="setup-sh-chip"></span></h3>
-          <p class="muted">Not required: onboarding stages per-device material
-            locally inside the server container and never opens an SSH hop to a
-            stage host, so this credential is not passed to any installer.</p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
           </div>
 
@@ -820,25 +808,6 @@
             <span class="err" id="pw-msg" role="alert"></span>
           </form>
           </div>
-          <!-- Card goes AROUND the mount point, never around the template
-               root below -- the template's own content is inert markup
-               until cloned into #sh-mount (mountSettingsForm, app.js), so it
-               stays outside the card entirely. -->
-          <div class="card">
-          <h3>Stage host (optional)</h3>
-          <div class="form-mount" id="sh-mount"></div>
-          </div>
-          <template id="tpl-sh-form">
-          <p class="muted" id="sh-status" role="status" aria-live="polite"></p>
-          <form class="inline-form" id="sh-form">
-            <label class="field" for="sh-user"><span class="field-label">Stage host username</span><input id="sh-user" placeholder="e.g. admin" autocomplete="username"></label>
-            <label class="field" for="sh-pass"><span class="field-label">Stage host password</span><input id="sh-pass" type="password" placeholder="Stage host password" autocomplete="new-password"></label>
-            <label class="field" for="sh-pass2"><span class="field-label">Confirm password</span><input id="sh-pass2" type="password" placeholder="Confirm password" autocomplete="new-password"></label>
-            <button class="btn" type="submit">Save</button>
-            <button class="btn ghost" type="button" id="sh-clear">Clear</button>
-            <span class="err" id="sh-msg" role="alert"></span>
-          </form>
-          </template>
           <div class="card">
           <h3>Sessions</h3>
           <p class="muted" id="sessions-info" role="status" aria-live="polite"></p>
@@ -918,7 +887,9 @@
         </div>
         <div id="settings-pane-telemetry" hidden>
           <!-- Card goes around the mount point, never around the template
-               root below -- same convention as tpl-sh-form above. -->
+               root below -- the template's own content is inert markup
+               until cloned into #td-mount (mountSettingsForm, app.js), so it
+               stays outside the card entirely. -->
           <div class="card">
           <h3>Telemetry destination</h3>
           <div class="form-mount" id="td-mount"></div>

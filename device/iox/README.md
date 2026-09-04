@@ -161,19 +161,31 @@ How the agent hands the downloaded image to IOS depends on the platform:
 - **C9k (share mount, the Console default)**: the app-hosting SSD share
   (`usbflash1:iox_host_data_share`, host-side `/vol/usb1/…`) is bind-mounted
   into the container, so the agent writes the image to the share ROOT as
-  `iris-staged.bin` at disk speed and runs an IOS-internal plain
-  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
-  over the SSH-to-self session — bootflash-root placement like Guest Shell
-  (the real image name comes from the copy; the agent attests placement by
-  dir presence and catalog byte size, and content integrity by its own
-  sha256 against the catalog), no image bytes on the CoPP-policed punt path.
-  IRIS uses only `iris-` prefixed filenames at the share root
+  `iris-staged.bin` at disk speed and places it at the bootflash root over
+  the SSH-to-self session with the same crash-safe, two-phase sequence
+  Guest Shell uses (see below) — no image bytes on the CoPP-policed punt
+  path. IRIS uses only `iris-` prefixed filenames at the share root
   (container-created subdirs lock the container out on this platform).
   Before the multi-GB copy the agent probes that IOS can actually read the
   share and otherwise falls back to the scp push below; the transient share
-  copy is removed after placement.
+  copy is removed after a verified placement.
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
-  SCP server (`ip scp server enable`, set by `install.sh`), then runs
-  `copy <target>guest-share/iris/<img> <target><img>` and confirms the
-  destination appears before reporting `ready`.
+  SCP server (`ip scp server enable`, set by `install.sh`), then places it at
+  the target-FS root with the same two-phase sequence.
+
+Both container paths place the image by running plain `copy`/`rename`
+commands DIRECTLY over the SSH-to-self vty rather than through the
+IRIS-COPYROOT EEM applet Guest Shell uses (`cli_ssh` drives `copy` to
+completion; EEM's `cli command "copy …"` is a no-op on this platform). The
+sequence itself is identical: `copy` first lands the bytes at a reserved
+temp name (`<img>.iris-tmp`), never at `<img>` directly — a copy failure or
+a power loss leaves `<img>` (an older copy, or the file the `BOOT` variable
+currently names) untouched — the agent reverifies the temp copy by dir
+presence and exact catalog byte size, and only once that passes does a
+single `rename` put it at `<img>` (a directory-entry update, not a data
+transfer). The agent attests the final placement the same way: dir presence
+and catalog byte size, plus its own sha256 against the catalog for content
+integrity. See [Crash-safe same-name
+replacement](../../docs/zensical/device-agents.md#crash-safe-same-name-replacement)
+for the full contract, shared with the Guest Shell path.

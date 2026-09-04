@@ -2,30 +2,43 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mixed-workload capacity harness (issue #55).
+"""Mixed-workload capacity harness (issue #55; extended for issue #125).
 
 #51/#52/#53/#56/#58 (see ``test_keyed_state_scaling.py``) and the console
 paging work each measured ONE operation, by hand, with a throwaway script,
 against a single fleet size. Nothing repeatable was left behind, so nothing
 catches a future change that quietly gives the win back. This module is that
 repeatable harness: it seeds a synthetic fleet of N devices in a fresh
-temporary directory, drives the same six operations a real fleet drives
+temporary directory, drives the same operations a real fleet drives
 concurrently -- a tracker announce, a catalog heartbeat, a device policy
-read, a terminal report, a credential resolution, and the console's own
-fleet projection -- and reports, per operation, how the cost moves as N goes
-from 100 to 1,000 to 10,000. A single number at one size proves nothing about
-growth; the growth factor across a hundredfold fleet is the thing that would
-catch a regression.
+read, a terminal report, a credential resolution, a fleet-wide bulk
+credential reassignment, and the console's own fleet projection -- and
+reports, per operation, how the cost moves as N goes from 100 to 1,000 to
+10,000. A single number at one size proves nothing about growth; the growth
+factor across a hundredfold fleet is the thing that would catch a
+regression.
+
+This module itself is what found issue #125: ``gui_fleet.FleetStore`` was
+the one per-device store the #51-#58 shard migration missed, still doing a
+whole-fleet read-modify-write under one lock -- reachable at fleet scale
+through the console's own "Select all N matching devices" bulk credential
+action, one HTTP request per selected device against a route that called
+it. ``_measure_bulk_reassignment`` below is that fix's own regression
+coverage: FleetStore is sharded now (this harness's ``_seed_fleet`` seeds
+its shards directly, like every other store here), and
+``FleetStore.bulk_upsert`` collapses the console's N per-device requests
+into one call that groups the underlying writes by shard.
 
 **What this measures, and how.** Every write/read below calls the exact
 production function the real hot path calls (``peer_endpoints
 .record_endpoint``, ``catalog.CatalogStore.record_heartbeat`` /
 ``device_policy_view`` / ``record_telemetry``, ``credential_cache
-.CredentialResolver.view``) against synthetic state shaped like the real
-thing. The console projection goes one step further and drives the real
-``gui_server`` HTTP handler end to end (bind, login, ``GET /api/devices``
-paged and unpaged) rather than re-deriving the merge logic here, so a change
-to that handler's shape shows up the same way it would in production.
+.CredentialResolver.view``, ``gui_fleet.FleetStore.upsert`` /
+``bulk_upsert``) against synthetic state shaped like the real thing. The
+console projection goes one step further and drives the real ``gui_server``
+HTTP handler end to end (bind, login, ``GET /api/devices`` paged and
+unpaged) rather than re-deriving the merge logic here, so a change to that
+handler's shape shows up the same way it would in production.
 
 **What this does NOT measure.** No concurrency (operations run one at a
 time, sequentially, from a single thread/process -- a real fleet hammers the
@@ -208,22 +221,22 @@ def _seed_secrets(path, n):
 
 
 def _seed_fleet(path, n):
-    """fleet.json directly. FleetStore has no per-device shards (issue #55
-    does not extend the keyed-state migration to it, and its whole-fleet cost
-    is unrelated to what this harness demonstrates); ``upsert()`` per device
-    would be an O(fleet) rewrite per call, which would make SEEDING dominate
-    the harness's own runtime at 10,000 devices."""
-    devices = {}
-    for i in range(n):
-        did = _device_id(i)
-        devices[did] = {
-            "device_id": did,
+    """FleetStore's fleet.d/ shards directly, exactly like every other
+    keyed store here is seeded (issue #125 sharded it the same way
+    devices.json/policy.json/etc. already were, see gui_fleet.py) --
+    ``upsert()`` per device would still be O(1) now, but paying it 10,000
+    times just to build a fixture would make SEEDING dominate the harness's
+    own runtime, which is not what is under test here. This intentionally
+    bypasses the legacy fleet.json document/migration path entirely, the
+    same way _seed_shards below bypasses KeyedState for every other store:
+    seeding measures steady state, not the one-shot migration."""
+    _seed_shards(path, {
+        _device_id(i): {
+            "device_id": _device_id(i),
             "device_ip": "10.%d.%d.%d" % (1, (i // 256) % 256, i % 256),
             "model": "C9300", "platform": "guestshell",
             "management_type": "legacy_routed", "registered_at": 1000,
-        }
-    with open(path, "w") as f:
-        json.dump({"revision": n, "devices": devices}, f)
+        } for i in range(n)})
 
 
 def _sample_indices(n, sample):
@@ -363,6 +376,71 @@ def _measure_credential_resolve(secrets_path, indices):
     return {"times": times, "index_builds": len(builds)}
 
 
+def _measure_bulk_reassignment(fleet, indices, all_ids):
+    """Issue #125: a fleet-wide credential/platform reassignment through the
+    console's "Select all N matching devices" bulk action, before and after.
+
+    'Before' is what the OLD single-device route still does per selected
+    device -- one fleet.upsert() call, one shard lock/read/write cycle. Its
+    O(1)-per-call property is already proven elsewhere in this file (the
+    same pattern _measure_heartbeat/_measure_announce use); what matters
+    here is that N of THOSE calls cost N shard writes, counted directly
+    over a SAMPLE (running the real thing 10,000 times just to re-prove a
+    per-call constant already established would make this measurement
+    dominate the harness, not what is under test).
+
+    'After' is ONE FleetStore.bulk_upsert() call across the WHOLE selected
+    set (*all_ids* -- the "select all" case, not a sample): grouped by
+    shard, so the shard WRITE COUNT is bounded by min(len(all_ids),
+    keyed_state.SHARD_COUNT) -- not by len(all_ids) -- however large the
+    selection. That bound, not a wall-clock number, is the proof: doing
+    the same reassignment as N single-device calls would cost N shard
+    writes (most of the store's ~256 shards rewritten many times over at
+    fleet scale); bulk_upsert costs at most SHARD_COUNT, each exactly
+    once."""
+    real_write = keyed_state.KeyedState._write_shard
+
+    def counting(writes):
+        def wrapped(self, bucket, rows):
+            writes.append(bucket)
+            return real_write(self, bucket, rows)
+        return wrapped
+
+    before_writes = []
+    keyed_state.KeyedState._write_shard = counting(before_writes)
+    t0 = time.perf_counter()
+    try:
+        for i in indices:
+            fleet.upsert({"device_id": _device_id(i),
+                          "credential_profile_id": "lab-before"})
+    finally:
+        keyed_state.KeyedState._write_shard = real_write
+    before_seconds = time.perf_counter() - t0
+
+    after_writes = []
+    keyed_state.KeyedState._write_shard = counting(after_writes)
+    t0 = time.perf_counter()
+    try:
+        results = fleet.bulk_upsert(all_ids, {"credential_profile_id": "lab-after"})
+    finally:
+        keyed_state.KeyedState._write_shard = real_write
+    after_seconds = time.perf_counter() - t0
+
+    assert all(outcome["ok"] for outcome in results.values()), \
+        [k for k, v in results.items() if not v["ok"]][:5]
+    assert len(results) == len(all_ids)
+    distinct_buckets = {keyed_state.bucket_of(did) for did in all_ids}
+    return {
+        "before_calls": len(indices),
+        "before_write_calls": len(before_writes),   # == before_calls, one each
+        "before_seconds": before_seconds,
+        "after_devices": len(all_ids),
+        "after_write_calls": len(after_writes),      # == distinct shard buckets
+        "after_distinct_buckets": len(distinct_buckets),
+        "after_seconds": after_seconds,
+    }
+
+
 def _console_login(host, port):
     c = http.client.HTTPConnection(host, port, timeout=_HTTP_TIMEOUT)
     body = json.dumps({"username": "admin", "password": "pw"}).encode()
@@ -448,6 +526,12 @@ def _run_one_size(n, sample, page_limit, seed=0):
             "policy_read": _measure_policy_read(cat, indices),
             "report_persist": _measure_report_persist(cat, indices, seed),
             "credential_resolve": _measure_credential_resolve(secrets_path, indices),
+            # issue #125: measured LAST -- it is the only measurement that
+            # touches every device in the fleet (the "select all" bulk
+            # case), so it runs after every other store's own measurement
+            # rather than before it.
+            "bulk_reassignment": _measure_bulk_reassignment(
+                fleet, indices, [_device_id(i) for i in range(n)]),
             "console": _measure_console_projection(state_dir, fleet, cat, page_limit),
         }
 
@@ -510,6 +594,38 @@ def format_report(report, sizes):
     lines.append("fleet size grew %.0fx (%d -> %d); an O(1)-per-device "
                  "operation should stay near 1x, not track the fleet."
                  % (fleet_growth, sizes[0], sizes[-1]))
+
+    lines.append("")
+    lines.append("issue #125: reassigning ALL selected devices' credential "
+                 "-- old way (N single-device calls, each proven ONE shard "
+                 "write/call below by sampling -- so N calls is N writes, "
+                 "extrapolated here to the full selection) vs. bulk_upsert "
+                 "(one call, grouped by shard)")
+    header = "%-22s" % "devices selected"
+    for n in sizes:
+        header += "%16s" % ("%d devices" % n)
+    lines.append(header)
+    row = "%-22s" % "old: shard writes*"
+    for n in sizes:
+        row += "%16d" % report[n]["n"]      # one write per device, always
+    lines.append(row)
+    row = "%-22s" % "bulk: shard writes"
+    for n in sizes:
+        row += "%16d" % report[n]["bulk_reassignment"]["after_write_calls"]
+    lines.append(row)
+    row = "%-22s" % "reduction"
+    for n in sizes:
+        after = report[n]["bulk_reassignment"]["after_write_calls"]
+        row += "%15.1fx" % (report[n]["n"] / float(after) if after else float("inf"))
+    lines.append(row)
+    lines.append("(median wall-clock, informational only: old %s -> bulk %s)"
+                 % (", ".join("%.2fms/call" % (
+                        1000.0 * report[n]["bulk_reassignment"]["before_seconds"]
+                        / max(1, report[n]["bulk_reassignment"]["before_calls"]))
+                        for n in sizes),
+                    ", ".join("%.2fms total" % (
+                        1000.0 * report[n]["bulk_reassignment"]["after_seconds"])
+                        for n in sizes)))
     return "\n".join(lines)
 
 
@@ -544,6 +660,20 @@ def test_capacity_harness_per_device_cost_is_flat_across_a_tenfold_fleet():
     assert small["credential_resolve"]["index_builds"] == 1
     assert large["credential_resolve"]["index_builds"] == 1
 
+    # issue #125: bulk_upsert's shard-write count is bounded by SHARD_COUNT
+    # regardless of how many devices are selected, where N single-device
+    # upsert() calls (still O(1) each post-#125, proven below) cost exactly
+    # N shard writes -- doing a "select all" reassignment the OLD, one-
+    # request-per-device way costs N writes; the bulk call costs at most
+    # SHARD_COUNT, however large N is.
+    for size_report in (small, large):
+        br = size_report["bulk_reassignment"]
+        assert br["before_write_calls"] == br["before_calls"], br
+        assert br["after_write_calls"] == br["after_distinct_buckets"], br
+        assert br["after_write_calls"] <= keyed_state.SHARD_COUNT, br
+        assert br["after_devices"] == size_report["n"], br
+    assert large["bulk_reassignment"]["after_write_calls"] < large["n"]
+
     # Console projection: a page stays the same shape regardless of fleet
     # size; the unpaged projection IS the whole fleet and must grow with it.
     paged_growth = (large["console"]["paged_bytes"]
@@ -576,6 +706,17 @@ def test_capacity_harness_ten_thousand_device_report(capsys):
     paged_growth = (large["console"]["paged_bytes"]
                     / small["console"]["paged_bytes"])
     assert paged_growth < 1.3, paged_growth
+
+    # issue #125's headline number, at full scale: reassigning ALL 10,000
+    # selected devices costs at most SHARD_COUNT (256) shard writes via
+    # bulk_upsert -- not the 10,000 a caller doing it as one upsert() per
+    # device (the console's pre-#125 bulk action) would cost.
+    br = large["bulk_reassignment"]
+    assert br["before_write_calls"] == br["before_calls"], br
+    assert br["after_write_calls"] == br["after_distinct_buckets"], br
+    assert br["after_write_calls"] <= keyed_state.SHARD_COUNT, br
+    assert br["after_devices"] == LARGE_SIZES[-1], br
+    assert br["after_write_calls"] < br["after_devices"] / 10, br
 
 
 if __name__ == "__main__":

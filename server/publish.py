@@ -307,7 +307,15 @@ def publish(image_path, store, tracker_url, image_id=None,
         "size": size,
         "sha256": sha,
         "sha512": sha512,
-        "cisco_signature_verified": bool(signature_verified),
+        # The OPERATOR's own attestation (--signature-verified), durable and
+        # distinct from cisco_signature_verified -- the Cisco Bulk Hash
+        # reconciler's OWN verdict field (catalog.py's apply_hash_verification/
+        # release_quarantine; never written here). IRIS-03-009/#88: the two
+        # used to share one field, so the reconciler's first run silently
+        # clobbered the operator's mark. Never write cisco_signature_verified
+        # from this module again -- see catalog.py's apply_hash_verification
+        # docstring for why it is the reconciler's exclusively.
+        "operator_attested_signature": bool(signature_verified),
         "info_hash_hex": info_hash,
         "published_at": int(time.time()),
     }
@@ -331,10 +339,12 @@ def main(argv=None):
     ap.add_argument("image", help="path to the .bin image")
     ap.add_argument("--id", dest="image_id", default=None)
     ap.add_argument("--signature-verified", action="store_true",
-                    help="record that the Cisco signature was verified elsewhere "
-                         "(advisory: the next Cisco Bulk Hash reconciliation "
-                         "run overwrites cisco_signature_verified with its own "
-                         "verdict)")
+                    help="record the operator's own attestation that the Cisco "
+                         "signature was verified elsewhere, as "
+                         "operator_attested_signature -- stored separately from "
+                         "cisco_signature_verified, the Cisco Bulk Hash "
+                         "reconciler's own verdict field, so a later "
+                         "reconciliation run never overwrites this mark")
     ap.add_argument("--state", default=os.environ.get(
         "IRIS_STATE", "/var/lib/iris"))
     ap.add_argument("--tracker-url", default=os.environ.get(

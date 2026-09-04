@@ -20,9 +20,10 @@ address plus bidirectional device-to-device BitTorrent traffic.
 
 The Console and artifact server share the same container, so Console
 onboarding always stages per-device configuration locally: there is no
-Console-to-stage-host SSH hop, and the optional stage-host credential in
-Settings is not passed to any installer. (A port-22 hop to a remote stage host
-exists only for a manual `device/device-install.sh` run from another machine.)
+Console-to-stage-host SSH hop. (A port-22 hop to a remote stage host exists
+only for a manual `device/device-install.sh` run from another machine, with
+`HOST_USER`/`HOST_PASS` supplied directly on that machine — the Console has
+no UI for it.)
 
 ## Steady-state operation
 

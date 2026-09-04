@@ -1196,6 +1196,14 @@ class CatalogStore:
     # mismatch can START a quarantine; release_quarantine() is the only
     # place one can END. set_policy() (above) is the single enforcement
     # point for "a quarantined image may never be assigned".
+    #
+    # cisco_signature_verified is this subsystem's OWN verdict field --
+    # neither method here may ever read or write publish.py's
+    # operator_attested_signature (the operator's own `iris-publish
+    # --signature-verified` attestation). IRIS-03-009/#88: the two used to
+    # share one field, so an operator's mark was silently overwritten by the
+    # very next reconciler run. They are now separate and both durable; keep
+    # them that way.
 
     def _audit_event(self, **kwargs):
         """Best-effort audit emit for the quarantine path. self.audit_path

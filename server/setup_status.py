@@ -404,11 +404,11 @@ def _image_verification_status(last_run):
 
 
 def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
-                 admin_username, stage_host,
+                 admin_username,
                  telemetry_override_endpoint=None, telemetry_override_enabled=None,
                  telemetry_env_endpoint="", telemetry_env_enabled=False,
                  image_verification_last_run=None):
-    """Assemble the five-card setup status. Pure: all inputs are supplied."""
+    """Assemble the four-card setup status. Pure: all inputs are supplied."""
     reference = read_pem_fingerprint(served_cert_path)
     distributed = read_pem_fingerprint(distributed_cert_path)
     # A disagreement here is worse than a stale package: every NEW onboard is
@@ -461,7 +461,6 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         packages["state"] = "unknown"
         packages["reason"] = "served-vs-distributed-mismatch"
 
-    stage_host = stage_host or {"configured": False, "username": ""}
     return {
         "admin": {
             "state": "ok" if admin_username else "unknown",
@@ -470,16 +469,6 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         "telemetry": _telemetry_status(
             telemetry_override_endpoint, telemetry_override_enabled,
             telemetry_env_endpoint, telemetry_env_enabled),
-        "stage_host": {
-            "state": "ok" if stage_host.get("configured") else "unset",
-            "username": stage_host.get("username", ""),
-            # Never required: console onboarding always stages per-device
-            # material locally (gui_onboard._build_env exports
-            # IRIS_STAGE_LOCAL=1), so no recipe reaches the ssh branch that
-            # would read this credential. The wizard must not hold setup
-            # open on it.
-            "required": False,
-        },
         "packages": packages,
         "image_verification": _image_verification_status(image_verification_last_run),
     }

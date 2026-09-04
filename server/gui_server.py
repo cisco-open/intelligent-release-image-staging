@@ -36,9 +36,11 @@ import catalog as catalog_mod
 import deployment_records
 import gui_app
 import gui_auth
+import gui_fleet
 import gui_onboard
 import gui_tls
 import live_samples
+import peer_endpoints
 import peer_policy
 import peer_enforcement
 import secretfs
@@ -114,6 +116,12 @@ _SSE_IDLE = 600   # close an onboard log stream after this long with NO progress
                   # behind the onboard pool legitimately waits >10 min)
 _SSE_KEEPALIVE = 15  # comment-frame interval so proxies don't reap a quiet stream
 _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing, held in memory)
+# A device_ids array at the supported fleet size (peer_endpoints.
+# SUPPORTED_DEVICES, 10,000 ids up to 64 chars each -- see gui_fleet._ID_RE)
+# plus a small field patch comfortably fits well under 64 KiB * 10; generous
+# headroom over the ~700 KB worst case without approaching _MAX_CSV's size
+# (this body is an id LIST, not per-device CSV rows).
+_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — /api/devices/bulk-credential
 # How long a client gets to complete the TLS handshake once its connection
 # has been handed to a worker thread (see _ConsoleServer). Generous for a
 # browser on an operator network; bounded so a connection that never sends
@@ -271,20 +279,31 @@ def _refresh_http_status(result):
 
 def _image_view(entry):
     """Console/API-safe projection of one catalog image entry (KGV
-    reconciler Task 4): every field the entry already carries, PLUS a
-    guaranteed-present top-level `quarantined` bool and `hash_verification`
-    verdict (both default to falsy/None for an image the reconciler has
-    never touched -- apply_hash_verification()/release_quarantine() only
-    ever set them, never pre-seed them), MINUS the two fields that exist
+    reconciler Task 4): every field the entry already carries, PLUS
+    guaranteed-present top-level `quarantined`, `cisco_signature_verified`,
+    and `operator_attested_signature` bools and a `hash_verification`
+    verdict (all default to falsy/None for an image the reconciler -- or,
+    for operator_attested_signature, the publishing operator -- has never
+    touched; apply_hash_verification()/release_quarantine() only ever set
+    the first three, never pre-seed them), MINUS the two fields that exist
     purely for catalog.py's own internal bookkeeping
     (quarantine_actions_complete -- convergence-retry state;
     quarantine_override_sha512 -- the re-quarantine-suppression ack) and
-    were never meant to be wire-visible."""
+    were never meant to be wire-visible.
+
+    cisco_signature_verified (the Cisco Bulk Hash reconciler's own verdict)
+    and operator_attested_signature (the operator's `iris-publish
+    --signature-verified` attestation, from publish.py) are DISTINCT fields
+    that must never be conflated here or anywhere downstream -- IRIS-03-009/
+    #88: they used to share one field, so the reconciler's first run
+    silently overwrote the operator's mark."""
     view = {k: v for k, v in entry.items()
            if k not in ("quarantine_actions_complete",
                         "quarantine_override_sha512")}
     view["quarantined"] = bool(entry.get("quarantined"))
     view["hash_verification"] = entry.get("hash_verification")
+    view["cisco_signature_verified"] = bool(entry.get("cisco_signature_verified"))
+    view["operator_attested_signature"] = bool(entry.get("operator_attested_signature"))
     return view
 
 
@@ -995,6 +1014,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 except OSError:
                     pass
                 self.close_connection = True
+            except gui_fleet.FleetStateError as exc:
+                # The fleet inventory (fleet.json / fleet.d/ shards /
+                # fleet-revision.json) is present but unreadable. Identical
+                # fail-closed contract to the catalog case just above --
+                # gui_fleet.FleetStore's own read paths (get_device,
+                # list_devices, snapshot) now fail closed the same way its
+                # write paths always have, so this is the one place that
+                # failure surfaces as a clean answer instead of a dropped
+                # connection.
+                print("iris-gui: %s" % exc, file=sys.stderr, flush=True)
+                try:
+                    self._json(503, {"error": "state unavailable; "
+                                              "see the server log"})
+                except OSError:
+                    pass
+                self.close_connection = True
 
         def _cookie_attrs(self):
             """Session-cookie attributes. Secure only when this listener
@@ -1089,6 +1124,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     "iris_vlan": device.get("iris_vlan", device.get("vlan", "")),
                     "svi_ip": device.get("svi_ip", ""),
                     "svi_mask": device.get("svi_mask", ""),
+                    # Per-device override of the SVI_IGP env var (issue #85).
+                    # Only meaningful for management_type routed (the only
+                    # type that creates an SVI); gui_fleet.validate_record
+                    # already refuses a non-blank value on every other type,
+                    # so device.get here is always "" for those.
+                    "svi_igp": device.get("svi_igp", ""),
                     "app_ip": device.get("app_ip", device.get("guest_ip", "")),
                     "app_mask": device.get("app_mask", device.get("svi_mask", "")),
                     "app_gateway": device.get("app_gateway", device.get("svi_ip", "")),
@@ -1798,7 +1839,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT),
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
-                    creds.get_stage_host() if creds is not None else None,
                     *_telemetry_status_args(),
                     image_verification_last_run=_image_verification_last_run()))
                 return
@@ -2299,10 +2339,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 },
                 "sessions": {"active": app.active_sessions(),
                              "idle_ttl_minutes": app.idle_ttl_minutes()},
-                # redacted (configured + username only) — the password stays
-                # server-side in the age-encrypted store
-                "stage_host": (creds.get_stage_host() if creds is not None
-                               else {"configured": False, "username": ""}),
                 # settings file verbatim (it holds no secret) + password_set —
                 # the SCP password itself never leaves the encrypted store
                 "audit_export": dict(
@@ -2585,7 +2621,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # rather than held whole in memory.
                 self._handle_offline_refresh(length)
                 return
-            cap = _MAX_CSV if path == "/api/devices/import-csv" else _MAX_BODY
+            if path == "/api/devices/import-csv":
+                cap = _MAX_CSV
+            elif path == "/api/devices/bulk-credential":
+                cap = _MAX_BULK_DEVICE_IDS
+            else:
+                cap = _MAX_BODY
             if length > cap:
                 self._json(413, {"error": "payload too large"})
                 return
@@ -2786,25 +2827,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            detail="revoked %d other session(s)" % revoked,
                            src_ip=self.client_address[0])
                 self._json(200, {"revoked": revoked}); return
-            if path == "/api/settings/stage-host":
-                if creds is None:
-                    self._json(404, {"error": "not found"}); return
-                data = self._json_body(raw)
-                if data is None:
-                    return
-                user = data.get("username", ""); pw = data.get("password", "")
-                if not isinstance(user, str) or not isinstance(pw, str):
-                    self._json(400, {"error": "username and password must be strings"}); return
-                prev = creds.get_stage_host()  # redacted: configured + username only
-                try:
-                    saved = creds.set_stage_host(user, pw)
-                except ValueError as exc:
-                    self._json(400, {"error": str(exc)}); return
-                self._audit("stage_host_set", "settings", action="set",
-                           target="stage-host", actor=actor,
-                           detail="user %s -> %s"
-                                  % (prev["username"] or "(none)", user))
-                self._json(200, {"stage_host": saved}); return
             if path == "/api/settings/audit-export/run":
                 # exact match before the bare config route below
                 if creds is None:
@@ -2877,8 +2899,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                target="audit-export", actor=actor, result="fail",
                                detail="persist failed: %s" % exc.__class__.__name__)
                     self._json(500, {"error": "settings save failed"}); return
-                # destination coordinates are non-secret (stage-host
-                # precedent); the password only ever audits as a flag
+                # destination coordinates are non-secret; the password only
+                # ever audits as a flag
                 self._audit("audit_export_config", "settings", action="set",
                            target="audit-export", actor=actor,
                            detail="dest %s -> %s@%s:%s port %d, auto %s, "
@@ -2987,7 +3009,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                detail="persist failed: %s" % exc.__class__.__name__)
                     self._json(500, {"error": "settings save failed"}); return
                 # endpoint URLs are non-secret (headers stay env-only), so a
-                # before -> after detail is safe — stage-host precedent.
+                # before -> after detail is safe.
                 self._audit("telemetry-destination-set", "telemetry",
                            action="set", target="otlp-endpoint", actor=actor,
                            detail="endpoint %s -> %s, enabled %s -> %s"
@@ -3250,6 +3272,65 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (stats["imported"], stats["new"],
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
+            if path == "/api/devices/bulk-credential":
+                # issue #125: the console's "Select all N matching devices"
+                # bulk action used to fire one /api/devices/<id>/credential
+                # request per selected device (still true for platform,
+                # which has no bulk UI action yet) -- each one locking and
+                # rewriting the WHOLE fleet document. FleetStore is sharded
+                # now (see gui_fleet.py / keyed_state.py), which already
+                # makes each of those O(1); this collapses the N *requests*
+                # too, and lets FleetStore.bulk_upsert group the underlying
+                # writes by shard instead of touching the same ~256 shards
+                # once per device landing in them. Keeps every property the
+                # single-device route has: session+CSRF (do_POST, above),
+                # the credential-profile-exists check, compare-and-set per
+                # device (bulk_upsert reads each device's CURRENT row from
+                # within its own shard lock, exactly like upsert()), a
+                # named audit record, and -- the one property N separate
+                # requests gave for free and a single request has to
+                # provide explicitly -- partial-failure reporting naming
+                # exactly which ids did not apply and why.
+                if fleet is None:
+                    self._json(404, {"error": "not found"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                ids = body.get("device_ids")
+                if not isinstance(ids, list) or not ids or \
+                        not all(isinstance(i, str) and i for i in ids):
+                    self._json(400, {"error": "device_ids must be a "
+                                              "non-empty array of strings"})
+                    return
+                if len(ids) > peer_endpoints.SUPPORTED_DEVICES:
+                    self._json(400, {"error": "device_ids exceeds the "
+                                              "supported fleet size (%d)"
+                                              % peer_endpoints.SUPPORTED_DEVICES})
+                    return
+                pid = str(body.get("credential_profile_id", ""))
+                if pid and (creds is None or creds.get_secrets(pid) is None):
+                    self._json(400, {"error": "no such credential profile"}); return
+                try:
+                    results = fleet.bulk_upsert(
+                        ids, {"credential_profile_id": pid})
+                except (ValueError, KeyError) as exc:
+                    self._json(400, {"error": str(exc)}); return
+                failed = {did: outcome["error"] for did, outcome in results.items()
+                         if not outcome["ok"]}
+                applied = len(results) - len(failed)
+                detail = "credential profile -> %s across %d/%d device(s)" % (
+                    pid or "(cleared)", applied, len(ids))
+                if failed:
+                    named = sorted(failed.items())
+                    detail += "; refused: " + ", ".join(
+                        "%s (%s)" % (k, v) for k, v in named[:10])
+                    if len(named) > 10:
+                        detail += " (+%d more)" % (len(named) - 10)
+                self._audit("device_credential_bulk_change", "device",
+                           action="credential", actor=actor, detail=detail,
+                           result="ok" if applied else "fail")
+                self._json(200, {"ok": True, "applied": applied,
+                                 "failed": failed}); return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
                 did = unquote(path[len("/api/devices/"):-len("/assign")])
                 if not did.strip():
@@ -3865,14 +3946,6 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if info is None:
                 return
             actor = "console:" + info["username"]
-            if path == "/api/settings/stage-host" and creds is not None:
-                prev = creds.get_stage_host()  # redacted: username only
-                deleted = creds.clear_stage_host()
-                self._audit("stage_host_clear", "settings", action="clear",
-                           target="stage-host", actor=actor,
-                           detail=("cleared (was user %s)" % prev["username"])
-                                  if deleted else "nothing was configured")
-                self._json(200, {"deleted": deleted}); return
             if path == "/api/settings/audit-export" and creds is not None:
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))

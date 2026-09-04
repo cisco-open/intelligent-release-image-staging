@@ -27,24 +27,19 @@ docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 
 ### Finishing setup
 
-Creating the admin is the first of five things a new server needs. The sign-in
+Creating the admin is the first of four things a new server needs. The sign-in
 straight after it lands on the **setup flow** (`#setup`) — a real Magnetic
 Stepper, not a linking checklist: a step panel on the left, the active step's
-own controls on the right — which walks the other four in order:
+own controls on the right — which walks the other three in order:
 
 1. **Telemetry destination** — where swarm progress, device reports and export
    health are published. Already satisfied if the deployment environment sets
    `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
    shows as done rather than being hidden.
-2. **Stage host** — optional, and never required to onboard. The Console and
-   the artifact server share one container, so onboarding stages per-device
-   material locally and never opens an SSH hop to a stage host; the
-   credential stored here is not passed to any installer. The step reports
-   `required: false` and the wizard does not hold setup open on it.
-3. **Device packages** — whether each served IOx package still pins the
+2. **Device packages** — whether each served IOx package still pins the
    certificate this server hands to devices, plus the IOS-XR agent RPM
    (`iris-xr.rpm`), checked differently — see below.
-4. **Image verification** — the Cisco Bulk Hash source check against every
+3. **Image verification** — the Cisco Bulk Hash source check against every
    staged image. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
    the offline feed-file import. These are the same controls Settings ›
@@ -70,10 +65,24 @@ the session rather than permanently, because a package that goes stale later is
 a silent failure with no other symptom, and a banner dismissed for good would
 hide precisely the case this exists to catch.
 
-Settings › Setup keeps reporting the same five states afterwards, for checking
+Settings › Setup keeps reporting the same four states afterwards, for checking
 a server long after it was installed — including a schedule for image
 verification that is configured but has not yet produced a successful run,
 worded distinctly from one never configured at all.
+
+### Branding
+
+The console's headings render in Cisco's Sharp Sans Bold typeface where it is
+available, and in the browser's default sans-serif font otherwise
+(`font-display: swap`) — a cosmetic difference only, never a functional one.
+The `.woff2` file is excluded from the Docker build context and the release
+tarball (`.dockerignore`): Cisco's license for it does not permit
+redistribution, so it can never ship inside the image. A deployment that
+independently holds the license restores it at runtime, without ever
+touching the image, by bind-mounting the file over Compose's
+`IRIS_SHARP_SANS_FONT_HOST` variable — see [Reference](reference.md) —
+before `docker compose up`. Left unset, the console looks identical apart
+from the fallback font.
 
 ## Console areas
 
@@ -457,20 +466,19 @@ tab strip. Each sub-page is deep-linkable: `#settings/setup`,
 
 ### Setup
 
-The **Setup** sub-page (`#settings/setup`) is a post-install status panel: five
-cards — **admin account**, **telemetry destination**, **stage-host
-credentials**, **device packages**, and **image verification** — each
-carrying a live status chip and a short rationale, meant to be revisited any
-time after installing a server rather than completed in one sitting. The
-admin card links to Settings › General; the telemetry, stage-host, and image
-verification cards all open the setup flow (`#setup`), which hosts those
-controls as steps 1, 2, and 4. The telemetry card also names the endpoint in
-effect and whether it is a console override or the deployment default. Every
-card's status is one of `ok`, `unset`, `stale`, `absent`, or `unknown` (the
-stage-host card also carries `required: false` and is shown as optional), plus
-a sixth reading unique to image verification — a schedule that is configured
-but has not yet produced a successful run, worded distinctly ("Configured —
-no successful run yet") from one never configured at all. `absent` and
+The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
+cards — **admin account**, **telemetry destination**, **device packages**, and
+**image verification** — each carrying a live status chip and a short
+rationale, meant to be revisited any time after installing a server rather
+than completed in one sitting. The admin card links to Settings › General; the
+telemetry and image verification cards both open the setup flow (`#setup`),
+which hosts those controls as steps 1 and 3. The telemetry card also names the
+endpoint in effect and whether it is a console override or the deployment
+default. Every card's status is one of `ok`, `unset`, `stale`, `absent`, or
+`unknown`, plus a sixth reading unique to image verification — a schedule
+that is configured but has not yet produced a successful run, worded
+distinctly ("Configured — no successful run yet") from one never configured
+at all. `absent` and
 `unknown` both mean the server could not determine the state; a failed or
 malformed status fetch shows every chip as `unknown` rather than leaving a
 previous, possibly stale, render on screen. Neither is ever presented as

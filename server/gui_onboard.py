@@ -1176,6 +1176,16 @@ class OnboardService:
         })
         if target.get("model"):
             env["MODEL"] = target["model"]
+        # Per-device override of device-install.sh's SVI_IGP (issue #85): the
+        # record already validated this to the closed 'none'/'isis' enum
+        # (gui_fleet.validate_record) before it could ever reach here. A
+        # blank record value must NOT be exported at all -- env already
+        # carries whatever SVI_IGP the server process itself was started
+        # with (env = dict(os.environ) above), and that process-wide value
+        # stays the fallback default for a device whose own record says
+        # nothing, exactly as it behaved before this field existed.
+        if target.get("svi_igp"):
+            env["SVI_IGP"] = target["svi_igp"]
         # IRIS_STAGE_LOCAL=1 above makes the recipes' remote-STAGE_HOST ssh
         # branch -- the only reader of HOST_USER/HOST_PASS -- unreachable, so
         # the stage-host credential from the store is never exported here and

@@ -27,6 +27,11 @@
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
+#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/iox/entrypoint.sh);
+#     off by default for flash write endurance. Forwarded verbatim as an
+#     -e run-opts value so the container actually sees an operator's opt-in --
+#     previously this script dropped it silently and the entrypoint's own
+#     default always won.
 #   INSTALL_TIMEOUT=300  ACTIVATE_TIMEOUT=300  START_TIMEOUT=300  STATE_POLL=5
 #     (seconds; the app-hosting lifecycle polls -- see the note by their
 #     defaults below)
@@ -84,6 +89,10 @@ DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
+# Same fail-closed default as device/iox/entrypoint.sh's own IRIS_LOG parsing
+# -- this is only the plumbing that lets an operator's opt-in actually reach
+# it; the default stays off either way.
+IRIS_LOG="${IRIS_LOG:-off}"
 # App-hosting lifecycle poll budgets, in seconds. The FIRST install of a new
 # package version is far slower than a repeat install of the same one: the IOx
 # runtime has to load the package's docker layers into its image cache before
@@ -145,6 +154,9 @@ _no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN" no-whitespace
 _no_quotes_or_newlines CATALOG_URL "$CATALOG_URL" no-whitespace
 _no_quotes_or_newlines DEVICE_ID "$DEVICE_ID" no-whitespace
 _no_quotes_or_newlines DEVICE_SSH_USER "$DEVICE_SSH_USER" no-whitespace
+# IRIS_LOG rides the same quoted run-opts value as everything else above;
+# reuse the one guard rather than trusting a bare on/off-shaped value.
+_no_quotes_or_newlines IRIS_LOG "$IRIS_LOG" no-whitespace
 APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
@@ -258,12 +270,13 @@ app-hosting appid $APPID
   run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
   run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
   run-opts 9 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
+  run-opts 10 "-e IRIS_LOG=$IRIS_LOG"
 EOF
 if [ -n "$SHARE_HOST_PATH" ]; then
 cat <<EOF
-  run-opts 10 "-e IRIS_SHARE_DIR=/mnt/share"
-  run-opts 11 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
-  run-opts 12 "-v $SHARE_HOST_PATH:/mnt/share"
+  run-opts 11 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 12 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 13 "-v $SHARE_HOST_PATH:/mnt/share"
 EOF
 fi
 echo "end"

@@ -465,3 +465,123 @@ def test_migration_is_one_shot_even_across_process_restarts(tmp_path):
     # The guard was left alone -- not rewritten, not treated as a legacy
     # document to re-migrate.
     assert os.stat(path).st_mtime_ns == guard_mtime
+
+
+# ---------------------------------------------------------------------------
+# update_many: batch read-modify-write of a CHOSEN key subset, grouped by
+# shard (issue #125's FleetStore.bulk_upsert is the first consumer; tested
+# directly here against a bare KeyedState since the primitive itself is
+# general-purpose, not FleetStore-specific).
+# ---------------------------------------------------------------------------
+
+def test_update_many_writes_each_touched_shard_exactly_once(tmp_path):
+    """N keys spread across the store are updated in ONE update_many() call:
+    the number of shard WRITES must equal the number of DISTINCT buckets
+    those keys land in, not the number of keys -- the whole point over N
+    calls to update(), which would rewrite a shard holding several chosen
+    keys once per key landing in it."""
+    path = str(tmp_path / "widgets.json")
+    n = 300
+    keys = ["w%05d" % i for i in range(n)]
+    _seed(path, {k: {"n": 0} for k in keys})
+    state = keyed_state.KeyedState(path)
+    write_calls = []
+    real_write = keyed_state.KeyedState._write_shard
+
+    def counting(self, bucket, rows):
+        write_calls.append(bucket)
+        return real_write(self, bucket, rows)
+
+    keyed_state.KeyedState._write_shard = counting
+    try:
+        results = state.update_many(keys, lambda k, row: {"n": row["n"] + 1})
+    finally:
+        keyed_state.KeyedState._write_shard = real_write
+    assert set(results) == set(keys)
+    assert all(v["n"] == 1 for v in results.values())
+    distinct_buckets = {keyed_state.bucket_of(k) for k in keys}
+    assert len(write_calls) == len(distinct_buckets) <= keyed_state.SHARD_COUNT
+    assert len(write_calls) < n           # strictly fewer writes than keys
+    for k in keys:
+        assert state.get(k)["n"] == 1     # every key actually applied
+
+
+def test_update_many_leaves_other_keys_in_a_touched_shard_alone(tmp_path):
+    """A shard holding both a requested key and an UNREQUESTED one must come
+    back out with the unrequested row untouched -- update_many only touches
+    the keys it was asked for, not every row sharing its bucket."""
+    path = str(tmp_path / "widgets.json")
+    mine = keyed_state.bucket_of("target")
+    # A neighbor sharing target's bucket (search nearby names; bucket space
+    # is small enough this always finds one quickly).
+    neighbor = next(k for k in ("neighbor%d" % i for i in range(1000))
+                    if keyed_state.bucket_of(k) == mine)
+    _seed(path, {"target": {"n": 0}, neighbor: {"n": 0}})
+    state = keyed_state.KeyedState(path)
+    state.update_many(["target"], lambda k, row: {"n": row["n"] + 1})
+    assert state.get("target")["n"] == 1
+    assert state.get(neighbor)["n"] == 0
+
+
+def test_update_many_none_leaves_the_key_untouched(tmp_path):
+    """fn returning None (the update()/sweep() convention) means "leave this
+    key exactly as it is" -- not written, and a shard where every key's fn
+    returned None is never rewritten at all."""
+    path = str(tmp_path / "widgets.json")
+    _seed(path, {"a": {"n": 1}, "b": {"n": 2}})
+    state = keyed_state.KeyedState(path)
+    before = _shard_bytes(path)
+    results = state.update_many(["a", "b"], lambda k, row: None)
+    assert results == {}
+    assert _shard_bytes(path) == before   # byte-for-byte: no shard rewritten
+
+
+def test_update_many_delete_removes_the_row(tmp_path):
+    path = str(tmp_path / "widgets.json")
+    _seed(path, {"a": {"n": 1}, "b": {"n": 2}})
+    state = keyed_state.KeyedState(path)
+
+    def fn(k, row):
+        return keyed_state.DELETE if k == "a" else None
+
+    results = state.update_many(["a", "b"], fn)
+    assert results == {"a": keyed_state.DELETE}
+    assert state.get("a") is None
+    assert state.get("b")["n"] == 2
+
+
+def test_update_many_repeated_key_sees_its_own_prior_result(tmp_path):
+    """A key appearing twice in *keys* is called twice, the second call
+    seeing the first call's return value as its "old row" -- the same
+    outcome N calls to update() would produce."""
+    path = str(tmp_path / "widgets.json")
+    _seed(path, {"a": {"n": 0}})
+    state = keyed_state.KeyedState(path)
+    results = state.update_many(["a", "a", "a"], lambda k, row: {"n": row["n"] + 1})
+    assert results == {"a": {"n": 3}}
+    assert state.get("a")["n"] == 3
+
+
+def test_update_many_a_corrupt_shard_aborts_without_rewriting_it(tmp_path):
+    """An exception out of fn's underlying read (a shard that fails to
+    parse) propagates immediately: that shard is left exactly as it was.
+    A DIFFERENT shard already written earlier in the SAME call stays
+    committed -- update_many groups by shard and commits each one as it
+    goes, it does not buffer every shard's write until the whole batch
+    succeeds (matching update_many's own docstring, and mirroring
+    update()'s single-key fail-closed contract)."""
+    path = str(tmp_path / "widgets.json")
+    good_key = next(k for k in ("g%d" % i for i in range(1000))
+                    if keyed_state.bucket_of(k) != keyed_state.bucket_of("bad"))
+    _seed(path, {"bad": {"n": 1}, good_key: {"n": 1}})
+    shard = os.path.join(keyed_state.shard_dir(path),
+                         "%02x.json" % keyed_state.bucket_of("bad"))
+    with open(shard, "w") as f:
+        f.write("{ corrupt")
+    state = keyed_state.KeyedState(path)
+    # good_key's shard is processed FIRST and commits; "bad" is second and
+    # raises -- proving the earlier commit survives the later failure.
+    with pytest.raises(keyed_state.KeyedStateError):
+        state.update_many([good_key, "bad"], lambda k, row: {"n": row["n"] + 1})
+    assert open(shard).read() == "{ corrupt"   # untouched
+    assert state.get(good_key)["n"] == 2       # already-committed write survives

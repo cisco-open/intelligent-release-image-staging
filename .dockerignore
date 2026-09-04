@@ -62,8 +62,11 @@ lab/evidence/
 **/*.tar
 
 # Host-specific Compose override (lab ports/mounts) and the Cisco-licensed
-# console typeface, which is staged onto the running host at deploy time and
-# must never be distributed inside an image (see .gitignore).
+# console typeface -- redistribution is not permitted, so it must never be
+# distributed inside an image or the release tarball (see .gitignore). A
+# deployment that independently holds the Sharp Sans license restores it at
+# RUNTIME instead, via the IRIS_SHARP_SANS_FONT_HOST bind mount in
+# server/docker-compose.yml -- never by re-adding it here.
 server/docker-compose.override.yml
 server/webroot/fonts/SharpSans-Bold.woff2
 

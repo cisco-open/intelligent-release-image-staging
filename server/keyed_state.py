@@ -7,7 +7,8 @@ state is written and read.
 
 Every per-device store used to be a single whole-fleet JSON document
 (``devices.json``, ``policy.json``, ``pull_requests.json``, ``telemetry.json``,
-``report_ledger.json``, ``peer-endpoints.json``). A device hot path — a
+``report_ledger.json``, ``peer-endpoints.json``, and — last, issue #125 —
+``fleet.json``, the operator inventory itself). A device hot path — a
 tracker announce, a catalog heartbeat, a terminal report — held ONE global
 ``flock`` on that document while it parsed the whole fleet, mutated one row,
 and re-serialised the whole fleet back out. Cost per device operation grew
@@ -363,6 +364,59 @@ class KeyedState:
             del rows[key]
             self._write_shard(bucket, rows)
             return True
+
+    def update_many(self, keys, fn):
+        """Read-modify-write every key in *keys*, grouped by shard so a shard
+        holding several requested keys is locked, read, and rewritten ONCE —
+        the batch counterpart of :meth:`update`. Where ``update`` costs one
+        shard per key and ``sweep`` costs every shard in the store regardless
+        of which keys the caller actually wants, this costs one shard per
+        DISTINCT bucket the requested keys land in — never more than
+        :data:`SHARD_COUNT`, however large *keys* is. It exists for a caller
+        that must apply the same kind of change to a CHOSEN subset of the
+        store in one call (a console bulk reassignment across a selected set
+        of devices) rather than either one key or literally every key.
+
+        ``fn(key, old_row_or_None)`` has the exact contract :meth:`update`'s
+        callback does: return the new row, :data:`DELETE`, or ``None`` to
+        leave that key untouched. It is called once per occurrence of a key
+        in *keys* (a repeated key is called again, seeing the previous
+        occurrence's result — the same outcome N calls to :meth:`update`
+        would produce). Unlike :meth:`sweep`, an exception out of ``fn``
+        propagates immediately: whichever shard was mid-write is never
+        written (its lock is released and the shard is left exactly as it
+        was), but any EARLIER shard in this call already committed stays
+        committed. A caller that needs per-key partial-failure reporting
+        instead of a hard abort must catch inside its own ``fn`` and encode
+        the failure in what it returns (``None`` — no write for that key) —
+        see ``gui_fleet.FleetStore.bulk_upsert`` for that pattern.
+
+        Returns ``{key: fn's return value}`` for every key actually passed to
+        ``fn`` (so a repeated key's LAST result is what appears)."""
+        self._ensure_migrated()
+        by_bucket = {}
+        for key in keys:
+            by_bucket.setdefault(bucket_of(key, self.shards), []).append(key)
+        results = {}
+        for bucket, bucket_keys in by_bucket.items():
+            with file_lock(self._shard_path(bucket)):
+                rows = self._read_shard(bucket)
+                dirty = False
+                for key in bucket_keys:
+                    new = fn(key, rows.get(key))
+                    if new is None:
+                        continue
+                    if new is DELETE:
+                        if rows.pop(key, None) is not None:
+                            dirty = True
+                        results[key] = DELETE
+                        continue
+                    rows[key] = new
+                    dirty = True
+                    results[key] = new
+                if dirty:
+                    self._write_shard(bucket, rows)
+        return results
 
     # -- whole-fleet operations (never on a per-device hot path) -----------
 

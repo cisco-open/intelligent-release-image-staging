@@ -85,6 +85,7 @@ Compose refuses to start without these; none has a default.
 | `COMPOSE_PROJECT_NAME` | `server` (the `name:` in `server/docker-compose.yml`) | Compose project name, and therefore the prefix on the named volumes (`server_iris-state`, `server_iris-config`, `server_iris-images`). Host-side only: read by Compose itself, never passed into the container. The declared default is the same name the directory used to derive, so an existing deployment keeps its volumes and needs no migration. Set it to give a second checkout on the same host its own volumes — see [Server](server.md#compose-project-name). |
 | `IRIS_CONTAINER` | `iris` | Name of the server container: Compose applies it as `container_name`, and `tools/apply-assignments.sh`, `tools/stage-iox-package.sh`, `tools/gen-device-installers.sh` and `tools/check-package-freshness.sh` address that name. Host-side only. Container names are host-global, so a second stack needs this as well as `COMPOSE_PROJECT_NAME`. `tools/start-compose-server.sh` resolves the container from its own Compose project when this is unset. |
 | `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory bind-mounted read-write at `/srv/artifacts`. Host-side only: it is interpolated into the bind mount, not passed into the container. |
+| `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Host path of the licensed Sharp Sans Bold `.woff2`, bind-mounted read-only over `server/webroot/fonts/SharpSans-Bold.woff2` inside the container. The font is excluded from the build context (`.dockerignore`) and the release tarball — Cisco's license does not permit redistributing it — so the console falls back to its default font stack without it (`font-display: swap`). Set this only on a deployment that independently holds the license; left unset it mounts `/dev/null`, a harmless no-op every other deployment never has to think about. Host-side only: interpolated into the bind mount, never passed into the container. See [Console](console.md#branding). |
 | `IRIS_GUI_PUBLISH` | `8080` | Published host port for the console. The container always listens on 8080 internally. |
 | `IRIS_CONSOLE_URL` | unset | Overrides the console link on the port 9101 pointer page verbatim, for hosts publishing the console somewhere other than `https://<IRIS_HOST_IP>:8080/`. Read per request. |
 | `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` lets the console serve plain HTTP when no usable certificate exists (`IRIS_GUI_CERT` / `IRIS_CERT`). Without it `iris-gui` refuses to start in that state. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
@@ -113,7 +114,7 @@ Compose refuses to start without these; none has a default.
 | `IRIS_SSH_LEGACY` | `0` | `1` re-enables SHA-1 KEX, `ssh-rsa` and CBC ciphers for server-side device sessions, for old IOS-XE images that offer nothing else. |
 | `IRIS_SSH_HOST_KEY` | unset | Pin one device/stage-host public host key (`<type> <base64>`) for strict verification. See [Security](security.md#device-ssh-host-keys). |
 | `IRIS_SSH_KNOWN_HOSTS` | unset | Path to a `known_hosts` file to verify strictly against. With neither this nor `IRIS_SSH_HOST_KEY` set, host keys are recorded on first contact into a persistent `known_hosts` under `$IRIS_STATE/ssh` and must match afterwards; `/dev/null` is never used. |
-| `SVI_IGP` | `none` | Routed Guest Shell installs only: `isis` adds `ip router isis` to the IRIS SVI, for fabrics (an SD-Access underlay, say) that must learn the IRIS subnet. The default injects nothing into your IGP. See [Management type](management-type.md). |
+| `SVI_IGP` | `none` | Routed Guest Shell installs only: `isis` adds `ip router isis` to the IRIS SVI, for fabrics (an SD-Access underlay, say) that must learn the IRIS subnet. The default injects nothing into your IGP. This is the fleet-wide fallback; a device's own inventory record (`svi_igp` column/field) overrides it per device, since one server can onboard devices into different fabrics. See [Management type](management-type.md). |
 
 Parser behaviour is not uniform, so each row above states its own. Several of
 the numeric knobs (`IRIS_HTTP_TIMEOUT`, `IRIS_ENDPOINT_TTL`,
@@ -273,11 +274,9 @@ upload at 256 MiB.
 | `POST /api/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/session` | The current session's info, or 401. Any GET carrying `X-IRIS-Poll: 1` (the console's periodic refreshers) is validated without refreshing the session's idle clock. All `/api/*` responses carry `Cache-Control: private, no-store`; a present-but-unreadable secrets store answers 503 on every store-backed route. |
 | `GET /api/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
-| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `stage_host`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`; `stage_host` also carries `required: false` (console onboarding stages locally and never uses it). `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` — the two IOx tars plus the IOS-XR agent RPM (`iris-xr.rpm`), each with its own build time, state, reason, and rebuild `remedy` command (the RPM's differs from the tars' — see [Setup](console.md#setup)); the RPM entry also carries a `detail` string naming exactly what was and was not verified, since its baked certificate cannot be pinned the way the tars' can — `reference_fingerprint`, and the card-level `remedy` command (the IOx tars' rebuild script). See [Setup](console.md#setup). |
+| `GET /api/settings/setup-status` | The setup status behind both the first-run wizard (`#setup`) and the Settings → Setup panel: `admin`, `telemetry`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages` additionally carries `items` — the two IOx tars plus the IOS-XR agent RPM (`iris-xr.rpm`), each with its own build time, state, reason, and rebuild `remedy` command (the RPM's differs from the tars' — see [Setup](console.md#setup)); the RPM entry also carries a `detail` string naming exactly what was and was not verified, since its baked certificate cannot be pinned the way the tars' can — `reference_fingerprint`, and the card-level `remedy` command (the IOx tars' rebuild script). See [Setup](console.md#setup). |
 | `POST /api/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/settings/sessions/revoke-others` | Revokes every session except the caller's. |
-| `POST /api/settings/stage-host` | Stores the stage-host SSH credential; returns the redacted record. |
-| `DELETE /api/settings/stage-host` | `{deleted: <bool>}` — clears that credential. |
 | `POST /api/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. Returns `{gui_cert, applied, note}`: `applied` is `false` (with a `note`) when the listener is not serving TLS, in which case the saved certificate takes effect at the next restart. |
 | `DELETE /api/settings/gui-cert` | Reverts the console to the built-in certificate, hot-applied. |
 | `POST /api/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. Every block must parse as an X.509 certificate; a decodable-but-not-a-certificate block rejects the whole upload (400). |
@@ -358,6 +357,7 @@ verification](operations.md#image-verification).
 | `GET /api/devices/<id>/deployment` | `{record, total}` — the deployment record that best describes the device (the active one, else the teardown-authorizing one, else the newest) plus the stored-record count; `record` is `null` when none exists. Read-only — feeds the deployment-details panel. |
 | `POST /api/devices/<id>/assign` | `{image_ids: [...]}` sets the device's ordered, up-to-ten-image approved set (an empty array unassigns); the singular `{image_id: <id or null>}` is the pre-multi-image compat shape and always means a one-element set. 400 for more than ten ids, a duplicate, or an id not in the catalog; 400 `image_quarantined` with the blocking verdict if one of the ids is currently quarantined by the Cisco Bulk Hash reconciler (see [Image verification](#image-verification)). See [Policy schema](#policy-schema). |
 | `POST /api/devices/<id>/credential`, `.../platform` | Sets the credential profile, or the platform (Agent install choice) and storage target; each returns `{ok: true}`. |
+| `POST /api/devices/bulk-credential` | `{device_ids: [...], credential_profile_id: <id or "">}` sets ONE credential profile on every listed device in a single call — the bulk form of the route above, backing the console's "Select all *N* matching devices" bulk credential action (issue #125). 400 for a non-array/empty `device_ids`, one over the supported fleet size, or an unknown `credential_profile_id`. Not all-or-nothing: returns `{ok: true, applied: <count>, failed: {<device_id>: <reason>, ...}}`, naming exactly which selected ids (e.g. one deleted out from under a stale selection) did not apply, while every other id still does. Audited once as `device_credential_bulk_change`, not once per device. |
 | `POST /api/devices/<id>/forget-host-key` | Removes the device's entry from the persistent SSH known_hosts accept-new mode records into (`lab/iris-ssh-policy.sh`) — for a device that was re-imaged or replaced and now fails every session with a changed-key error. `{ok: true, peer: <device_ip>}` on success, including when nothing was recorded (already effectively forgotten). 400 `{error: ...}` when the device has no `device_ip` on record or the removal itself fails. Audited as `device_forget_host_key` (device id, actor, and the peer address). Only the persistent accept-new file is touched — an `IRIS_SSH_HOST_KEY` pin or an operator-supplied `IRIS_SSH_KNOWN_HOSTS` file is untouched. The next session re-verifies and pins the device's new key; this never disables verification. See [Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key). |
 | `POST /api/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
@@ -574,7 +574,8 @@ written to `<state>/torrents/<image_id>.torrent`, never next to the image itself
 | `size` | Image size in bytes. What the agent attests the placed copy against. |
 | `sha256` | Checked by the agent against the staged file. |
 | `sha512` | Recorded at publish time and never recomputed on a device. Once this image is joined to a Cisco Bulk Hash feed row (by file name and size), this is the value compared against that row's published sha512 — see [Image verification](#image-verification). |
-| `cisco_signature_verified` | `True` exactly when this entry's `hash_verification.state` is `verified` — kept in sync by the Cisco Bulk Hash reconciler on every run that covers this image. `False` for `mismatch`, `not_in_feed`, or before the first run ever covers it. On the device, the check is still the agent's sha256 of the staged file against this entry's `sha256`; nothing re-hashes the placed copy. |
+| `cisco_signature_verified` | `True` exactly when this entry's `hash_verification.state` is `verified` — kept in sync by the Cisco Bulk Hash reconciler on every run that covers this image, and by it alone. `False` for `mismatch`, `not_in_feed`, or before the first run ever covers it. Distinct from `operator_attested_signature`, below — the two used to share this one field, so an operator's own attestation was silently overwritten by the reconciler's next run (#88); they are now separate. On the device, the check is still the agent's sha256 of the staged file against this entry's `sha256`; nothing re-hashes the placed copy. |
+| `operator_attested_signature` | `True` when `iris-publish` was run with `--signature-verified` — the publishing operator's own attestation that the Cisco signature was checked elsewhere. Written once, at publish time, by `publish.py` alone; the Cisco Bulk Hash reconciler never reads or writes it, so it survives every reconciliation run untouched. Advisory only — nothing on the device consults it. |
 | `hash_verification` | `{state, checked_at, feed_published_at, source, deferral}` — the reconciler's most recent verdict for this image; absent until the first reconciliation run covers this entry. See [Image verification](#image-verification). |
 | `quarantined` | `True` once a `mismatch` verdict has quarantined this image. Only `POST /api/images/<id>/release-quarantine` clears it — a later `verified` verdict alone does not. See [Releasing a quarantine](operations.md#releasing-a-quarantine). |
 | `info_hash_hex` | Torrent info hash, used to stop seeding on delete. |
@@ -597,9 +598,10 @@ serves what the API says is absent or withheld.
 
 Every per-device store the server keeps under `IRIS_STATE` — heartbeats,
 staging approval, telemetry reports, the seen-report-id ledger, transfer
-attestations, pending pull directives, and the tracker's durable peer-endpoint
-map — is **keyed** state: one row per device (or per principal), spread over
-256 shard files in a directory, rather than one whole-fleet JSON document.
+attestations, pending pull directives, the tracker's durable peer-endpoint
+map, and (since issue #125) the operator inventory itself — is **keyed**
+state: one row per device (or per principal), spread over 256 shard files in
+a directory, rather than one whole-fleet JSON document.
 
 | Store | Directory |
 | --- | --- |
@@ -610,12 +612,30 @@ map — is **keyed** state: one row per device (or per principal), spread over
 | Transfer attestations | `<state>/transfer-attestations.d/` |
 | Pending pull directives | `<state>/pull_requests.d/` |
 | Durable peer endpoints | `<state>/peer-endpoints.d/` |
+| Operator inventory (fleet) | `<state>/fleet.d/` |
 
-A heartbeat, a policy read, a terminal report and a tracker announce lock,
-parse and rewrite only the shard their own device lands in. Before this, each
-of those operations held one lock on the whole document while it re-parsed and
-re-serialised every device in the fleet, so a single device's request cost grew
-with fleet size and unrelated devices serialised behind one writer.
+A heartbeat, a policy read, a terminal report, a tracker announce, and a
+credential/platform reassignment lock, parse and rewrite only the shard their
+own device lands in. Before this, each of those operations held one lock on
+the whole document while it re-parsed and re-serialised every device in the
+fleet, so a single device's request cost grew with fleet size and unrelated
+devices serialised behind one writer.
+
+The inventory store carries one thing the others do not:
+`<state>/fleet-revision.json`, a small counter bumped once per fleet-editing call
+(create/edit/delete a device, a CSV import, a bulk reassignment) and read
+back alongside a fleet listing so a console client walking pages can tell
+whether the fleet changed between two page reads. It is deliberately its own
+tiny file rather than a per-shard field, because "did the fleet change" is a
+whole-store question a single shard cannot answer on its own — it is the one
+thing every inventory write still serialises on, but the file is a few bytes
+regardless of fleet size, so that serialisation stays O(1) per write. A
+console bulk action reassigning a credential or platform across many
+selected devices at once — the console's own "Select all N matching
+devices" — additionally goes through `POST /api/devices/bulk-credential`
+(see [Console API](#console-api)) rather than one request per device: it
+groups the underlying shard writes the same way, so a shard holding many of
+the selected devices is rewritten once, not once per device in it.
 
 What has not changed: each shard is written atomically (a unique temp file in
 the same directory, then a rename), so a reader never sees a partial write; and
@@ -627,11 +647,17 @@ shard and any whole-fleet listing.
 
 The whole-fleet documents from earlier releases (`devices.json`, `policy.json`,
 `telemetry.json`, `report_ledger.json`, `transfer-attestations.json`,
-`pull_requests.json`, `peer-endpoints.json`) are migrated into their shard
-directories the first time the server touches each store, and are then left in
-place renamed to `<name>.json.migrated`. There is nothing to run by hand, and
-nothing is deleted. A migration that cannot read its source document fails
-closed and leaves the document exactly where it is.
+`pull_requests.json`, `peer-endpoints.json`, and — as of issue #125 —
+`fleet.json`) are migrated into their shard directories the first time the
+server touches each store, and are then left in place renamed to
+`<name>.json.migrated`. There is nothing to run by hand, and nothing is
+deleted. A migration that cannot read its source document fails closed and
+leaves the document exactly where it is. `fleet-revision.json` is not part
+of that migration — a store migrated from a pre-shard `fleet.json` simply
+starts its counter fresh at 0 rather than carrying the old document's own
+`revision` field forward; nothing compares that number across a migration
+or a restart; it exists only so a page and the fleet it was read from can be
+told apart within one running process's page-to-page walk.
 
 Migration also leaves a deliberately-invalid placeholder at each retired
 legacy path, so that a **rollback** to a release from before this migration
@@ -874,7 +900,8 @@ Compose/container variables — they never reach the `iris` server container.
 | `IRIS_STARTUP_JITTER` | `1` (on) | IOx, XR | Spreads the first tick after container start across the whole `IRIS_TICK_SECONDS` window. `0` disables it. |
 | `IRIS_TICK_BACKOFF_MAX` | `600` (seconds) | IOx, XR, Guest Shell, router | Cap on the exponential backoff applied after a tick's agent process fails outright. |
 | `IRIS_TICK_JITTER_MAX` | `8` (seconds) | Guest Shell, router | Bound (0..N-1, uniform) on the per-tick sleep `bootstrap.sh` takes before contacting the catalog. The EEM timer's own 60s period is unaffected — IOS owns that clock. |
-| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Device-side logging opt-in — see [Device agents → Device-side logging (flash write endurance)](device-agents.md#device-side-logging-flash-write-endurance). **Off by default**: flash has finite write endurance, and aria2c's log is chatty and continuous for the whole life of a transfer. `on`/`1`/`true`/`yes` (case-insensitive) enables it; anything else, including unset, stays off. On IOx/XR the launch line adds `--log=<STAGE_DIR or WORK_DIR>/aria2c.log --log-max-size=50M --log-max-files=1`; Guest Shell adds `--log=<STAGE_DIR>/aria2c.log` and relies on the existing `rotate-logs.sh`/EEM cadence to trim it. Never affects error reporting: IOS syslog / the XR container's `%IRIS-6-<MNEMONIC>` stdout lines and the heartbeat's `stage_error` field are unaffected either way. On Guest Shell, set `iris_log` in `iris-agent.conf` instead — see [Device agent config keys](#device-agent-config-keys) below; `bootstrap.sh` reads it (and `rpc_port`/`max_peers`, which had the identical gap) from that persisted file and exports it before every `guestshell-start.sh` launch, so it survives an EEM tick and a reboot without a reinstall. |
+| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Device-side `aria2c.log` opt-in — see [Device agents → Device-side logging (flash write endurance)](device-agents.md#device-side-logging-flash-write-endurance). **Off by default**: flash has finite write endurance, and aria2c's own log is chatty and continuous for the whole life of a transfer. `on`/`1`/`true`/`yes` (case-insensitive) enables it; anything else, including unset, stays off. `device/xr-install.sh` and `device/iox/install.sh` forward an operator's setting verbatim (`--env IRIS_LOG=…` in `docker-run-opts`, `run-opts N "-e IRIS_LOG=…"`) — before this plumbing existed neither installer passed it at all, so the opt-in was unreachable on exactly the two platforms whose entrypoints implement it. On IOx/XR the launch line adds `--log=<STAGE_DIR or WORK_DIR>/aria2c.log --log-max-size=50M --log-max-files=1`; Guest Shell adds `--log=<STAGE_DIR>/aria2c.log` and relies on the existing `rotate-logs.sh`/EEM cadence to trim it. On Guest Shell, set `iris_log` in `iris-agent.conf` instead — see [Device agent config keys](#device-agent-config-keys) below; `bootstrap.sh` reads it (and `rpc_port`/`max_peers`, which had the identical gap) from that persisted file and exports it before every `guestshell-start.sh` launch, so it survives an EEM tick and a reboot without a reinstall. **`IRIS_LOG` governs only that one file — the `aria2c.log` transfer log** — never the `%IRIS-6-<MNEMONIC>` operator lines `emit()` writes on every platform, which `IRIS_LOG` never touches either way: real IOS syslog (`send log`) on Guest Shell and IOx, or the XR container's stdout on IOS-XR, captured into the container log appmgr keeps (`show appmgr application name iris logs`) — that stdout capture happens **regardless of `IRIS_LOG`**, so "off" does not mean zero recurring write on XR, only that `aria2c.log` itself stops growing; see the container-log bound below. The heartbeat's `stage_error` field is unaffected on every platform either way. |
+| `IRIS_LOG` (XR container-log bound) | — | XR | `device/xr-install.sh`'s `docker-run-opts` always adds `--log-driver json-file --log-opt max-size=1m --log-opt max-file=3` — independent of `IRIS_LOG` and not configurable per device. This bounds (not eliminates) the one recurring write `IRIS_LOG=off` cannot stop on XR: appmgr's capture of `emit()`'s `%IRIS-6-<MNEMONIC>` stdout lines, roughly one per 60s tick. 3&nbsp;MiB total, rotated, retains roughly 11 days of that history at the emit rate above — comfortably past a long weekend — for about 0.08% of the ~3.9&nbsp;GB `/misc/app_host` partition XR's container logs live on. Deliberately never `--log-driver=none`: XR has no syslog path for `%IRIS` lines (see the deviation note in `device/agent/xr_deps.py`), so `none` would silently discard every device diagnostic, including pre-heartbeat startup failures, with no second channel. |
 
 ## Device agent config keys
 

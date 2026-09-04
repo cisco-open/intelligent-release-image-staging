@@ -40,6 +40,13 @@
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
 #     it for a larger assigned image set; one proven full image is 1.8GB)
 #   IRIS_TELEMETRY=on  IRIS_TELEMETRY_STREAM=off
+#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/xr/entrypoint.sh);
+#     off by default for flash write endurance. Forwarded verbatim as --env
+#     IRIS_LOG so the container the agent runs in actually sees an operator's
+#     opt-in -- previously this script dropped it silently and the entrypoint's
+#     own default always won. Does not affect the %IRIS-6-<MNEMONIC> lines
+#     emit() writes to this container's stdout; those are bounded separately,
+#     below, by the docker-run-opts log-driver options.
 #   MODEL -- hardware model from the fleet row, when known (same env contract
 #     as DEVICE_ID; server/gui_onboard.py's OnboardService._build_env sets it).
 #     Forwarded verbatim as IRIS_MODEL so heartbeats report it. The running
@@ -66,6 +73,10 @@ XR_RPM_FILE="${XR_RPM_FILE:-$IRIS_ARTIFACTS_DIR/iris-xr.rpm}"
 XR_MIN_FREE_BYTES="${XR_MIN_FREE_BYTES:-2147483648}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
+# Same fail-closed default as device/xr/entrypoint.sh's own IRIS_LOG parsing
+# -- this is only the plumbing that lets an operator's opt-in actually reach
+# it; the default stays off either way.
+IRIS_LOG="${IRIS_LOG:-off}"
 ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-300}"
 ACTIVATE_POLL="${ACTIVATE_POLL:-10}"
 
@@ -93,6 +104,9 @@ _no_quotes_or_newlines DEVICE_ID "$DEVICE_ID"
 # fleet row when known). Forwarded to the container so XR heartbeats report a
 # real model instead of the "no CLI to ask" default -- see xr_deps.py.
 _no_quotes_or_newlines MODEL "${MODEL:-}"
+# IRIS_LOG rides the same quoted docker-run-opts token as everything else
+# above; reuse the one guard rather than trusting a bare on/off-shaped value.
+_no_quotes_or_newlines IRIS_LOG "$IRIS_LOG"
 
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER}"; : "${DEVICE_PASS:?set DEVICE_PASS}"
@@ -103,15 +117,37 @@ if [ "$DRY" -eq 0 ]; then
 fi
 
 # docker-run-opts: the exact hardware-proven base ("-td --net=host -v
-# /misc/disk1:/hostmount") plus one --env per secret/identity value. NEVER
-# --name -- appmgr's opts validator rejects it outright ("Docker run invalid
-# opts passed: unsupported arguments: --name"; appmgr names the container
-# itself). No docker-run-cmd override: the image's own ENTRYPOINT
-# (device/xr/entrypoint.sh) is what should run.
+# /misc/disk1:/hostmount") plus a bounded container log driver plus one --env
+# per secret/identity value. NEVER --name -- appmgr's opts validator rejects
+# it outright ("Docker run invalid opts passed: unsupported arguments:
+# --name"; appmgr names the container itself). No docker-run-cmd override:
+# the image's own ENTRYPOINT (device/xr/entrypoint.sh) is what should run.
+#
+# --log-driver/--log-opt: both are in appmgr's documented docker-run-opts
+# flag surface pre-24.1.1 (agentinfo/xr-support/research/xrfact-appmgr-
+# docker-hosting.md), and a working "--log-opt max-size=... --log-opt
+# max-file=..." activation line is hardware-attested on NCS 5500
+# (agentinfo/xr-support/research/sources/ncs5500-apphost-simple.txt:1158).
+# Deliberately NOT --log-driver=none: emit_impl (xr_deps.py) writes every
+# %IRIS-6-<MNEMONIC> line -- including every pre-heartbeat startup failure --
+# ONLY to this stdout, XR has no syslog path for them (the deviation note at
+# xr_deps.py:52-57), and `none` would discard all of it with no second
+# channel. json-file with a small bound keeps that diagnostic history while
+# still capping the write volume the unbounded default left open (scrubber
+# #123).
+#
+# Bound: max-size=1m, max-file=3 -> 3 MiB total. The agent emits roughly one
+# %IRIS line per 60s tick (xr_deps.py's emit_impl); at a generous ~200 bytes
+# per json-file entry (the raw "%IRIS-6-MNEMONIC: msg" text plus the
+# driver's per-line JSON/timestamp wrapper) that is ~281 KiB/day, so 3 MiB
+# retains roughly 11 days of history -- comfortably past a long weekend --
+# for about 0.08% of the ~3.9 GB /misc/app_host partition dockerd's container
+# logs live on (agentinfo/xr-support/research/parity/install-bootstrap-
+# parity.md), and nothing against a multi-GB harddisk: image.
 docker_run_opts() {
-  printf -- '-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s' \
+  printf -- '-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s --env IRIS_LOG=%s' \
     "$CATALOG_URL" "$CATALOG_TOKEN" "$DEVICE_ID" "${MODEL:-}" "${XR_VERSION:-}" \
-    "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM"
+    "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM" "$IRIS_LOG"
 }
 
 activate_line() {

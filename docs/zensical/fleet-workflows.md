@@ -26,11 +26,19 @@ VPG subnet behind NAT), or `xr-host` (an IOS-XR appmgr container sharing the
 router's own network stack):
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
 ```
 
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
-  `app_gateway`; leave `inband_vlan` blank.
+  `app_gateway`; leave `inband_vlan` blank. `svi_igp` is optional and
+  routed-only: `isis` adds `ip router isis` to the IRIS SVI for a fabric
+  (an SD-Access underlay, say) that must learn it; blank keeps the server's
+  `SVI_IGP` env var default (`none`) for that device. This is a per-device
+  override, not a fleet-wide setting — one server can onboard devices into
+  different fabrics, only some of which run IS-IS. Validated to exactly
+  `none`/`isis` before it reaches the device's config; every other
+  `management_type` must leave it blank. See
+  [Management type → Routed](management-type.md#routed-iris-managed-app-network).
 - **inband** — fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`; leave
   `iris_vlan`/`svi_*` blank. Static IPv4 on Guest Shell or IOx (IE-3400, Catalyst 9300);
   DHCP is not supported. For inband **IOx**, `ios_ssh_host` (the IOS endpoint

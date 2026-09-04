@@ -816,6 +816,15 @@
     document.getElementById('ii-file').textContent = img.filename || '';
     document.getElementById('ii-verdict').innerHTML = bulkhashVerdictPillHTML(img.hash_verification, img.quarantined);
     document.getElementById('ii-verdict-detail').textContent = imageVerdictDetailText(img.hash_verification);
+    // The operator's own `iris-publish --signature-verified` attestation
+    // (operator_attested_signature) is a separate fact from the reconciler's
+    // verdict above (cisco_signature_verified) -- #88, so it never disappears
+    // when the reconciler runs. Shown plainly, never as a pill, so it never
+    // reads as a second automated verdict.
+    document.getElementById('ii-operator-attestation').textContent =
+      img.operator_attested_signature
+        ? 'Operator attested at publish time that the Cisco signature was verified elsewhere.'
+        : 'Not attested by the publishing operator.';
     // The release action only makes sense while an image is ACTUALLY
     // quarantined -- an override-released mismatch keeps its "mismatch"
     // verdict (see bulkhashVerdictPillHTML) but is not blocking anything, so
@@ -2514,6 +2523,45 @@
     // does not linger in SELECTED forever) diff `ids` against this.
     return failedIds;
   }
+  // issue #125: the bulk-endpoint counterpart of forSelected -- ONE POST
+  // carrying every selected id, instead of one request per id. Reports the
+  // same status-line shape forSelected does (label N/M device(s); failed:
+  // id (reason), ...), from the single response's {applied, failed} rather
+  // than from N settled promises. Always releases the shared bulk lock
+  // (unlike forSelected, nothing here shares it with a non-selected-action
+  // caller).
+  async function bulkApply(label, ids, fn) {
+    var failedIds = [];
+    try {
+      var r = await fn(ids);
+      var body = null;
+      try { body = await r.json(); } catch (e) { }
+      if (r.ok && body) {
+        var failedMap = body.failed || {};
+        failedIds = Object.keys(failedMap);
+        var reasons = failedIds.map(function (id) {
+          return id + ' (' + failedMap[id] + ')';
+        });
+        devStatus.textContent = label + ' ' + body.applied + '/' + ids.length +
+          ' device(s)' + (reasons.length ? '; failed: ' + reasons.join(', ') : '');
+      } else {
+        // The request itself failed (bad input, session/CSRF, network) --
+        // nothing in this batch applied, so every id counts as failed.
+        failedIds = ids.slice();
+        var reason = (body && body.error) || '';
+        devStatus.textContent = label + ' failed for all ' + ids.length +
+          ' device(s)' + (reason ? ': ' + reason : '');
+      }
+    } catch (e) {
+      failedIds = ids.slice();
+      devStatus.textContent = label + ' failed for all ' + ids.length +
+        ' device(s): network error';
+    } finally {
+      setBulkBusy(false);
+    }
+    refreshDevices();
+    return failedIds;
+  }
   // Shared by the per-row assign button and the bulk toolbar action: POST
   // the SAME ordered image_ids body to every device id, sequentially,
   // reporting per-device failures in the status line through forSelected --
@@ -2692,7 +2740,50 @@
                    { acknowledge_adopt: true });
     });
   });
-  document.getElementById('assign-images-selected').addEventListener('click', function () {
+  // Selection is id-keyed and outlives paging/filtering (issue #112), so a
+  // selected device is very often NOT in LAST_DEVICES, which holds only the
+  // currently rendered page. Issue #121: the picker used to fall back to []
+  // for any such device, feeding a fabricated "assigned: []" into both the
+  // pre-check preview and the expect_image_ids compare-and-set below -- the
+  // server correctly refused (409) the resulting write, but for the wrong
+  // reason, and every off-page device in the selection spuriously conflicted.
+  //
+  // There is no "fetch by id list" route (only q=, a substring search), so
+  // this walks /api/devices at the server's own page cap
+  // (gui_server.MAX_PAGE_LIMIT), matching by device_id, and stops the moment
+  // every id missing from LAST_DEVICES has been found. Unfiltered, since
+  // SELECTED persists across filter changes and a selected device may no
+  // longer match whatever the filter bar shows now. For the common case --
+  // the whole selection already on the rendered page -- this makes no
+  // request at all. Returns a device_id -> row map; an id that still cannot
+  // be found (deleted since being selected, or the walk failed) is simply
+  // absent from it, same as it always was for a genuinely unknown device.
+  async function fetchDeviceRows(ids) {
+    var byId = Object.create(null);
+    LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; });
+    var missing = ids.filter(function (id) { return !byId[id]; });
+    if (!missing.length) return byId;
+    var need = Object.create(null);
+    missing.forEach(function (id) { need[id] = true; });
+    var remaining = missing.length;
+    var batch = 1000, offset = 0, total = null;
+    while (remaining > 0 && (total === null || offset < total)) {
+      var qs = 'limit=' + batch + '&offset=' + offset;
+      var r;
+      try { r = await fetch('/api/devices?' + qs); } catch (e) { break; }
+      if (!r.ok) break;
+      var body = await r.json();
+      total = typeof body.total === 'number' ? body.total : 0;
+      var got = body.devices || [];
+      got.forEach(function (d) {
+        if (need[d.device_id]) { byId[d.device_id] = d; delete need[d.device_id]; remaining--; }
+      });
+      if (!got.length) break;   // never spin forever on an unexpected reply
+      offset += got.length;
+    }
+    return byId;
+  }
+  document.getElementById('assign-images-selected').addEventListener('click', async function () {
     var ids = selectedIds();
     if (!ids.length) { devStatus.textContent = 'No devices selected.'; return; }
     if (!imageListOk) {
@@ -2700,17 +2791,17 @@
         'Retry once the Images list loads.';
       return;
     }
+    this.disabled = true;
+    var byId;
+    try { byId = await fetchDeviceRows(ids); } finally { this.disabled = false; }
     // Pre-check the INTERSECTION of the selection's current sets: pre-
     // checking the UNION would silently ADD an image to a device that does
     // not have it the moment ANY other selected device does; pre-checking
     // just one device's set would silently DROP an image from the rest on
     // Apply. The intersection is the only starting point Apply cannot
     // change anyone's assignment by surprise from.
-    // An id off the current page reads as [] here -- fails safe (#112).
-    var sets = ids.map(function (id) {
-      var d = LAST_DEVICES.filter(function (x) { return x.device_id === id; })[0] || {};
-      return rowAssignedIds(d);
-    });
+    // Off-page ids resolve via fetchDeviceRows (issue #121), not [].
+    var sets = ids.map(function (id) { return rowAssignedIds(byId[id] || {}); });
     var intersection = sets.reduce(function (a, b) {
       return a.filter(function (x) { return b.indexOf(x) !== -1; });
     });
@@ -2783,10 +2874,13 @@
     var ids = claimSelection();
     if (!ids) return;
     closeModal('cred-modal');
-    await forSelected(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
-      function (id) {
-        return jpost('/api/devices/' + encodeURIComponent(id) + '/credential',
-                     { credential_profile_id: pid });
+    // issue #125: one request for the whole selection (ids can run into the
+    // thousands via "Select all N matching devices"), not one per device --
+    // see bulkApply and gui_server.py's /api/devices/bulk-credential.
+    await bulkApply(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
+      function (allIds) {
+        return jpost('/api/devices/bulk-credential',
+                     { device_ids: allIds, credential_profile_id: pid });
       });
   });
   document.getElementById('batch-cancel').addEventListener('click', async function () {
@@ -3402,7 +3496,6 @@
     document.getElementById('setup-admin-chip').innerHTML = setupChip('unknown');
     document.getElementById('setup-td-chip').innerHTML = setupChip('unknown');
     document.getElementById('setup-td-note').textContent = '';
-    document.getElementById('setup-sh-chip').innerHTML = setupChip('unknown');
     document.getElementById('setup-pkg-chip').innerHTML = setupChip('unknown');
     document.querySelector('#setup-pkg-table tbody').innerHTML = '';
     document.getElementById('setup-pkg-remedy').textContent = '';
@@ -3415,10 +3508,7 @@
   // call the setup-status payload does not itself encode (it only ever
   // reports each card's own ok/unset), so it lives here rather than in the
   // API -- widening that response is out of scope for this task.
-  // stage_host: console onboarding always stages locally (the server
-  // exports IRIS_STAGE_LOCAL=1 to every recipe), so the credential has no
-  // consumer and the wizard must not hold setup open on it.
-  var SETUP_ITEM_OPTIONAL = { telemetry: true, stage_host: true, image_verification: true };
+  var SETUP_ITEM_OPTIONAL = { telemetry: true, image_verification: true };
 
   // M37 fold-in (carried from the KGV close-out): setup_status.py's
   // image_verification card reports ok only once a run has actually
@@ -3477,22 +3567,21 @@
 
   // ---- First-run setup wizard -------------------------------------------
   // A flow, not a checklist: the operator finishes setup here instead of being
-  // sent back and forth to Settings pages. The two form steps mount the SAME
-  // templates Settings uses, so there is one implementation of each form.
+  // sent back and forth to Settings pages. The telemetry step mounts the SAME
+  // template Settings uses, so there is one implementation of that form.
   //
   // Every step is skippable and the wizard resumes at the first incomplete one.
   // That is forced, not a convenience: the packages step can never complete
   // in-console (the container has no Docker socket), so a wizard that insisted
   // on completion could never be finished.
   //
-  // Step 4, Image verification (Task 9, USER DIRECTIVE): supersedes the
+  // Step 3, Image verification (Task 9, USER DIRECTIVE): supersedes the
   // earlier decision that this card stays outside the wizard -- it now
   // mounts the SAME Settings > Image verification controls (schedule,
   // Refresh now, offline import) via mountImageVerification, the same
-  // one-implementation precedent as the telemetry/stage-host form mounts.
+  // one-implementation precedent as the telemetry form mount.
   var WIZARD_STEPS = [
     { id: 'telemetry', pane: 'wz-step-telemetry', key: 'telemetry',  chip: 'wz-td-chip',  label: 'Telemetry destination' },
-    { id: 'stagehost', pane: 'wz-step-stagehost', key: 'stage_host', chip: 'wz-sh-chip',  label: 'Stage host' },
     { id: 'packages',  pane: 'wz-step-packages',  key: 'packages',   chip: 'wz-pkg-chip', label: 'Device packages' },
     { id: 'imageverification', pane: 'wz-step-imageverification', key: 'image_verification',
       chip: 'wz-iv-chip', label: 'Image verification' }
@@ -3563,9 +3652,6 @@
     // it on its way back in, so only one clone is ever live.
     if (WIZARD_STEPS[wizardStep].id === 'telemetry') {
       mountSettingsForm('td', 'wz-td-mount');
-      refreshSettings();
-    } else if (WIZARD_STEPS[wizardStep].id === 'stagehost') {
-      mountSettingsForm('sh', 'wz-sh-mount');
       refreshSettings();
     } else if (WIZARD_STEPS[wizardStep].id === 'imageverification') {
       // Moved, not cloned (see mountImageVerification) -- Settings reclaims
@@ -3701,8 +3787,6 @@
       setupItemChipHTML('telemetry', s.telemetry.state, null);
     document.getElementById('setup-td-note').textContent =
       setupTelemetryNote(s.telemetry);
-    document.getElementById('setup-sh-chip').innerHTML =
-      setupItemChipHTML('stage_host', s.stage_host.state, null);
     document.getElementById('setup-pkg-chip').innerHTML =
       setupChip(s.packages.state);
     document.querySelector('#setup-pkg-table tbody').innerHTML =
@@ -3739,20 +3823,6 @@
     document.getElementById('sessions-info').textContent =
       s.sessions.active + ' active session(s); idle timeout ' +
       s.sessions.idle_ttl_minutes + ' min.';
-    var sh = s.stage_host || {};
-    // These live in a template and are only present while mounted, so every
-    // write guards -- refreshSettings also runs for surfaces that host neither.
-    var shUser = document.getElementById('sh-user');
-    if (shUser) shUser.value = sh.username || '';
-    var shStatus = document.getElementById('sh-status');
-    if (shStatus) shStatus.textContent = (sh.configured
-      ? ('Configured as "' + sh.username + '". To change it, edit the username ' +
-         'and/or re-enter the password below and Save. ')
-      : 'Not configured. ') +
-      'Not required: the Console and the artifact server share one container, ' +
-      'so onboarding stages per-device material locally and never opens an SSH ' +
-      'hop to a stage host; this credential is not passed to any installer. ' +
-      'Stored age-encrypted; the password is never shown again.';
     // --- Certificate (metadata only — key material never reaches this page) ---
     var gc = s.gui_cert || {};
     var certStatus = document.getElementById('cert-status');
@@ -4042,17 +4112,16 @@
     refreshSettings();
   });
   // ---- Shared settings forms: one markup source, mounted where it is needed
-  // The telemetry and stage-host forms live in a <template> in the settings
-  // pane and are cloned into whichever surface is showing -- Settings, or a
-  // step of the first-run wizard. Cloning rather than duplicating the markup
-  // keeps a single source of truth, and only ever ONE clone is mounted, so the
-  // ids inside stay unique. Handlers bind per mount, which is why they live in
+  // The telemetry form lives in a <template> in the settings pane and is
+  // cloned into whichever surface is showing -- Settings, or a step of the
+  // first-run wizard. Cloning rather than duplicating the markup keeps a
+  // single source of truth, and only ever ONE clone is mounted, so the ids
+  // inside stay unique. Handlers bind per mount, which is why they live in
   // wire*Form() rather than running once at startup.
   var FORM_MOUNTS = {
-    td: { tpl: 'tpl-td-form', wire: function () { wireTelemetryForm(); } },
-    sh: { tpl: 'tpl-sh-form', wire: function () { wireStageHostForm(); } }
+    td: { tpl: 'tpl-td-form', wire: function () { wireTelemetryForm(); } }
   };
-  var formMountedAt = { td: null, sh: null };
+  var formMountedAt = { td: null };
 
   function mountSettingsForm(which, hostId) {
     var spec = FORM_MOUNTS[which];
@@ -4073,10 +4142,10 @@
   }
 
   // The Image verification content (schedule form, Refresh now, offline
-  // import) is relocated the same way -- Settings and the wizard's step 4
+  // import) is relocated the same way -- Settings and the wizard's step 3
   // share one implementation -- but by MOVING the live nodes rather than
-  // cloning a <template>: unlike wireTelemetryForm/wireStageHostForm above,
-  // its handlers (the schedule-form submit listener, the iv-refresh click
+  // cloning a <template>: unlike wireTelemetryForm above, its handlers
+  // (the schedule-form submit listener, the iv-refresh click
   // handler, wireDropzone on the offline dropzone, the once-only hour-select
   // IIFE) are bound ONCE at load, not re-wired per mount. Moving the same
   // DOM node keeps every listener intact and needs no rewire step, and since
@@ -4089,31 +4158,6 @@
     if (!host || !content) return;
     host.appendChild(content);
     ivMountedAt = hostId;
-  }
-
-  function wireStageHostForm() {
-  document.getElementById('sh-form').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    var msg = document.getElementById('sh-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var user = document.getElementById('sh-user').value.trim();
-    var pass = document.getElementById('sh-pass').value;
-    var pass2 = document.getElementById('sh-pass2').value;
-    if (!user) { msg.textContent = 'Username is required.'; return; }
-    if (!pass) { msg.textContent = 'Password is required.'; return; }
-    if (pass !== pass2) { msg.textContent = 'Passwords do not match.'; return; }
-    var r = await jpost('/api/settings/stage-host', { username: user, password: pass });
-    if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
-    document.getElementById('sh-form').reset();
-    msg.textContent = 'Stage host credentials saved.'; msg.classList.add('ok');
-    refreshSettings();
-  });
-  document.getElementById('sh-clear').addEventListener('click', async function () {
-    var msg = document.getElementById('sh-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var r = await fetch('/api/settings/stage-host', { method: 'DELETE', headers: csrfHdr() });
-    if (!r.ok) { msg.textContent = 'Failed (' + r.status + ')'; return; }
-    msg.textContent = 'Stage host credentials cleared.'; msg.classList.add('ok');
-    refreshSettings();
-  });
   }
 
 
@@ -4464,9 +4508,8 @@
       document.getElementById('settings-pane-' + t).hidden = t !== sub;
       document.getElementById('nav-settings-' + t).classList.toggle('active', t === sub);
     });
-    // Claim the shared forms back from the wizard, then repopulate them --
+    // Claim the shared form back from the wizard, then repopulate it --
     // a freshly cloned form is empty until refreshSettings writes to it.
-    if (sub === 'general') mountSettingsForm('sh', 'sh-mount');
     if (sub === 'telemetry') mountSettingsForm('td', 'td-mount');
     // Same reclaim, but a move rather than a re-mount -- see
     // mountImageVerification's own comment for why.
@@ -4581,8 +4624,6 @@
     password_change: 'changed the console password',
     password_change_fail: 'failed to change the console password',
     revoke_other_sessions: 'revoked other console sessions',
-    stage_host_set: 'set stage-host credentials',
-    stage_host_clear: 'cleared stage-host credentials',
     'gui-cert-replace': 'replaced the console TLS certificate',
     'gui-cert-revert': 'reverted the console to the built-in certificate',
     'trust-add': 'installed a trusted CA certificate',

@@ -9,6 +9,7 @@ import time
 import pytest
 
 import bencode
+import bulkhash
 import catalog
 import publish
 import secrets_store
@@ -44,6 +45,59 @@ def test_publish_end_to_end(tmp_path):
     # catalog persisted + seeder invoked with the image's dir
     assert store.get_image("cat9k_iosxe.26.01.01") is not None
     assert captured["dir"] == str(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("mktorrent") is None,
+                    reason="mktorrent not installed")
+def test_signature_verified_writes_operator_field_not_the_reconcilers(tmp_path):
+    """#88: `iris-publish --signature-verified` used to write
+    cisco_signature_verified -- the SAME field the Cisco Bulk Hash
+    reconciler owns (catalog.apply_hash_verification) -- so the operator's
+    attestation was silently overwritten by the very next reconciler run.
+    The operator's mark now lands on its own field, untouched by the
+    reconciler, and the reconciler's field is untouched by publish()."""
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image payload" * 1000)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+
+    entry = publish.publish(
+        str(img), store,
+        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        image_id=None, signature_verified=True,
+        seeder=lambda torrent_bytes, image_dir: None)
+
+    # the operator's own attestation
+    assert entry["operator_attested_signature"] is True
+    # publish() never writes the reconciler's field at all
+    assert "cisco_signature_verified" not in entry
+
+    # The reconciler's first run (a mismatch, so it would previously have
+    # flipped the shared field to False) must not touch the operator's mark.
+    store.apply_hash_verification(
+        {entry["id"]: {"state": bulkhash.STATE_MISMATCH,
+                       "feed_sha512": "bb" * 64,
+                       "publish_date": "2026-08-01", "deferral": False}},
+        source="scheduled", now=1000)
+    after = store.get_image(entry["id"])
+    assert after["operator_attested_signature"] is True, \
+        "the reconciler must never overwrite the operator's attestation"
+    assert after["cisco_signature_verified"] is False
+    assert after["hash_verification"]["state"] == "mismatch"
+
+
+@pytest.mark.skipif(shutil.which("mktorrent") is None,
+                    reason="mktorrent not installed")
+def test_publish_without_signature_verified_flag_leaves_attestation_false(tmp_path):
+    img = tmp_path / "cat9k_iosxe.26.01.01.SPA.bin"
+    img.write_bytes(b"fake image payload" * 1000)
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+    entry = publish.publish(
+        str(img), store,
+        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        image_id=None, signature_verified=False,
+        seeder=lambda torrent_bytes, image_dir: None)
+    assert entry["operator_attested_signature"] is False
+    assert "cisco_signature_verified" not in entry
 
 
 def test_derive_id_strips_known_suffixes():

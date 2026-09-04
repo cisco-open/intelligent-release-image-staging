@@ -18,9 +18,43 @@ setup() {
 # ---------------------------------------------------------------------------
 
 @test "dry-run renders the hardware-proven activate line with the three secrets" {
+  # Rewritten (was pinned to the pre-#123/#124 opts string) to also cover the
+  # bounded container-log driver and the IRIS_LOG env now on the line.
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off"'* ]]
+  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+}
+
+# ---------------------------------------------------------------------------
+# #123 -- the container log must be bounded (never --log-driver=none: XR has
+# no syslog path for %IRIS lines, see xr_deps.py's deviation note), and #124
+# -- IRIS_LOG must actually reach the container so the documented opt-in is
+# reachable on this platform.
+# ---------------------------------------------------------------------------
+
+@test "dry-run bounds the container log with a rotated json-file driver, never --log-driver=none" {
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--log-driver json-file --log-opt max-size=1m --log-opt max-file=3'* ]]
+  [[ "$output" != *'--log-driver none'* ]]
+}
+
+@test "dry-run defaults IRIS_LOG to off and forwards it to the container" {
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--env IRIS_LOG=off'* ]]
+}
+
+@test "dry-run forwards an operator's IRIS_LOG=on opt-in to the container" {
+  IRIS_LOG=on run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--env IRIS_LOG=on'* ]]
+}
+
+@test "installer refuses an IRIS_LOG value that would break out of the docker-run-opts quoting" {
+  IRIS_LOG='on"; no shutdown' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS_LOG must not contain a double quote"* ]]
 }
 
 @test "dry-run forwards MODEL from the caller's env contract (fleet row) as IRIS_MODEL" {
@@ -240,6 +274,20 @@ _xr_install_run_live() {
   MODEL=8201 run _xr_install_run_live
   [ "$status" -eq 0 ]
   grep -q -- '--env IRIS_MODEL=8201' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: forwards IRIS_LOG through to the activate line sent to the device" {
+  _xr_install_stub_setup
+  IRIS_LOG=on run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  grep -q -- '--env IRIS_LOG=on' "$FAKE_COMMAND_LOG"
+}
+
+@test "live: IRIS_LOG defaults to off on the activate line sent to the device" {
+  _xr_install_stub_setup
+  run _xr_install_run_live
+  [ "$status" -eq 0 ]
+  grep -q -- '--env IRIS_LOG=off' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: refuses a device whose show version is not IOS-XR" {

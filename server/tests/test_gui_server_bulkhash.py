@@ -925,6 +925,50 @@ def test_images_list_rows_default_for_a_never_checked_image(tmp_path):
         stop()
 
 
+def test_images_list_rows_keep_operator_attestation_distinct_from_reconciler_verdict(tmp_path):
+    """#88: the operator's `iris-publish --signature-verified` attestation
+    (operator_attested_signature) and the Cisco Bulk Hash reconciler's own
+    verdict (cisco_signature_verified) are separate fields -- both
+    guaranteed-present booleans on every row, like quarantined/
+    hash_verification, so an image the reconciler has never covered still
+    shows the operator's mark rather than omitting the key.
+
+    Builds the raw entry WITHOUT cisco_signature_verified at all (rather
+    than via _entry(), which hardcodes it False) -- publish.py no longer
+    writes that field, so a freshly-published, reconciler-never-touched
+    entry genuinely lacks the key; the row projection must still guarantee
+    it reads as False rather than omitting it or raising."""
+    host, port, (_, _, _, cat), state_dir, _audit, stop = _serve(tmp_path)
+    try:
+        raw = _entry(sha512="aa" * 64, operator_attested_signature=True)
+        del raw["cisco_signature_verified"]
+        cat.save_image(raw)
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/images",
+                               headers={"Cookie": cookie})
+        row = json.loads(body)["images"][0]
+        # the operator's mark survives even though the reconciler has never
+        # touched this image (cisco_signature_verified defaults False, never
+        # absent, mirroring quarantined/hash_verification above)
+        assert row["operator_attested_signature"] is True
+        assert row["cisco_signature_verified"] is False
+
+        # a reconciler run that finds a MISMATCH must still not touch the
+        # operator's attestation, even though it flips its own field
+        cat.apply_hash_verification(
+            {"img1": {"state": "mismatch", "feed_sha512": "bb" * 64,
+                     "publish_date": "2026-08-01", "deferral": False}},
+            source="scheduled", now=1000)
+        status, _, body = _req(host, port, "GET", "/api/images",
+                               headers={"Cookie": cookie})
+        row = json.loads(body)["images"][0]
+        assert row["operator_attested_signature"] is True
+        assert row["cisco_signature_verified"] is False
+        assert row["hash_verification"]["state"] == "mismatch"
+    finally:
+        stop()
+
+
 def test_images_list_rows_never_carry_internal_bookkeeping_fields(tmp_path):
     host, port, (_, _, _, cat), state_dir, _audit, stop = _serve(tmp_path)
     try:

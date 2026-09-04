@@ -1,4 +1,4 @@
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
 # One row per device — NETWORK INFO ONLY. Tokens and secrets are handled
 # automatically by the Console/API onboarding flow (see the Management Type
 # and VLAN Ownership doc). Comment lines (#) and the header are ignored on import,
@@ -21,6 +21,10 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 #   xr-host = IOS-XR appmgr container on the router's own network stack. Leave
 #             all VLAN/SVI/app-address/VPG/NAT fields blank; use platform=xr-appmgr.
 # 'model' is OPTIONAL (e.g. C9300-48UXM, IE-3400, C8000V); blank lets onboarding detect it.
+# svi_igp: OPTIONAL, routed only. 'isis' adds 'ip router isis' to the IRIS SVI
+#   for a fabric that must learn its subnet (e.g. an SD-Access underlay); blank
+#   keeps the server's SVI_IGP env var default (none) for that device. Every
+#   other management_type must leave it blank.
 # 'platform' is LAST: choose 'guestshell', 'iox', 'router', or 'xr-appmgr'. A
 #   blank imported value is an inventory transition state; known IOS-XE models
 #   can resolve at onboard, while uncertainty and IOS-XR without xr-appmgr fail closed.
@@ -29,12 +33,14 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 #   (device_ip) by default; set this only to override it. Blank for Guest Shell.
 #
 # Routed example (dedicated IRIS VLAN/SVI):
-# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,guestshell
+# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,guestshell
+# Routed example on an IS-IS fabric (SD-Access underlay learns the IRIS subnet):
+# edge-routed-isis,192.0.2.15,routed,667,192.0.2.13,255.255.255.252,192.0.2.14,255.255.255.252,192.0.2.13,,,C9300-48UXM,,,isis,guestshell
 # Inband Guest Shell example (existing management VLAN 120, static address):
-# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,guestshell
+# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,guestshell
 # Inband IOx example (IE-3400, app SSHes to the existing management SVI 192.0.2.1):
-# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,iox
+# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,iox
 # C8000v router NAT example (VPG 10; use an operator-selected outside interface):
-# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,router
+# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router
 # Cisco 8201 IOS-XR example (no app-network fields):
-# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,xr-appmgr
+# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,xr-appmgr

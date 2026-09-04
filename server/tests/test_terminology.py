@@ -156,7 +156,12 @@ ALLOWLIST = [
      "pins iox/uninstall.sh's NETWORK_ATTACHMENT tripwire message"),
 
     # -- decision 1: the removed network_attachment CSV/read alias -----
-    ("server/gui_fleet.py", ("retired network_attachment",),
+    # Anchor on text that stays on ONE line. The previous anchor was
+    # "retired network_attachment", which broke when the svi_igp work reflowed
+    # this comment and split that phrase across two lines -- the guard then
+    # reported both a stale anchor and an unlisted hit for the same unchanged
+    # sentence.
+    ("server/gui_fleet.py", ("network_attachment alias header is gone",),
      "developer comment explaining the retired network_attachment CSV "
      "header alias is gone (decision 1) -- historical context, not live code"),
     ("server/tests/test_gui_fleet.py",

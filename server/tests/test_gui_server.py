@@ -170,8 +170,13 @@ def test_bulk_row_actions_wired():
     assert "'adopt-selected'" in js and "'delete-selected'" in js
     assert "'apply-cred-selected'" in js
     assert "/adopt'" in js and "acknowledge_adopt: true" in js
-    # bulk assign reuses the per-device credential route
+    # the per-row credential dropdown still uses the single-device route...
     assert "'/credential'" in js or "+ '/credential'" in js
+    # ...but the bulk credential action (issue #125) posts ONE request
+    # carrying every selected id, not one per-device request each --
+    # see bulkApply and gui_server.py's /api/devices/bulk-credential.
+    assert "'/api/devices/bulk-credential'" in js
+    assert "function bulkApply(" in js
     # the single delete path confirms first
     assert "function delWarning(" in js
     assert js.count("confirm(delWarning(") == 1
@@ -369,7 +374,7 @@ def test_audit_message_composer_wired():
         js = f.read()
     assert "function auditVerb(" in js
     # verb coverage: console + legacy broker events
-    for ev in ("login_fail", "password_change_fail", "stage_host_clear",
+    for ev in ("login_fail", "password_change_fail", "revoke_other_sessions",
                "device_csv_import", "device_credential_change",
                "onboard_finished", "credential_profile_delete",
                "image_publish_finished", "request_report",
@@ -1123,6 +1128,7 @@ def test_upload_rejects_truncated_body(tmp_path):
 import gui_fleet
 import gui_creds
 import catalog as catalog_mod
+import keyed_state
 import peer_enforcement
 
 
@@ -1427,7 +1433,7 @@ def test_csv_import_export(tmp_path):
         assert b.decode().splitlines()[0] == \
             ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
              "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
-             "vpg_number,nat_interface,platform")
+             "vpg_number,nat_interface,svi_igp,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -2432,8 +2438,8 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
             "management_type": "xr-host", "device_ip": "10.0.0.9",
             "swarm_port": "6881", "model": "8201", "platform": "xr-appmgr",
             "renderer": "v1"}
-        for key in ("iris_vlan", "svi_ip", "svi_mask", "app_ip", "app_mask",
-                    "app_gateway", "inband_vlan", "vpg_number",
+        for key in ("iris_vlan", "svi_ip", "svi_mask", "svi_igp", "app_ip",
+                    "app_mask", "app_gateway", "inband_vlan", "vpg_number",
                     "nat_interface", "ios_ssh_host"):
             assert key not in plan["resolved"], key
         assert plan["ownership"] == (
@@ -2506,6 +2512,40 @@ def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tm
         resolved = json.loads(body)["plan"]["resolved"]
         assert resolved["management_type"] == "routed"     # not 'inband'
         assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+    finally:
+        stop()
+
+
+def test_plan_carries_svi_igp_through_to_the_resolved_record(tmp_path):
+    """issue #85: a routed device's per-record svi_igp override must reach
+    the resolved plan gui_onboard._build_env reads for the installer env --
+    not just live in the fleet row. A device with no override plans with an
+    empty svi_igp, so device-install.sh's own SVI_IGP env var default still
+    decides for it."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "management_type": "routed", "iris_vlan": "666",
+                      "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                      "app_ip": "10.0.0.1", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.0.0.2", "svi_igp": "isis",
+                      "model": "C9300", "platform": "guestshell"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.9",
+                      "management_type": "routed", "iris_vlan": "667",
+                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.252",
+                      "app_ip": "10.0.0.9", "app_mask": "255.255.255.252",
+                      "app_gateway": "10.0.0.10",
+                      "model": "C9300", "platform": "guestshell"})
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        assert json.loads(body)["plan"]["resolved"]["svi_igp"] == "isis"
+        status, _, body = _req(host, port, "GET", "/api/devices/d2/plan",
+                               headers={"Cookie": ck})
+        assert status == 200, body
+        assert json.loads(body)["plan"]["resolved"]["svi_igp"] == ""
     finally:
         stop()
 
@@ -2827,7 +2867,8 @@ def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
         assert plan["resolved"] == {
             "management_type": "router-routed", "device_ip": "192.0.2.10",
             "iris_vlan": "", "svi_ip": "",
-            "svi_mask": "", "app_ip": "10.7.0.2", "app_mask": "255.255.255.252",
+            "svi_mask": "", "svi_igp": "", "app_ip": "10.7.0.2",
+            "app_mask": "255.255.255.252",
             "app_gateway": "10.7.0.1", "inband_vlan": "", "vpg_number": "7",
             "nat_interface": "", "swarm_port": "6881", "ios_ssh_host": "",
             "model": "C8000V", "platform": "router", "renderer": "v1"}
@@ -3941,7 +3982,7 @@ def test_setup_status_route_requires_auth(tmp_path, monkeypatch):
 
 def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
     """Authenticated GET must actually reach setup_status.build_status and
-    return its three-card shape wired to the real session + credential
+    return its four-card shape wired to the real session + credential
     store -- unlike the source-scan test, this fails if the route raises,
     returns the wrong shape, or never calls the builder at all."""
     monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
@@ -3952,7 +3993,7 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
                                headers={"Cookie": ck})
         assert status == 200
         st = json.loads(body)
-        assert set(("admin", "stage_host", "packages")) <= set(st)
+        assert set(("admin", "telemetry", "packages", "image_verification")) <= set(st)
         # the session's real username must flow through, not a placeholder
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
@@ -4003,29 +4044,6 @@ def test_setup_status_route_carries_the_image_verification_card(tmp_path, monkey
         status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
                                headers={"Cookie": ck})
         assert json.loads(body)["image_verification"]["state"] == "ok"
-    finally:
-        stop()
-
-
-def test_setup_status_route_response_has_no_secret_material(tmp_path, monkeypatch):
-    """The card exists to be trustworthy about system state; it must never
-    leak stage-host credentials onto the wire, even after a real stage-host
-    password has been set through the credential store it reads from."""
-    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
-    host, port, _ctx, stop = _serve_full(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        status, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
-                            {"username": "svc-iris", "password": "hostpw-s3cr3t"},
-                            headers=hh)
-        assert status == 200
-        status, _, body = _req(host, port, "GET", "/api/settings/setup-status",
-                               headers={"Cookie": ck})
-        assert status == 200
-        blob = body.decode().lower()
-        for banned in ("password", "secret", "token", "private", "begin "):
-            assert banned not in blob
     finally:
         stop()
 
@@ -4119,50 +4137,6 @@ def test_devices_example_csv_download(tmp_path):
         assert st == 200
         assert "filename=devices-example.csv" in hd.get("Content-Disposition", "")
         assert "device_id,device_ip,management_type,iris_vlan" in b.decode()
-    finally:
-        stop()
-
-
-def test_settings_stage_host_roundtrip(tmp_path):
-    host, port, _deps, stop = _serve_full(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        # auth: no session -> 401; session without CSRF -> 403
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": "p"})[0] == 401
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": "p"},
-                    headers={"Cookie": ck})[0] == 403
-        # starts unconfigured; GET /api/settings shows the redacted view
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert st == 200
-        assert json.loads(b)["stage_host"] == {"configured": False, "username": ""}
-        # validation: missing/null/non-string fields and non-object JSON -> 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "", "password": "p"}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": ""}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "u", "password": None}, headers=hh)[0] == 400
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": 42, "password": "p"}, headers=hh)[0] == 400
-        hh_json = dict(hh); hh_json["Content-Type"] = "application/json"
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    raw=b"[]", headers=hh_json)[0] == 400
-        # set, then the settings view reflects it — but NEVER the password
-        assert _req(host, port, "POST", "/api/settings/stage-host",
-                    {"username": "svc-iris", "password": "hostpw"},
-                    headers=hh)[0] == 200
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert json.loads(b)["stage_host"] == {"configured": True,
-                                               "username": "svc-iris"}
-        assert b"hostpw" not in b
-        # clear
-        st, _, b = _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        assert st == 200 and json.loads(b)["deleted"] is True
-        st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
-        assert json.loads(b)["stage_host"]["configured"] is False
     finally:
         stop()
 
@@ -4432,6 +4406,137 @@ def test_device_credential_empty_string_clears_profile(tmp_path):
         dev = json.loads(b)["devices"][0]
         assert dev.get("credential_profile_id") == ""
         assert dev["device_ip"] == "10.0.0.1"   # untouched
+    finally:
+        stop()
+
+
+# ---- bulk credential reassignment (issue #125) ----
+
+def test_bulk_credential_requires_session_and_csrf(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "lab"})
+        assert st == 401
+        ck, _csrf = _auth(host, port)
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "lab"},
+                        headers={"Cookie": ck})
+        assert st == 403
+    finally:
+        stop()
+
+
+def test_bulk_credential_rejects_bad_device_ids_body(tmp_path):
+    host, port, _deps, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for body in ({"device_ids": []}, {"device_ids": "d1"},
+                     {"device_ids": [1, 2]}, {"device_ids": [""]}, {}):
+            st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                            body, headers=hh)
+            assert st == 400, body
+    finally:
+        stop()
+
+
+def test_bulk_credential_unknown_profile_400_applies_nothing(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, _creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, _ = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1"], "credential_profile_id": "nope"},
+                        headers=hh)
+        assert st == 400
+        assert fleet.get_device("d1").get("credential_profile_id") in (None, "")
+    finally:
+        stop()
+
+
+def test_bulk_credential_happy_path_one_audit_record(tmp_path):
+    """The whole point of the bulk endpoint: ONE request, ONE audit record,
+    applied to every selected device -- not one request/record per device."""
+    host, port, deps, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        for i in range(5):
+            fleet.upsert({"device_id": "d%d" % i, "device_ip": "10.0.0.%d" % i})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        ids = ["d%d" % i for i in range(5)]
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ids, "credential_profile_id": "lab"},
+                        headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result == {"ok": True, "applied": 5, "failed": {}}
+        for did in ids:
+            assert fleet.get_device(did)["credential_profile_id"] == "lab"
+        events = [json.loads(l) for l in open(audit_path) if l.strip()]
+        creds_events = [e for e in events
+                       if e.get("event") == "device_credential_bulk_change"]
+        assert len(creds_events) == 1, creds_events
+        assert "5/5" in creds_events[0]["detail"]
+    finally:
+        stop()
+
+
+def test_bulk_credential_partial_failure_names_the_missing_device(tmp_path):
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ["d1", "ghost"],
+                         "credential_profile_id": "lab"}, headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result["ok"] is True
+        assert result["applied"] == 1
+        assert result["failed"] == {"ghost": "no such device"}
+        assert fleet.get_device("d1")["credential_profile_id"] == "lab"
+    finally:
+        stop()
+
+
+def test_bulk_credential_matches_select_all_matching_at_scale(tmp_path):
+    """The scenario issue #125 is actually about: the console's "Select all
+    N matching devices" bulk action fires this ONE request for the whole
+    filtered set. A few hundred devices is enough to prove correctness end
+    to end over HTTP without making the test itself slow."""
+    host, port, deps, stop = _serve_full(tmp_path)
+    _app, fleet, creds, _cat = deps
+    try:
+        n = 300
+        for i in range(n):
+            fleet.upsert({"device_id": "d%03d" % i, "device_ip": "10.0.%d.%d" % (i // 256, i % 256)})
+        creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
+                                  "device_pass": "pw"})
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        ids = ["d%03d" % i for i in range(n)]
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-credential",
+                        {"device_ids": ids, "credential_profile_id": "lab"},
+                        headers=hh)
+        assert st == 200, b
+        result = json.loads(b)
+        assert result == {"ok": True, "applied": n, "failed": {}}
+        st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
+        devs = json.loads(b)["devices"]
+        assert len(devs) == n
+        assert all(d["credential_profile_id"] == "lab" for d in devs)
     finally:
         stop()
 
@@ -4995,27 +5100,6 @@ def test_device_assign_detail_notes_previous_image(tmp_path):
         stop()
 
 
-def test_stage_host_set_emits_without_password_in_file(tmp_path):
-    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        st, _, _ = _req(host, port, "POST", "/api/settings/stage-host",
-                        {"username": "svc-iris", "password": "supersecretpw"},
-                        headers=hh)
-        assert st == 200
-        raw = open(audit_path).read()
-        assert "supersecretpw" not in raw
-        lines = _read_audit_lines(audit_path)
-        settings_events = [e for e in lines if e.get("category") == "settings"]
-        # the username belongs in detail (before -> after); target is the key
-        ev = [e for e in settings_events if e.get("event") == "stage_host_set"]
-        assert ev and ev[0]["target"] == "stage-host"
-        assert ev[0]["detail"] == "user (none) -> svc-iris"
-    finally:
-        stop()
-
-
 def test_audit_emission_failure_does_not_break_route(tmp_path, monkeypatch):
     host, port, _ctx, _audit_path, stop = _serve_full_audit(tmp_path)
     try:
@@ -5219,32 +5303,6 @@ def test_auth_ops_emit_enriched_audit(tmp_path):
         assert by_event["revoke_other_sessions"]["detail"] == \
             "revoked 0 other session(s)"
         assert by_event["logout"]["src_ip"] == "127.0.0.1"
-    finally:
-        stop()
-
-
-def test_stage_host_update_and_clear_details(tmp_path):
-    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
-    try:
-        ck, csrf = _auth(host, port)
-        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        _req(host, port, "POST", "/api/settings/stage-host",
-             {"username": "svc-a", "password": "stagepw1"}, headers=hh)
-        _req(host, port, "POST", "/api/settings/stage-host",
-             {"username": "svc-b", "password": "stagepw2"}, headers=hh)
-        _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        _req(host, port, "DELETE", "/api/settings/stage-host", headers=hh)
-        sets = [e for e in _read_audit_lines(audit_path)
-                if e.get("event") == "stage_host_set"]
-        clears = [e for e in _read_audit_lines(audit_path)
-                  if e.get("event") == "stage_host_clear"]
-        assert [e["detail"] for e in sets] == \
-            ["user (none) -> svc-a", "user svc-a -> svc-b"]
-        assert [e["detail"] for e in clears] == \
-            ["cleared (was user svc-b)", "nothing was configured"]
-        assert all(e["target"] == "stage-host" for e in sets + clears)
-        raw = open(audit_path).read()
-        assert "stagepw1" not in raw and "stagepw2" not in raw
     finally:
         stop()
 
@@ -7619,8 +7677,8 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     Settings > General / > Telemetry to actually do anything. First run is a
     flow, so it becomes a stepped wizard that hosts the forms in place.
 
-    Three steps -- telemetry, stage host, device packages -- with admin shown
-    as already complete, because first-run just created it. Every step can be
+    Steps -- telemetry, device packages, image verification -- with admin
+    shown as already complete, because first-run just created it. Every step can be
     skipped and the wizard resumes at the first incomplete one, because the
     packages step can NEVER complete in-console (no Docker socket), so a
     wizard that insisted on completion could never be finished."""
@@ -7636,10 +7694,9 @@ def test_first_run_setup_is_a_wizard_not_a_linking_checklist():
     assert "'setup'" in js.split("var VIEWS =", 1)[1].split("]", 1)[0]
 
     wiz = html.split('id="view-setup"', 1)[1].split("</section>", 1)[0]
-    # the two form steps mount the SHARED templates rather than copying them
-    assert 'id="wz-td-mount"' in wiz and 'id="wz-sh-mount"' in wiz
+    # the telemetry form step mounts the SHARED template rather than copying it
+    assert 'id="wz-td-mount"' in wiz
     assert "mountSettingsForm('td', 'wz-td-mount')" in js
-    assert "mountSettingsForm('sh', 'wz-sh-mount')" in js
     # packages is detect-and-instruct, never a form
     assert 'id="wz-pkg-recheck"' in wiz
     assert "<form" not in wiz.split('id="wz-step-packages"', 1)[1]
@@ -7716,7 +7773,7 @@ def test_setup_wizard_shows_every_step_even_when_already_complete():
     """The wizard renders one step at a time and opens on the first incomplete
     one. On a server whose telemetry destination already comes from the
     deployment environment (IRIS_OTLP_ENDPOINT), telemetry resolves to 'ok',
-    so the wizard opened on stage host and the telemetry step was never
+    so the wizard opened on the next step and the telemetry step was never
     visible at all -- it looked missing.
 
     Every step must therefore be listed and reachable, whatever its state."""
@@ -8289,6 +8346,43 @@ def test_picker_does_not_open_on_a_failed_image_fetch():
     assert "not in the catalog" in picker
 
 
+def test_bulk_assign_resolves_off_page_selection_from_the_server():
+    """Issue #121: selection is id-keyed and outlives paging (issue #112), so
+    a selected device is very often NOT in LAST_DEVICES, which holds only the
+    currently rendered page. The bulk picker used to derive its pre-check
+    intersection AND its expect_image_ids compare-and-set straight from
+    LAST_DEVICES, so an off-page selected device read as "assigned: []" --
+    the server correctly refused (409) the resulting write, but for the wrong
+    reason, and it happened for every off-page device in the selection.
+
+    fetchDeviceRows() resolves each selected id's REAL current row first (a
+    bounded /api/devices walk keyed by device_id -- there is no "fetch by id
+    list" route), and the click handler now reads from that map instead of
+    LAST_DEVICES."""
+    app_js = _webroot("app.js")
+    assert "async function fetchDeviceRows(ids)" in app_js
+    fetch_fn = app_js.split("async function fetchDeviceRows(ids) {", 1)[1].split(
+        "\n  document.getElementById('assign-images-selected')", 1)[0]
+    # keyed by device_id, seeded from whatever page is already rendered
+    assert "byId[d.device_id] = d" in fetch_fn
+    assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
+    assert "/api/devices?" in fetch_fn
+    # bounded: nothing to fetch when the whole selection is already rendered,
+    # and the walk stops the moment every missing id has been found rather
+    # than always paging the entire fleet
+    assert "if (!missing.length) return byId;" in fetch_fn
+    assert "remaining--" in fetch_fn
+    bulk_handler = app_js.split(
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+    assert "await fetchDeviceRows(ids)" in bulk_handler
+    # the pre-check/expect sets are read from the fetched map, never straight
+    # from LAST_DEVICES (which is exactly the bug: the page in the DOM is not
+    # the same thing as the selection)
+    assert "byId[id]" in bulk_handler
+    assert "LAST_DEVICES" not in bulk_handler, \
+        "bulk picker still trusts LAST_DEVICES for a selection that can span pages"
+
+
 def test_image_picker_is_one_function_shared_by_both_entry_points():
     """The row select and the bulk dropdown used to be two separate ways to
     assign the same thing, through two different code paths that could (and
@@ -8540,11 +8634,17 @@ def test_deploy_logs_flag_nothing_without_a_registration_stamp(tmp_path):
     host, port, fleet, onboard, log_dir, _audit, stop = _serve_router_jobs(tmp_path)
     try:
         ck, _csrf = _auth(host, port)
-        # a row as it looked before the stamp existed
-        with open(fleet.path) as stream:
+        # a row as it looked before the stamp existed. FleetStore is
+        # sharded per device now (see keyed_state.py) -- _serve_router_jobs
+        # already upserted r1 before the server even started, so fleet.path
+        # (fleet.json) is the retired legacy document, not the live store;
+        # r1's row lives in its own shard.
+        shard = os.path.join(keyed_state.shard_dir(fleet.path),
+                             "%02x.json" % keyed_state.bucket_of("r1"))
+        with open(shard) as stream:
             raw = json.load(stream)
-        raw["devices"]["r1"].pop("registered_at", None)
-        with open(fleet.path, "w") as stream:
+        raw["r1"].pop("registered_at", None)
+        with open(shard, "w") as stream:
             json.dump(raw, stream)
         _plant_deploy_log(log_dir, "r1", 500, job_id="cccccccccccc0003")
 
@@ -8782,9 +8882,8 @@ def test_forms_get_persistent_field_labels():
         form = html.split('id="%s"' % form_id, 1)[1].split("</form>", 1)[0]
         for fid in field_ids:
             assert 'for="%s"' % fid in form, "%s: no label for=%r" % (form_id, fid)
-    # the two shared templates (mounted into both Setup and Settings)
-    for tpl_id, field_ids in (("tpl-sh-form", ("sh-user", "sh-pass", "sh-pass2")),
-                               ("tpl-td-form", ("td-endpoint",))):
+    # the shared template (mounted into both Setup and Settings)
+    for tpl_id, field_ids in (("tpl-td-form", ("td-endpoint",)),):
         tpl = html.split('id="%s"' % tpl_id, 1)[1].split("</template>", 1)[0]
         for fid in field_ids:
             assert 'for="%s"' % fid in tpl, "%s: no label for=%r" % (tpl_id, fid)
@@ -8797,7 +8896,7 @@ def test_error_and_status_regions_carry_live_roles():
     styles.css) get role=alert, so either outcome is announced without the
     operator having to go find the message by sight."""
     html = _webroot("index.html")
-    alert_ids = ("df-err", "cf-err", "pw-msg", "sh-msg", "cert-msg",
+    alert_ids = ("df-err", "cf-err", "pw-msg", "cert-msg",
                  "trust-msg", "ca-msg", "td-msg", "ae-msg",
                  "iv-schedule-msg", "iv-refresh-msg", "iv-offline-msg",
                  "ii-override-note", "ii-release-msg")
@@ -8805,7 +8904,7 @@ def test_error_and_status_regions_carry_live_roles():
         tag = html.split('id="%s"' % eid, 1)[1].split(">", 1)[0]
         assert 'role="alert"' in tag, eid
     status_ids = ("status", "dev-status", "di-note", "wz-progress", "wz-msg",
-                  "sh-status", "cert-status", "td-status", "ae-status",
+                  "cert-status", "td-status", "ae-status",
                   "sessions-info", "swarm-summary")
     for sid in status_ids:
         tag = html.split('id="%s"' % sid, 1)[1].split(">", 1)[0]
@@ -9190,12 +9289,12 @@ def test_settings_forms_are_wrapped_in_bounded_card_sections():
 
 
 def test_settings_card_never_wraps_a_template_root():
-    """The card goes AROUND the mount point (#sh-mount / #td-mount), never
+    """The card goes AROUND the mount point (#td-mount), never
     around the <template> whose content is cloned into it -- a wrapped
     template root would be inert markup styled as a card that never
     actually renders."""
     html = _webroot("index.html")
-    for tpl_id, mount_id in (("tpl-sh-form", "sh-mount"), ("tpl-td-form", "td-mount")):
+    for tpl_id, mount_id in (("tpl-td-form", "td-mount"),):
         before_tpl = html.split('id="%s"' % tpl_id, 1)[0]
         last_card_open = before_tpl.rfind('<div class="card">')
         last_card_close = before_tpl.rfind("</div>")

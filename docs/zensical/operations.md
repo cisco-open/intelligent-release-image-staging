@@ -619,12 +619,13 @@ release from before it.
 
 Every whole-fleet document under `IRIS_STATE` — `devices.json`,
 `policy.json`, `pull_requests.json`, `telemetry.json`, `report_ledger.json`,
-`transfer-attestations.json`, `peer-endpoints.json` — is migrated into a
-`<name>.d/` shard directory the first time the running server touches that
-store, normally on the container's first restart after an upgrade past the
-shard migration. Migration is automatic, one-shot per store, and never
-deletes anything: the original document is renamed to `<name>.json.migrated`
-and left in place next to its shard directory.
+`transfer-attestations.json`, `peer-endpoints.json`, and (issue #125)
+`fleet.json`, the operator inventory itself — is migrated into a `<name>.d/`
+shard directory the first time the running server touches that store,
+normally on the container's first restart after an upgrade past the shard
+migration. Migration is automatic, one-shot per store, and never deletes
+anything: the original document is renamed to `<name>.json.migrated` and
+left in place next to its shard directory.
 
 **A rollback to a pre-migration release refuses to start rather than run
 with an empty fleet.** Code from before the migration reads a *missing*
@@ -636,9 +637,10 @@ legacy path instead of leaving nothing: deliberately not valid JSON, so it
 trips the same fail-closed check that release already has for a *corrupt*
 state file (`state file unreadable: ...` / `state file is not a JSON
 object: ...` in the server log, or `EndpointStoreError` for
-`peer-endpoints.json`), and the affected requests fail instead of quietly
-succeeding against an empty fleet. The placeholder file itself is plain
-text — `cat` it — and names the exact `.migrated` file to restore.
+`peer-endpoints.json`, or `gui_fleet.FleetStateError` for `fleet.json`), and
+the affected requests fail instead of quietly succeeding against an empty
+fleet. The placeholder file itself is plain text — `cat` it — and names the
+exact `.migrated` file to restore.
 
 To roll back:
 
@@ -658,19 +660,27 @@ To roll back:
    mv <state>/report_ledger.json.migrated <state>/report_ledger.json
    mv <state>/transfer-attestations.json.migrated <state>/transfer-attestations.json
    mv <state>/peer-endpoints.json.migrated <state>/peer-endpoints.json
+   mv <state>/fleet.json.migrated <state>/fleet.json
    ```
 4. Start the pre-migration release.
+
+`fleet-revision.json` is not part of this restore — it has no legacy
+document to roll back to (the pre-migration release read `revision` out of
+`fleet.json` itself). Leaving it in place is harmless: the pre-migration
+release never reads it, and the post-migration release, if you later roll
+forward again, is fine finding one either way.
 
 **What this does not recover.** The restored document is a snapshot from the
 moment of migration, not from the moment of rollback. Any write the *new*
 (sharded) release made in between — a heartbeat, a policy change, a
-telemetry report, an endpoint announce — lives only in the `<name>.d/` shard
-directory, and migration never folds later shard writes back into
-`<name>.json.migrated`. A rollback shortly after the upgrade, before devices
-have reported again, loses nothing; a rollback after the fleet has run on
-the new release for a while reverts every migrated store to its state at
-migration time. The shard directories are left in place by this procedure —
-pre-migration code never reads or writes them — so nothing already on disk
+telemetry report, an endpoint announce, an inventory edit — lives only in
+the `<name>.d/` shard directory, and migration never folds later shard
+writes back into `<name>.json.migrated`. A rollback shortly after the
+upgrade, before devices have reported again, loses nothing; a rollback
+after the fleet has run on the new release for a while reverts every
+migrated store to its state at migration time. The shard directories are
+left in place by this procedure — pre-migration code never reads or writes
+them — so nothing already on disk
 is destroyed, but a device's activity between migration and rollback will
 not be visible to the older release. If that gap matters for your fleet,
 back up `<state>` (see [Backups](#backups)) before rolling back, and keep it

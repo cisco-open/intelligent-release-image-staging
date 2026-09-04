@@ -47,6 +47,56 @@ that one before a release too: an Alpine security bump withdraws the exact
 version we pinned, which no hermetic test can notice, and it leaves the
 corresponding source we publish unbuildable.
 
+### Capacity harness
+
+`server/tests/test_capacity_harness.py` is a repeatable mixed-workload
+capacity harness: it seeds a synthetic fleet of N devices under its own
+temporary directory (never the live server, its volumes, or a real device)
+and drives a tracker announce, a catalog heartbeat, a device policy read, a
+terminal report, a credential resolution, a fleet-wide bulk credential
+reassignment, and the console's own fleet projection — the operations a real
+fleet drives concurrently — then reports how the cost of each moves as N
+grows. It exists so the per-device scaling work (issues #51–#53/#56/#58 and
+the console paging that followed) has something repeatable behind it, instead
+of the ad hoc, one-off scripts that produced its original numbers — and it is
+what found issue #125 (`FleetStore`, the operator inventory, was left
+un-sharded) on its first run. The bulk-reassignment measurement is that
+fix's coverage: reassigning the WHOLE selected set through
+`FleetStore.bulk_upsert` costs at most `keyed_state.SHARD_COUNT` (256) shard
+writes, however many devices are selected, where the old one-request-per-
+device path cost one shard write per device.
+
+A small pair of sizes (50 and 500 devices) runs by default, in seconds, with
+every test suite. The full progression the project's own scale claims are
+stated at — 100, 1,000 and 10,000 devices, 10,000 being the top of the
+supported fleet size — rebuilds a 10,000-device fleet and is slow by design,
+so it is opt-in behind `IRIS_TEST_CAPACITY_LARGE=1`:
+
+```bash
+IRIS_TEST_CAPACITY_LARGE=1 python3 -m pytest \
+    server/tests/test_capacity_harness.py -q -s -k ten_thousand
+```
+
+or standalone: `python3 server/tests/test_capacity_harness.py --sizes 100
+1000 10000`. Every operation calls the real production function (the console
+check drives the real `gui_server` HTTP handler end to end), never a
+reimplementation, against synthetic state shaped like the real thing.
+
+Wall-clock timings the harness prints are informational only, not pass/fail:
+this host also runs the live IRIS lab server and real device traffic, so
+absolute milliseconds are noisy and **not comparable across separate runs,
+days, or machines** — only the growth factor within one run, across its own
+sizes, means anything. The assertions that actually run check deterministic
+counted work instead — which shard file changed, how many rows it holds, how
+many credential-index builds a run of requests costs, how many bytes a
+console response carries — the same style `test_keyed_state_scaling.py`
+uses. It deliberately does not measure concurrent load (every call runs
+sequentially, never the thousands-of-devices-at-once shape a real fleet
+produces), process/thread/FD growth over time, or real disk-hardware latency
+(state lives under `tempfile.TemporaryDirectory()`, on whatever filesystem
+backs the host's temp directory). See `TESTING.md` and the module's own
+docstring for the full accounting.
+
 ## Documentation build
 
 The docs site builds clean from the repository root, with no reported issues.

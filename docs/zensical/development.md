@@ -71,14 +71,16 @@ the IOx certificate pins and uses a build-time proxy for the XR RPM. A green
 result cannot prove that a package contains the current agent. Rebuild after
 any shared-agent change and redeploy each affected device.
 
-`device/iox/build.sh` and `tools/build-xr-package.sh` each bake in
-`device/agent`, `device/verify_image.py` and their own `device/<platform>`
+`device/iox/build.sh`, `tools/build-xr-package.sh` and
+`tools/make-agent-bundle.sh` each bake in `device/agent`,
+`device/verify_image.py` and their own `device/<platform>`/installer-script
 tree exactly as they sit in the checkout the script runs from — a worktree
 that has fallen behind `main` under those paths ships an older agent with
-nothing in the built image saying so (issue #72: this is how a stale
-candidate worktree made it into a size-measurement comparison). Both scripts
-now warn on stderr when that checkout is behind `main` (or `origin/main`)
-under those paths, naming the missing commits; set `IRIS_REQUIRE_FRESH_AGENT=1`
+nothing in the built image/package saying so (issue #72, and #119 for the
+third script: this is how a stale candidate worktree made it into a
+size-measurement comparison). All three now warn on stderr when that
+checkout is behind `main` (or `origin/main`) under those paths, naming the
+missing commits; set `IRIS_REQUIRE_FRESH_AGENT=1`
 to make that finding a hard build failure instead (recommended for anything
 that builds candidate images specifically to compare against a baseline),
 and `IRIS_ALLOW_STALE_AGENT_ACK=1` to build anyway under that setting (e.g.

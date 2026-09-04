@@ -284,6 +284,7 @@ _COMPOSE_UNAVAILABLE = {
     "IRIS_AGE_KEY_FILE_HOST": "host path of the age identity (docker secret)",
     "IRIS_ARTIFACTS_HOST_DIR": "host path of the artifacts bind mount",
     "IRIS_IMAGE_ROOT": "host path of the read-only image bind mount",
+    "IRIS_SHARP_SANS_FONT_HOST": "host path of the licensed-font bind mount",
     # Build argument, not a runtime variable.
     "IRIS_VERSION": "docker build arg",
     # Read by the IOS-XR appmgr container's own entrypoint on the device, not

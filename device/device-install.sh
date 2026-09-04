@@ -364,8 +364,8 @@ if [ "${IRIS_STAGE_LOCAL:-0}" = "1" ] || ip -o addr 2>/dev/null | grep -qw "$STA
   [ -e "$ART/bootstrap.sh" ]     || cp "$HERE/bootstrap.sh" "$ART/bootstrap.sh"
   [ -e "$ART/iris-catalog.pem" ] || cp "$IRIS_CRT_FILE" "$ART/iris-catalog.pem"
 else
-  : "${HOST_USER:?set HOST_USER (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
-  : "${HOST_PASS:?set HOST_PASS (source creds/, or Console: Settings → Stage host) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  : "${HOST_USER:?set HOST_USER (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
+  : "${HOST_PASS:?set HOST_PASS (source creds/, or export it directly) — needed to ssh to remote STAGE_HOST $STAGE_HOST}"
   agent_conf | ssh_host "umask 077 && mkdir -p ~/iris/artifacts/staging && cat > ~/iris/artifacts/staging/$CONF && printf '%s\n' '$RPC_SECRET' > ~/iris/artifacts/staging/$RPC_SECRET_FILE"
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi

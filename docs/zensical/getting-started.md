@@ -160,7 +160,7 @@ management-type-aware CSV v2. Each device declares `routed`, `inband`,
 `router-routed`, `router-nat`, or `xr-host` as its `management_type`:
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
 ```
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband

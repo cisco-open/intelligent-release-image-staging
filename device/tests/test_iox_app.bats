@@ -354,6 +354,34 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   [[ "$output" == *"DEVICE_SSH_USER"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# #123/#124 -- IRIS_LOG must actually reach the container (previously neither
+# installer passed it, so the documented opt-in was unreachable on exactly
+# the platforms whose entrypoints implement it), validated the same way every
+# other value riding inside the quoted run-opts lines already is.
+# ---------------------------------------------------------------------------
+
+@test "install.sh defaults IRIS_LOG to off and forwards it in the run-opts" {
+  run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=off"'* ]]
+}
+
+@test "install.sh forwards an operator's IRIS_LOG=on opt-in in the run-opts" {
+  IRIS_LOG=on run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=on"'* ]]
+}
+
+@test "install.sh rejects an IRIS_LOG value that would break the run-opts quoting, and whitespace" {
+  IRIS_LOG='on"' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"IRIS_LOG must not contain"* ]] || return 1
+  IRIS_LOG='on off' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"IRIS_LOG contains whitespace"* ]]
+}
+
 @test "install.sh's quoting guard runs before the first device session" {
   # structural: the guard precedes the [1/9] teardown AND the identity probe
   guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"

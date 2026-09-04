@@ -40,6 +40,21 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   existence and metadata did.
 
 ### Added
+- **A routed device's SVI can now opt into IS-IS per device, not just
+  fleet-wide.** `device/device-install.sh`'s `SVI_IGP=isis` env var (default
+  `none`) was the only way to add `ip router isis` to the IRIS SVI, and being
+  process-wide it was wrong the moment one server onboards devices into
+  different fabrics — the SD-Access lab needed `SVI_IGP=isis` set for every
+  device on the server, including ones on fabrics that do not run IS-IS. The
+  fleet inventory (CSV column and console/API field, routed devices only)
+  now carries an `svi_igp` override that flows through onboarding
+  (`gui_fleet.validate_record` → the resolved deployment plan →
+  `gui_onboard._build_env`) to that same env var; a device whose record
+  leaves it blank still falls back to the server's `SVI_IGP` default,
+  unchanged. Validated to the closed `none`/`isis` enum before it is ever
+  interpolated into the device's config — the same command-injection
+  defense every other value on that path gets. See [Management type →
+  Routed](docs/zensical/management-type.md#routed-iris-managed-app-network).
 - **Device-side logging is now opt-in, and off by default, to protect flash
   write endurance.** Every platform stages images to `flash:` /
   `bootflash:` / `sdflash:` / `harddisk:`, and flash has a finite number of
@@ -162,15 +177,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   the device and the actor), success or failure. See
   [Operations → Forgetting a device's SSH host
   key](docs/zensical/operations.md#forgetting-a-devices-ssh-host-key).
-- **`device/iox/build.sh` and `tools/build-xr-package.sh` now warn — or, on
-  request, refuse — when the checkout they run from is stale.** Both bake in
-  `device/agent` (and their own `device/<platform>` tree) exactly as it sits
-  in whatever worktree the script happens to run from, with no check against
+- **`device/iox/build.sh`, `tools/build-xr-package.sh` and
+  `tools/make-agent-bundle.sh` now warn — or, on request, refuse — when the
+  checkout they run from is stale.** All three bake in `device/agent` (and
+  their own `device/<platform>`/installer-script tree) exactly as it sits in
+  whatever worktree the script happens to run from, with no check against
   `main`. A worktree left behind after `main` moved on then silently shipped
-  an older agent, with nothing in the built image saying so — confirmed still
-  live, and exactly how a stale candidate worktree corrupted a size
-  comparison (three worktrees pinned at an older commit while the baseline
-  moved on). Both scripts now source the new
+  an older agent, with nothing in the built image/package saying so —
+  confirmed still live, and exactly how a stale candidate worktree corrupted
+  a size comparison (three worktrees pinned at an older commit while the
+  baseline moved on). All three now source the new
   `tools/agent-source-freshness.sh` and warn on stderr, naming the missing
   commits, whenever the checkout is behind `main`/`origin/main` under the
   relevant paths; `IRIS_REQUIRE_FRESH_AGENT=1` turns that into a hard build
@@ -179,8 +195,50 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   reference branch resolves, and never blocks a checkout already at or ahead
   of it. See [Development → Embedded agent
   packages](docs/zensical/development.md#embedded-agent-packages).
+- **There is now a repeatable mixed-workload capacity harness, so the
+  per-device scaling work above has something to catch a regression.**
+  `server/tests/test_capacity_harness.py` seeds a synthetic fleet of N
+  devices in its own temporary directory and drives a tracker announce, a
+  catalog heartbeat, a device policy read, a terminal report, a credential
+  resolution, and the console's own fleet projection — calling the real
+  production functions (and, for the console, the real `gui_server` HTTP
+  handler) against synthetic state, never a reimplementation of the logic
+  under test — then reports how each operation's cost moves as the fleet
+  grows. A fast pair of sizes (50/500 devices) runs by default with every
+  test suite; the full 100/1,000/10,000-device progression this project's
+  scale claims are stated at is slow by design and opt-in behind
+  `IRIS_TEST_CAPACITY_LARGE=1`, the same convention as
+  `IRIS_TEST_HOST_INTEGRATION=1`. Wall-clock numbers it prints are
+  informational only — this is a shared, noisy host — and every assertion
+  that actually runs checks deterministic counted work instead (which shard
+  changed, rows per shard, credential-index builds, response bytes), in the
+  style `server/tests/test_keyed_state_scaling.py` already uses. See
+  [Validation → Capacity
+  harness](docs/zensical/validation.md#capacity-harness) and `TESTING.md`.
 
 ### Fixed
+- **The IOS-XR appmgr container log is now bounded and rotated instead of
+  growing without limit.** IOS-XR has no syslog path for `emit()`'s
+  `%IRIS-6-<MNEMONIC>` diagnostics — they go only to the container's own
+  stdout, which appmgr captures — so `--log-driver=none` (considered and
+  conditionally approved for the container, "as long as syslog messages for
+  iris are not affected") was rejected for this platform: `none` would have
+  discarded every one of those lines, including every pre-heartbeat startup
+  failure, with no second channel. `device/xr-install.sh` now sets
+  `--log-driver json-file --log-opt max-size=1m --log-opt max-file=3` on the
+  appmgr activation instead, capping the previously-unbounded write at 3 MiB
+  while retaining roughly 11 days of history at the agent's ~1-line/60s emit
+  rate. Find the lines with `show appmgr application name iris logs` — they
+  were never in `show logging` and still are not.
+- **`IRIS_LOG` (the device-side `aria2c.log` opt-in, off by default) now
+  actually reaches IOx and IOS-XR devices.** Neither `device/xr-install.sh`
+  nor `device/iox/install.sh` passed it to the container, so an operator's
+  opt-in silently resolved to each entrypoint's own default on exactly the
+  two platforms that implement it. Both installers now forward it
+  (`--env IRIS_LOG=…` in XR's `docker-run-opts`, `run-opts N "-e
+  IRIS_LOG=…"` in IOx's app-hosting block), validated with the same
+  quoting guard already applied to every other interpolated value on that
+  activation line. The default stays off on every platform.
 - **`ps`, `top`, `free` and `kill` stay in the device images.** A slimming pass
   had removed `procps`, on the reasoning that the aria2c supervisor owns its
   child by exact PID and never needs `pgrep`/`pkill` — true, but it also took
@@ -285,6 +343,33 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   migration](docs/zensical/operations.md#rollback-after-the-shard-migration)
   for the recovery procedure and what it does not restore (writes made by the
   new release since migration).
+- **A fleet-wide credential or platform reassignment is no longer O(fleet²).**
+  `FleetStore` (the operator inventory backing `fleet.json`) was the one
+  per-device store the shard migration above missed: every `upsert()` still
+  locked and rewrote the WHOLE fleet document, sitting directly beside
+  operations that were just made O(1). The console's own "Select all *N*
+  matching devices" bulk action fires one HTTP request per selected device
+  against the single-device credential/platform routes, each of which calls
+  `upsert()` — so reassigning a credential profile across a full 10,000-device
+  fleet meant roughly 10,000 whole-fleet rewrites, serialized behind one lock,
+  on the same process that serves device heartbeats and announces, for an
+  entirely ordinary operator action. `FleetStore` is now sharded the same way
+  as the other six stores (`fleet.d/`, migrated from `fleet.json` on first
+  use, with the same rollback-guard placeholder and one-shot migration
+  guarantees — see [Reference → Keyed per-device
+  state](docs/zensical/reference.md#keyed-per-device-state) and [Operations →
+  Rollback after the shard
+  migration](docs/zensical/operations.md#rollback-after-the-shard-migration),
+  both updated to cover it). A new `POST /api/devices/bulk-credential`
+  endpoint additionally collapses the console's *N* per-device requests for a
+  bulk credential reassignment into one call (`FleetStore.bulk_upsert`) that
+  groups the underlying shard writes, so a shard holding many of the selected
+  devices is rewritten once, not once per device landing in it — session,
+  CSRF, the credential-profile-exists check, and a single audit record all
+  still apply, and a response names exactly which selected devices, if any,
+  did not apply and why. On this host, reassigning all 10,000 devices this
+  way costs at most 256 shard writes instead of 10,000 — see
+  `server/tests/test_capacity_harness.py`'s `_measure_bulk_reassignment`.
 - **The tracker's endpoint map no longer evicts a live device at full fleet
   size.** Its capacity was 10,000 — the same number as the supported device
   count — but the map also holds the `service:seeder` principal, so a full
@@ -1021,6 +1106,57 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `show boot` cannot be read the agent skips the delete instead of guessing.
   The agent's `Deps` contract drops the never-called arbitrary `ios` exec
   seam; `boot_image` (read-only `show boot`) takes its slot.
+- **A same-name image replacement — including one the `BOOT` variable
+  currently names — no longer deletes the old file before the new one is
+  proven good.** The root-copy path used to `delete /force` the destination
+  and then `copy`; a copy failure or a power loss between those two commands
+  could leave the device unable to boot if the destination was the `BOOT`
+  target, and this path was deliberately left unguarded by the previous fix
+  because refusing outright would have blocked the ordinary republish flow.
+  It now copies the new bytes to a reserved temp name (`<image>.iris-tmp`),
+  verifies presence and exact size there, and only then `rename`s the proven
+  copy over the real name — a directory-entry update, not a data transfer,
+  so it is the smallest exposure window this driver can make. A `rename` (or
+  its confirming applet run) that itself raises is not treated as a failure
+  outright: the agent re-checks the real name afterwards and reports
+  whichever state it actually finds. That re-check is stricter than a
+  presence-and-size look at the real name: it also insists the temp name is
+  gone, so a `rename` that silently no-ops onto a same-size file already
+  sitting at the image name cannot be reported as "placed" while the new
+  bytes are still under the temp name (scrubber #130), and it polls for at
+  most 60 seconds — the applet's own `maxrun` — rather than the ~15-minute
+  budget sized for the copy itself (#140). The flash-space gate costs no extra
+  headroom for a same-name replacement: the pre-existing file at the
+  destination stays in place until the new copy is proven, but it was
+  already occupying space before this placement began, so the gate's free-space
+  reading already excludes it — a same-name replacement needs exactly the
+  same room as a fresh filename. (An earlier revision of this change briefly
+  added a measured surcharge for the pre-existing file on top of that,
+  double-counting its bytes and refusing placements that physically fit —
+  see scrubber #138, fixed before release.) On bundle-mode devices, the
+  reserved temp name is also covered by the low-space bundle-reclaim sweep,
+  so a leftover from an attempt that crashed before its own cleanup ran does
+  not sit invisible on an otherwise-full device — install-mode devices don't
+  get this: their reclaim runs `install remove inactive`, which does not
+  touch a stray `.bin.iris-tmp` at the storage root. (Also fixed before
+  release, scrubber #139: the sweep's once-per-image guard is now cleared
+  whenever a fresh acquisition cycle starts for that image — a same-id
+  content republish, a return from park, or the image's own placement
+  succeeding — so a device that already burned the guard on an earlier
+  cycle still gets one reclaim attempt for the next one, instead of being
+  permanently disqualified.)
+- **`device/eem-iris-copyroot.cfg` (the hand-maintained reference EEM applet)
+  and `device/iox/README.md`'s on-box staging section now match the
+  crash-safe two-phase sequence above.** Both still showed the OLD
+  delete-then-copy-directly-onto-the-real-name shape the fix above replaced,
+  so an operator reading either as a reference would have validated or
+  reproduced the unsafe shape. The reference `.cfg` now shows both applet
+  phases (stage-and-prove against the `<img>.iris-tmp` temp name, then a
+  single `rename` once the agent reverifies it), with comments calling out
+  the verification step and the running-image/reverify conditionals the
+  static file cannot itself express. `docs/zensical/device-agents.md`'s
+  description of the copy sequence itself, and the copy implementations,
+  were already accurate; only these two reference files had drifted.
 - **A same-id republish now refreshes the device's `.torrent`.** The agent
   records which catalog torrent identity (`info_hash_hex`, else the sha256)
   the on-disk `<id>.torrent` was fetched for; when the catalog's identity
@@ -1329,6 +1465,60 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   unproven), mirroring the RECHECK republish path; the delete itself still
   happens (a genuine content mismatch has no "convergence wins" argument for
   silence), but the operator is told.
+- **The bulk "Assign images…" picker now resolves a paged-away selection
+  from the server instead of guessing it is unassigned.** Selection is
+  id-keyed and outlives paging (device table pagination), but the picker's
+  pre-check preview and its `expect_image_ids` compare-and-set both read a
+  selected device's current image set from the currently rendered page only
+  — a selected device on another page fell back to an empty set, which the
+  server correctly refused (409) but for the wrong reason, spuriously
+  conflicting on every off-page device in a bulk assignment. The console now
+  fetches each selected id's real current row first (a bounded
+  `/api/devices` walk keyed by device_id — no request at all when the whole
+  selection is already on the rendered page) before opening the picker.
+- **The stage-host credential store, its Settings route, and its console
+  form are gone.** Console onboarding always stages per-device material
+  locally (`gui_onboard._build_env` exports `IRIS_STAGE_LOCAL=1` to every
+  recipe), so the stage-host SSH credential the form collected was never
+  reachable by any onboarding path — a password field with no consumer.
+  Removed: `CredentialStore.set_stage_host`/`get_stage_host`/
+  `stage_host_secrets`/`clear_stage_host`, the `POST`/`DELETE
+  /api/settings/stage-host` routes, the `stage_host` card from
+  `GET /api/settings/setup-status` (now four cards, not five) and from
+  `GET /api/settings`, and the Settings/first-run-wizard form and template.
+  The wizard is now three steps (telemetry, device packages, image
+  verification), not four. A remote `STAGE_HOST` for a manual, off-console
+  `device/device-install.sh` run is unaffected — that path still reads
+  `HOST_USER`/`HOST_PASS` from the environment; only the console's UI for
+  setting them is gone, so its comment pointing operators at "Console:
+  Settings → Stage host" is corrected to say so.
+- **An operator's `iris-publish --signature-verified` attestation no longer
+  disappears the next time the Cisco Bulk Hash reconciler runs.** The flag
+  used to write `cisco_signature_verified` — the exact field
+  `catalog.apply_hash_verification`/`release_quarantine` (the reconciler)
+  own and overwrite on every run that covers the image — so the operator's
+  mark was silently discarded the first time the reconciler ever touched
+  that entry. The attestation now lands on its own `operator_attested_signature`
+  field, written once at publish time and never touched by the reconciler;
+  `cisco_signature_verified` stays exclusively the reconciler's. Both are
+  now guaranteed-present booleans on every `/api/images` row (like
+  `quarantined`/`hash_verification`) and both are shown, distinctly, in the
+  image-detail drawer. Pre-existing catalog entries are left as they are:
+  an already-stored `cisco_signature_verified` cannot be attributed after
+  the fact to either the operator's old flag or a genuine past reconciler
+  verdict, so nothing is guessed or backfilled into
+  `operator_attested_signature` — the next scheduled reconciler run settles
+  `cisco_signature_verified` correctly, exactly as it always has.
+- **The Cisco-licensed Sharp Sans Bold console typeface is restorable at
+  runtime, for deployments that hold the license, without ever re-entering
+  the Docker build context.** It stays excluded from the image and the
+  release tarball (`.dockerignore` — see `test_dockerignore.py`/
+  `test_make_release.bats`), so the console keeps falling back to its
+  default font stack by default. `server/docker-compose.yml` now bind-mounts
+  it in read-only when `IRIS_SHARP_SANS_FONT_HOST` names the `.woff2` file
+  on the Compose host; left unset (the common case), it mounts `/dev/null` —
+  a harmless no-op every deployment without the license never has to think
+  about.
 
 ## [2026.09.01]
 

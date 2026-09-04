@@ -4,17 +4,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """CredentialStore: shared device credential profiles, kept in the age-encrypted
 secrets store under the top-level 'credential_profiles' key, plus the singleton
-stage-host SSH login under the top-level 'stage_host' key (used by onboarding when
-the installer must ssh to STAGE_HOST — e.g. the Console running inside Docker,
-whose network namespace is never the stage host), plus the singleton audit-export
-SCP password under the top-level 'audit_export' key (used by audit_export.py's
-sshpass upload). The whole store file is encrypted at rest, so fields are stored
-plaintext inside (consistent with token storage). list_profiles()/
-get_stage_host() NEVER return passwords — the audit-export HTTP surface only
-ever sees password_set; get_secrets()/stage_host_secrets()/
-audit_export_secrets() are server-side accessors. Persists via
-secretfs.persist_store (durable-first), mirroring GuiApp.set_admin. Stdlib + repo
-modules only."""
+audit-export SCP password under the top-level 'audit_export' key (used by
+audit_export.py's sshpass upload). The whole store file is encrypted at rest, so
+fields are stored plaintext inside (consistent with token storage). list_profiles()
+NEVER returns passwords — the audit-export HTTP surface only ever sees
+password_set; get_secrets()/audit_export_secrets() are server-side accessors.
+Persists via secretfs.persist_store (durable-first), mirroring GuiApp.set_admin.
+Stdlib + repo modules only."""
 import time
 
 import secrets_store
@@ -44,9 +40,8 @@ class CredentialStore:
             if not isinstance(fields.get(req), str) or not fields[req].strip():
                 raise ValueError("%s is required" % req)
         # Values end up in an onboarding subprocess environment, which only
-        # takes strings: reject other JSON types at save time (the same
-        # typing the stage-host route enforces) rather than failing the
-        # onboard later with a TypeError.
+        # takes strings: reject other JSON types at save time rather than
+        # failing the onboard later with a TypeError.
         if fields.get("enable_secret") is not None and \
                 not isinstance(fields.get("enable_secret"), str):
             raise ValueError("enable_secret must be a string")
@@ -81,44 +76,6 @@ class CredentialStore:
             store = secrets_store.load(self.secrets_path)
             profs = store.get("credential_profiles", {})
             existed = profs.pop(profile_id, None) is not None
-            if existed:
-                secretfs.persist_store(store, self.secrets_path,
-                                       recipients_csv=self.recipients_csv,
-                                       enc_path=self.secrets_enc)
-        return existed
-
-    def set_stage_host(self, username, password):
-        """Set the stage-host SSH login (singleton). Required: both fields."""
-        user = str(username or "").strip()
-        if not user:
-            raise ValueError("username is required")
-        if not str(password or ""):
-            raise ValueError("password is required")
-        rec = {"username": user, "password": password,
-               "updated_at": int(self._now())}
-        with secrets_store.store_lock(self.secrets_path):
-            store = secrets_store.load(self.secrets_path)
-            store["stage_host"] = rec
-            secretfs.persist_store(store, self.secrets_path,
-                                   recipients_csv=self.recipients_csv,
-                                   enc_path=self.secrets_enc)
-        return {"configured": True, "username": user}
-
-    def get_stage_host(self):
-        """Redacted view for the UI — NEVER the password."""
-        rec = self._load().get("stage_host") or {}
-        user = rec.get("username", "")
-        return {"configured": bool(user), "username": user}
-
-    def stage_host_secrets(self):
-        """Full record incl. password — SERVER-SIDE ONLY (onboarding). None if unset."""
-        rec = self._load().get("stage_host")
-        return rec if rec and rec.get("username") else None
-
-    def clear_stage_host(self):
-        with secrets_store.store_lock(self.secrets_path):
-            store = secrets_store.load(self.secrets_path)
-            existed = store.pop("stage_host", None) is not None
             if existed:
                 secretfs.persist_store(store, self.secrets_path,
                                        recipients_csv=self.recipients_csv,

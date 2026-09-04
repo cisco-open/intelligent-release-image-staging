@@ -29,13 +29,21 @@ Two details of what routed mode touches beyond the VLAN and SVI:
   (`switchport trunk allowed vlan add <vlan>`), exactly as in inband mode, so
   other IOx apps riding the same uplink keep their VLANs. Teardown removes
   only the IRIS VLAN from that allowed list (`... allowed vlan remove`).
-- The SVI joins an IGP only when the record says so: `SVI_IGP=isis` adds
+- The SVI joins an IGP only when the record says so: `isis` adds
   `ip router isis` (for fabrics such as an SD-Access underlay that need to
   learn the IRIS subnet). The default (`none`) never injects the IRIS subnet
   into the operator's routing protocol and never creates a `router isis`
-  process. Before this was unconditional. The console passes its container
-  environment to the installer, so `SVI_IGP=isis` in `server/.env` is a
-  fleet-wide default for a fabric that needs it.
+  process. Before this was unconditional. This is a **per-device** setting —
+  one server routinely onboards devices into different fabrics, only some of
+  which run IS-IS. Set it on the device's inventory record (the `svi_igp`
+  CSV column, or the same field via the console/API), routed devices only;
+  it is validated against the closed `none`/`isis` enum before it is ever
+  interpolated into the device's config, the same command-injection defense
+  every other value on that path gets. A device whose record leaves it blank
+  falls back to the fleet-wide `SVI_IGP` env var on the server (default
+  `none`) — the process-wide setting `SVI_IGP=isis` in `server/.env` used to
+  be the only way to opt a device in at all; it is now the default a
+  per-device override can still opt out of.
 
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers
@@ -150,6 +158,18 @@ a 2 GB image) for one image in flight: the staging copy plus the placed copy
 coexist while the placement runs. The agent safely refuses to stage when space
 is insufficient.
 
+**A same-name replacement — including republishing under a name the `BOOT`
+variable currently points at — costs no more free space than the figure
+above.** The old file at the destination, the staging copy, and the new
+proven copy at its temp name do all coexist on the storage root until the
+crash-safe [`rename` that puts it in
+place](device-agents.md#crash-safe-same-name-replacement) — but the old
+file was already occupying space before this placement began, so it is
+already excluded from "free" rather than something this placement newly
+needs room for. The only bytes this placement writes that were not already
+on the device are the staging copy and its root-side twin — the same **2×
+the image size + 200 MB** as a fresh filename.
+
 Budget beyond that for the images you want **resident at once**, not for the
 number of reassignments you expect. Unchecking or reassigning an image parks it
 and deliberately keeps the copy already on the storage root — see
@@ -193,11 +213,12 @@ Inventory is a management-type-aware, named-header CSV. The header is required a
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
-  `app_gateway`.
+  `app_gateway`, and may fill `svi_igp` (`isis` or blank; every other
+  management type must leave it blank).
 - **inband** rows fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`, and
   must not carry routed VLAN/SVI fields. There is no IRIS VRF field.
 - **router-routed** rows fill `app_ip`, `app_mask`, `app_gateway`, and

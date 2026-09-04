@@ -3434,3 +3434,47 @@ def test_build_env_takes_device_ip_from_the_resolved_plan_for_every_type():
     # a plan without an address (legacy start) still falls back to the row
     _dev, env = svc._build_env("d1", mint=False)
     assert env["DEVICE_IP"] == "203.0.113.99"
+
+
+# ---------------------------------------------------------------------------
+# svi_igp (issue #85): SVI_IGP used to be settable only as a process-wide env
+# var on the server -- wrong for a server that onboards devices into
+# different fabrics. A per-device record value now overrides it; a device
+# whose record says nothing must still see whatever SVI_IGP the server
+# process itself was started with (e.g. server/.env), unchanged.
+# ---------------------------------------------------------------------------
+
+def test_build_env_sets_svi_igp_from_the_resolved_record(monkeypatch):
+    monkeypatch.delenv("SVI_IGP", raising=False)
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": "isis"})
+    assert env["SVI_IGP"] == "isis"
+
+
+def test_build_env_falls_back_to_the_inherited_svi_igp_env_when_record_is_blank(monkeypatch):
+    # server/.env (or any process-wide setting) stays the default for a
+    # device whose own record carries no override -- the exact SD-Access
+    # workaround issue #85 exists to make unnecessary.
+    monkeypatch.setenv("SVI_IGP", "isis")
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": ""})
+    assert env["SVI_IGP"] == "isis"
+    # and identically when the resolved plan carries no key at all
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1"})
+    assert env["SVI_IGP"] == "isis"
+
+
+def test_build_env_record_svi_igp_overrides_the_inherited_env_default(monkeypatch):
+    # The per-device value wins over the process-wide one when both are set.
+    monkeypatch.setenv("SVI_IGP", "isis")
+    svc = _svc(lambda p, e, on: 0)
+    _dev, env = svc._build_env("d1", mint=False, resolved={
+        "platform": "guestshell", "management_type": "routed",
+        "device_ip": "10.0.0.1", "svi_igp": "none"})
+    assert env["SVI_IGP"] == "none"
