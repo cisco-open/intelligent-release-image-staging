@@ -181,6 +181,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   packages](docs/zensical/development.md#embedded-agent-packages).
 
 ### Fixed
+- **`ps`, `top`, `free` and `kill` stay in the device images.** A slimming pass
+  had removed `procps`, on the reasoning that the aria2c supervisor owns its
+  child by exact PID and never needs `pgrep`/`pkill` — true, but it also took
+  away every process tool an operator has when an agent misbehaves on a switch
+  they cannot easily reach, and `docker exec … ps` began failing with
+  "executable file not found". Restored ahead of the signing freeze, after
+  which nothing can be added back. Only the Debian IOx image was affected: the
+  Alpine XR image already provides all four through busybox. Costs 313 KB on
+  amd64 and 329 KB on arm64 in the delivered package.
 - **`lab/device-run.sh` refuses the interactive install-subsystem commands.**
   `install remove inactive` and its siblings wait on a `[y/n]` prompt, and
   this transport feeds stdin ahead of the prompt: the answer lands nowhere,

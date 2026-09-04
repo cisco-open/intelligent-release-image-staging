@@ -32,15 +32,38 @@ _code() { sed 's/[[:space:]]*#.*$//' "$1"; }
   done
 }
 
-@test "neither container image installs procps" {
-  for df in $DOCKERFILES; do
-    # the package-install line: apt on the Debian IOx image, apk on the Alpine XR image
-    run grep -E 'apt-get install|^RUN apk add' "$df"
-    [ "$status" -eq 0 ] || return 1
-    [[ "$output" != *procps* ]] || { echo "procps still installed by $df"; return 1; }
-    # the comment that once justified it must not survive either
-    ! grep -q 'procps: pkill/pgrep' "$df" || return 1
-  done
+@test "no image installs procps for the SUPERVISOR's benefit" {
+  # Rewritten 2026-09-04. This used to assert neither image installed procps
+  # at all, which encoded a slimming decision the owner has since reversed
+  # (#73): ps/top/free/kill stay in, so an operator can inspect a misbehaving
+  # agent on a switch they cannot easily reach -- decided before the image is
+  # frozen for signing, after which nothing can be added back.
+  #
+  # The property worth pinning was never "the package is absent". It is that
+  # the supervisor does not DEPEND on it: it owns aria2c by the exact PID of
+  # its own tracked child, never by process name. The test above pins that
+  # directly and is the real guard. What survives here is the justification:
+  # procps may be present for operators, never because supervision needs it.
+  # No keyword-proximity check on the Dockerfile comments: a comment saying
+  # "the supervisor does NOT need pgrep/pkill" is indistinguishable by grep
+  # from one claiming the opposite, and the first test in this file already
+  # pins the property against the CODE, which is where it matters.
+
+  # Alpine's busybox already provides ps/top/free/uptime, so the XR image needs
+  # no package for them -- verified by running both images. Only the Debian IOx
+  # image was missing them, so only it carries procps.
+  # Backslash continuations are joined first: the package list sits on the
+  # line AFTER `apt-get install`, so a plain grep would silently match the
+  # command and never see the packages -- passing whatever the list said.
+  _pkg_line() { sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$1"; }
+
+  run bash -c "$(declare -f _pkg_line); _pkg_line '$DEVICE/xr/Dockerfile' | grep -E '^RUN apk add'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *procps* ]]
+
+  run bash -c "$(declare -f _pkg_line); _pkg_line '$DEVICE/iox/Dockerfile' | grep -E 'apt-get install'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *procps* ]]
 }
 
 @test "aria2c runs as a tracked child of PID 1 with daemon-equivalent stdio" {
