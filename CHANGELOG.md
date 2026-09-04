@@ -901,7 +901,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   any session created at or before it on its next request, so a
   suspected-compromised session dies with the credential. The in-console
   password change keeps its caller's session and revokes the others, as
-  before.
+  before. The floor and each session's creation time keep sub-second
+  precision: truncating both to whole seconds had made a login in the same
+  second as the reset land exactly on the floor and die on its next request.
 - **Background polling no longer keeps a console session alive.** The
   console's periodic refreshers send `X-IRIS-Poll: 1` (GET only); the server
   validates the session for those without refreshing its idle clock, so a
@@ -951,7 +953,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **`tools/make-torrent.sh` requires an announce credential.** The tracker
   rejects a credential-less announce, so the helper now needs
   `ANNOUNCE_TOKEN` (embedded as `/announce?announce_token=...`) or a full
-  `ANNOUNCE_URL` and fails with a clear message otherwise.
+  `ANNOUNCE_URL` and fails with a clear message otherwise. `ANNOUNCE_URL` is
+  checked too: it must carry a non-empty `announce_token=` (or legacy `key=`)
+  query parameter, so the escape hatch cannot recreate the credential-less
+  torrent the default path refuses.
 - **`tools/build-xr-package.sh` never deletes `APPMGR_BUILD_DIR`.** The
   xr-appmgr-build clone only goes into a missing or empty directory; an
   existing non-empty one without `./appmgr_build` is refused. The RPM is
@@ -960,9 +965,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **The Compose `HEALTHCHECK` probes `/readyz`** (12 s timeout) instead of the
   unconditional `/healthz`, so a container whose catalog or artifact listener
   died no longer reports `healthy`, matching the Kubernetes probes.
+- **The documentation workflow's actions are pinned to full commit SHAs.**
+  `.github/workflows/docs.yml` publishes to `gh-pages` with `contents: write`,
+  so `actions/checkout`, `actions/setup-python` and `peaceiris/actions-gh-pages`
+  are now pinned to the commits their `v4`/`v5`/`v4` tags resolved to on
+  2026-09-04 rather than to the mutable tags (IRIS-13-015); a moved or
+  compromised tag can no longer run with that write token.
 - **Kubernetes ConfigMap is generated from `kubernetes/iris-seed-server.env`**
   (kustomize `configMapGenerator`, hash-suffixed name) so edits roll the pod on
-  re-apply; `kubernetes/configmap.yaml` is gone. Both containers pull with
+  re-apply; `kubernetes/configmap.yaml` is gone. The env file is tracked
+  (explicitly unignored from the `*.env` rule; it holds the former ConfigMap's
+  sentinel values and paths, no secrets), so `kubectl apply -k kubernetes`
+  works from a fresh clone. Both containers pull with
   `imagePullPolicy: Always` because the tag is a mutable placeholder, and
   `kubectl -n iris rollout restart deployment/iris-seed-server` is documented
   for same-tag rebuilds.

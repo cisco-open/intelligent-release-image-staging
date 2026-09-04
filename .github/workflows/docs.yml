@@ -16,9 +16,11 @@ on:
   workflow_dispatch:
 
 # This job writes to gh-pages with `contents: write`, so the three action
-# refs below should be pinned to full commit SHAs rather than mutable major
-# tags (IRIS-13-015). Left as tags here because the SHAs must be verified
-# against the upstream repositories by a maintainer, not copied blind.
+# refs below are pinned to full commit SHAs, not mutable major tags
+# (IRIS-13-015): a moved or compromised tag cannot run with the write token.
+# Each SHA was resolved from the upstream repository's tag on 2026-09-04
+# (`gh api repos/<owner>/<repo>/commits/<tag>`); the trailing comment names
+# the tag it corresponds to. To update, resolve the new tag the same way.
 permissions:
   contents: write
 
@@ -31,10 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
           cache: "pip"
@@ -54,7 +56,7 @@ jobs:
           rm -f deploy/docs/404.html
 
       - name: Publish to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./deploy

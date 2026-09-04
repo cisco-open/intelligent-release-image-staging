@@ -139,18 +139,27 @@ def set_admin(store, username, password, now, invalidate_sessions=False):
         "pw_hash": hash_password(password),
         "created_at": int(now),
     }
-    floor = int(now) if invalidate_sessions else previous.get("sessions_not_before")
-    if isinstance(floor, int) and not isinstance(floor, bool) and floor > 0:
+    # Full precision, deliberately NOT int(now): the session's created_at is
+    # compared against this with <=, and truncating both to whole seconds
+    # made a login in the same second as the reset land exactly ON the floor
+    # and die on its next request (the end-to-end test needed a 1.1 s sleep
+    # to dodge it). With sub-second timestamps on both sides a login after
+    # the reset is strictly above the floor immediately.
+    floor = now if invalidate_sessions else previous.get("sessions_not_before")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool) and floor > 0:
         record["sessions_not_before"] = floor
     store["admin"] = record
 
 
 def sessions_not_before(store):
-    """Epoch-second floor below which no console session is valid (0 when
-    no break-glass reset has ever been recorded)."""
+    """Epoch floor (seconds, sub-second precision kept) at or below which no
+    console session is valid (0 when no break-glass reset has ever been
+    recorded). Older stores hold a whole-second int; both are honoured."""
     admin = store.get("admin") if isinstance(store.get("admin"), dict) else {}
     floor = admin.get("sessions_not_before", 0)
-    if isinstance(floor, bool) or not isinstance(floor, int) or floor < 0:
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) or floor < 0:
+        return 0
+    if floor != floor:            # NaN never compares, so it can never floor
         return 0
     return floor
 
@@ -198,7 +207,9 @@ class SessionStore:
             self._sessions[sid] = {
                 "username": username,
                 "csrf": csrf,
-                "created_at": int(now),
+                # Not truncated: compared with <= against the break-glass
+                # floor (set_admin), which keeps sub-second precision too.
+                "created_at": now,
                 "last_seen": int(now),
             }
         return sid, csrf

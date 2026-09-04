@@ -256,3 +256,32 @@ def test_session_info_touch_false_does_not_refresh_idle_clock(tmp_path):
         assert app.session_info(sid2) is None
     finally:
         gui_app.set_request_session_touch(True)
+
+
+def test_login_in_the_same_second_as_a_break_glass_reset_is_honoured(tmp_path):
+    """The floor and a session's created_at both keep sub-second precision:
+    a login 0.5 s after the reset must NOT be dropped. When both were
+    truncated to whole seconds, that login landed exactly on the floor and
+    died on its very next request (the end-to-end test hid it with a
+    1.1 s sleep)."""
+    secrets_path = str(tmp_path / "secrets.json")
+    clock = [1000.0]
+    console = gui_app.GuiApp(secrets_path, now_fn=lambda: clock[0])
+    console.set_admin("admin", "pw")
+    old_sid, _ = console.login("admin", "pw")
+    clock[0] = 1020.25
+    cli = gui_app.GuiApp(secrets_path, now_fn=lambda: clock[0])
+    cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
+    clock[0] = 1020.75                                  # same wall-clock second
+    assert console.session_info(old_sid) is None        # pre-reset session gone
+    new_sid, _ = console.login("admin", "reset-pw")
+    assert console.session_info(new_sid) is not None    # post-reset login lives
+    clock[0] = 1021.0
+    assert console.session_info(new_sid) is not None    # and keeps living
+    # a session minted in the same second but BEFORE the reset is still dead
+    clock[0] = 1030.10
+    pre_sid, _ = console.login("admin", "reset-pw")
+    clock[0] = 1030.20
+    cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
+    clock[0] = 1030.30
+    assert console.session_info(pre_sid) is None

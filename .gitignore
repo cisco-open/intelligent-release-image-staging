@@ -8,6 +8,9 @@ creds/*
 !creds/deploy.env.example
 .env
 *.env
+# kubernetes/iris-seed-server.env is a TRACKED template (sentinel values only,
+# no secrets): kustomize's configMapGenerator builds the ConfigMap from it.
+!kubernetes/iris-seed-server.env
 server/.env
 tokens.txt
 rpc-secret

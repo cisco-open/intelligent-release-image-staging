@@ -50,3 +50,24 @@ STUB
   [ "$status" -eq 1 ]
   [[ "$output" == *"URL-safe"* ]]
 }
+
+@test "ANNOUNCE_URL without a credential is refused, not passed through" {
+  # the escape hatch must not recreate the credential-less torrent the
+  # default path refuses: the tracker answers 403 to such an announce
+  run env ANNOUNCE_URL='http://192.0.2.10:6969/announce' bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no announce credential"* ]]
+  [[ "$output" != *"MKTORRENT ARGS"* ]]
+}
+
+@test "ANNOUNCE_URL with a blank credential value is refused" {
+  run env ANNOUNCE_URL='http://192.0.2.10:6969/announce?announce_token=' bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"MKTORRENT ARGS"* ]]
+}
+
+@test "ANNOUNCE_URL with announce_token among other parameters is accepted" {
+  run env ANNOUNCE_URL='http://192.0.2.10:6969/announce?x=1&announce_token=abc123' bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-a http://192.0.2.10:6969/announce?x=1&announce_token=abc123"* ]]
+}

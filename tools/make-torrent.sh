@@ -15,7 +15,9 @@
 #   ANNOUNCE_TOKEN=<token>   the seeder announce token (from the server's
 #                            secrets store; iris-publish uses the same one),
 #                            embedded as /announce?announce_token=<token>
-#   ANNOUNCE_URL=<url>       a complete announce URL, used verbatim
+#   ANNOUNCE_URL=<url>       a complete announce URL, used verbatim -- it
+#                            must still carry a non-empty announce_token=
+#                            (or legacy key=) query parameter
 #
 # Usage: ANNOUNCE_TOKEN=... tools/make-torrent.sh <file> <tracker-host>
 set -euo pipefail
@@ -25,6 +27,12 @@ TRACKER_HOST="${2:?$usage}"
 [ -f "$FILE" ] || { echo "ERROR: no such file: $FILE" >&2; exit 1; }
 
 if [ -n "${ANNOUNCE_URL:-}" ]; then
+  # Verbatim, but it must still carry a credential the tracker honours
+  # (announce_token=, or the legacy key=) with a non-empty value -- otherwise
+  # this escape hatch recreates exactly the unusable torrent refused below.
+  cred_re='[?&](announce_token|key)=[^&[:space:]]+'
+  [[ "$ANNOUNCE_URL" =~ $cred_re ]] \
+    || { echo "ERROR: ANNOUNCE_URL carries no announce credential (needs a non-empty announce_token= or key= query parameter); the tracker would answer 403" >&2; exit 1; }
   ANNOUNCE="$ANNOUNCE_URL"
 elif [ -n "${ANNOUNCE_TOKEN:-}" ]; then
   [[ "$ANNOUNCE_TOKEN" =~ ^[A-Za-z0-9._~-]+$ ]] \

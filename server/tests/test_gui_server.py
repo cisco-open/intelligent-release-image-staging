@@ -10008,11 +10008,12 @@ def test_break_glass_reset_ends_live_console_session(tmp_path):
     try:
         ck, _ = _auth(host, port)
         assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 200
-        time.sleep(1.1)                                # floor is whole seconds
+        # No sleeps: the floor and created_at keep sub-second precision, so
+        # a reset right after the login still drops it, and a login right
+        # after the reset is honoured immediately.
         cli = gui_app.GuiApp(app.secrets_path)         # the iris-gui-admin process
         cli.set_admin("admin", "reset-pw", invalidate_sessions=True)
         assert _req(host, port, "GET", "/api/session", headers={"Cookie": ck})[0] == 401
-        time.sleep(1.1)
         st, h, _ = _req(host, port, "POST", "/api/login",
                         {"username": "admin", "password": "reset-pw"})
         assert st == 200
