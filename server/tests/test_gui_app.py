@@ -7,7 +7,7 @@ import pytest
 
 import gui_app
 import gui_auth
-import gui_server
+import management_api as gui_server
 import secrets_store
 
 

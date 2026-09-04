@@ -4,12 +4,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+write_seeder_secrets() {
+  printf '%s\n' '{"devices":{},"seeder":{"announce_token":{"value":"seedertoken"}}}' \
+    > "$1"
+}
+
 @test "seed-launch reads the rpc-secret from IRIS_RPC_SECRET_FILE (tmpfs)" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images" "$tmp/run"
   echo "tmpfssecret" > "$tmp/run/rpc-secret"
   # an old plaintext on the volume must NOT be used when the env var is set
   echo "stalesecret" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 

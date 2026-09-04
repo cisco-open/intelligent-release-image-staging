@@ -17,9 +17,18 @@ https://<server-ip>:8080/
 ```
 
 The server uses a self-signed certificate by default. Before an admin account
-exists, sign in with the default credential `iris` / `irisisgreat!` — it only
-works pre-setup — which takes you straight to the account-creation page for the
-real admin account. Or create the initial admin from the container instead:
+exists, sign in as `iris` with the deployment-unique token from the protected
+file named by `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`. There is no shared default.
+The correct token yields a one-use, ten-minute grant and takes you to the
+account-creation page; it cannot reopen setup once the real admin exists. Read
+the runtime copy without placing it in an argument or log:
+
+```bash
+docker compose -f server/docker-compose.yml exec iris \
+  cat /run/iris/console-setup-token
+```
+
+Or create the initial admin from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
@@ -260,7 +269,7 @@ Above it, the filter bar narrows what the table shows — free text across
 device, IP and model, plus management type, **Agent install**, credential,
 telemetry, peer policy and status. Filtering happens on the server, not just
 in the browser: every one of these controls (and the free-text search) is
-applied by the same `GET /api/devices` request the table polls, so the count
+applied by the same `GET /api/v1/devices` request the table polls, so the count
 next to the filter bar and the rows on screen can never disagree about what
 "matches" means, no matter how large the fleet is. The **Status** choices are
 generated from the same derivation the Status column renders, so every state

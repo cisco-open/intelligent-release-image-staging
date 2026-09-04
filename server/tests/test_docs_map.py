@@ -280,21 +280,26 @@ _COMPOSE_UNAVAILABLE = {
     # neither is a container variable.
     "COMPOSE_PROJECT_NAME": "compose project name, host-side only",
     "IRIS_CONTAINER": "compose container_name + tools/ target, host-side only",
+    "IRIS_CONSOLE_CONTAINER": "console container_name, host-side only",
     # Interpolated host-side into the secrets/bind-mount stanzas, never injected.
     "IRIS_AGE_KEY_FILE_HOST": "host path of the age identity (docker secret)",
     "IRIS_ARTIFACTS_HOST_DIR": "host path of the artifacts bind mount",
     "IRIS_IMAGE_ROOT": "host path of the read-only image bind mount",
     "IRIS_SHARP_SANS_FONT_HOST": "host path of the licensed-font bind mount",
+    "IRIS_OBSERVABILITY_TOKEN_FILE_HOST": "host path of an observability-token bind mount",
+    "IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST": "host path of the previous-token bind mount",
+    "IRIS_OTLP_HEADERS_FILE_HOST": "host path of the OTLP-header bind mount",
+    "IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST": "host path of the Console setup-token secret",
     # Build argument, not a runtime variable.
     "IRIS_VERSION": "docker build arg",
     # Read by the IOS-XR appmgr container's own entrypoint on the device, not
     # by the server: it never belongs in the server container's environment.
-    "IRIS_XR_SKIP_MOUNT_CHECK": "device-side XR entrypoint, test-only",
+    "IRIS_CONTAINER_TESTING": "device-container entrypoint, test-only",
+    "IRIS_TEST_SKIP_MOUNT_CHECK": "device-container XR mount bypass, test-only",
     # Passed on the one-shot `run --rm -e ...` so the long-lived container never
     # holds the admin password in its environment.
     "IRIS_GUI_ADMIN_PASSWORD": "one-shot iris-gui-admin only",
     # Container-side defaults; the docs say none of these needs setting.
-    "IRIS_GUI_CERT": "container default path",
     "IRIS_TRUST_DIR": "container default path",
     "IRIS_CA_BUNDLE": "container default path",
 }
@@ -343,7 +348,8 @@ def _compose_environment_keys():
             continue
         here = len(line) - len(line.lstrip())
         if here <= indent:
-            break
+            indent = None
+            continue
         m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*:", line)
         if m:
             keys.add(m.group(1))

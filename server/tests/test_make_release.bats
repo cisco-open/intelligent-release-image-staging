@@ -39,7 +39,13 @@
   # The assembler ships TRACKED files only and refuses when an allowlisted
   # input is missing from the index, so a brand-new shipped file must be
   # `git add`ed before this live-checkout case can pass.
-  for new_input in lab/iris-ssh-policy.sh requirements-dev.txt; do
+  for new_input in \
+    lab/iris-ssh-policy.sh \
+    requirements-dev.txt \
+    device/container/Dockerfile \
+    device/container/entrypoint.sh \
+    device/container/reconcile.sh \
+    tools/build-device-image.sh; do
     git -C "$repo" ls-files --error-unmatch "$new_input" >/dev/null 2>&1 \
       || skip "$new_input is not tracked yet (git add it): the release ships tracked files only"
   done
@@ -58,6 +64,10 @@
     iris/lab/device-run.sh \
     iris/lab/xr-run.sh \
     iris/lab/iris-ssh-policy.sh \
+    iris/device/container/Dockerfile \
+    iris/device/container/entrypoint.sh \
+    iris/device/container/reconcile.sh \
+    iris/tools/build-device-image.sh \
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh; do
@@ -98,7 +108,8 @@ _make_release_fixture() {
   for f in get-aria2c.sh aria2c.sha256 make-torrent.sh make-agent-bundle.sh \
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
-           check-package-freshness.sh start-compose-server.sh; do
+           build-device-image.sh check-package-freshness.sh \
+           start-compose-server.sh; do
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"

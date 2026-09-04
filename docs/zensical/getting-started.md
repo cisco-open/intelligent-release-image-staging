@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Getting Started
 
-This path brings up the IRIS server, publishes an image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
+This path brings up the IRIS server and Console tiers, publishes an image,
+generates device installers, and assigns an image to a device. Docker Compose
+runs the two-container stack.
 
 It uses the command line throughout because it starts from an empty host. Once the server is running, everything after bring-up can also be done in the browser — see [Web Console](console.md).
 
@@ -14,7 +16,7 @@ It uses the command line throughout because it starts from an empty host. Once t
 
 | Requirement | Notes |
 | --- | --- |
-| Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server container. The runtime tmpfs uses the `uid=`, `gid=`, and `mode=` mount options, which older engines reject. |
+| Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
@@ -27,32 +29,49 @@ It uses the command line throughout because it starts from an empty host. Once t
 Create the secret identity and export the values Docker Compose expects:
 
 ```bash
+umask 077
 mkdir -p ~/.config/iris
 age-keygen -o ~/.config/iris/age.txt
 age-keygen -y ~/.config/iris/age.txt
+openssl rand -hex 32 > ~/.config/iris/console-setup-token
 
 export IRIS_HOST_IP=<server-ip>
 export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
+export IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST=$HOME/.config/iris/console-setup-token
 ```
 
 ## Give the runtime user the host paths
 
 Every service in the container runs as the fixed uid/gid `10001` with all Linux
 capabilities dropped. The image cannot chown host paths, so grant that uid the
-two host paths that cross the container boundary before the first start, and
-again whenever either one is recreated:
+two credential files and writable artifacts directory that cross the container
+boundary before the first start, and again whenever one is recreated:
 
 ```bash
 # from the repository root
-sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"   # keep it mode 600
+sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"                 # keep it mode 600
+sudo chown 10001 "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"     # keep it mode 600
 sudo chown -R 10001:10001 "${IRIS_ARTIFACTS_HOST_DIR:-artifacts}"
 ```
 
+If you enable authenticated Prometheus scraping, create another raw token with
+the same private umask, export its host path, and mount the identical value as
+the scraper's bearer credentials file:
+
+```bash
+openssl rand -hex 32 > ~/.config/iris/observability-token
+export IRIS_OBSERVABILITY_TOKEN_FILE_HOST=$HOME/.config/iris/observability-token
+sudo chown 10001 "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST"
+```
+
+The optional previous-token host path is needed only during rotation; see
+[Telemetry export](telemetry-export.md).
+
 Compose reads the same directory as `${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}`,
 resolved relative to `server/docker-compose.yml` — the repository's `artifacts/`
-directory either way. Without these two, the server starts and then cannot read
-its key material or write served artifacts; see
+directory either way. Without these three paths, the server cannot read its
+key/setup material or write served artifacts; see
 [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
 
 A fresh install needs nothing more — a new named volume inherits the image's
@@ -62,9 +81,9 @@ root-owned and need a one-time migration first:
 
 ## Start the server
 
-`start-compose-server.sh` builds the image, so hand in the pinned `aria2c`
+`start-compose-server.sh` builds both server-tier images, so hand in the pinned `aria2c`
 binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
-Then build the image, initialize a fresh encrypted config volume, start the
+Then build the images, initialize a fresh encrypted config volume, start the
 stack, and prepare both IOx packages from the repository root:
 
 ```bash
@@ -84,10 +103,12 @@ certificate. `--force --yes` is disaster recovery only: it mints new secrets and
 a new certificate, so every onboarded device must be re-onboarded and every
 prebuilt package rebuilt. Both recipients on the first bootstrap avoids all of
 this.
-The running container exposes the tracker, catalog, artifact server, seeder data
-port, console, and telemetry endpoints. Plaintext secrets are decrypted into
-`/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
-rest.
+The server container exposes the tracker, catalog, artifact server, seeder data
+port, and telemetry endpoints. The separate state-free Console publishes 8080
+and reaches the server's internal 9443 management API with a file-mounted,
+rotatable credential over pinned HTTPS. Plaintext server secrets are decrypted
+into `/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume
+at rest; the Console does not mount that volume.
 
 `start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
 container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
@@ -108,10 +129,18 @@ container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
 
 ## Create the console admin
 
-Open `https://<server-ip>:8080/` and sign in with the default credential
-`iris` / `irisisgreat!`. This only works before an admin account exists — it
-does not create a session, it takes you straight to first-run setup to create
-the real admin account. Or set the admin account from the container instead:
+Open `https://<server-ip>:8080/`. Before an admin exists, sign in as `iris`
+using the exact contents of `$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST` as the
+password. The token is deployment-unique and server-mounted; it does not create
+a session, but exchanges once for the ten-minute account-creation grant. To
+read it without changing host-file ownership, use:
+
+```bash
+docker compose -f server/docker-compose.yml exec iris \
+  cat /run/iris/console-setup-token
+```
+
+Or set the admin account from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin

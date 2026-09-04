@@ -12,15 +12,14 @@ IRIS reports network progress from the point of view that matters most: whether 
 
 | Surface | Purpose |
 | --- | --- |
-| `/healthz` on port 9101 | Basic service health. |
-| `/swarm` on port 9101 | Machine-readable swarm and peer state — loopback peers only by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it. |
-| `/swarmmap` on port 9101 | Pointer to the console swarm view. |
+| `/healthz` and `/readyz` on port 9101 | Anonymous, non-disclosing liveness and readiness results over TLS. |
+| `/swarm` on port 9101 | Machine-readable swarm and peer state for the management tier; always requires its bearer token. |
 | Console monitoring | Human-readable network, image, and audit state. |
 
 These stay on whenever the telemetry listener runs, regardless of the
 telemetry settings below. The one exception is `IRIS_METRICS_PORT` set to
-empty or `0`, which disables the listener entirely and takes `/healthz`,
-`/swarm`, and `/swarmmap` with it.
+empty or `0`, which disables the listener entirely and takes the probe and
+management swarm routes with it.
 
 ## Running with telemetry off
 
@@ -32,11 +31,10 @@ chooses the collector and backend. Set it to `1` to turn the external surface on
 of that variable and of `IRIS_OTLP_ENDPOINT`.
 
 With telemetry off, `/metrics` is not served and answers 404, and nothing is
-pushed to a collector. Nothing else changes: the port 9101 listener still runs
-because `/healthz`, the loopback-gated `/swarm`, and the `/swarmmap` pointer
-live there, and the console's swarm view, image state, device reports, and
-audit log are unaffected — they read the catalog's own state, not the metrics
-pipeline. The startup log says which posture is in effect.
+pushed to a collector. Nothing else changes: the TLS listener on port 9101
+still provides minimal probes and management-authenticated `/swarm`; the
+Console's swarm view, image state, device reports, and audit log are
+unaffected. The startup log says which posture is in effect.
 
 A Prometheus job left scraping `<server>:9101/metrics` in that posture therefore
 reads the IRIS target as down and renders an operator dashboard blank. That is
@@ -160,7 +158,7 @@ Sampling adapts to link quality automatically:
 | `bad` | No samples (the terminal report tells the story later). |
 
 Fleet-wide tuning without redeploys goes through the console API:
-`POST /api/telemetry/stream` with `{"every": <1..60>, "pause": <bool>}`
+`POST /api/v1/telemetry/stream` with `{"every": <1..60>, "pause": <bool>}`
 stretches the cadence (`every` multiplies the interval in ticks) or pauses
 sampling entirely. Directives can only reduce volume — the hard ceiling is one
 sample per device per tick, and a stale directive reverts to defaults within
@@ -169,9 +167,10 @@ three ticks.
 ### The add-on guarantee
 
 Telemetry is an add-on: no telemetry condition can affect staging. Loss is
-silent in operation but visible in three places — the console's *Telemetry
-export* badge, the `/healthz` JSON (`otlp_export` block), and one audit entry
-per state transition (`otlp-export-degraded` / `otlp-export-recovered`).
+silent in operation but visible in the Console's *Telemetry export* badge and
+one audit entry per state transition (`otlp-export-degraded` /
+`otlp-export-recovered`). Anonymous `/healthz` deliberately exposes no export
+state.
 
 ### Metrics names (operator contract)
 
@@ -756,10 +755,9 @@ what a future bump will require.
 | Symptom | First place to look |
 | --- | --- |
 | Device never appears | Installer output, artifact server reachability, catalog trustpoint, enrollment token expiry. |
-| Download does not start | Tracker port, announce key, seeder port, device route to server. |
+| Download does not start | Tracker port and authentication (Bearer header for IOx/XR, legacy query token for Guest Shell), seeder port, device route to server. |
 | Download stalls | Swarm view, peer count, seeder availability, storage capacity. |
 | Verification fails | Catalog hash, file name, staged-copy byte size, image integrity. |
 | Console stale | Telemetry health, catalog service logs, device report interval. |
 | Prometheus target down, dashboard blank | `IRIS_OBSERVABILITY` — unset means `/metrics` answers 404 by design; then check reachability to port 9101. |
-| `403` on `:9101/swarm` | Swarm data is console-gated by design: use the console's Swarm tab, the authenticated `GET /api/swarm`, or `docker compose -f server/docker-compose.yml exec iris curl -s http://127.0.0.1:9101/swarm` (`kubectl exec` on Kubernetes). `IRIS_SWARM_PUBLIC=1` reopens remote access. |
-
+| `401` on `:9101/swarm` | Swarm data is management-tier only by design. Use the Console's Swarm tab or its authenticated `GET /api/v1/swarm`; do not expose or manually reuse the internal bearer. |

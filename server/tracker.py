@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote_to_bytes, urlparse
 
 import auth
+import api_routes
 import bencode
 import blocklist_reconciler as _reconciler
 import bounded_pool
@@ -194,10 +195,37 @@ def _legacy_id(peer_ip, peer_port):
     return "%s:%s" % (peer_ip, peer_port if peer_port is not None else "")
 
 
+def _catalog_scrape_authorizer(state_dir):
+    """Return a fail-closed device assignment check for ``/scrape``.
+
+    The tracker and catalog share the server tier's durable state, but remain
+    separate listeners. Reuse CatalogStore's sharded/locked reads instead of
+    adding a second parser for policy.json and catalog.json here.
+    """
+    # Keep the tracker module lightweight for callers that only use its BEP
+    # parsing and registry helpers.
+    import catalog as _catalog
+
+    store = _catalog.CatalogStore(state_dir)
+
+    def allowed(device_id, info_hash):
+        try:
+            image_ids = store.get_policy(device_id)["approved_image_ids"]
+            return any(
+                str((store.get_image(image_id) or {}).get(
+                    "info_hash_hex", "")).lower() == info_hash.lower()
+                for image_id in image_ids)
+        except (_catalog.StateFileError, OSError, ValueError, TypeError):
+            return False
+
+    return allowed
+
+
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
-                on_endpoint_change=None, on_announce_refused=None):
+                on_endpoint_change=None, on_announce_refused=None,
+                scrape_authorizer=None):
     """Build the tracker HTTP server.
 
     Typed identity/policy integration (spec §6/§7):
@@ -224,6 +252,10 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
       ``expired=True`` means the presented credential resolved to a known,
       non-revoked record that failed only because it timed out -- the
       SEEDER_PREV_TTL overlap case this counter exists for.
+    * ``scrape_authorizer`` — ``(device_id, info_hash_hex) -> bool`` binding a
+      device scrape to its current catalog assignment. Missing/failing checks
+      deny device principals; service and bounded legacy principals retain
+      their compatibility-wide tracker view.
     """
     registry = registry or PeerRegistry()
     # One stat-validated snapshot of the secret store and its strict announce
@@ -250,18 +282,45 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             self.send_response(status)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(body)))
+            if status in (401, 403):
+                self.send_header("WWW-Authenticate", "Bearer")
+            if status == 503:
+                self.send_header("Retry-After", "1")
+            if getattr(self, "_legacy_query_auth", False):
+                # Unchanged Guest Shell aria2 bundles cannot attach a
+                # per-download HTTP header.  Make the bounded compatibility
+                # path visible to operators and caches while new IOx/XR agents
+                # use the preferred Bearer transport.
+                self.send_header("Deprecation", "true")
+                self.send_header("Vary", "Authorization")
             self.end_headers()
             self.wfile.write(body)
 
-        def _resolve_principal(self, query, store, index, now, peer_ip=None,
-                               peer_port=None):
-            """Resolve the announce credential to a typed AuthContext, or None
-            on any missing/invalid/ambiguous outcome (=> token-free 403). The
-            legacy id is the effective endpoint (spec §6), never a token."""
+        def _extract_token(self):
+            value = self.headers.get("Authorization", "")
+            if not value.startswith("Bearer ") or value.count(" ") != 1:
+                return None
+            return value[7:] or None
+
+        def _resolve_principal(self, token, query, store, index, now,
+                               peer_ip=None, peer_port=None):
+            """Resolve Bearer first, or the Guest Shell query fallback.
+
+            Presence of any Authorization header disables query fallback, so
+            a malformed/invalid preferred credential cannot be downgraded to
+            a URL credential.  The legacy id is an endpoint-derived nonsecret
+            key, never the presented token.
+            """
             try:
-                return auth.resolve_announce_principal(
+                if self.headers.get("Authorization") is not None:
+                    return auth.resolve_announce_bearer(
+                        token, index, store, now, _grace,
+                        legacy_id=_legacy_id(peer_ip, peer_port))
+                ctx = auth.resolve_announce_principal(
                     query, index, store, now, _grace,
                     legacy_id=_legacy_id(peer_ip, peer_port))
+                self._legacy_query_auth = True
+                return ctx
             except auth.AnnounceAuthError as exc:
                 if on_announce_refused is not None:
                     on_announce_refused(expired=exc.expired)
@@ -273,36 +332,81 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             try:
                 store, index = _credentials.view(
                     "announce", secrets_store.build_announce_index)
-            except secrets_store.DuplicateCredentialError:
+            except (secrets_store.DuplicateCredentialError,
+                    secrets_store.StoreCorruptError, OSError):
                 # A hard configuration error (two records share a value) is a
                 # token-free 403 — never a silent overwrite (spec §6).
-                self._send(403, build_failure("credential configuration error"))
+                self._send(503, build_failure("credential store unavailable"))
                 return
             now = time.time()
+            # Resolve authentication before route matching or request-shape
+            # validation. Authorization is preferred; query credentials are a
+            # bounded compatibility path for unchanged Guest Shell bundles.
+            ctx = self._resolve_principal(
+                self._extract_token(), query, store, index, now)
+            if ctx is None:
+                self._send(401 if self.headers.get("Authorization") is not None
+                           else 403,
+                           build_failure("missing or invalid token"))
+                return
+            if api_routes.match("tracker", "GET", self.path) is None:
+                self._send(404, build_failure("not found"))
+                return
             if parsed.path == "/announce":
-                self._handle_announce(query, store, index, now)
+                self._handle_announce(query, store, index, now, ctx)
             elif parsed.path == "/scrape":
-                # Scrape auth stays valid but its semantics are unchanged: we
-                # only require a valid announce credential, discarding the
-                # typed context (spec §6 scrape).
-                if self._resolve_principal(query, store, index, now) is None:
-                    self._send(403, build_failure("missing or invalid token"))
-                    return
-                self._handle_scrape(query)
+                self._handle_scrape(query, ctx)
             else:
                 self._send(404, build_failure("not found"))
 
-        def _handle_announce(self, query, store, index, now):
+        def _unsupported(self):
+            """Authenticate before returning a method/route result."""
+            try:
+                store, index = _credentials.view(
+                    "announce", secrets_store.build_announce_index)
+            except (secrets_store.DuplicateCredentialError,
+                    secrets_store.StoreCorruptError, OSError):
+                self._send(503, build_failure("credential store unavailable"))
+                return
+            ctx = self._resolve_principal(
+                self._extract_token(), urlparse(self.path).query,
+                store, index, time.time())
+            if ctx is None:
+                self._send(401 if self.headers.get("Authorization") is not None
+                           else 403,
+                           build_failure("missing or invalid token"))
+                return
+            body = build_failure("method not allowed")
+            self.send_response(405)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Allow", "GET")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        do_POST = _unsupported
+        do_PUT = _unsupported
+        do_DELETE = _unsupported
+        do_PATCH = _unsupported
+        do_HEAD = _unsupported
+        do_OPTIONS = _unsupported
+
+        def __getattr__(self, name):
+            if name.startswith("do_"):
+                return self._unsupported
+            raise AttributeError(name)
+
+        def _handle_announce(self, query, store, index, now, ctx):
             a = parse_announce(query)
             socket_ip = self.client_address[0]
             # The legacy id is derived from the SOCKET endpoint: a legacy
             # credential never earns the ip= override (below), so this is
             # its effective endpoint.
-            ctx = self._resolve_principal(query, store, index, now, socket_ip,
-                                          a["port"])
-            if ctx is None:
-                self._send(403, build_failure("missing or invalid token"))
-                return
+            if ctx.principal.type == "legacy":
+                ctx = auth.AuthContext(
+                    auth.Principal("legacy", _legacy_id(socket_ip, a["port"])),
+                    ctx.secret_name, ctx.scope)
             if on_announce is not None:
                 on_announce()
             # Validate info_hash AFTER auth so an unauthenticated caller learns
@@ -429,7 +533,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 a["info_hash"], a["peer_id"], principal, peer_ip,
                 predicate=predicate, numwant=a["numwant"])
 
-        def _handle_scrape(self, query):
+        def _handle_scrape(self, query, ctx):
             # Parse the RAW query like parse_announce: a real info_hash is 20
             # raw SHA-1 bytes and not valid UTF-8, so parse_qs (which decodes
             # escapes as UTF-8) mangled it — crash on high bytes, silent
@@ -446,6 +550,23 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if len(info_hex) != 40:
                 self._send(400, build_failure("info_hash must be 20 bytes"))
                 return
+            principal = ctx.principal
+            if principal.type == "device":
+                try:
+                    allowed = (scrape_authorizer is not None and
+                               bool(scrape_authorizer(principal.id,
+                                                      info_hex)))
+                except Exception:
+                    # A state/read failure cannot broaden a device's view.
+                    allowed = False
+                if not allowed:
+                    # Cross-assignment and nonexistent hashes are identical
+                    # after authentication, preventing resource enumeration.
+                    self._send(404, build_failure("not found"))
+                    return
+            # The seeder service retains whole-swarm visibility. A bounded
+            # previous-seeder query token has no attributable device id and is
+            # retained as the explicit unchanged Guest Shell exception.
             stats = registry.scrape(info_hex)
             self._send(200, build_scrape_response(info_hex, stats))
 
@@ -1026,25 +1147,18 @@ def main():
     if mport is not None:
         # External Prometheus-format /metrics is gated on IRIS_OBSERVABILITY
         # (default off) — IRIS doesn't assume any observability stack is
-        # around. The swarm JSON (/swarm) answers loopback peers only unless
-        # IRIS_SWARM_PUBLIC opens it (the console proxies it over container
-        # loopback); the map PAGE moved into the console (:8080), so /swarmmap
-        # and / point there instead. IRIS_METRICS_HOST (default unchanged
-        # 0.0.0.0) remains the HARD control for this surface: a peer-address
-        # gate is namespace-scoped, the bind host is not (security.md).
+        # around. Swarm JSON always requires the management-tier credential;
+        # the map page moved into the console. The listener is TLS-only in
+        # production because both management and observability credentials can
+        # cross it.
         obs = telemetry.observability_enabled()
         mhost = os.environ.get("IRIS_METRICS_HOST", "0.0.0.0")
-        swarm_public = os.environ.get(
-            "IRIS_SWARM_PUBLIC", "").strip().lower() in (
-                "1", "true", "yes", "on")
         try:
             msrv = telemetry.make_metrics_server(
                 mhost, mport,
                 hub.metrics_text if obs else None,
                 swarm_provider=hub.swarm_snapshot,
-                html=telemetry.moved_page,   # map page retired -> console pointer
                 health=hub.export_health.as_dict,
-                swarm_public=swarm_public,
                 # What /readyz TCP-probes. /healthz answering 200 only ever
                 # proved :9101 was alive, so a dead artifact server or tracker
                 # left the container "healthy" and, under Kubernetes, never
@@ -1059,15 +1173,24 @@ def main():
                             "IRIS_CATALOG_PORT", "8443")),
                         "artifacts": int(os.environ.get(
                             "IRIS_ARTIFACTS_PORT", "8000")),
-                        "console": int(os.environ.get(
-                            "IRIS_CONSOLE_PORT", "8080")),
-                    }))
+                        "management": int(os.environ.get(
+                            "IRIS_MANAGEMENT_API_PORT", "9443")),
+                    }),
+                management_token_file=os.environ.get(
+                    "IRIS_MANAGEMENT_API_TOKEN_FILE") or None,
+                management_previous_token_file=os.environ.get(
+                    "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE") or None,
+                observability_token_file=os.environ.get(
+                    "IRIS_OBSERVABILITY_TOKEN_FILE") or None,
+                observability_previous_token_file=os.environ.get(
+                    "IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE") or None,
+                certfile=os.environ.get("IRIS_TELEMETRY_CERT")
+                or os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem"),
+                keyfile=os.environ.get("IRIS_TELEMETRY_KEY") or None)
             threading.Thread(target=msrv.serve_forever, daemon=True).start()
-            print("swarm JSON on http://%s:%d/swarm %s%s"
+            print("swarm JSON on https://%s:%d/swarm "
+                  "(management bearer required)%s"
                   % (mhost, mport,
-                     "(open to any peer — IRIS_SWARM_PUBLIC)" if swarm_public
-                     else "(loopback only — console-gated; "
-                          "IRIS_SWARM_PUBLIC=1 to open)",
                      "  (metrics on /metrics)" if obs else
                      "  (Prometheus /metrics disabled — IRIS_OBSERVABILITY=1 "
                      "to enable)"), flush=True)
@@ -1093,7 +1216,8 @@ def main():
         pending_queue=reconciler._pending,
         on_endpoint_failure=reconciler.wake,
         on_endpoint_change=reconciler.wake,
-        on_announce_refused=hub.note_announce_refused)
+        on_announce_refused=hub.note_announce_refused,
+        scrape_authorizer=_catalog_scrape_authorizer(state_dir))
     reconciler.start()
     print("tracker on http://%s:%d/announce" % (host, port), flush=True)
     srv.serve_forever()

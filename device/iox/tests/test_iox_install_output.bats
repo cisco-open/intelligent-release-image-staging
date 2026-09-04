@@ -93,11 +93,33 @@ setup() {
   [[ "$output" == *"vlan 666"* ]] && [[ "$output" == *"interface Vlan666"* ]]
 }
 
+@test "dry-run preserves run-opt structure without printing credentials" {
+  CATALOG_TOKEN=literal-catalog-secret DEVICE_SSH_PASS=literal-device-secret \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'IRIS_CATALOG_TOKEN=<redacted>'* ]]
+  [[ "$output" == *'IRIS_DEVICE_SSH_PASS=<redacted>'* ]]
+  [[ "$output" != *'literal-catalog-secret'* ]]
+  [[ "$output" != *'literal-device-secret'* ]]
+}
+
+@test "package destination values are validated before use" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    PKG='../escape.tar' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PKG must be a safe basename"* ]]
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    PKG_FS='flash:;reload' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PKG_FS must be an IOS filesystem prefix"* ]]
+}
+
 # --- C9k share-mount transfer (Route B): the app-hosting SSD share is bind-
 # mounted into the container so the agent lands its scratch at disk speed and
 # placement is an IOS-internal copy — no scp, no punt path, no CoPP cap. ---
 
-@test "share dry-run renders the bind-mount run-opts and the share env" {
+@test "share dry-run renders the bind mount and its matching container/IOS paths" {
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
@@ -109,17 +131,29 @@ setup() {
   [[ "$output" == *"mkdir usbflash1:iox_host_data_share"* ]]
 }
 
+@test "share dry-run preserves a validated alternate host/IOS path pair" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb2/iris-alt \
+    SHARE_IOS_PATH=usbflash2:iris-alt \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"'* ]]
+  [[ "$output" == *'run-opts 13 "-e IRIS_SHARE_IOS_PATH=usbflash2:iris-alt"'* ]]
+  [[ "$output" == *'run-opts 14 "-v /vol/usb2/iris-alt:/mnt/share"'* ]]
+  [[ "$output" == *'mkdir usbflash2:iris-alt'* ]]
+}
+
 @test "share run-opts render INSIDE the app-hosting docker block (before end)" {
   # app-hosting silently ignores run-opts rendered after the block's `end`,
   # so the mount would vanish while every substring gate still passed —
-  # assert the line that immediately follows run-opts 13 (the last one,
-  # renumbered from 12 when run-opts 10 "-e IRIS_LOG=..." was added ahead of
+  # assert the line that immediately follows run-opts 14 (the last one,
+  # after the unified selector and target override were added ahead of
   # the SHARE block) is `end`.
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
     run bash "$INSTALL" --dry-run
-  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 13' | tail -1)"
+  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 14' | tail -1)"
   [ "$after" = "end" ]
 }
 
@@ -135,6 +169,62 @@ setup() {
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ] && [[ "$output" == *"SHARE_IOS_PATH"* ]]
+}
+
+@test "alternate share paths reject traversal and IOS command separators" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/../escape SHARE_IOS_PATH=usbflash1:escape \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHARE_HOST_PATH must be a safe absolute path"* ]]
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iris SHARE_IOS_PATH='usbflash1:iris;reload' \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHARE_IOS_PATH must be a safe IOS filesystem path"* ]]
+}
+
+@test "dry-run rejects CLI and config injection across IOx supplied fields" {
+  local name value
+  while IFS='|' read -r name value; do
+    run env VLAN=666 SVI_IP=192.0.2.9 \
+      SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 "$name=$value" \
+      bash "$INSTALL" --dry-run
+    [ "$status" -ne 0 ] || { echo "$name unexpectedly accepted"; return 1; }
+    [[ "$output" != *$'\nreload\n'* ]] || return 1
+  done <<'EOF'
+APP_INTF|AppGigabitEthernet1/1;reload
+VLAN|666;reload
+SVI_IP|192.0.2.9;reload
+SVI_MASK|255.0.255.0
+GUEST_IP|192.0.2.10;reload
+GW_IP|192.0.2.9;reload
+CPU|400;reload
+MEM|768;reload
+DISK|2048;reload
+IOS_SSH_HOST|192.0.2.9;reload
+IRIS_TELEMETRY|on;reload
+IRIS_TELEMETRY_STREAM|off;reload
+SHARE_HOST_PATH|/vol/usb1/../escape
+EOF
+}
+
+@test "dry-run rejects CR/LF before rendering supplied secrets" {
+  CATALOG_TOKEN=$'literal-secret\r\nend' \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'literal-secret'* ]]
+  [[ "$output" != *$'\nend\n'* ]]
+}
+
+@test "dry-run rejects catalog URL userinfo without printing it" {
+  CATALOG_URL=https://user:literal-secret@192.0.2.20:8443 \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without credentials"* ]]
+  [[ "$output" != *"literal-secret"* ]]
 }
 
 @test "IOx install retries app-hosting verification disable until it succeeds" {
@@ -193,7 +283,7 @@ setup() {
 
 _iox_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox" "$STUBDIR/artifacts" "$STUBDIR/bin"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
 cmds="$(cat)"
@@ -277,9 +367,22 @@ esac
 exit 0
 STUB
   chmod +x "$STUBDIR/lab/device-run.sh"
+  cat > "$STUBDIR/lab/iris-ssh-policy.sh" <<'STUB'
+iris_ssh_policy() { IRIS_SSH_OPTS=(); }
+iris_ssh_cleanup() { :; }
+STUB
+  cat > "$STUBDIR/bin/sshpass" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/sshpass"
   ln -s "$BATS_TEST_DIRNAME/../install.sh" "$STUBDIR/device/iox/install.sh"
+  printf 'fake package\n' > "$STUBDIR/artifacts/iris-arm64.tar"
   CRTFILE="$BATS_TEST_TMPDIR/crt.pem"
   echo "-----BEGIN CERTIFICATE-----fake-----END CERTIFICATE-----" > "$CRTFILE"
+  export PATH="$STUBDIR/bin:$PATH"
+  export IRIS_ARTIFACTS_DIR="$STUBDIR/artifacts"
+  export DEVICE_USER=test DEVICE_PASS=test
 }
 
 # same portable timeout wrapper as device/tests/test_device_install.bats: the
@@ -429,11 +532,11 @@ _iox_env() {
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     ACTIVATE_TIMEOUT=abc run bash "$INSTALL" --dry-run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ACTIVATE_TIMEOUT must be a whole number of seconds"* ]]
+  [[ "$output" == *"ACTIVATE_TIMEOUT must be an integer from 1 to 86400"* ]]
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     STATE_POLL=0 run bash "$INSTALL" --dry-run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"STATE_POLL must be greater than zero"* ]]
+  [[ "$output" == *"STATE_POLL must be an integer from 1 to 86400"* ]]
 }
 
 @test "activation timeout honours the budget, dumps the unfiltered IOS reply, and keeps the app for a resumable retry" {

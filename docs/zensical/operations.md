@@ -81,7 +81,7 @@ individual effects are documented in
 ## Onboarding at scale
 
 A batch onboard no longer blocks its HTTP request on a router's live SSH
-session. `POST /api/devices/<id>/onboard` resolves the plan, checks for a
+session. `POST /api/v1/devices/<id>/onboard` resolves the plan, checks for a
 conflicting deployment record, and returns a job id immediately; router
 preflight — the read-only collision, identity, and NAT checks in
 [Router preflight and ownership](management-type.md#router-preflight-and-ownership)
@@ -95,7 +95,7 @@ still completes before any token is minted or any device configuration is
 applied — only when it runs moved.
 
 Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
-(default 25); `GET /api/onboard/jobs` reports the current limit as
+(default 25); `GET /api/v1/onboard/jobs` reports the current limit as
 `max_concurrent`.
 
 The generated installers and Console recipes also cut down on device logins:
@@ -183,7 +183,7 @@ down — `peer-enforcement.json` simply stops changing, and its last recorded
 state (possibly `enforced`) would otherwise sit there looking current
 indefinitely. The console's peer-policy badge (device inventory, Peer
 policy column) does not take a frozen state at face value: `GET
-/api/peer-policy` derives `enforcement.stale` from how long it has been
+/api/v1/peer-policy` derives `enforcement.stale` from how long it has been
 since `last_reconciled_at` (never, or more than five minutes — several
 multiples of the reconciler's own 60-second maintenance deadline, to absorb
 scheduling jitter without false-flagging a healthy but quiet fleet) and the
@@ -477,6 +477,32 @@ persisted deployment-log offsets with lines such as `artifacts GET ... in
 concurrency. Expired staging credentials are swept on a five-minute timer, not
 on a request path, so one fetch cannot trigger deletion work for another.
 
+## Rotating the Console-to-server credential
+
+The Console reaches server state only through the internal management API on
+9443. Both services read the credential from mounted files; never place it in
+`server/.env`, a Compose `environment:` value, a URL, or a command argument.
+Compose atomically provisions a scoped random value in its `iris-tier-auth`
+named volume on first start. Kubernetes operators create the corresponding
+Secret before deployment, as documented in [Kubernetes](kubernetes.md).
+
+Rotation uses the current/previous overlap and is intentionally two phase:
+
+1. Copy the current scoped JSON record to `previous.json`, generate a new random
+   value of at least 32 bytes, and atomically replace `current.json`. In Compose
+   those files live in the tier-auth named volume; in Kubernetes they are the
+   two projected Secret keys.
+2. Wait for both readiness checks and make one authenticated browser request
+   through `/api/v1/session`. The Compose processes reread both files on every
+   request; Kubernetes should roll Console and server while the overlap exists.
+3. Remove `previous.json` (or its Secret key), verify again, and securely retire
+   any out-of-band copy of the old value.
+
+The server rereads the pair and compares both in constant time. A missing,
+unreadable, too-short, wrongly scoped, or unmatched value returns a redacted
+401 before a route is matched or a request body is read. The Console pins the
+management CA independently; a token does not enable plaintext fallback.
+
 ## TLS rotation and device packages
 
 Rotating or regenerating the server's TLS certificate invalidates prebuilt
@@ -585,7 +611,7 @@ the catalog, and that request is authorised by the device's catalog token.
 
 **The rotation is only reported complete when the tracker independently proves
 the new identity is serving.** After every canonical torrent is re-added, the
-command polls the tracker's loopback `/swarm` and requires the current typed
+command polls the telemetry listener's authenticated, pinned-TLS `/swarm` and requires the current typed
 `service:seeder` principal to be observed for every expected info hash, each with
 an announce later than the post-add boundary. A completed device peer does not
 stand in for that proof, and there is no registry shortcut or IP-based guess.

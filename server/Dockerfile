@@ -28,8 +28,8 @@
 # processing only: IOS image authenticity is established server-side at
 # publish time, not by a device-side signature check — the device places the
 # image with a plain `copy`, and the agent attests placement and content
-# integrity itself. Keep in lockstep with device/iox/Dockerfile, which shares
-# this base (issue #13).
+# integrity itself. Device IOx/XR images now use their independently pinned
+# Alpine definition under `device/container/`.
 FROM python:3.12-slim-trixie
 
 
@@ -100,6 +100,7 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
     /opt/iris/server/iris-assign \
     /opt/iris/server/iris-bootstrap \
+    /opt/iris/server/iris-management-token \
     /opt/iris/server/rotate_seeder_announce.py \
     /opt/iris/server/pack-agent-bundle.sh \
     /opt/iris/server/provision-served.sh \
@@ -121,10 +122,13 @@ RUN groupadd --system --gid 10001 iris \
          --shell /usr/sbin/nologin iris \
     && install -d -o iris -g iris \
          /var/lib/iris /etc/iris /etc/iris/tls /var/lib/iris-images \
-         /srv/artifacts /opt/images /var/log/iris /run/iris
+         /srv/artifacts /opt/images /var/log/iris /run/iris \
+         /run/iris-tier /run/iris-management-ca \
+    && rm -rf /opt/iris/server/webroot /opt/iris/server/gui_server.py \
+         /opt/iris/server/iris-gui
 
 # Device/operator-facing ports. aria2 RPC (:6800) is loopback-only and omitted.
-EXPOSE 6969 8443 8000 6881 8080 9101
+EXPOSE 6969 8443 8000 6881 9101 9443
 VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts", "/var/lib/iris-images"]
 
 # /readyz, NOT /healthz: /healthz answers 200 unconditionally (telemetry.py)
@@ -135,7 +139,9 @@ VOLUME ["/var/lib/iris", "/etc/iris", "/opt/images", "/srv/artifacts", "/var/lib
 # ~8s worst case with everything down), hence the 12s timeout -- the same
 # reasoning as kubernetes/deployment.yaml.
 HEALTHCHECK --interval=30s --timeout=12s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9101/readyz || exit 1
+  CMD curl -fsS --cacert /etc/iris/tls/crt.pem \
+      --resolve "$IRIS_HOST_IP:9101:127.0.0.1" \
+      "https://$IRIS_HOST_IP:9101/readyz" || exit 1
 
 USER iris
 

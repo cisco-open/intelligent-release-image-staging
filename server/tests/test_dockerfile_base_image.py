@@ -2,21 +2,22 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Both images must sit on a Debian trixie base (OpenSSL 3.5 LTS), not bookworm
-(OpenSSL 3.0, upstream EOL 2026-09-07).
+"""The server must sit on Debian trixie (OpenSSL 3.5 LTS), not bookworm
+(OpenSSL 3.0, upstream EOL 2026-09-07). The canonical device image deliberately
+uses a smaller Alpine base, pinned by multi-architecture digest so IOx and
+IOS-XR appmgr consume exactly the same audited OCI index.
 
 This is security-critical rather than housekeeping: server/trust.py shells out
 to the base image's `openssl` binary to parse the TLS trust store and verify
 CMS integrity for downloaded CA bundles (PKCS#7/CMS). It does NOT verify Cisco
 IOS image signatures -- IOS image authenticity is established server-side at
 publish time, not via any on-device signature check (placement is a plain
-`copy`, attested by the agent itself). The two Dockerfiles share a base and
-must be bumped in lockstep, so a drift between them is itself a failure
-(issue #13).
+`copy`, attested by the agent itself).
 
-The second half of the file covers the other way a base goes stale: the tag is
-floating, so every build that does not pass --pull silently reuses the build
-host's cache (issue #64)."""
+The second half of the file covers the other way a floating base goes stale:
+every build that does not pass --pull silently reuses the build host's cache
+(issue #64). The canonical device build defaults to --pull as well, preserving
+that safety if its base ever returns to a floating reference."""
 import os
 import re
 import subprocess
@@ -25,7 +26,8 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER_DOCKERFILE = os.path.join(HERE, "..", "Dockerfile")
-IOX_DOCKERFILE = os.path.join(HERE, "..", "..", "device", "iox", "Dockerfile")
+DEVICE_DOCKERFILE = os.path.join(
+    HERE, "..", "..", "device", "container", "Dockerfile")
 
 
 def _base_image(path):
@@ -44,17 +46,25 @@ def test_server_base_is_trixie():
     assert "trixie" in base, "expected a trixie base, got %s" % base
 
 
-def test_iox_base_is_trixie():
-    base = _base_image(IOX_DOCKERFILE)
-    assert "bookworm" not in base, (
-        "IOx agent image is still on bookworm: %s" % base)
-    assert "trixie" in base, "expected a trixie base, got %s" % base
+def test_device_base_is_digest_pinned_supported_alpine():
+    base = _base_image(DEVICE_DOCKERFILE)
+    assert re.fullmatch(
+        r"python:3\.12-alpine3\.24@sha256:[0-9a-f]{64}", base
+    ), "expected the audited digest-pinned Alpine device base, got %s" % base
 
 
-def test_both_images_share_one_base_in_lockstep():
-    # The IOx agent and the server run the same Python and the same OpenSSL;
-    # bumping one without the other reintroduces the split this item closes.
-    assert _base_image(SERVER_DOCKERFILE) == _base_image(IOX_DOCKERFILE)
+def test_iox_and_xr_wrappers_share_the_canonical_device_builder():
+    wrappers = (
+        os.path.join(HERE, "..", "..", "device", "iox", "build.sh"),
+        os.path.join(HERE, "..", "..", "tools", "build-xr-package.sh"),
+    )
+    for path in wrappers:
+        text = open(path).read()
+        assert 'tools/build-device-image.sh" --context' in text, (
+            "%s must delegate to the canonical device image builder" % path)
+        assert not re.search(
+            r"^\s*docker\s+(?:buildx\s+build|build)\b", text, re.MULTILINE
+        ), "%s must not independently rebuild the shared image" % path
 
 
 def test_server_dockerfile_states_trust_boundary_accurately():
@@ -75,24 +85,22 @@ def test_server_dockerfile_states_trust_boundary_accurately():
 
 
 # ---------------------------------------------------------------------------
-# A current base in the Dockerfile is only half of it: `python:3.12-slim-trixie`
-# is a floating tag, so a build without `--pull` reuses whatever the build host
-# cached and ships an out-of-date base while the Dockerfile still reads
-# correctly (measured on the lab server: a 19-day-old cached tag was 12 Debian
-# security updates behind, OpenSSL 3.5.6 vs 3.5.7 -- issue #13/#64). Every way
-# we tell someone to build an IRIS image therefore has to pass --pull: the
-# scripts that run the build, and the commands the docs hand an operator to
-# paste.
+# A current base in the Dockerfile is only half of it: the server's
+# `python:3.12-slim-trixie` is a floating tag, so a build without `--pull`
+# reuses whatever the build host cached and ships an out-of-date base while
+# the Dockerfile still reads correctly (measured on the lab server: a
+# 19-day-old cached tag was 12 Debian security updates behind, OpenSSL 3.5.6
+# vs 3.5.7 -- issue #13/#64). Every image-build command still has to pass
+# --pull: the scripts that actually run a build and the commands the docs hand
+# an operator to paste.
 # ---------------------------------------------------------------------------
 REPO = os.path.join(HERE, "..", "..")
 
-# script -> regex matching the line that actually invokes the build.
-# tools/build-xr-package.sh builds a digest-pinned base, where --pull cannot
-# change the result; it is held to the same rule anyway so that a future
-# switch back to a floating tag cannot quietly reintroduce the stale-base bug.
+# script -> regex matching the line that actually invokes the build. The IOx
+# and XR package wrappers are covered above: they delegate rather than issue
+# independent builds.
 BUILD_SCRIPTS = {
-    os.path.join("device", "iox", "build.sh"): r"^docker build\b",
-    os.path.join("tools", "build-xr-package.sh"): r"^docker build\b",
+    os.path.join("tools", "build-device-image.sh"): r"^docker buildx build\b",
     os.path.join("tools", "start-compose-server.sh"): r"^\"\$\{COMPOSE\[@\]\}\" build\b",
 }
 
@@ -100,17 +108,20 @@ BUILD_SCRIPTS = {
 def _expanded_build_lines(script_path, invocation_re):
     """Invocation lines with shell variables replaced by their DEFAULT value.
 
-    The scripts spell the flag `PULL_FLAG="--pull"` with an IRIS_NO_PULL=1
-    opt-out, so the literal string is not on the docker build line; the
-    default assignment is what this rule is about.
+    Build scripts keep the flag in a shell variable with an IRIS_NO_PULL=1
+    opt-out, so the literal string is not necessarily on the build line; the
+    default assignment is what this rule is about. Accept both quoted and
+    unquoted simple assignments used by the supported scripts.
     """
     defaults = {}
     lines = []
     for raw in open(script_path).read().splitlines():
         line = raw.strip()
-        m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)="([^"]*)"', line)
+        m = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|([^\s#]+))$', line)
         if m and m.group(1) not in defaults:
-            defaults[m.group(1)] = m.group(2)
+            defaults[m.group(1)] = (
+                m.group(2) if m.group(2) is not None else m.group(3))
         if line.startswith("#") or not re.search(invocation_re, line):
             continue
         expanded = line
@@ -136,8 +147,8 @@ def test_every_image_build_script_pulls_a_fresh_base():
 
 def test_every_documented_build_command_pulls_a_fresh_base():
     # A literal `docker build -...` anywhere a reader might copy it. Test
-    # helpers are excluded: they build the digest-pinned XR image into a
-    # throwaway tag, where a pull buys nothing and costs a download.
+    # helpers are excluded: their throwaway images are not release artifacts,
+    # and forcing a pull there only adds network-dependent cost.
     command = re.compile(r"docker\s+(?:buildx\s+)?build\s+(?=-)")
     offenders = []
     listing = subprocess.run(

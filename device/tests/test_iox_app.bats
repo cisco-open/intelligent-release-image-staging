@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for device/iox/{install.sh, entrypoint.sh, build.sh}
+# Tests for the shared container entrypoint plus device/iox/{install.sh,build.sh}
 # Findings addressed:
 #   #1 (CRITICAL)  install.sh run-opts must pass IRIS_DEVICE_SSH_HOST / IRIS_DEVICE_SSH_USER
 #   #2 (IMPORTANT) entrypoint.sh supervisor must restart a crashed aria2c
@@ -17,8 +17,8 @@
 setup() {
   IOX_DIR="$BATS_TEST_DIRNAME/../iox"
   INSTALL="$IOX_DIR/install.sh"
-  ENTRYPOINT="$IOX_DIR/entrypoint.sh"
-  BUILD="$IOX_DIR/build.sh"
+  ENTRYPOINT="$BATS_TEST_DIRNAME/../container/entrypoint.sh"
+  BUILD="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/tools/build-device-image.sh"
 
   export DEVICE_IP=192.0.2.1 VLAN=100 \
     SVI_IP=192.0.2.253 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.254 \
@@ -80,14 +80,14 @@ _appid_block_output() {
 @test "install.sh uses one numbered run-opts line per environment variable" {
   run _appid_block_output
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts [1-8] ' | tr -d ' ')" -eq 8 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts ' | tr -d ' ')" -eq 11 ]
   ! printf '%s\n' "$output" | grep -Eq 'run-opts.* -e .* -e '
 }
 
 @test "install.sh explicitly passes the telemetry setting" {
   run _appid_block_output
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 8 "-e IRIS_TELEMETRY=on"'* ]]
+  [[ "$output" == *'run-opts 9 "-e IRIS_TELEMETRY=on"'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -287,25 +287,22 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 }
 
 @test "build.sh supports arm64 and amd64 IOx images" {
-  grep -q 'arm64|aarch64)' "$BUILD"
-  grep -q 'amd64|x86_64)' "$BUILD"
-  grep -q 'linux/arm64' "$BUILD"
-  grep -q 'linux/amd64' "$BUILD"
+  grep -q 'amd64:x86_64:iris-agent.tgz' "$BUILD"
+  grep -q 'arm64:aarch64:iris-agent-arm.tgz' "$BUILD"
+  grep -q -- '--platform linux/amd64,linux/arm64' "$BUILD"
 }
 
 @test "amd64 package descriptor declares x86_64" {
   grep -q '^  cpuarch: x86_64$' "$IOX_DIR/package-amd64.yaml"
 }
 
-@test "IOx Dockerfile uses a multi-architecture Python base" {
+@test "unified Dockerfile uses a digest-pinned multi-architecture Python base" {
   # The app is built for BOTH aarch64 (IE3x00) and x86_64 (Catalyst 9000)
   # from one Dockerfile, so the base must be an official multi-arch
-  # python:3.12-slim-* image and never an arch-pinned namespace. The Debian
-  # suite is deliberately not asserted here — that belongs to the base-image
-  # bump check in server/tests/test_dockerfile_base_image.py, which also
-  # holds this file in lockstep with server/Dockerfile.
-  grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$IOX_DIR/Dockerfile"
-  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$IOX_DIR/Dockerfile"
+  # Alpine keeps both manifests small and the index digest pins the base.
+  dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$dockerfile"
+  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$dockerfile"
 }
 
 # ---------------------------------------------------------------------------
@@ -319,13 +316,13 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 @test "install.sh rejects a DEVICE_SSH_PASS containing a double quote" {
   DEVICE_SSH_PASS='pa"ss' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote, CR, or LF"* ]]
 }
 
 @test "install.sh rejects a DEVICE_SSH_PASS containing a newline" {
   DEVICE_SSH_PASS=$'pa\nss' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote, CR, or LF"* ]]
 }
 
 @test "install.sh allows whitespace inside DEVICE_SSH_PASS (it stays quoted)" {
@@ -364,22 +361,22 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 @test "install.sh defaults IRIS_LOG to off and forwards it in the run-opts" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=off"'* ]]
+  [[ "$output" == *'run-opts 11 "-e IRIS_LOG=off"'* ]]
 }
 
 @test "install.sh forwards an operator's IRIS_LOG=on opt-in in the run-opts" {
   IRIS_LOG=on run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=on"'* ]]
+  [[ "$output" == *'run-opts 11 "-e IRIS_LOG=on"'* ]]
 }
 
 @test "install.sh rejects an IRIS_LOG value that would break the run-opts quoting, and whitespace" {
   IRIS_LOG='on"' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"IRIS_LOG must not contain"* ]] || return 1
+  [[ "$output" == *"IRIS_LOG has an invalid boolean value"* ]] || return 1
   IRIS_LOG='on off' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"IRIS_LOG contains whitespace"* ]]
+  [[ "$output" == *"IRIS_LOG has an invalid boolean value"* ]]
 }
 
 @test "install.sh's quoting guard runs before the first device session" {

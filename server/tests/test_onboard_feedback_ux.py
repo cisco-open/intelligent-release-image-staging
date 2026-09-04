@@ -13,7 +13,7 @@ own -- so these assert the markup/wiring stays intact, mirroring the
 open-the-webroot-file idiom in test_tls_page_ux.py / test_gui_server.py."""
 import os
 
-import gui_server
+import management_api as gui_server
 
 
 def _read(name):

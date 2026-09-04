@@ -12,7 +12,7 @@ document.getElementById('login-form').addEventListener('submit', async function 
   };
   var res;
   try {
-    res = await fetch('/api/login', {
+    res = await fetch('/api/v1/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -24,9 +24,9 @@ document.getElementById('login-form').addEventListener('submit', async function 
   if (res.ok) {
     var j = await res.json().catch(function () { return {}; });
     if (j.setup && j.setup_grant) {
-      // First-run: the default credential doesn't open a session, it hands
-      // back a one-time grant for /api/setup. Keep it out of the URL (no
-      // secrets in history/referrers) -- sessionStorage only.
+      // First-run: the operator-held setup credential doesn't open a session;
+      // it returns a one-time grant for /api/v1/setup. Keep it out of the URL
+      // (no secrets in history/referrers) -- sessionStorage only.
       window.sessionStorage.setItem('iris_setup_grant', j.setup_grant);
       window.location.href = '/setup.html';
       return;

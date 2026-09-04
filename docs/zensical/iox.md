@@ -7,28 +7,34 @@ SPDX-License-Identifier: Apache-2.0
 # IOx App
 
 The IOx path runs the agent as a Docker-based IOx application. It supports
-ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting.
+ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting. IOx and
+IOS-XR package the same canonical device image and run the same entrypoint;
+`IRIS_DEVICE_PLATFORM=iox` selects this profile.
 
 ## When to use it
 
 Use the IOx app when the platform expects an IOx application lifecycle. The
 Guest Shell path remains available for Catalyst devices that support that agent
-model. The staging target is platform-appropriate, and the rule is stated once
-here: the CLI installer (`device/iox/install.sh`) defaults `TARGET_FS` to
-`sdflash:` (the IE-3400 case); console onboarding overrides it to `flash:`
-(bootflash, like Guest Shell) for Catalyst 9300 IOx, with the SSD share
-carrying the transfer. The table in
+model. The staging target is platform-appropriate and selected by the existing
+live filesystem/model policy rather than a second platform knob: IE-3400
+normally selects `sdflash:`, while Catalyst 9300 normally selects `flash:`
+(bootflash, like Guest Shell) and uses the SSD share to carry the transfer. The table in
 [Device Agents](device-agents.md#platform-targets) reflects the same rule.
+
+The installer reads the selected package from the server's local
+`artifacts/` directory and pushes it to IOS over its authenticated,
+host-key-checked SCP session before driving app hosting. It does not put a
+credential in an artifact URL.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `device/iox/Dockerfile` | Builds the multi-architecture IOx agent container. |
+| `device/container/Dockerfile` | Builds the canonical multi-architecture IOx/XR agent container. |
+| `device/container/entrypoint.sh` | Validates `IRIS_DEVICE_PLATFORM` and supervises either runtime profile. |
 | `device/iox/package.yaml` | ARM64 IOx package metadata. |
 | `device/iox/package-amd64.yaml` | x86_64 IOx package metadata. |
-| `device/iox/entrypoint.sh` | Starts the agent inside the application container. |
-| `device/iox/build.sh` | Builds the IOx package. |
+| `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
 | `device/iox/rebake_iris_tar.py` | Updates an existing IOx package's content. |
@@ -76,13 +82,10 @@ and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host 
 against it instead of running unverified. See
 [Device Agents](device-agents.md).
 
-`IRIS_TARGET_FS` optionally selects a filesystem prefix such as `sdflash:` or
-`bootflash:`. The agent accepts it only when `show file systems` reports a
-writable non-crash disk; otherwise it logs the fallback and retains automatic
-platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
-defaults it to `sdflash:`.
-
-When `TARGET_FS` is `sdflash:` (the IE3x00 default), the installer checks
+The agent selects a target only after `show file systems`, model evidence, and
+the existing flash-target rules prove a writable non-crash disk. It does not
+fall back to a guessed `flash:` target. When the selected target is `sdflash:`
+(the IE3x00 case), the installer checks
 `show sdflash: filesys` for an IOx partition before applying any config and
 fails closed with a `PREREQ:` line if the SD card was never formatted for
 IOx. The installer also checks `ip routing` on a device using the routed management type (see
@@ -115,6 +118,20 @@ while an app that is `RUNNING` is a live deployment and still refuses.
 
 ## Build modes
 
+The canonical build always persists one OCI archive with one image manifest
+per CPU architecture under one multi-architecture identity. `--image-only`
+still builds/verifies both `linux/amd64` and `linux/arm64`; the architecture
+flag selects only a later native wrapper. The default signable output is
+`artifacts/iris-device-$VERSION.oci.tar` with an adjacent `.manifest` recording
+its index, archive, and source digests. `device/iox/build.sh` places that image inside an
+`ioxclient` package; `tools/build-xr-package.sh` places the same amd64 image
+inside an appmgr RPM. The outer tar and RPM necessarily differ in metadata and
+format, but their embedded amd64 image config and rootfs digest must match.
+Signing the OCI identity therefore signs one common payload; deployments that
+also require native IOx/RPM signatures still sign each native envelope. Each
+wrapper is published atomically beside a `.manifest` tying its own SHA-256 and
+selected platform back to the canonical index/archive/source digests.
+
 ```bash
 # Docker image only
 CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
@@ -136,13 +153,14 @@ pinned-cert probe member `tools/check-package-freshness.sh` and the console's
 Setup "device packages" card read, so a served package can be checked
 against the live certificate without unpacking its image.
 
-`device/iox/build.sh` never downloads `aria2c`. The binary is a handed-in
+The common device-image builder and `device/iox/build.sh` never download
+`aria2c`. The binary is a handed-in
 deliverable, produced elsewhere by the aria2-next-static project and only
 verified here — never fetched from a third party, never built in this
 repository (`tools/get-aria2c.sh` and `tools/aria2c.sha256` document the same
 producer/consumer split and the same verify-or-fail idiom the build uses
-internally). It resolves an architecture-matched `aria2c` in order:
-`ARIA2C_BIN` if set, else the matching local agent bundle
+internally). It resolves each architecture-matched `aria2c` in order:
+`ARIA2C_BIN_AMD64` or `ARIA2C_BIN_ARM64` if set, else the matching local agent bundle
 (`artifacts/iris-agent-arm.tgz` or `iris-agent.tgz`, whose `aria2c` is still
 checksum-verified — a bundle's provenance is not otherwise pinned), else
 `deliverables/aria2c-<arch>` checksum-verified against `tools/aria2c.sha256`.
@@ -162,7 +180,7 @@ name.
 # Build and stage both packages during server bring-up (recommended).
 tools/provision-iox-packages.sh
 
-# IE-3400 / IE-3400 / IR: arm64 package served as iris-arm64.tar
+# IE-3x00 / IR1101 / IR18xx: arm64 package served as iris-arm64.tar
 tools/stage-iox-package.sh --arch arm64
 
 # SSD-equipped Catalyst 9300 IOx: amd64 package served as iris-amd64.tar

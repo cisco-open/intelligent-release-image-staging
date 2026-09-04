@@ -28,6 +28,7 @@ RTT_LOG_MAX = 16
 JSON_RESPONSE_MAX = 64 * 1024
 TORRENT_RESPONSE_MAX = 4 * 1024 * 1024
 ERROR_RESPONSE_MAX = 64 * 1024
+TRACKER_BEARER_NEGOTIATION_HEADER = "X-IRIS-Tracker-Auth"
 
 
 class CatalogError(Exception):
@@ -35,10 +36,14 @@ class CatalogError(Exception):
 
 
 class CatalogClient:
-    def __init__(self, base_url, token, context=None):
+    def __init__(self, base_url, token, context=None, tracker_bearer=False):
         self.base = base_url.rstrip("/")
         self.token = token
         self.context = context     # ssl.SSLContext for https; None for http/tests
+        # Unified IOx/XR containers opt into token-free torrent metainfo. The
+        # default is deliberately false so existing Guest Shell bundles keep
+        # their byte-identical request and receive legacy query-auth metainfo.
+        self.tracker_bearer = tracker_bearer
         # RTT samples (ms) from successful catalog calls. Neither variant can
         # ICMP-probe (no ping binary in the IOx container; IOS ping over
         # SSH-to-self costs seconds), so timed HTTPS calls are the agent's
@@ -118,8 +123,12 @@ class CatalogClient:
         raise CatalogError("image %s -> HTTP %d" % (image_id, status))
 
     def download_torrent(self, image_id, dest_path):
+        extra_headers = None
+        if self.tracker_bearer:
+            extra_headers = {TRACKER_BEARER_NEGOTIATION_HEADER: "bearer"}
         status, body = self._req(
             "GET", "/v1/torrents/%s.torrent" % image_id,
+            extra_headers=extra_headers,
             max_response_bytes=TORRENT_RESPONSE_MAX)
         if status != 200:
             raise CatalogError("torrent %s -> HTTP %d" % (image_id, status))

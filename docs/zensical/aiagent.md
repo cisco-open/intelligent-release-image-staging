@@ -50,6 +50,7 @@ knowing them in advance saves a stalled PoC:
 | You see | Why | What to set |
 | --- | --- | --- |
 | The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
+| A fresh server tier refuses to start because Console setup material is unavailable | First-run setup must not be claimable with a shared default credential | Create a deployment-unique token with a private umask, export `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, and make the file mode 600/readable by uid 10001 as shown in Getting Started |
 | A device refuses the SSH connection, naming legacy algorithms | Old SHA-1 key exchange and `ssh-rsa` host keys are no longer offered by default | `IRIS_SSH_LEGACY=1`, only for devices too old to offer anything current |
 | A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm which, then remove that host's entry from the known-hosts file under the IRIS state directory |
 | Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS no longer applies a routing protocol to the interfaces it creates unless asked | `SVI_IGP=isis` when the fabric runs IS-IS; leave unset otherwise |
@@ -93,9 +94,11 @@ At the end of every step, state the next action required from me.
 1. **Choose the runtime.** Use [Getting Started](getting-started.md) for Docker
    Compose on one server. Use [Kubernetes](kubernetes.md) only when a
    single-replica Kubernetes deployment and its persistent volume are intended.
-2. **Bring up the server.** Create the age identity outside the repository.
-   Give uid `10001` the age key file and the host `artifacts/` directory — the
-   container runs non-root and cannot chown host paths; see
+2. **Bring up the server.** Complete [Getting Started → Configure the
+   server](getting-started.md#configure-the-server): create the age identity and
+   deployment-unique Console setup token outside the repository with a private
+   umask, and export both host paths. Give uid `10001` both files and the host
+   `artifacts/` directory — the container runs non-root and cannot chown host paths; see
    [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
    Then run
    `tools/start-compose-server.sh` on the Linux Compose host. It
@@ -106,9 +109,10 @@ At the end of every step, state the next action required from me.
    the container always listens on 8080 internally; substitute your published
    port in every URL in this guide.
 3. **Create the Console admin.** Accept the self-signed certificate warning only
-   for the expected server, sign in with the default first-run credential
-   `iris` / `irisisgreat!`, and create the initial admin account. The default
-   credential works only before an admin account exists. The next sign-in opens
+   for the expected server, sign in as `iris` with the deployment-unique token
+   from `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, and create the initial admin
+   account. There is no shared default, and the token becomes inert once an
+   admin exists. The next sign-in opens
    the first-run setup wizard at `#setup`, a Magnetic Stepper with a step
    panel on the left and each step's own controls on the right: telemetry
    destination, device packages, and image verification — the Cisco source
@@ -182,11 +186,13 @@ first-run slate instead of deploying over live state:
    `server/docker-compose.override.yml`.
 2. From the `server/` Compose directory: `docker compose down` (never `down -v`
    — that deletes the state volumes with no backup).
-3. Back up both state volumes before touching them — never skip this:
+3. Back up every named volume before touching it — never skip this. The tier
+   credential and management-CA volumes are narrow, but they are still part of
+   a restorable two-container deployment:
 
     ```bash
     STAMP=$(date +%Y%m%d-%H%M%S)
-    for v in iris-state iris-config; do
+    for v in iris-state iris-config iris-images iris-tier-auth iris-management-ca; do
       docker run --rm -v "$(docker compose config --format json | python3 -c \
         'import json,sys; print(json.load(sys.stdin)["name"])')_${v}":/v \
         -v "$HOME/iris-backups":/b alpine \
@@ -196,13 +202,14 @@ first-run slate instead of deploying over live state:
 
     (Compose prefixes volume names with the project name; the snippet resolves
     it. `docker volume ls` shows the exact names if in doubt.)
-4. Remove the two state volumes (`docker volume rm <project>_iris-state
-   <project>_iris-config`). The third volume, `iris-images`, holds images that
-   were **uploaded through the Console** — keep it (and know it is in your
-   backup) if you want those payloads; images imported from the host image
-   root (`IRIS_IMAGE_ROOT`, default `/opt/images`, bind-mounted read-only) are
-   untouched either way and reappear through the Console **Import from disk**
-   panel after setup.
+4. Remove `iris-state`, `iris-config`, `iris-tier-auth`, and
+   `iris-management-ca` for a genuine first-run stack. The `iris-images`
+   volume holds images that were **uploaded through the Console** — keep it
+   (and know it is in your backup) if you want those payloads, or remove it as
+   well for an entirely empty upload library. Images imported from the host
+   image root (`IRIS_IMAGE_ROOT`, default `/opt/images`, bind-mounted read-only)
+   are untouched either way and reappear through the Console **Import from
+   disk** panel after setup.
 5. Treat every prebuilt agent package as stale after the wipe — no condition
    to check: the next bootstrap mints a new server certificate, and all
    packages pin the old one at build time. The bring-up script in step 6
@@ -210,7 +217,7 @@ first-run slate instead of deploying over live state:
    after bring-up (`tools/build-xr-package.sh --out artifacts/` with
    `CATALOG_PEM` pointing at the NEW live certificate, certificate block
    only) when IOS-XR devices are in scope.
-6. Bring the server back up with `tools/start-compose-server.sh` — not raw
+6. Bring the stack back up with `tools/start-compose-server.sh` — not raw
    `docker compose up`. The entrypoint fails closed when the encrypted secrets
    file is missing from the freshly recreated config volume, and only the
    bring-up script's `iris-bootstrap` step recreates it (raw `up -d` produces a

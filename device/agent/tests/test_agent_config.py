@@ -126,6 +126,76 @@ def test_target_fs_accepts_ios_prefix_and_rejects_paths(tmp_path):
         agent_config.load(str(p))
 
 
+def test_container_announce_token_accepts_bearer_shape_and_rejects_header_injection(tmp_path):
+    import pytest
+
+    p = tmp_path / "agent.conf"
+    base = ("catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+            "device_platform = xr-appmgr\ntarget_fs = harddisk:\n")
+    p.write_text(base + "announce_token = safe-token_1.2~3+/==\n")
+    assert agent_config.load(str(p))["announce_token"] == "safe-token_1.2~3+/=="
+    for bad in ("has space", "value:extra"):
+        p.write_text(base + "announce_token = " + bad + "\n")
+        with pytest.raises(ValueError, match="announce_token"):
+            agent_config.load(str(p))
+
+
+def test_absent_selector_preserves_legacy_guestshell_config_grammar(tmp_path):
+    """Container-only validation must not tighten existing Guest Shell files."""
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "stage_dir = relative-legacy-path\n"
+        "max_peers = legacy-value\n"
+        "legacy key = retained\n")
+    cfg = agent_config.load(str(p))
+    assert cfg["stage_dir"] == "relative-legacy-path"
+    assert cfg["max_peers"] == "legacy-value"
+    assert cfg["legacy key"] == "retained"
+
+
+def test_iox_rejects_option_shaped_ssh_username(tmp_path):
+    import pytest
+
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "device_platform = iox\nstage_dir = /data/iris\n"
+        "device_ssh_host = 192.0.2.1\n"
+        "device_ssh_user = -oProxyCommand=bad\n"
+        "device_ssh_pass = p\n")
+    with pytest.raises(ValueError, match="device_ssh_user"):
+        agent_config.load(str(p))
+
+
+def test_container_config_strict_fields_reject_line_and_command_injection(tmp_path):
+    import pytest
+
+    p = tmp_path / "agent.conf"
+    base = (
+        "catalog_url = https://x\n"
+        "catalog_token = t\n"
+        "device_id = d\n"
+        "device_platform = xr-appmgr\n"
+        "target_fs = harddisk:\n")
+    for line, match in (
+            ("telemetry = maybe\n", "telemetry"),
+            ("telemetry_stream = off;reload\n", "telemetry_stream"),
+            ("device_model = 8201;reload\n", "device_model"),
+            ("device_version = 25.4.2$(reload)\n", "device_version"),
+            ("catalog_url = http://x\n", "catalog_url"),
+            ("catalog_url = https://user:secret@x\n", "catalog_url"),
+            ("catalog_token = bad:value\n", "catalog_token")):
+        body = base
+        if line.startswith("catalog_url ="):
+            body = body.replace("catalog_url = https://x\n", "")
+        if line.startswith("catalog_token ="):
+            body = body.replace("catalog_token = t\n", "")
+        p.write_text(body + line)
+        with pytest.raises(ValueError, match=match):
+            agent_config.load(str(p))
+
+
 def test_write_conf_round_trips_through_load(tmp_path):
     # write_conf emits key = value lines that load() reads back unchanged.
     # Include all DEFAULTS keys to confirm none are silently dropped on round-trip.

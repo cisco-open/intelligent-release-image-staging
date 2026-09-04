@@ -212,19 +212,17 @@ _stage_iox_build_script() {
   # deliberately NO $R/tools at all
   run env -u ARIA2C_BIN bash "$R/device/iox/build.sh" --arm64
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
-  # fails on the NEXT real thing build.sh needs (the aria2 completion hook is
+  # fails on the NEXT real thing build.sh needs (the common image builder is
   # missing), not on the freshness guard's own sourcing -- the buggy version
   # of this fixed a `build.sh: line N: .../tools/agent-source-freshness.sh:
   # No such file or directory` abort right there, before this message.
-  [[ "$output" == *"peer-transfer-hook.sh"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"build-device-image.sh"* ]] || { echo "$output"; return 1; }
   [[ "$output" != *"agent-source-freshness.sh: No such file or directory"* ]] \
     || { echo "$output"; return 1; }
 }
 
 _stage_xr_build_script() {
   mkdir -p "$R/device/xr"
-  cp "$REPO_ROOT/device/xr/Dockerfile" "$R/device/xr/Dockerfile"
-  cp "$REPO_ROOT/device/xr/entrypoint.sh" "$R/device/xr/entrypoint.sh"
   mkdir -p "$R/tools"
   cp "$REPO_ROOT/tools/build-xr-package.sh" "$R/tools/build-xr-package.sh"
   cp "$FRESHNESS" "$R/tools/agent-source-freshness.sh"

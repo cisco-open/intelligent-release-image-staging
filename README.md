@@ -26,8 +26,8 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 **Deploy the server**
 
 - [Server](docs/zensical/server.md) — services, state, bootstrap, certificates
-- [Container deployments](docs/zensical/containers.md) — the Compose seed server and agent containers
-- [Kubernetes](docs/zensical/kubernetes.md) — optional single-replica manifests
+- [Container deployments](docs/zensical/containers.md) — the split Compose server/Console and unified device image
+- [Kubernetes](docs/zensical/kubernetes.md) — optional split server and Console manifests
 
 **Onboard devices**
 
@@ -46,6 +46,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 **Reference and development**
 
 - [Reference](docs/zensical/reference.md) — environment variables, file layouts, APIs
+- [Problem type registry](docs/zensical/problems.md) — stable API error identifiers
 - [Validation](docs/zensical/validation.md) — test suites and the lab checklist
 - [Development](docs/zensical/development.md) — working on IRIS itself
 
@@ -55,11 +56,11 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 | Area | Purpose |
 | --- | --- |
-| `server/` | Tracker, catalog, seeder, artifact server, console, telemetry, encrypted state, and server tests. |
+| `server/` | Stateful tracker/catalog/seeder/artifact/telemetry tier, stateless web Console, management API, encrypted state, and server tests. |
 | `device/` | Catalyst Guest Shell installer, EEM applets, bootstrap, agent code, and device tests. |
 | `device/iox/` | ARM64 and x86_64 IOx app packaging and install path for supported Cisco platforms. |
-| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
-| `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
+| `device/xr/` | IOS-XR appmgr wrapper metadata, package-build support, and tests for the common device image. |
+| `kubernetes/` | Optional split server and stateless Console workloads with server-only persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
 | `docs/` | Dynamic public website, Zensical documentation source, and importable Splunk and Grafana dashboards. |

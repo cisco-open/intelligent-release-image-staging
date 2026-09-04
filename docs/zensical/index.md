@@ -20,7 +20,7 @@ IRIS also measures that distribution rather than only performing it. Every rollo
 
 | Area | Purpose |
 | --- | --- |
-| Server stack | Tracker, catalog, seeder, artifact server, console, telemetry, and encrypted state. |
+| Server stack | A stateful tracker/catalog/seeder/artifact/telemetry tier plus a separate, stateless web Console and encrypted state. |
 | Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
 | Management types | Per-device **routed**, **inband**, **router-routed**, **router-nat**, or **xr-host**, with a record-backed deployment lifecycle. |
 | Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
@@ -84,8 +84,8 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Server](server.md) | Server services, state, bootstrap, and certificates. |
-| [Container Deployments](containers.md) | The Compose seed server and the device agent containers. |
-| [Kubernetes](kubernetes.md) | Optional single-replica seed-server manifests. |
+| [Container Deployments](containers.md) | The split Compose server/Console and unified device image. |
+| [Kubernetes](kubernetes.md) | Optional split server and stateless Console manifests. |
 
 ### Onboard devices
 
@@ -110,5 +110,6 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Reference](reference.md) | Environment variables, file layouts, and APIs. |
+| [Problem type registry](problems.md) | Stable RFC 9457 error identifiers used by API clients. |
 | [Validation](validation.md) | The test suites and lab validation checklist. |
 | [Development](development.md) | Working on IRIS itself. |

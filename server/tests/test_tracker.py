@@ -79,7 +79,9 @@ def _serve(tmp_path, device_id="dev-1"):
     """Start a tracker with a secrets store; return (srv, port, announce_token)."""
     sp = _secrets_path(tmp_path)
     tok = _mint_announce_token(sp, device_id)
-    srv = tracker.make_server("127.0.0.1", 0, sp)
+    srv = tracker.make_server(
+        "127.0.0.1", 0, sp,
+        scrape_authorizer=lambda _device_id, _info_hash: True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1], tok
 

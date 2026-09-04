@@ -13,10 +13,16 @@
 # whatever the code did. Found by writing a new test for a real seeder defect and
 # watching it pass against the unfixed code.
 
+write_seeder_secrets() {
+  printf '%s\n' '{"devices":{},"seeder":{"announce_token":{"value":"seedertoken"}}}' \
+    > "$1"
+}
+
 @test "seed-launch builds the expected aria2c command line" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
@@ -30,7 +36,8 @@
   # any local user can read via /proc/<pid>/cmdline) -- IRIS-13-016.
   [[ "$output" != *"--rpc-secret="* ]] || return 1
   [[ "$output" == *"--conf-path=$tmp/state/seeder.aria2.conf"* ]] || return 1
-  [ "$(cat "$tmp/state/seeder.aria2.conf")" = "rpc-secret=secretval" ] || return 1
+  grep -qx 'rpc-secret=secretval' "$tmp/state/seeder.aria2.conf" || return 1
+  grep -qx 'header=Authorization: Bearer seedertoken' "$tmp/state/seeder.aria2.conf" || return 1
   [ "$(stat -c %a "$tmp/state/seeder.aria2.conf")" = "600" ] || return 1
   [[ "$output" == *"--enable-dht=false"* ]] || return 1
   [[ "$output" == *"--enable-peer-exchange=false"* ]] || return 1
@@ -75,6 +82,7 @@
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images/IE3400" "$tmp/run"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/run/secrets.json"
   : > "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent"
   printf '{"images":{"ie3x00-universalk9.17.18.03":{"filename":"ie3x00.bin"}}}' > "$tmp/state/catalog.json"
   : > "$tmp/images/IE3400/ie3x00.bin"
@@ -111,6 +119,7 @@
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
@@ -133,6 +142,7 @@
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 

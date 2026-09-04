@@ -13,7 +13,7 @@ HTTP endpoints these panes call are already covered end-to-end by
 test_gui_server_bulkhash.py (Task 4); nothing here re-tests the server."""
 import os
 
-import gui_server
+import management_api as gui_server
 
 
 def _read(name):
@@ -125,12 +125,12 @@ def test_app_js_wires_the_dropzone_via_the_shared_wireDropzone_helper():
 
 def test_offline_upload_is_a_raw_body_post_not_multipart():
     """Endpoint contract (Task 4): raw binary POST, not RFC 2046 multipart
-    and not form-encoded -- mirrors the PUT /api/images/upload/<name> XHR
+    and not form-encoded -- mirrors the PUT /api/v1/images/upload/<name> XHR
     idiom (xhr.send(file) sends the raw File body)."""
     js = _read("app.js")
     fn = js.split("function uploadOfflineTar(file) {", 1)[1].split(
         "\n  wireDropzone(document.getElementById('iv-offline-dropzone')", 1)[0]
-    assert "'/api/image-verification/offline'" in fn
+    assert "'/api/v1/image-verification/offline'" in fn
     assert "xhr.open('POST'" in fn
     assert "setRequestHeader('X-CSRF-Token'" in fn
     assert "xhr.send(file)" in fn
@@ -146,7 +146,7 @@ def test_refresh_now_disables_while_in_flight_and_handles_already_running():
     assert "btn.disabled = false" in fn
     assert "r.status === 409" in fn
     assert "already in progress" in fn
-    assert "'/api/image-verification/refresh'" in fn
+    assert "'/api/v1/image-verification/refresh'" in fn
 
 
 def test_failed_status_get_shows_could_not_load_not_stale_never_run():
@@ -232,7 +232,7 @@ def test_schedule_form_posts_mode_and_hour_utc():
     js = _read("app.js")
     fn = js.split(
         "document.getElementById('iv-schedule-form').addEventListener('submit'", 1)[1][:900]
-    assert "'/api/settings/image-verification'" in fn
+    assert "'/api/v1/settings/image-verification'" in fn
     assert "mode: mode" in fn
     assert "hour_utc: hour" in fn
 
@@ -421,7 +421,7 @@ def test_normal_release_first_then_override_path_on_409_still_mismatching():
     js = _read("app.js")
     fn = js.split("async function attemptReleaseQuarantine(override, confirmText) {", 1)[1].split(
         "\n  document.getElementById('ii-release')", 1)[0]
-    assert "'/api/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine'" in fn
+    assert "'/api/v1/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine'" in fn
     assert "override: override" in fn
     assert "confirm_text: confirmText" in fn
     assert "r.status === 409" in fn

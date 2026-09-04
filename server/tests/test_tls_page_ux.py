@@ -9,7 +9,7 @@ server endpoint. Mirrors the open-the-webroot-file idiom in
 test_gui_server.py."""
 import os
 
-import gui_server
+import management_api as gui_server
 
 
 def _read(name):
@@ -86,17 +86,17 @@ def test_app_js_classifies_pem_by_content():
     assert "getElementById('cert-key')" in js
     # No auto-submit from the drop handler: the existing Upload button (the
     # cert-form submit listener) must remain the only path to
-    # /api/settings/gui-cert from this section.
+    # /api/v1/settings/gui-cert from this section.
     drop_wiring = js.split("wireDropzone(document.getElementById('cert-dropzone')", 1)[1]
     drop_wiring = drop_wiring.split("document.getElementById('cert-form').addEventListener('submit'", 1)[0]
-    assert "jpost('/api/settings/gui-cert'" not in drop_wiring, \
+    assert "jpost('/api/v1/settings/gui-cert'" not in drop_wiring, \
         "drop handler must not itself call the gui-cert save endpoint"
 
 
 def test_app_js_trust_drop_posts_sequentially_and_refreshes():
     js = _read("app.js")
     drop_wiring = js.split("wireDropzone(document.getElementById('trust-dropzone')", 1)[1]
-    assert "/api/settings/trust" in drop_wiring
+    assert "/api/v1/settings/trust" in drop_wiring
     assert "refreshSettings()" in drop_wiring
 
 
@@ -122,11 +122,11 @@ def test_app_js_ca_source_uses_mozilla_url_and_reflects_stored_state():
     assert "https://curl.se/ca/cacert.pem" in js
     assert "getElementById('ca-source')" in js
     # Save must still go through the one existing endpoint.
-    assert "/api/settings/ca-trust" in js
+    assert "/api/v1/settings/ca-trust" in js
     # Selecting a preset must not bypass the Save button (no direct POST
     # wired to a 'change' listener on the select).
     change_wiring = js.split("getElementById('ca-source').addEventListener('change'", 1)[1].split(");\n", 1)[0]
-    assert "/api/settings/ca-trust" not in change_wiring
+    assert "/api/v1/settings/ca-trust" not in change_wiring
 
 
 def test_no_inline_event_handlers_introduced():

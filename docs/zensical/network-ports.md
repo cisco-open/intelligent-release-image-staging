@@ -14,40 +14,46 @@ address plus bidirectional device-to-device BitTorrent traffic.
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
-| 22 | TCP | Console/server host -> device IOS | SSH | Drive the installer, configure the trustpoint, and transfer configuration. |
-| 8000 | TCP | Console/server host -> artifact server | HTTPS | Installer preflight. |
-| 8000 | TCP | Device IOS -> artifact server | HTTPS | Download the Guest Shell bundle, bootstrap, certificate, per-device configuration, IOx package, or XR RPM. |
+| 22 | TCP | Server tier or manual installer host -> device IOS | SSH/SCP | Drive onboarding. IOx and IOS-XR packages are pushed over SCP; Guest Shell keeps its existing SSH-driven IOS configuration path. |
+| 8000 | TCP | Guest Shell device IOS -> artifact server | HTTPS capability URL | Unchanged Guest Shell bootstrap, bundle, certificate, and short-lived per-install configuration fetch. |
+| 8000 | TCP | Explicit artifact API client -> server tier | Authenticated HTTPS | Optional resource-bound `/v1/devices/.../artifacts/...` GET/HEAD. |
 
-The Console and artifact server share the same container, so Console
-onboarding always stages per-device configuration locally: there is no
-Console-to-stage-host SSH hop. (A port-22 hop to a remote stage host exists
-only for a manual `device/device-install.sh` run from another machine, with
-`HOST_USER`/`HOST_PASS` supplied directly on that machine — the Console has
-no UI for it.)
+The Console and artifact server are separate. Console onboarding asks the
+server-tier management API to stage Guest Shell's per-install files beside the
+artifact server; no artifacts or device state are mounted into the Console.
+Guest Shell remains on its established flow: the server-side installer sends
+verified `copy https:` commands through SSH after installing the catalog
+trustpoint. IOx and XR package delivery use authenticated, host-key-checked SCP;
+their passwords reach `sshpass` through the environment, never a URL, argument,
+or log. A remote stage-host hop exists only for a manual Guest Shell installer
+run; the Console has no UI for it.
 
 ## Steady-state operation
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
 | 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, assignment, enrollment-token refresh, heartbeats, and reports. |
-| 6969 | TCP | Device or server seeder -> tracker | HTTP | Private BitTorrent announces. |
+| 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTP | Private BitTorrent announces. IOx/XR use a bearer header; unchanged Guest Shell bundles retain their existing personalized query credential. Neither is logged. |
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
 | 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
-| 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTP | `/healthz` and optional `/metrics` (swarm state, image sizes, and the peer-distribution counters). `/swarm` answers only loopback peers unless `IRIS_SWARM_PUBLIC=1`. |
+| 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTPS | Anonymous, non-disclosing `/healthz` and `/readyz`; authenticated optional `/metrics`. Swarm data is reserved for the authenticated management API. |
+| 9443 | TCP | Console -> server tier | Authenticated HTTPS | Internal management API. Never publish this port on the host or public LoadBalancer. |
 | 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before the final IOS placement copy on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
 | 22 | TCP | Console/server host -> IOS-XR router | SSH/SCP | Register and control the appmgr agent and copy its RPM to `harddisk:` during onboard/undeploy. |
 
-External telemetry is opt-in, and the 9101 listener runs either way: `/healthz`
-and the `/swarmmap` pointer are served regardless, the Prometheus `/metrics`
-endpoint and OTLP export are gated on `IRIS_OBSERVABILITY`, and the `/swarm`
-JSON answers only loopback peers by default (`IRIS_SWARM_PUBLIC=1` opens it —
-per-device swarm data is otherwise reserved for the authenticated console). See
+External telemetry is opt-in, and the 9101 listener runs either way.
+`/healthz` and `/readyz` disclose no state and are the only anonymous registered
+API operations. Guest Shell's short-lived capability paths are a preserved
+installer compatibility surface. Prometheus `/metrics` is both observability-gated and authenticated;
+swarm JSON is reached by the Console through the authenticated management API.
+See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
 
-The Console reads `/swarm` over container loopback (`127.0.0.1:9101`), so 9101
-needs **external** reachability only for Prometheus scraping or operator tools.
+The server management API reads its local telemetry state, so 9101 needs
+**external** reachability only for authenticated Prometheus scraping or
+operator tools.
 A deployment with no monitoring stack can leave it closed at the firewall
 without affecting the Console.
 
@@ -60,7 +66,7 @@ server run as the non-root uid 10001 with all capabilities dropped. See
 | Port | Transport | Service | Constraint |
 | --- | --- | --- | --- |
 | 6800 | TCP | aria2 JSON-RPC | Bound to loopback in the device runtime and seed-server container. It is intentionally not published by Docker Compose and must not be opened in a firewall. |
-| 9101 (loopback path) | TCP | Console swarm access | The same listener as the external 9101 row above, reached over container loopback rather than the published port — not a second service. Devices report through authenticated catalog traffic on 8443 and never talk to telemetry directly. |
+| 9443 | TCP | Server management API | Compose-network/Kubernetes-internal only and reachable only from the Console tier. It is intentionally absent from host/public Service mappings. |
 
 ## Firewall rules
 
@@ -70,10 +76,12 @@ All ports below are **TCP**.
 
 | Permit | Transport | Destination ports |
 | --- | --- | --- |
-| Devices -> server | TCP | 6969, 8443, 8000, 6881 |
+| Devices -> server | TCP | 6969, 8443, 6881; Guest Shell onboarding also needs 8000 |
 | Operators -> server | TCP | 8080 |
+| Explicit artifact API clients -> server, when used | TCP | 8000 |
 | Prometheus or operator tooling -> server, when used | TCP | 9101 |
-| Server/Console -> devices during onboarding | TCP | 22 |
+| Console -> server, internal network only | TCP | 9443 |
+| Server tier or manual installer host -> devices during onboarding | TCP | 22 |
 | Devices <-> devices | TCP | 6881-6999 in both directions |
 
 !!! note "IRIS uses no UDP"
@@ -94,10 +102,13 @@ The collector is external to IRIS and is not published by the Compose stack.
   is no UDP tracker or DHT firewall requirement; tracker discovery is TCP 6969.
 - The origin seeder is pinned to TCP 6881. Devices choose an available listen
   port in the 6881-6999 range and announce it to peers.
-- Catalog (8443), artifacts (8000), and Console (8080) use HTTPS. Tracker
-  (6969) and telemetry (9101) use HTTP by design.
-- Kubernetes publishes 6969, 8443, 8000, 6881, 8080, and 9101 through its
-  LoadBalancer. Preserve source IP as described in [Kubernetes](kubernetes.md).
+- Catalog (8443), artifacts (8000), Console (8080), telemetry (9101), and
+  internal management (9443) use HTTPS. Tracker (6969) remains HTTP for BEP
+  client compatibility.
+- Kubernetes publishes server ports 6969, 8443, 8000, 6881, and 9101 through
+  one LoadBalancer and Console port 8080 through another. Port 9443 is a
+  separate ClusterIP Service selected by ingress policy. Preserve device source
+  IP as described in [Kubernetes](kubernetes.md).
 - For **inband** devices, these flows traverse the existing operator-owned
   management VLAN and its SVI; IRIS adds no VLAN, SVI, gateway, route, or VRF.
   Onboarding preflight is read-only and does not test that path from the device:
@@ -106,14 +117,12 @@ The collector is external to IRIS and is not published by the Compose stack.
   artifact (an IRIS-* EEM applet, the IRISQ logging discriminator or its
   bindings, `crypto pki trustpoint IRIS`, `ip http client secure-trustpoint
   IRIS`, the app-hosting stanza), has Guest Shell already enabled, or has a
-  non-empty `bootflash:guest-share`. The installer separately verifies from the
-  server host that the artifact server (8000) is serving over trusted HTTPS.
+  non-empty `bootflash:guest-share`. Its unchanged enrollment then fetches
+  short-lived capability-named files from the TLS-protected artifact listener.
   See [Management Type and VLAN Ownership](management-type.md).
 - For **router-routed** devices, the operator must route the VPG app subnet to
   the IRIS server and peers. **router-nat** uses the configured outside
   interface; permit inbound TCP 6881 to its outside address for peer reachability.
-- The `/swarm` peer-address gate assumes a rootful container engine; on
-  rootless Docker/Podman or host networking a source-IP check is meaningless
-  (published-port connections can be re-originated inside the namespace) — set
-  `IRIS_METRICS_HOST=127.0.0.1` or drop the 9101 publish to keep swarm data
-  local there.
+- Do not use source IP as authentication. Every non-probe HTTP operation has a
+  documented browser, device, monitoring, or tier credential even when a
+  firewall or NetworkPolicy also restricts who can reach it.

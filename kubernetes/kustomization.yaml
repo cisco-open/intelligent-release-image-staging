@@ -9,7 +9,11 @@ resources:
   - namespace.yaml
   - pvc.yaml
   - deployment.yaml
+  - console-deployment.yaml
   - service.yaml
+  - console-service.yaml
+  - management-service.yaml
+  - network-policy.yaml
 
 # The ConfigMap is GENERATED from iris-seed-server.env so its name carries a
 # content hash: editing the env file and re-applying rolls the Deployment,
@@ -19,15 +23,18 @@ configMapGenerator:
   - name: iris-seed-server
     envs:
       - iris-seed-server.env
+  - name: iris-console
+    envs:
+      - iris-console.env
 
-# Change this mapping to an image reachable by every amd64 cluster node.
-# `docker-alpha` is a MUTABLE placeholder tag (this repo has no image-publish
-# step); deployment.yaml therefore pulls with imagePullPolicy: Always so a
-# rebuilt image under the same tag is picked up on the next rollout. Pin
-# `digest:` here (or a CalVer tag) once an image is published, and use
-#   kubectl -n iris rollout restart deployment/iris-seed-server
-# to re-pull after rebuilding under the same tag.
+# Both mappings are deliberately unusable, immutable placeholders. Build and
+# push each image, then replace its registry name and all-zero digest before
+# applying. A mutable tag is never an acceptable substitute: a digest makes the
+# exact server and console bytes visible in review and repeatable on rollback.
 images:
-  - name: iris
-    newName: iris
-    newTag: docker-alpha
+  - name: iris-server
+    newName: registry.example.invalid/iris/server
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  - name: iris-console
+    newName: registry.example.invalid/iris/console
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

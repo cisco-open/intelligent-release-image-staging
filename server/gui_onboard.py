@@ -1165,12 +1165,13 @@ class OnboardService:
             "DEVICE_PASS": cred["device_pass"],
             "DEVICE_ENABLE": cred.get("enable_secret") or cred["device_pass"],
             "IRIS_CRT_FILE": self.crt_public,
-            # The console always runs in the SAME container as the artifact
-            # server (docker-entrypoint launches both), so device-install.sh's
-            # step [2/7] can always stage the per-device config directly --
+            # The state-owning management worker remains in the server tier
+            # beside the artifact volume, so device-install.sh can stage its
+            # temporary inputs locally before the verified SCP delivery --
             # ssh-to-self / HOST_USER is never needed for console onboarding.
             # IRIS_ARTIFACTS_DIR tells the installer where that server actually
-            # serves from (default /srv/artifacts, bind-mounted from the host).
+            # stores compatibility artifacts (default /srv/artifacts,
+            # bind-mounted from the host).
             "IRIS_STAGE_LOCAL": "1",
             "IRIS_ARTIFACTS_DIR": os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts"),
         })

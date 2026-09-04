@@ -1,0 +1,34 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+FROM python:3.12-slim-trixie
+
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) ;; \
+      *) echo "IRIS console supports linux/amd64 only (got ${TARGETARCH})" >&2; exit 1 ;; \
+    esac
+
+LABEL org.opencontainers.image.title="IRIS web console" \
+      org.opencontainers.image.description="State-free IRIS console and management API BFF" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
+
+WORKDIR /opt/iris/server
+COPY server/gui_server.py server/api_problem.py server/api_routes.py \
+     server/tier_auth.py server/bounded_pool.py /opt/iris/server/
+COPY server/webroot/ /opt/iris/server/webroot/
+
+RUN groupadd --system --gid 10001 iris \
+    && useradd --system --uid 10001 --gid iris --home-dir /nonexistent \
+         --shell /usr/sbin/nologin iris \
+    && install -d -o iris -g iris /run/iris-console \
+    && chmod 0755 /opt/iris/server/gui_server.py
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
+  CMD python3 -c 'import os,ssl,urllib.request as u; s="http" if os.environ.get("IRIS_GUI_ALLOW_PLAINTEXT")=="1" else "https"; kw={} if s=="http" else {"context":ssl._create_unverified_context()}; u.urlopen("%s://127.0.0.1:%s/readyz" % (s,os.environ.get("IRIS_GUI_PORT", "8080")), timeout=2, **kw).read()'
+USER iris
+ENTRYPOINT ["python3", "/opt/iris/server/gui_server.py"]

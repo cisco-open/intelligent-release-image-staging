@@ -186,17 +186,53 @@ The endpoint can also be set at runtime from the console under
 with no restart. `IRIS_OBSERVABILITY` still needs a restart, because it also
 gates the `:9101/metrics` surface at startup.
 
-For an authenticated collector, add
-`IRIS_OTLP_HEADERS="Authorization=Bearer <token>"` to the same `server/.env`,
-or `IRIS_OTLP_HEADERS_FILE=/path` for a secret mount (the `_FILE` form is
-preferred: a bearer token in `server/.env` is a plaintext secret on the Docker
-host). Those values are never logged, and IRIS refuses HTTP redirects so a
-header cannot leak to a redirect target.
+The metrics listener is never anonymous. Before enabling a Prometheus scrape,
+create a raw token on the IRIS host with private permissions and give Compose
+its host path. Mount the identical raw value as the collector or Prometheus
+`credentials_file` shown below:
 
-!!! note "`server/.env` reaches the container only for the keys Compose names"
-    All three of these are named in `server/docker-compose.yml`'s
-    `environment:` block, so `server/.env` works for them. A variable that is
-    *not* named there is interpolation-only and never reaches the process — see
+```bash
+umask 077
+openssl rand -hex 32 > ~/.config/iris/observability-token
+export IRIS_OBSERVABILITY_TOKEN_FILE_HOST=$HOME/.config/iris/observability-token
+sudo chown 10001 "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST"
+```
+
+`IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST` optionally mounts the preceding
+raw value during a two-token rotation window; leave it unset otherwise. These
+host-side interpolation variables are distinct from `IRIS_OTLP_HEADERS_FILE`,
+which authenticates IRIS's outbound push to a collector.
+
+For an authenticated OTLP collector, create the header specification in a
+private host file and give Compose its host path. The value is read without
+placing it in the container environment, command arguments, or URL:
+
+```bash
+umask 077
+mkdir -p ~/.config/iris
+read -rsp 'OTLP Authorization header value: ' IRIS_OTLP_AUTH_VALUE; echo
+printf 'Authorization=%s\n' "$IRIS_OTLP_AUTH_VALUE" > ~/.config/iris/otlp-headers
+unset IRIS_OTLP_AUTH_VALUE
+sudo chown 10001 ~/.config/iris/otlp-headers
+printf '%s\n' \
+  'IRIS_OTLP_HEADERS_FILE_HOST='"$HOME"'/.config/iris/otlp-headers' \
+  >> server/.env
+```
+
+Compose mounts that file read-only at the fixed in-container
+`IRIS_OTLP_HEADERS_FILE=/run/secrets/iris_otlp_headers`. The direct
+`IRIS_OTLP_HEADERS="Name=Value"` environment form remains available for
+non-Compose integrations, but putting a bearer token in `server/.env` is not
+recommended. Header values are never logged, and IRIS refuses HTTP redirects
+so they cannot leak to a redirect target. With either form present, the OTLP
+endpoint must be HTTPS; anonymous HTTP remains available only for an isolated
+deployment that deliberately sends no credential.
+
+!!! note "Host interpolation and container variables are different"
+    `IRIS_OBSERVABILITY_TOKEN_FILE_HOST`, its optional `PREVIOUS` counterpart,
+    and `IRIS_OTLP_HEADERS_FILE_HOST` are host-side Compose interpolation
+    variables. Compose turns them into fixed, server-only container paths; it
+    does not pass the host paths into the process. See
     [How a variable reaches the container](reference.md#environment-variables).
 
 ## The collector
@@ -234,7 +270,7 @@ Keep the file holding `SPLUNK_HEC_TOKEN` out of version control.
 | IRIS server | Collector | 4318/tcp | OTLP push — required |
 | Collector | Splunk | 8088/tcp | HEC delivery — required |
 | Admin host | Collector | 8888/tcp | Collector health — optional |
-| Collector | IRIS server | 9101/tcp | Prometheus scrape — optional |
+| Collector | IRIS server | 9101/tcp | Authenticated Prometheus scrape over TLS — optional |
 
 ### Receivers
 
@@ -263,9 +299,21 @@ underscored families survive an OTLP metric outage:
       scrape_configs:
         - job_name: iris-9101
           scrape_interval: 15s
+          scheme: https
+          authorization:
+            type: Bearer
+            credentials_file: /etc/otelcol/secrets/iris-observability-token
+          tls_config:
+            ca_file: /etc/otelcol/secrets/iris-catalog-ca.pem
+            server_name: 203.0.113.10
           static_configs:
             - targets: ["203.0.113.10:9101"]
 ```
+
+Mount the raw observability `current` token and catalog CA into the collector
+at the example paths (or adjust them). `server_name` must match an IP or DNS
+subject alternative name in the certificate. The listener never permits an
+anonymous metrics scrape.
 
 ### Filter to IRIS only
 
@@ -551,12 +599,16 @@ Work the hops cheapest first.
 **1. Is IRIS exporting?**
 
 ```bash
-curl -s http://203.0.113.10:9101/healthz
+curl --fail --silent --show-error \
+  --cacert /secure/path/iris-catalog.pem \
+  https://203.0.113.10:9101/healthz
 ```
 
-Look for `"otlp_export": {"state": "ok", ...}`. `off` means the enable flag or
-endpoint is missing; `degraded` means IRIS is trying and the collector is not
-answering.
+`{"ok": true}` proves only that the TLS telemetry listener is answering; the
+anonymous probe deliberately reveals no export or dependency details. Check
+the Console's *Telemetry export* badge for `off` or `degraded`, then use the
+server audit trail to distinguish a disabled destination from a collector
+failure.
 
 **2. Is the collector receiving and forwarding?**
 

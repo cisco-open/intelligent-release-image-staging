@@ -6,7 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Device Agents
 
-Device agents are the only part of IRIS that runs on the device. Their job is intentionally narrow: discover the approved image, download it, verify it, place it on the platform storage root, and report status. Most run on IOS-XE; the IOS-XR agent runs in an appmgr container, described under [IOS-XR: what the installer pushes](#ios-xr-what-the-installer-pushes).
+Device agents are the only part of IRIS that runs on the device. Their job is
+intentionally narrow: discover the approved image, download it, verify it,
+place it on the platform storage root, and report status. IOx and IOS-XR use
+the same multi-architecture container definition and entrypoint; the mandatory
+`IRIS_DEVICE_PLATFORM` selector activates the `iox` or `xr-appmgr` profile.
+Guest Shell remains outside that container unification and keeps its existing
+bundle, bootstrap, EEM, and HTTPS enrollment path unchanged.
 
 A device attaches through one of five management types: a dedicated IRIS-managed
 VLAN/SVI (**routed**), an existing operator-owned management VLAN (**inband**),
@@ -62,7 +68,10 @@ the guest-share root, over a `copy https://` that the PKI trustpoint step
 fixed filename reused by every device — that was the old shared
 `rpc-secret`). The staged copies live under the artifact server's `staging/`
 prefix and are only reachable for the 3600 seconds it retains them, ample
-headroom for queued fleet work and the installer's own retry loop.
+headroom for queued fleet work and the installer's own retry loop. This
+capability-bearing HTTPS surface is retained specifically for the unchanged
+Guest Shell installer; the authenticated `/v1/devices/.../artifacts/...` API
+used by explicit clients is a separate surface.
 
 The installer then installs one EEM applet:
 
@@ -92,16 +101,18 @@ previous install — see
 
 ### IOx: what the installer pushes
 
-`device/iox/install.sh` never touches Guest Shell. It copies the built
-package (`iris-arm64.tar` or `iris-amd64.tar`) to the target IOS filesystem
-over the same verified `copy https://`, then drives the app-hosting lifecycle
+`device/iox/install.sh` never touches Guest Shell. It pushes the built package
+(`iris-arm64.tar` or `iris-amd64.tar`) from the server host to the target IOS
+filesystem over the same authenticated, host-key-checked SCP transport, then
+drives the app-hosting lifecycle
 directly: `app-hosting install` → `activate` → `start`. Deployment-specific
-values — the enrollment token, device id, SSH-to-self credentials, target
-filesystem — are passed as numbered `run-opts -e` Docker options at deploy
-time and never baked into the image; `device/iox/entrypoint.sh` (PID 1 inside
-the container) writes them into `iris-agent.conf` on first boot only if no
-config already exists on the persistent mount. There is no EEM timer on IOx:
-`entrypoint.sh` is its own supervisor loop, running the agent once every
+values — the enrollment token, device id, and SSH-to-self credentials — are
+passed as numbered `run-opts -e` Docker options at deploy time and never baked
+into the image. `IRIS_DEVICE_PLATFORM=iox` selects and persists the IOx
+profile; `device/container/entrypoint.sh` (PID 1) writes the values into
+`iris-agent.conf` on first boot only if no config already exists on the
+persistent mount. There is no EEM timer on IOx: the common entrypoint is its
+own supervisor loop, running the agent once every
 `IRIS_TICK_SECONDS` (default 60s).
 
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
@@ -125,9 +136,12 @@ rpm`), and activates it in config mode with host networking and one bind
 mount: `-v /misc/disk1:/hostmount`. `/misc/disk1` **is** `harddisk:`, so the
 container writes straight to the router's own filesystem. Secrets and the
 device id are passed as `--env` options on the activation line and are never
-baked into the image; `device/xr/entrypoint.sh` writes them into
-`iris-agent.conf` on first boot, and is its own supervisor loop the same way
-the IOx entrypoint is. `device/xr-uninstall.sh` is the record-driven
+baked into the image. `IRIS_DEVICE_PLATFORM=xr-appmgr` selects and persists
+the XR profile; `device/container/entrypoint.sh` writes the configuration on
+first boot and uses the same supervisor as IOx. The XR profile verifies the
+`harddisk:` mount before its first write, rejects all IOx SSH/share variables,
+and never instantiates the SSH transport even though the common image contains
+the client binaries IOx needs. `device/xr-uninstall.sh` is the record-driven
 inverse: deactivate, uninstall the source, remove the RPM and the agent's
 `iris-work/` directory, and sweep any `*.torrent`/`*.aria2`/`*.peers.json`
 sidecar the agent left at `harddisk:` root — this platform has no placement
@@ -158,7 +172,7 @@ real error.
 
 Fixed 2026-08-20 after a field incident. `device/bootstrap.sh`,
 `device/guestshell-start.sh` (Guest Shell and router), and
-`device/iox/entrypoint.sh` (IOx) used to gate a relaunch on aria2c *process*
+the former IOx container entrypoint used to gate a relaunch on aria2c *process*
 liveness (`pgrep`). An aria2c that was running but not answering its RPC port
 blocked its own relaunch — it still owned the port, and `cp -f` over a running
 binary fails `ETXTBSY` — so the agent hit `ECONNREFUSED` on
@@ -176,8 +190,9 @@ loop. Copy and chmod failures during relaunch are no longer swallowed, so a
 failed relaunch now surfaces in the logs instead of silently leaving a dead
 binary in place.
 
-The container entrypoints (IOx and IOS-XR) went one step further: they run
-aria2c as a tracked child of the PID-1 shell and supervise it by that exact
+The common container entrypoint (`device/container/entrypoint.sh`) goes one
+step further for both its IOx and IOS-XR profiles: it runs
+aria2c as a tracked child of the PID-1 shell and supervises it by that exact
 PID, never by process-name matching. A daemon that is alive but wedged or
 stopped is sent TERM, then KILL after five seconds, reaped, and relaunched
 within a tick — the earlier `pkill`-based loop could not replace a daemon
@@ -280,8 +295,8 @@ for a slow catalog — the per-device cost of a policy/heartbeat round trip is
 now a fixed, small constant regardless of fleet size (see [Reference → Keyed
 per-device state](reference.md#keyed-per-device-state)):
 
-- **Steady-state dither (IOx/XR only).** `device/iox/entrypoint.sh` and
-  `device/xr/entrypoint.sh` vary every ordinary tick by ±10% of
+- **Steady-state dither (IOx/XR only).** The IOx and XR profiles in
+  `device/container/entrypoint.sh` vary every ordinary tick by ±10% of
   `IRIS_TICK_SECONDS` (54–66s at the 60s default, via `IRIS_TICK_JITTER_PCT`)
   — enough that devices which started in the same second drift apart over a
   handful of ticks, small enough that the *average* cadence, and so token
@@ -334,7 +349,7 @@ recurring write" at all.
   full stop** — not a smaller or rotated file, on any platform. With no
   `--log=` on the launch line, aria2c's own daemon mode already redirects
   its stdio to `/dev/null` (Guest Shell, via `--daemon=true`); the container
-  supervisors (`device/iox/entrypoint.sh`, `device/xr/entrypoint.sh`)
+  supervisors (the two profiles in `device/container/entrypoint.sh`)
   already redirect their tracked child's stdio to `/dev/null`
   unconditionally, so there is nothing extra to suppress there either.
 - **On** adds `--log=<stage dir>/aria2c.log` to the launch line. Guest Shell
@@ -495,13 +510,21 @@ it exists for operators who want the connection pinned.
 
 ## Platform targets
 
-| Platform path | Storage target | Control path |
-| --- | --- | --- |
-| Catalyst 9300 Guest Shell | `flash:` | EEM timer and Guest Shell process. |
-| Catalyst 9300 IOx | `flash:` when console-onboarded (via the SSD share); the CLI installer defaults to `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
-| IE-3400 IOx | `sdflash:` | IOx Docker app and SSH-to-self IOS commands. |
-| Catalyst 8000 Guest Shell | `bootflash:` | Guest Shell through a VirtualPortGroup. |
-| Cisco 8000 series (IOS-XR) | `harddisk:` | appmgr Docker app; no CLI — the container bind-mounts `harddisk:` and stages directly onto it. |
+The container selector is required before any write. A new deployment with no
+`IRIS_DEVICE_PLATFORM`, an unknown value, or conflicting persisted value stops
+with a clear error. After first boot the `device_platform` key in
+`iris-agent.conf` carries the choice across a restart or already-deployed
+upgrade. Unified IOx/XR container storage is derived and live-attested and
+never blindly guesses `flash:`. The explicitly out-of-scope Guest Shell path
+keeps its established platform-specific fallback shown below.
+
+| Platform path | Selector | Storage target | Control path |
+| --- | --- | --- | --- |
+| Catalyst 9300 Guest Shell | n/a | `flash:` | EEM timer and Guest Shell process. |
+| Catalyst 9300 IOx | `iox` | Live writable-media policy, normally `flash:` via the SSD share | Common device container and SSH-to-self IOS commands. |
+| IE-3400 IOx | `iox` | Live writable-media policy, normally `sdflash:` | Common device container and SSH-to-self IOS commands. |
+| Catalyst 8000 Guest Shell | n/a | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+| Cisco 8000 series (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).

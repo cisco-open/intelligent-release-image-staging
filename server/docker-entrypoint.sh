@@ -33,6 +33,10 @@ IRIS_AGE_KEY_FILE="${IRIS_AGE_KEY_FILE:-/run/secrets/iris_age_key}"
 IRIS_TRUST_DIR="${IRIS_TRUST_DIR:-$IRIS_CONFIG/tls/trust}"
 IRIS_CA_BUNDLE="${IRIS_CA_BUNDLE:-$IRIS_RUN/tls/ca-bundle.pem}"
 IRIS_GUI_CERT="${IRIS_GUI_CERT:-$IRIS_RUN/tls/gui-cert.pem}"
+IRIS_GUI_FALLBACK_CERT="${IRIS_GUI_FALLBACK_CERT:-$IRIS_RUN/tls/console-fallback.pem}"
+IRIS_MANAGEMENT_API_CERT="${IRIS_MANAGEMENT_API_CERT:-$IRIS_RUN/tls/management-crt.pem}"
+IRIS_MANAGEMENT_API_KEY="${IRIS_MANAGEMENT_API_KEY:-$IRIS_RUN/tls/key.pem}"
+IRIS_CONSOLE_SETUP_TOKEN_FILE="${IRIS_CONSOLE_SETUP_TOKEN_FILE:-$IRIS_RUN/console-setup-token}"
 mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_TRUST_DIR" "$IRIS_LOG" \
   "$IRIS_RUN/tls"
 # Keep the plaintext dir private. Running non-root (uid 10001), we may not OWN
@@ -41,6 +45,22 @@ mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_TRUST_DIR" "$IRIS_LOG"
 # (fsGroup grants group access only) and chmod by a non-owner fails. The mount
 # options / fsGroup are the enforcement there, so don't abort on it.
 chmod 700 "$IRIS_RUN" 2>/dev/null || true
+
+# Docker Compose file-backed Secrets may be exposed with engine-controlled
+# permissions. Copy the first-run Console credential into this container's
+# private tmpfs and validate the private copy in management_api.py. Kubernetes
+# mounts a group-readable projected Secret directly and leaves SOURCE unset.
+if [ -n "${IRIS_CONSOLE_SETUP_TOKEN_SOURCE:-}" ]; then
+  if [ ! -f "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" ] || \
+     [ ! -s "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" ]; then
+    echo "FATAL: Console setup credential source is unavailable — refusing to start" >&2
+    exit 1
+  fi
+  setup_tmp="${IRIS_CONSOLE_SETUP_TOKEN_FILE}.tmp"
+  cp "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" "$setup_tmp"
+  chmod 600 "$setup_tmp"
+  mv -f "$setup_tmp" "$IRIS_CONSOLE_SETUP_TOKEN_FILE"
+fi
 
 # At-rest: the persistent volume holds ONLY ciphertext (*.age). The master
 # age identity is supplied out-of-band (a Docker secret), never on the volume.
@@ -77,6 +97,80 @@ done
 # Build the plaintext combined cert (cert+key) in tmpfs for ssl.load_cert_chain.
 cat "$IRIS_CONFIG/tls/crt.pem" "$IRIS_RUN/tls/key.pem" > "$IRIS_RUN/tls/cert.pem"
 chmod 600 "$IRIS_RUN/tls/cert.pem"
+
+# Compose can derive a separate internal identity from the already-decrypted
+# key without changing the device-pinned catalog certificate. Kubernetes
+# mounts a dedicated management TLS Secret and leaves this switch disabled.
+# The exported CA contains public certificate material only and is the one
+# narrow shared bootstrap file the state-free console needs before HTTPS can
+# carry its tier credential.
+if [ "${IRIS_MANAGEMENT_API_GENERATE_CERT:-0}" = "1" ]; then
+  mgmt_tmp="$IRIS_RUN/tls/.management-crt.pem.tmp"
+  openssl req -x509 -new -key "$IRIS_MANAGEMENT_API_KEY" -days 3650 \
+    -subj "/CN=iris" \
+    -addext "subjectAltName=DNS:iris,DNS:iris-server,DNS:localhost,IP:127.0.0.1,IP:${IRIS_HOST_IP}" \
+    -out "$mgmt_tmp" >/dev/null 2>&1
+  chmod 600 "$mgmt_tmp"
+  mv -f "$mgmt_tmp" "$IRIS_MANAGEMENT_API_CERT"
+fi
+if [ ! -s "$IRIS_MANAGEMENT_API_CERT" ] || [ ! -s "$IRIS_MANAGEMENT_API_KEY" ]; then
+  echo "FATAL: management API TLS identity unavailable — refusing to start" >&2
+  exit 1
+fi
+if [ -n "${IRIS_MANAGEMENT_API_CA_EXPORT:-}" ]; then
+  mkdir -p "$(dirname "$IRIS_MANAGEMENT_API_CA_EXPORT")"
+  ca_tmp="${IRIS_MANAGEMENT_API_CA_EXPORT}.tmp"
+  cp "$IRIS_MANAGEMENT_API_CERT" "$ca_tmp"
+  chmod 644 "$ca_tmp"
+  mv -f "$ca_tmp" "$IRIS_MANAGEMENT_API_CA_EXPORT"
+fi
+
+# Compose bootstrap for an independent browser-facing identity. This key is
+# never the device-pinned catalog key. It crosses only the authenticated,
+# CA-verified management hop into the console's tmpfs. Kubernetes instead
+# mounts its operator-issued console identity and leaves generation disabled.
+if [ "${IRIS_GUI_FALLBACK_GENERATE:-0}" = "1" ]; then
+  fallback_key="$IRIS_RUN/tls/.console-fallback-key.pem"
+  fallback_crt="$IRIS_RUN/tls/.console-fallback-crt.pem"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=${IRIS_HOST_IP}" \
+    -addext "subjectAltName=IP:${IRIS_HOST_IP}" \
+    -keyout "$fallback_key" -out "$fallback_crt" >/dev/null 2>&1
+  cat "$fallback_crt" "$fallback_key" > "${IRIS_GUI_FALLBACK_CERT}.tmp"
+  chmod 600 "${IRIS_GUI_FALLBACK_CERT}.tmp"
+  mv -f "${IRIS_GUI_FALLBACK_CERT}.tmp" "$IRIS_GUI_FALLBACK_CERT"
+  rm -f "$fallback_key" "$fallback_crt"
+fi
+
+# Local Compose bootstrap for the narrowly scoped tier credential. The named
+# volume contains only current/previous management tokens; Kubernetes supplies
+# the same files from a Secret. Values never enter env, argv, or logs.
+if [ "${IRIS_MANAGEMENT_API_GENERATE_TOKEN:-0}" = "1" ] && \
+   [ ! -s "${IRIS_MANAGEMENT_API_TOKEN_FILE:-}" ]; then
+  PYTHONPATH="$script_dir" python3 - "${IRIS_MANAGEMENT_API_TOKEN_FILE}" <<'PY'
+import json
+import os
+import secrets
+import sys
+import tempfile
+
+path = sys.argv[1]
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".management-token-")
+try:
+    with os.fdopen(fd, "w") as stream:
+        json.dump({"scope": "management", "token": secrets.token_urlsafe(48)}, stream)
+        stream.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+finally:
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+PY
+fi
 
 # Optional console-only cert override: when the operator installed a custom
 # console certificate from Settings (durable gui-crt.pem + age-encrypted
@@ -159,10 +253,27 @@ export IRIS_STATE IRIS_CONFIG IRIS_RUN
 export IRIS_SECRETS="$IRIS_RUN/secrets.json"
 export IRIS_RPC_SECRET_FILE="$IRIS_RUN/rpc-secret"
 export IRIS_CERT="$IRIS_RUN/tls/cert.pem"
+export IRIS_TELEMETRY_CERT="${IRIS_TELEMETRY_CERT:-$IRIS_CERT}"
+export IRIS_TELEMETRY_CA="${IRIS_TELEMETRY_CA:-$IRIS_CONFIG/tls/crt.pem}"
 export IRIS_AUDIT="${IRIS_AUDIT:-$IRIS_CONFIG/audit.jsonl}"
 export IRIS_SECRETS_ENC="${IRIS_SECRETS_ENC:-$IRIS_CONFIG/secrets.json.age}"
 export IRIS_AGE_BIN IRIS_AGE_KEY_FILE
-export IRIS_GUI_CERT IRIS_TRUST_DIR IRIS_CA_BUNDLE
+export IRIS_GUI_CERT IRIS_GUI_FALLBACK_CERT IRIS_TRUST_DIR IRIS_CA_BUNDLE
+export IRIS_MANAGEMENT_API_CERT IRIS_MANAGEMENT_API_KEY
+export IRIS_CONSOLE_SETUP_TOKEN_FILE
+
+# Compose represents an omitted optional bind with /dev/null.  Never pass that
+# character device to strict credential-file validation as an alleged previous
+# token, and never treat it as an OTLP header file. A real mounted regular file
+# remains configured unchanged (including Kubernetes projected Secret files).
+if [ -n "${IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE:-}" ] && \
+   [ ! -f "$IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE" ]; then
+  export IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE=""
+fi
+if [ -n "${IRIS_OTLP_HEADERS_FILE:-}" ] && \
+   [ ! -f "$IRIS_OTLP_HEADERS_FILE" ]; then
+  export IRIS_OTLP_HEADERS_FILE=""
+fi
 
 # Writable volume for images uploaded via the GUI console; the seeder's
 # restart-reseed walk (seed-launch.sh) also covers this dir so uploads
@@ -212,29 +323,23 @@ RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   IRIS_IMAGES_DIR="$IRIS_IMAGES_DIR" \
   SEEDER_LOG=- \
   ARIA2=/opt/iris/bin/aria2c bash seed-launch.sh & S=$!
-# artifact server (HTTPS): devices `copy https://<host>:8000/...` the agent bundle
-# + per-device configs from the configured artifacts volume. Serves over TLS with
-# the SAME combined cert (IRIS_CERT) the catalog uses; the device trusts it via
-# the per-device PKI trustpoint the installer pushes first. No auth here — the
-# trustpoint gives confidentiality + server-auth and the payload IS the
-# credential bundle (transport-security only; nothing installed/activated/reloaded).
-# staging/ holds the ephemeral per-device configs gui_onboard.py
-# (IRIS_STAGE_LOCAL=1) writes when the console is co-located with this artifact
-# server; artifact_server.py sweeps them after STAGING_MAX_AGE_SECONDS.
+# Artifact server (HTTPS): explicit API consumers authenticate with resource-
+# bound device Basic credentials before path translation/existence. Unchanged
+# Guest Shell onboarding still pulls the explicit static files and time-bounded
+# high-entropy staging capabilities with IOS `copy https:`.
 # Log to the container log like the other services — discarding stdout/stderr
-# here hides artifact-server startup/serving failures (the device fetches its
-# agent bundle + per-device conf from this port, so silent failures matter).
+# here hides artifact-server startup/serving failures for authenticated API
+# consumers, so silent failures still matter.
 python3 artifact_server.py & A=$!
 
-# web console (HTTPS :8080): single-admin GUI to run IRIS end-to-end. Serves
-# with the SAME combined cert (IRIS_CERT) as the catalog. Persists the admin
-# credential + credential profiles into the age-encrypted store (IRIS_SECRETS_ENC),
-# re-encrypting via IRIS_AGE_RECIPIENTS on write.
-python3 gui_server.py & G=$!
-PIDS=("$T" "$C" "$S" "$A" "$G")
+# Stateful management API (internal HTTPS :9443). The separate console BFF is
+# its only network consumer; browser session and CSRF checks remain here beside
+# the encrypted state they protect.
+python3 management_api.py & M=$!
+PIDS=("$T" "$C" "$S" "$A" "$M")
 
-echo "iris container up: tracker :6969  catalog :8443 (https)  artifacts :8000 (https)  console :8080 (https)  seeder rpc :6800"
-wait -n "$T" "$C" "$S" "$A" "$G" || true
+echo "iris container up: tracker :6969  catalog :8443 (https)  artifacts :8000 (https)  management :9443 (https, internal)  seeder rpc :6800"
+wait -n "$T" "$C" "$S" "$A" "$M" || true
 echo "an iris service exited — stopping container" >&2
 stop_services
 exit 1

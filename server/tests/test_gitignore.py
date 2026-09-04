@@ -28,11 +28,15 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 CASES = [
     ("server/docker-compose.override.yml", True),
     ("device/xr/out/iris-xr.rpm", True),
+    ("device/xr/out/iris-xr.rpm.manifest", True),
     ("device/iox/out/iris.tar", True),
+    ("device/iox/out/iris-arm64.tar.manifest", True),
+    ("artifacts/iris-device-test.oci.tar", True),
+    ("artifacts/iris-device-test.oci.tar.manifest", True),
     # Negative controls: an over-broad rule (`docker-compose.*`, `device/xr/`)
     # that swallowed tracked source would still satisfy the checks above.
     ("server/docker-compose.yml", False),
-    ("device/xr/entrypoint.sh", False),
+    ("device/container/entrypoint.sh", False),
     ("device/xr/tests/test_build_xr_package.bats", False),
 ]
 

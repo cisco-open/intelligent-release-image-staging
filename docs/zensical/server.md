@@ -6,11 +6,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Server
 
-The server is a single Docker service that runs several small Python and shell components. It intentionally keeps runtime dependencies narrow: Python standard library services, `aria2c` for BitTorrent, `mktorrent` for torrent metadata, and OpenSSL/age tooling for certificates and encrypted secret material.
+IRIS runs two Docker services. The stateful server tier runs the tracker,
+catalog, artifact server, seeder, telemetry, and an internal management API.
+The state-free Console tier serves the browser application and forwards its
+versioned API calls to that management API. The server keeps runtime
+dependencies narrow: Python standard-library services, `aria2c` for
+BitTorrent, `mktorrent` for torrent metadata, and OpenSSL/age tooling for
+certificates and encrypted secret material.
 
-Docker Compose and the Kubernetes manifests are the supported ways to run the
-server; both use the same image. There is no separate host install — the image
-is the unit of deployment.
+Docker Compose and the Kubernetes manifests are the supported ways to run both
+tiers. There is no separate host install — the two images are the units of
+deployment.
 
 The image is self-contained: device installer sources and the SSH helper used by
 console onboarding are copied in at build time. `aria2c` is handed in, not
@@ -28,8 +34,10 @@ whatever `python:3.12-slim-trixie` the host cached, which can be weeks of
 Debian security updates behind the tag. `tools/start-compose-server.sh`
 passes it for you.
 
-Compose builds and runs `iris:latest`, so tag a hand-built image the same way —
-the volume-ownership migration below runs a throwaway container from that tag.
+Compose builds and runs `iris:latest` and `iris-console:latest`, so tag
+hand-built images the same way. The volume-ownership migration below runs a
+throwaway container from the server tag; the Console has no durable volume to
+migrate.
 
 The root `.dockerignore` excludes credentials, firmware, network state, generated
 artifacts, and test output from the build context.
@@ -38,23 +46,26 @@ artifacts, and test output from the build context.
 
 | Port | Transport | Protocol | Service | Purpose |
 | --- | --- | --- | --- | --- |
-| 6969 | TCP | HTTP | Tracker | Private BitTorrent announces with an announce key. |
+| 6969 | TCP | HTTP | Tracker | Private BitTorrent announces: IOx/XR use a Bearer header; unchanged Guest Shell clients retain query-token compatibility. |
 | 8443 | TCP | HTTPS | Catalog | Image metadata, device assignments, token refresh, and reports. |
 | 8000 | TCP | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | TCP | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
 | 8080 | TCP | HTTPS | Web console | Admin browser interface. |
-| 9101 | TCP | HTTP | Telemetry | Health and optional metrics (Prometheus exposition format); the swarm view is loopback/console-gated. |
+| 9101 | TCP | HTTPS | Telemetry | Non-disclosing probes, authenticated optional metrics, and management-authenticated swarm state. |
+| 9443 | TCP | HTTPS | Management API | Internal Console-to-server API; exposed only on the Compose network or internal Kubernetes Service. |
 | 6800 | TCP | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
 
-Every listener is TCP; IRIS opens no UDP port. See
+Every listener is TCP; IRIS opens no UDP port. Port 9443 must never be
+host-published: a file-mounted service credential and TLS still protect it,
+but network reachability is restricted to the Console tier as a second layer.
+See
 [Network ports and flows](network-ports.md#firewall-rules).
 
 ## Runtime identity
 
-The image creates a system user `iris` with the fixed uid and gid `10001` and
-declares `USER iris`. Every service — tracker, catalog, artifact server, the
-seeder and its `aria2c`, the web console, and the telemetry listener — runs as
-uid `10001`. No listener in the table above needs a privileged port, so the
+Both images create a system user `iris` with the fixed uid and gid `10001` and
+declare `USER iris`. Every server component and the separate web Console run as
+uid `10001`. No listener in the table above needs a privileged port, so either
 runtime needs no Linux capabilities at all.
 
 Compose restates the identity and removes the remaining privilege surface:
@@ -72,17 +83,19 @@ to it. Those mount options require Docker Engine 23.0 or later.
 ### Host paths to chown on every deploy
 
 The uid is fixed precisely so host-side ownership is deterministic, but the
-Dockerfile cannot chown paths on the host. Run both of these from the repository
+Dockerfile cannot chown paths on the host. Run these from the repository
 root on every deploy, fresh or upgraded, or the server starts and then fails to
 read its own key material and cannot write served artifacts:
 
 ```bash
+chmod 600 "$IRIS_AGE_KEY_FILE_HOST" "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"
+sudo chown 10001 "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"
 sudo chown -R 10001:10001 artifacts          # or "$IRIS_ARTIFACTS_HOST_DIR"
 ```
 
-Keep the age identity at mode `600` (or `400`); changing the owner does not
-change the mode. `IRIS_ARTIFACTS_HOST_DIR` defaults to `../artifacts` relative to
+Keep both credential files at mode `600` (or `400`); changing the owner does
+not change the mode. `IRIS_ARTIFACTS_HOST_DIR` defaults to `../artifacts` relative to
 `server/docker-compose.yml`, which is the repository's `artifacts/` directory.
 
 ### Upgrading from a root-runtime deployment
@@ -128,8 +141,10 @@ readable and traversable by uid `10001`. A conventional `755` tree is fine; a
 ## Compose project name
 
 `server/docker-compose.yml` declares `name: server`, so the Compose project —
-and with it the named volumes `server_iris-state`, `server_iris-config` and
-`server_iris-images` — is stable wherever the repository is checked out.
+and with it the five named volumes `server_iris-state`, `server_iris-config`,
+`server_iris-images`, `server_iris-tier-auth`, and
+`server_iris-management-ca` — is stable wherever the repository is checked
+out.
 
 Without that line Compose names the project after the directory holding the
 compose file, which is always `server`. Every checkout of this repository on a
@@ -156,6 +171,7 @@ name of its own — container names are host-global:
 
 ```bash
 COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
+  IRIS_CONSOLE_CONTAINER=iris-console-dev \
   docker compose -f server/docker-compose.yml up -d
 ```
 
@@ -172,9 +188,16 @@ the container from its own Compose project, so it needs no override.
 | `/var/lib/iris` | Catalog state, policies, torrent metadata, the peer ledger, peer endpoints, and deployment records. |
 | `/etc/iris` | The age-encrypted secret store and generated TLS material, **plus two plaintext files**: the console certificate override `tls/gui-crt.pem` (its private key is the age-encrypted `tls/gui-key.pem.age`) and the append-only audit trail `audit.jsonl`. |
 | `/run/iris` | Plaintext runtime secrets on tmpfs. |
-| `/var/lib/iris-images` | Uploads volume (`IRIS_IMAGES_DIR`); images the console received over HTTP. |
+| `/var/lib/iris-images` | Uploads volume (`IRIS_IMAGES_DIR`); images the Console received over its authenticated HTTPS API. |
 | `/opt/images` | Read-only import root (`IMAGES_ROOT`), the host `IRIS_IMAGE_ROOT` tree mounted `:ro`. |
 | `/srv/artifacts` | Served bootstrap and agent artifacts. |
+
+None of these paths is mounted into the Console. Its only server-side inputs
+are the public management CA and the current/previous tier-credential files,
+all read-only. Its active browser TLS identity is fetched over that authenticated
+hop into Console tmpfs; Compose generates a console-only fallback distinct from
+the catalog identity, while Kubernetes mounts its independent default Secret.
+The management API certificate and private key stay in the server container.
 
 !!! warning "`/etc/iris` is not wholly encrypted"
     Only `secrets.json.age`, `gui-key.pem.age` and the other `.age` files on
@@ -197,9 +220,10 @@ that drives undeploy) live under `IRIS_STATE` — `/var/lib/iris` on Compose,
 `/data/state` on the Kubernetes PVC — and hold no secrets. See
 [Management Type and VLAN Ownership](management-type.md).
 
-Docker Compose uses separate named volumes for state, encrypted config, and GUI
-image uploads. The Kubernetes alpha maps all durable paths into one ReadWriteOnce
-PVC under `/data` and keeps `/run/iris` memory-backed.
+Docker Compose uses separate named volumes for state, encrypted config, GUI
+image uploads, the narrow tier credential, and its public management CA. The
+Kubernetes alpha maps all durable server paths into one ReadWriteOnce PVC under
+`/data` and keeps `/run/iris` memory-backed; the Console mounts no PVC.
 
 ## Publishing images
 
@@ -248,13 +272,48 @@ IRIS uses age recipients for encrypted-at-rest server secrets. The private age i
 
 The seeder RPC secret is not published to the network. Tools that need it, such as `iris-publish`, run inside the container where `127.0.0.1:6800` is reachable.
 
+## Console-to-server authentication
+
+The management API listens on internal HTTPS port 9443. On first Compose start,
+the server atomically creates a management-scoped token in the
+`iris-tier-auth` named volume; both tiers mount it, and the Console's mount is
+read-only. Kubernetes uses a Secret projection instead. The token is not
+accepted by the catalog, tracker, or any device resource, and it never appears
+in Compose environment, a process argument, a URL, logs, or audit text. The
+server compares credentials in constant time before route lookup, body
+buffering, or state access.
+
+Rotation keeps a bounded two-token window: retain the former record as
+`previous.json`, atomically install the replacement as `current.json`, verify
+an authenticated Console request, then remove `previous.json`. Both processes
+reread the files on every request, so Compose needs no restart; Kubernetes
+rotates the equivalent `current`/`previous` Secret keys in two
+rollouts so every replica sees an overlap. Missing, unreadable, wrongly scoped,
+or unmatched material fails closed. TLS is independently fail closed: the
+Console pins the management CA and cannot opt into plaintext for this hop.
+
+For Compose, the server-side helper generates the replacement without ever
+printing the credential. Run the first command, verify a normal Console API
+request, and then retire the overlap:
+
+```bash
+docker compose -f server/docker-compose.yml exec iris \
+  iris-management-token rotate
+docker compose -f server/docker-compose.yml exec iris \
+  iris-management-token retire-previous
+```
+
+The browser still uses its session cookie and CSRF token. Those checks are in
+addition to tier authentication, not replaced by it; `X-IRIS-Poll` continues
+through the proxy so polling does not extend an idle session.
+
 ## Kubernetes
 
-The optional manifests under `kubernetes/` run the same image as one pod behind
-a source-IP-preserving LoadBalancer. They add an idempotent bootstrap init
-container, persistent storage, startup/readiness/liveness probes, and a
-Kubernetes Secret mount for the age identity. See [Kubernetes](kubernetes.md)
-for the address and scaling constraints.
+The optional manifests under `kubernetes/` run server and Console as separate
+Deployments and Services. They add an idempotent server bootstrap init
+container, server-only persistent storage, per-tier probes/resources,
+management TLS/auth Secret projections, and an internal management Service.
+See [Kubernetes](kubernetes.md) for address and scaling constraints.
 
 ## Self-provisioned artifacts
 

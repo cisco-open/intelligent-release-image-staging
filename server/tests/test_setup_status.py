@@ -524,7 +524,9 @@ def test_route_is_registered_and_session_gated():
     """The console route must exist and must sit behind the session check,
     like every other /api/settings read."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(here, "gui_server.py")).read()
+    # The state-owning route moved behind the Console BFF; inspect the
+    # management implementation, not the deliberately state-free proxy.
+    src = open(os.path.join(here, "management_api.py")).read()
     assert '"/api/settings/setup-status"' in src
     idx = src.index('"/api/settings/setup-status"')
     window = src[idx:idx + 400]
@@ -545,7 +547,7 @@ def test_console_has_a_setup_pane_wired_to_the_endpoint():
     assert 'id="nav-settings-setup"' in html
     assert 'id="settings-pane-setup"' in html
     assert "'setup'" in js                       # registered in the pane list
-    assert "'/api/settings/setup-status'" in js
+    assert "'/api/v1/settings/setup-status'" in js
 
 
 def test_setup_pane_explains_why_each_step_matters():
@@ -835,14 +837,14 @@ def test_m37_configured_but_unrun_schedule_gets_its_own_wording():
     never-run config and a truly unconfigured one both resolve to "unset"
     from that field alone -- see its docstring). The console tells them
     apart using the schedule's own mode, fetched separately from
-    /api/settings/image-verification, and renders a distinct label rather
+    /api/v1/settings/image-verification, and renders a distinct label rather
     than conflating the two."""
     js = _webroot("app.js")
     assert "'Configured — no successful run yet'" in js
     assert "function fetchIvScheduleConfigured()" in js
     fn = js.split("function fetchIvScheduleConfigured() {", 1)[1].split(
         "\n  }", 1)[0]
-    assert "'/api/settings/image-verification'" in fn
+    assert "'/api/v1/settings/image-verification'" in fn
     assert "(iv.mode || 'off') !== 'off'" in fn
     item_fn = js.split("function setupItemChipHTML(key, state, ivScheduleConfigured) {", 1)[1].split(
         "\n  }", 1)[0]

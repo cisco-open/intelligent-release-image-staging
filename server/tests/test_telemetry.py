@@ -8,6 +8,8 @@ import os
 import socket
 import threading
 
+import pytest
+
 import metrics
 import otlp
 import telemetry
@@ -437,17 +439,20 @@ def test_sample_has_no_inferred_allocation_state():
     assert not hasattr(hub, "_joined_at_by_ip")
 
 
-def test_metrics_server_serves_swarm_json():
+def test_metrics_server_serves_swarm_json(tmp_path):
     snap = {"images": [{"image": "x", "info_hash": "abc", "total_bytes": 1000,
                         "peers": [{"ip": "10.9.9.9", "progress": 0.5}],
                         "seeders": 0, "leechers": 1}], "seeder": {}}
+    token = _scoped_token(tmp_path, "management", "management", "m")
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
-                                        swarm_provider=lambda: snap)
+                                        swarm_provider=lambda: snap,
+                                        management_token_file=token)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                        timeout=5)
-        c.request("GET", "/swarm")
+        c.request("GET", "/swarm", headers={
+            "Authorization": "Bearer " + "m" * 64})
         r = c.getresponse()
         body = r.read()
         assert r.status == 200
@@ -457,40 +462,44 @@ def test_metrics_server_serves_swarm_json():
         srv.shutdown()
 
 
-def test_metrics_server_serves_swarmmap_html():
+def test_metrics_server_does_not_serve_retired_swarmmap_html(tmp_path):
+    token = _scoped_token(tmp_path, "management", "management", "m")
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
                                         swarm_provider=lambda: {},
-                                        html="<html>SWARM-MAP</html>")
+                                        html="<html>SWARM-MAP</html>",
+                                        management_token_file=token)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         for path in ("/swarmmap", "/"):
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                            timeout=5)
-            c.request("GET", path)
+            c.request("GET", path, headers={
+                "Authorization": "Bearer " + "m" * 64})
             r = c.getresponse()
             body = r.read()
-            assert r.status == 200, path
-            assert "text/html" in r.getheader("Content-Type")
-            assert b"SWARM-MAP" in body
+            assert r.status == 404, path
+            assert r.getheader("Content-Type") == "application/problem+json"
+            assert b"SWARM-MAP" not in body
     finally:
         srv.shutdown()
 
 
-def test_metrics_server_swarmmap_html_can_be_a_callable():
-    # a callable is read per request -> the page can hot-reload from disk
-    pages = iter(["<html>ONE</html>", "<html>TWO</html>"])
+def test_metrics_server_never_reads_retired_swarmmap_callable(tmp_path):
+    calls = []
+    token = _scoped_token(tmp_path, "management", "management", "m")
     srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
                                         swarm_provider=lambda: {},
-                                        html=lambda: next(pages))
+                                        html=lambda: calls.append(1),
+                                        management_token_file=token)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        got = []
         for _ in range(2):
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                            timeout=5)
-            c.request("GET", "/swarmmap")
-            got.append(c.getresponse().read())
-        assert b"ONE" in got[0] and b"TWO" in got[1]   # re-read each request
+            c.request("GET", "/swarmmap", headers={
+                "Authorization": "Bearer " + "m" * 64})
+            assert c.getresponse().status == 404
+        assert calls == []
     finally:
         srv.shutdown()
 
@@ -557,19 +566,29 @@ def test_sample_updates_seeder_stats_and_flushes_events():
 
 # --- metrics HTTP server ---
 
-def _get(port, path):
+def _get(port, path, headers=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    c.request("GET", path)
+    c.request("GET", path, headers=headers or {})
     r = c.getresponse()
     return r.status, r.read()
 
 
-def test_metrics_server_serves_provider_text():
+def _scoped_token(tmp_path, name, scope, char):
+    path = tmp_path / (name + "-token")
+    path.write_text(json.dumps({"scope": scope, "token": char * 64}))
+    path.chmod(0o600)
+    return str(path)
+
+
+def test_metrics_server_serves_provider_text(tmp_path):
+    token = _scoped_token(tmp_path, "observability", "observability", "o")
     srv = telemetry.make_metrics_server(
-        "127.0.0.1", 0, lambda: "iris_tracker_up 1\n")
+        "127.0.0.1", 0, lambda: "iris_tracker_up 1\n",
+        observability_token_file=token)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        status, body = _get(srv.server_address[1], "/metrics")
+        status, body = _get(srv.server_address[1], "/metrics", {
+            "Authorization": "Bearer " + "o" * 64})
         assert status == 200
         assert b"iris_tracker_up 1" in body
     finally:
@@ -587,8 +606,7 @@ def test_metrics_server_healthz_ok():
         status, body = _get(srv.server_address[1], "/healthz")
         assert status == 200
         data = json.loads(body)
-        assert data["ok"] is True
-        assert data["otlp_export"]["state"] in ("ok", "degraded", "off")
+        assert data == {"ok": True}
     finally:
         srv.shutdown()
 
@@ -663,9 +681,7 @@ def test_readyz_200_when_every_listener_is_up():
         status, body = _get(srv.server_address[1], "/readyz")
         assert status == 200
         data = json.loads(body)
-        assert data["ok"] is True
-        assert data["listeners"] == {"tracker": "up"}
-        assert "down" not in data
+        assert data == {"ok": True}
     finally:
         srv.shutdown()
         sock.close()
@@ -680,12 +696,15 @@ def test_readyz_503_names_the_listener_that_is_down():
         listeners={"tracker": up_port, "artifacts": _dead_port()})
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        status, body = _get(srv.server_address[1], "/readyz")
+        c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
+                                       timeout=5)
+        c.request("GET", "/readyz")
+        r = c.getresponse()
+        status, body = r.status, r.read()
         assert status == 503
+        assert r.getheader("Retry-After") == "1"
         data = json.loads(body)
-        assert data["ok"] is False
-        assert data["down"] == ["artifacts"]
-        assert data["listeners"] == {"artifacts": "down", "tracker": "up"}
+        assert data == {"ok": False}
     finally:
         srv.shutdown()
         sock.close()
@@ -727,7 +746,7 @@ def test_readyz_listeners_can_be_a_callable_read_per_request():
         sock.close()
 
 
-def test_healthz_reports_listeners_but_keeps_its_200_contract():
+def test_healthz_does_not_disclose_listener_state():
     # a down listener must NOT flip /healthz's status: container HEALTHCHECK
     # and existing orchestrator probes read that code (spec 7.7).
     srv = telemetry.make_metrics_server(
@@ -737,7 +756,7 @@ def test_healthz_reports_listeners_but_keeps_its_200_contract():
     try:
         status, body = _get(srv.server_address[1], "/healthz")
         assert status == 200
-        assert json.loads(body)["listeners"] == {"artifacts": "down"}
+        assert json.loads(body) == {"ok": True}
     finally:
         srv.shutdown()
 
@@ -751,11 +770,15 @@ def test_probe_listeners_never_raises_on_a_nonsense_port():
     assert telemetry._probe_listeners(None) == {}
 
 
-def test_metrics_server_unknown_path_404():
-    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "")
+def test_metrics_server_unknown_path_authenticates_before_404(tmp_path):
+    token = _scoped_token(tmp_path, "management", "management", "m")
+    srv = telemetry.make_metrics_server(
+        "127.0.0.1", 0, lambda: "", management_token_file=token)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        status, _ = _get(srv.server_address[1], "/nope")
+        assert _get(srv.server_address[1], "/nope")[0] == 401
+        status, _ = _get(srv.server_address[1], "/nope", {
+            "Authorization": "Bearer " + "m" * 64})
         assert status == 404
     finally:
         srv.shutdown()
@@ -791,22 +814,28 @@ def test_observability_enabled_default_off_and_truthy_values():
     assert telemetry.observability_enabled({"IRIS_OBSERVABILITY": "ON"}) is True
 
 
-def test_metrics_endpoint_gated_off_but_swarm_map_still_served():
-    # provider=None (observability off) -> /metrics 404, but the self-contained
-    # swarm server + page remain available.
+def test_metrics_endpoint_gated_off_after_auth_and_pointer_routes_retired(tmp_path):
+    management = _scoped_token(tmp_path, "management", "management", "m")
+    observability = _scoped_token(
+        tmp_path, "observability", "observability", "o")
     srv = telemetry.make_metrics_server("127.0.0.1", 0, None,
                                         swarm_provider=lambda: {"images": []},
-                                        html="<html>MAP</html>")
+                                        html="<html>MAP</html>",
+                                        management_token_file=management,
+                                        observability_token_file=observability)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        def code(path):
+        def code(path, bearer=None):
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                            timeout=5)
-            c.request("GET", path)
+            headers = ({"Authorization": "Bearer " + bearer * 64}
+                       if bearer else {})
+            c.request("GET", path, headers=headers)
             return c.getresponse().status
-        assert code("/metrics") == 404
-        assert code("/swarm") == 200
-        assert code("/swarmmap") == 200
+        assert code("/metrics") == 401
+        assert code("/metrics", "o") == 404
+        assert code("/swarm", "m") == 200
+        assert code("/swarmmap", "m") == 404
         assert code("/healthz") == 200
     finally:
         srv.shutdown()
@@ -822,6 +851,22 @@ def test_metrics_port_default_explicit_and_disabled():
     assert telemetry.metrics_port({"IRIS_METRICS_PORT": "9200"}) == 9200
     assert telemetry.metrics_port({"IRIS_METRICS_PORT": "0"}) is None
     assert telemetry.metrics_port({"IRIS_METRICS_PORT": ""}) is None
+
+
+def test_local_swarm_url_is_exact_https_loopback_origin():
+    env = {"IRIS_METRICS_PORT": "9101"}
+    assert telemetry.validate_local_swarm_url(
+        "https://127.0.0.1:9101/swarm", env) == \
+        "https://127.0.0.1:9101/swarm"
+    for bad in (
+            "http://127.0.0.1:9101/swarm",
+            "https://example.test:9101/swarm",
+            "https://127.0.0.1:9999/swarm",
+            "https://127.0.0.1:9101/readyz",
+            "https://user:secret@127.0.0.1:9101/swarm",
+            "https://127.0.0.1:9101/swarm?next=x"):
+        with pytest.raises(ValueError, match="invalid local swarm URL"):
+            telemetry.validate_local_swarm_url(bad, env)
 
 
 def test_swarm_snapshot_joins_device_model_by_principal_id():
@@ -983,7 +1028,7 @@ def test_swarmmap_script_and_style_tags_stay_attribute_free():
 
 def test_swarmmap_csrf_comes_from_session_not_cfg():
     html = _swarmmap_html()
-    assert '"/api/session"' in html          # app.js-style bootstrap
+    assert '"/api/v1/session"' in html       # versioned console bootstrap
     assert "X-CSRF-Token" in html            # header sent on the pull POST
     assert "csrf" not in _swarmmap_html().split("window.IRIS_MAP_CFG = null;")[0], \
         "no csrf material may ride above/inside the injected CFG line"
@@ -1394,46 +1439,6 @@ def test_metrics_text_reports_stored_gauge():
 def test_metrics_text_reports_stored_zero_when_unwired():
     hub = telemetry.Telemetry(PeerRegistry())
     assert "iris_device_reports_stored 0" in hub.metrics_text()
-
-
-def test_moved_page_links_to_console(monkeypatch):
-    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
-    page = telemetry.moved_page()
-    assert isinstance(page, bytes)
-    assert b"https://192.0.2.10:8080/" in page
-    assert b"intelligent-release-image-staging Console" in page
-
-
-def test_moved_page_honors_console_url_override(monkeypatch):
-    # Shared hosts may publish the console on a non-default port (e.g. 8480
-    # when :8080 is already taken) — IRIS_CONSOLE_URL, when non-empty, wins
-    # verbatim over the IRIS_HOST_IP-derived default.
-    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
-    monkeypatch.setenv("IRIS_CONSOLE_URL", "https://192.0.2.10:8480/")
-    page = telemetry.moved_page()
-    assert isinstance(page, bytes)
-    assert b"https://192.0.2.10:8480/" in page
-    assert b"intelligent-release-image-staging Console" in page
-    assert b":8080" not in page
-
-
-def test_metrics_server_serves_moved_page_at_swarmmap_and_root(monkeypatch):
-    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
-    srv = telemetry.make_metrics_server("127.0.0.1", 0, lambda: "",
-                                        swarm_provider=lambda: {"images": []},
-                                        html=telemetry.moved_page)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    try:
-        for path in ("/swarmmap", "/"):
-            status, body = _get(srv.server_address[1], path)
-            assert status == 200, path
-            assert b"https://192.0.2.10:8080/" in body, path
-        # JSON + health surfaces untouched; /metrics still provider-gated
-        assert _get(srv.server_address[1], "/swarm")[0] == 200
-        assert _get(srv.server_address[1], "/healthz")[0] == 200
-        assert _get(srv.server_address[1], "/metrics")[0] == 200
-    finally:
-        srv.shutdown()
 
 
 # ---- live transfer streaming: aggregation + /swarm enrichment (spec 7.2/7.4)
@@ -1918,59 +1923,43 @@ class TestReportExportEnrichment:
         assert telemetry._otlp_record_event_id(rec) == "a" * 32
 
 
-# ---- :9101 /swarm loopback gate (console-only swarm data by default) ----
-
-class TestSwarmPeerGate:
-    def test_predicate_loopback_allowed(self):
-        for p in ("127.0.0.1", "127.0.0.53", "::1", "::ffff:127.0.0.1",
-                  "::ffff:127.0.0.1%lo0"):
-            assert telemetry.swarm_peer_allowed(p, False), p
-
-    def test_predicate_non_loopback_denied(self):
-        for p in ("10.0.0.9", "192.168.1.5", "::ffff:10.0.0.9",
-                  "2001:db8::1", "not-an-ip", ""):
-            assert not telemetry.swarm_peer_allowed(p, False), p
-
-    def test_predicate_public_flag_allows_anything(self):
-        assert telemetry.swarm_peer_allowed("10.0.0.9", True)
-        assert telemetry.swarm_peer_allowed("garbage", True)
-
+# ---- :9101 /swarm management-tier authentication -----------------------
 
 class TestSwarmRouteGate:
-    """The deny path is unreachable by a real client (any connection to a
-    127.0.0.1-bound test server IS loopback), so these patch the predicate
-    the route consults at request time (module-global resolution)."""
-
-    def _server(self, swarm_public=False):
+    def _server(self, tmp_path):
+        token = tmp_path / "management-token"
+        token.write_text(json.dumps({"scope": "management",
+                                     "token": "m" * 64}))
+        token.chmod(0o600)
         return telemetry.make_metrics_server(
             "127.0.0.1", 0, lambda: "", swarm_provider=lambda: {"ok": 1},
-            health=lambda: {"state": "off"}, swarm_public=swarm_public)
+            health=lambda: {"state": "off"},
+            management_token_file=str(token))
 
-    def test_loopback_client_gets_swarm(self):
-        srv = self._server()
+    def test_management_bearer_gets_swarm(self, tmp_path):
+        srv = self._server(tmp_path)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                            timeout=5)
-            c.request("GET", "/swarm")
+            c.request("GET", "/swarm", headers={
+                "Authorization": "Bearer " + "m" * 64})
             r = c.getresponse()
             assert r.status == 200 and b"ok" in r.read()
         finally:
             srv.shutdown()
 
-    def test_non_loopback_client_gets_403_but_healthz_ok(self, monkeypatch):
-        srv = self._server()
-        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
-                            lambda peer, public: False)
+    def test_missing_bearer_gets_401_but_healthz_is_anonymous(self, tmp_path):
+        srv = self._server(tmp_path)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
                                            timeout=5)
             c.request("GET", "/swarm")
             r = c.getresponse()
-            body = r.read()
-            assert r.status == 403
-            assert b"console" in body               # self-describing
+            assert r.status == 401
+            assert r.getheader("Content-Type") == "application/problem+json"
+            r.read()
             c2 = http.client.HTTPConnection("127.0.0.1",
                                             srv.server_address[1], timeout=5)
             c2.request("GET", "/healthz")            # probes unaffected
@@ -1978,16 +1967,19 @@ class TestSwarmRouteGate:
         finally:
             srv.shutdown()
 
-    def test_swarm_public_true_serves_any_peer(self, monkeypatch):
-        srv = self._server(swarm_public=True)
-        monkeypatch.setattr(telemetry, "swarm_peer_allowed",
-                            lambda peer, public: public)  # only the flag saves it
+    def test_detailed_status_is_management_authenticated(self, tmp_path):
+        srv = self._server(tmp_path)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1],
-                                           timeout=5)
-            c.request("GET", "/swarm")
-            assert c.getresponse().status == 200
+            assert _get(srv.server_address[1], "/status")[0] == 401
+            status, body = _get(srv.server_address[1], "/status", {
+                "Authorization": "Bearer " + "m" * 64})
+            assert status == 200
+            assert json.loads(body) == {
+                "ok": True, "otlp_export": {"state": "off"}}
+            # Anonymous probe remains intentionally non-diagnostic.
+            assert json.loads(_get(
+                srv.server_address[1], "/healthz")[1]) == {"ok": True}
         finally:
             srv.shutdown()
 
@@ -2090,15 +2082,15 @@ class TestEditableDestination:
             self, tmp_path, monkeypatch):
         posts = []
         hub, path = _dest_hub(tmp_path, monkeypatch, posts,
-                              env_endpoint="http://env-collector:4318",
+                              env_endpoint="https://env-collector:4318",
                               env_enabled=True,
                               headers={"Authorization": "Bearer s3cr3t"})
         hub.sample(now=100.0)
-        telemetry_destination.write(path, "http://other:4318", None)
+        telemetry_destination.write(path, "https://other:4318", None)
         os.utime(path, (200, 200))
         hub.sample(now=115.0)               # exporter swap
         url, hdrs = posts[-1]
-        assert url == "http://other:4318/v1/metrics"
+        assert url == "https://other:4318/v1/metrics"
         assert hdrs["Authorization"] == "Bearer s3cr3t"
 
     def test_export_health_survives_destination_swap(
@@ -2191,8 +2183,8 @@ class TestFromEnvDestination:
             str(tmp_path / "telemetry-destination.json")
         assert hub._env_endpoint == "" and hub._env_enabled is False
 
-    def test_from_env_captures_env_fields_and_builds_exporters(self,
-                                                               tmp_path):
+    def test_from_env_refuses_authenticated_plaintext_exporters(self,
+                                                                 tmp_path):
         hub = telemetry.from_env({
             "IRIS_STATE": str(tmp_path),
             "IRIS_OBSERVABILITY": "1",
@@ -2201,11 +2193,8 @@ class TestFromEnvDestination:
         assert hub._env_endpoint == "http://collector:4318"
         assert hub._env_enabled is True
         assert hub._headers == {"Authorization": "Bearer x"}
-        # initial exporters exist BEFORE start() so announce-path events are
-        # captured from process start, as construction-time exporters were
-        assert hub.exporter is not None
-        assert hub.exporter.url == "http://collector:4318/v1/logs"
-        assert hub.metrics_exporter.url == "http://collector:4318/v1/metrics"
+        assert hub.exporter is None
+        assert hub.metrics_exporter is None
 
     def test_from_env_file_override_enables_export_with_env_off(self,
                                                                 tmp_path):

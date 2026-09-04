@@ -296,7 +296,7 @@ Audit as `undeploy_forced`. Onboard again after it completes.
 
 Router preflight is read-only and runs once, in the bounded onboarding worker
 pool, immediately before the enrollment token is minted — not synchronously
-inside the `POST /api/devices/<id>/onboard` request. Submitting a batch of
+inside the `POST /api/v1/devices/<id>/onboard` request. Submitting a batch of
 routers therefore returns a job id per device promptly, with progress shown
 as each job queues and then runs, instead of the request blocking on live SSH
 to every router in turn. Preflight rejects collisions for the VPG, NAT

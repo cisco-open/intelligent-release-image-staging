@@ -52,7 +52,7 @@ import gui_app
 import gui_creds
 import gui_fleet
 import gui_images
-import gui_server
+import management_api as gui_server
 
 # ---------------------------------------------------------------------------
 # Fixture-tar builders (replicated from test_bulkhash_refresh.py -- see the
@@ -404,7 +404,10 @@ def test_refresh_already_running_maps_to_409(tmp_path, monkeypatch):
                                "/api/image-verification/refresh",
                                headers=headers)
         assert status == 409
-        assert json.loads(body) == {"outcome": "already_running"}
+        problem = json.loads(body)
+        assert problem["outcome"] == "already_running"
+        assert problem["code"] == "resource-conflict"
+        assert problem["status"] == 409
     finally:
         stop()
 
@@ -616,7 +619,8 @@ def test_offline_unsigned_tar_fails_and_leaves_catalog_untouched(
         assert status == 502
         result = json.loads(body)
         assert result["outcome"] == "fail"
-        assert result["matched"] is None
+        assert result["code"] == "upstream-operation-failed"
+        assert "matched" not in result  # RFC 9457 extensions omit null values
         # catalog genuinely untouched
         entry = cat.get_image("img1")
         assert "hash_verification" not in entry

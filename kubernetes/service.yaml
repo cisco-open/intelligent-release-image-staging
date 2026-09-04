@@ -8,6 +8,7 @@ metadata:
   name: iris-seed-server
   labels:
     app.kubernetes.io/name: iris-seed-server
+    app.kubernetes.io/component: server
     app.kubernetes.io/part-of: iris
 spec:
   type: LoadBalancer
@@ -19,6 +20,7 @@ spec:
   externalTrafficPolicy: Local
   selector:
     app.kubernetes.io/name: iris-seed-server
+    app.kubernetes.io/component: server
   ports:
     - name: tracker
       port: 6969
@@ -35,10 +37,6 @@ spec:
     - name: bittorrent
       port: 6881
       targetPort: bittorrent
-      protocol: TCP
-    - name: console
-      port: 8080
-      targetPort: console
       protocol: TCP
     - name: health
       port: 9101

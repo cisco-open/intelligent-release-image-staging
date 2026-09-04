@@ -24,11 +24,14 @@ command-line / RPC interface and remains under its own license:
                tools/aria2c.sha256, and is NOT downloaded, NOT built, and NOT
                stored in this source repository. This applies to every build
                path that stages it — the server (see tools/get-aria2c.sh and
-               server/Dockerfile) and the optional IOx application packages
-               (see device/iox/build.sh, which resolves aria2c from an
-               operator-supplied ARIA2C_BIN or from deliverables/aria2c-<arch>,
-               checksum-verified against tools/aria2c.sha256, and fails closed
-               with no network fallback if neither is available). It is
+               server/Dockerfile) and the common IOx / IOS-XR device image
+               (see tools/build-device-image.sh, invoked by device/iox/build.sh
+               and tools/build-xr-package.sh). The common builder resolves both
+               architectures from operator-supplied ARIA2C_BIN_AMD64 /
+               ARIA2C_BIN_ARM64 values, local agent bundles, or
+               deliverables/aria2c-<arch>, checksum-verifies each against
+               tools/aria2c.sha256, and fails closed with no network fallback
+               if either is unavailable. It is
                communicated with only over its JSON-RPC interface and command
                line, as a separate independent program.
 
@@ -102,9 +105,9 @@ authoritative text.
   * iproute2 — GNU General Public License, version 2. Installed as a system
                package; present for operator diagnostics inside the container.
 
-The IOx and IOS-XR device images (device/iox/Dockerfile, device/xr/Dockerfile)
-install a smaller set of the same kinds of packages under the same terms; see
-those files for the exact list per image.
+The common IOx and IOS-XR device image (device/container/Dockerfile) installs a
+smaller set of the same kinds of packages under the same terms; see that file
+for the exact list shared by both runtime profiles.
 
 ------------------------------------------------------------------------------
 Documentation tooling and runtime assets

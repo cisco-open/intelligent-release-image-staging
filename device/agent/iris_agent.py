@@ -45,6 +45,21 @@ _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _ROOT_COPY_MAX_ATTEMPTS = 4
 _ROOT_COPY_BACKOFF_BASE = 5 * 60
 _ROOT_COPY_BACKOFF_MAX = 60 * 60
+_TORRENT_AUTH_BEARER = "bearer-v1"
+
+
+def _choose_ios_stage_prefix(platform, filesystems, model,
+                             guest_share_fs, preferred_fs, boot_path):
+    """Select IOS storage while retaining the Guest Shell legacy fallback."""
+    prefix = (flash_target.choose_stage_fs(
+                  filesystems, model=model, guest_share_fs=guest_share_fs,
+                  preferred_fs=preferred_fs)
+              or flash_target.choose_target_fs(filesystems, boot_path))
+    # An absent selector is Guest Shell, whose established behavior falls back
+    # to flash:. The explicit IOx container profile must prove its destination.
+    if not prefix and platform != "iox":
+        return "flash:"
+    return prefix
 
 
 def _root_copy_tmp_name(fname):
@@ -1725,6 +1740,48 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # has reached full size but whose last pieces aren't on disk yet (a race that
     # produced spurious sha mismatches on the 60s timer).
     downloading = deps.file_size(stage + ".aria2") is not None
+    torrent = os.path.join(stage_dir, img_id + ".torrent")
+    st = state.setdefault(img_id, {})
+    torrent_id = _torrent_identity(image)
+    bearer_metainfo = (cfg.get("device_platform")
+                       in agent_config.DEVICE_PLATFORMS)
+
+    # The old container torrent and the bearer-header replacement have an
+    # identical info dictionary, so torrent_id cannot distinguish them. For
+    # an identity-equal on-disk torrent with no format marker, atomically
+    # refetch the small metainfo and re-add it under the per-download header.
+    # forceRemove does not delete the payload or its .aria2 resume bitfield.
+    # Run this before the complete-file fast path too: an already-staged seed
+    # otherwise keeps announcing with the legacy query credential forever.
+    migrate_auth = (bearer_metainfo
+                    and deps.file_size(torrent) is not None
+                    and st.get("torrent_id") == torrent_id
+                    and st.get("torrent_auth_format")
+                    != _TORRENT_AUTH_BEARER)
+    if migrate_auth:
+        try:
+            deps.catalog.download_torrent(img_id, torrent)
+            deps.aria_remove(image["filename"])
+            deps.aria_add(torrent, stage_dir)
+        except TrackerAuthConfigError:
+            deps.emit("TRACKER-AUTH",
+                      "tracker authorization unavailable; refusing addTorrent")
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker authorization unavailable")
+            return "tracker-auth"
+        except Exception as e:
+            deps.emit("TORRENT-UNAVAILABLE",
+                      "%s tracker-auth migration unavailable: %s"
+                      % (image["filename"], e))
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker-auth migration unavailable")
+            return "torrent-unavailable"
+        st["torrent_auth_format"] = _TORRENT_AUTH_BEARER
+
     if deps.file_size(stage) == size and not downloading:
         if deps.verify(stage, image["sha256"]):
             # state is PER-IMAGE: a reassignment to a new image id must go through
@@ -1974,6 +2031,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # hundred KB — instead of re-adding this one and looping.
         deps.remove_stage(os.path.join(stage_dir, img_id + ".torrent"))
         state[img_id].pop("torrent_id", None)
+        state[img_id].pop("torrent_auth_format", None)
         return "bad-sha"
 
     # need to download — media-aware flash pre-check + mode-gated reclaim.
@@ -2024,9 +2082,6 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # forever (board #70, hardware-reproduced on IOx and on a Cisco 8010's XR
     # appmgr). The guard below is keyed on ARIA2'S OWN KNOWLEDGE of the file
     # (deps.aria_stats), never on file presence alone.
-    torrent = os.path.join(stage_dir, img_id + ".torrent")
-    st = state.setdefault(img_id, {})
-    torrent_id = _torrent_identity(image)
     have = deps.file_size(stage)
     # A SAME-ID REPUBLISH regenerates the torrent (server/publish.py writes a
     # new info hash under the unchanged id), and nothing on the device ever
@@ -2049,7 +2104,16 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.remove_stage(stage + ".aria2")
         deps.remove_stage(torrent)
         have = None
-    if deps.file_size(torrent) is None or st.get("torrent_id") != torrent_id:
+    # Container torrents used to embed the announce credential in the query
+    # string. Their BitTorrent info dictionary (and therefore torrent_id) is
+    # intentionally identical to the new header-auth form, so identity alone
+    # cannot detect an on-disk legacy metainfo file. An additive state marker
+    # records the format fetched by this agent. Missing marker on IOx/XR means
+    # atomically re-fetch ONLY the small .torrent; preserve staged image bytes
+    # and the .aria2 resume bitfield. Guest Shell has no selector and retains
+    # its legacy query-auth torrent behavior without writing this marker.
+    if (deps.file_size(torrent) is None
+            or st.get("torrent_id") != torrent_id):
         try:
             deps.catalog.download_torrent(img_id, torrent)
         except Exception as e:
@@ -2068,6 +2132,8 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            stage_error="catalog torrent unavailable: %s" % e)
             return "torrent-unavailable"
         st["torrent_id"] = torrent_id
+        if bearer_metainfo:
+            st["torrent_auth_format"] = _TORRENT_AUTH_BEARER
     # ARIA2 MAY HAVE FORGOTTEN A PRESENT FILE (board #70). A present partial
     # (or a size-matching file still marked 'downloading' below) no longer
     # proves aria2 is actively fetching it — ask aria2 directly.
@@ -2125,6 +2191,17 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # went through (an RPC failure below re-tries the whole thing,
             # including this, next tick).
             state.setdefault(img_id, {})["download_started"] = True
+        except TrackerAuthConfigError:
+            # The torrent URL deliberately carries no credential. Never start
+            # it without the separately scoped per-device announce bearer, and
+            # never print that bearer in the diagnostic.
+            deps.emit("TRACKER-AUTH",
+                      "tracker authorization unavailable; refusing addTorrent")
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker authorization unavailable")
+            return "tracker-auth"
         except OSError as e:
             # An HTTP 400/401 from the RPC endpoint is NOT a dead daemon: it is
             # aria2c rejecting our token, which is the ordinary state of a
@@ -2217,9 +2294,11 @@ def run_once(cfg, deps, state):
     # in-memory cfg (a 7d TTL + half-life refresh leaves a ~3.5d retry buffer,
     # so a few failed ticks never strand the device; the live client's bearer
     # is _refresh_impl's concern, see its docstring for the failure split).
-    if needs_refresh(time.time(),
-                     int(float(cfg.get("token_expires_at", 0) or 0)),
-                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
+    _container_platform = cfg.get("device_platform") in agent_config.DEVICE_PLATFORMS
+    if ((_container_platform and not cfg.get("announce_token"))
+            or needs_refresh(time.time(),
+                             int(float(cfg.get("token_expires_at", 0) or 0)),
+                             _TOKEN_TTL, _TOKEN_REFRESH_AT)):
         new_cfg = deps.refresh()
         if new_cfg is None:
             deps.emit("TOKEN-REFRESH-FAIL",
@@ -2359,6 +2438,47 @@ def make_catalog_context(cfg, error):
            "set catalog_ca in the agent conf")
     error(msg)
     raise CatalogTLSConfigError(msg)
+
+
+class TrackerAuthConfigError(OSError):
+    """The per-device tracker bearer is unavailable or unsafe."""
+
+
+def _tracker_headers(cfg, conf_path=None):
+    """Return aria2's per-download Bearer header without exposing the token.
+
+    The first-boot refresh writes announce_token before image work. Since the
+    dependency closures were built from the pre-refresh dict, re-read that
+    atomic config here. JSON-RPC carries the value over loopback; it never
+    appears in aria2's process arguments.
+    """
+    current = cfg
+    if conf_path:
+        try:
+            current = agent_config.load(conf_path)
+        except (OSError, KeyError, ValueError):
+            current = cfg
+    token = current.get("announce_token")
+    try:
+        token = agent_config.validate_bearer_token(
+            "announce_token", token, allow_empty=False)
+    except ValueError as exc:
+        raise TrackerAuthConfigError("invalid tracker authorization") from exc
+    if not token:
+        raise TrackerAuthConfigError("tracker authorization is unavailable")
+    # aria2's JSON-RPC schema represents repeatable --header options as an
+    # array. Do not log or interpolate this value anywhere else.
+    return ["Authorization: Bearer " + token]
+
+
+def _aria_torrent_options(cfg, dest_dir, conf_path=None,
+                          require_tracker_bearer=False):
+    """Build addTorrent options, preserving legacy Guest Shell behavior."""
+    options = {"dir": dest_dir, "bt-seed-unverified": "true",
+               "bt-max-peers": cfg.get("max_peers", "10")}
+    if require_tracker_bearer:
+        options["header"] = _tracker_headers(cfg, conf_path)
+    return options
 
 
 # ---- Phase 2: catalog token self-refresh (half-life, stdlib only) ----
@@ -3379,22 +3499,22 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 # ---- on-box wiring (not exercised by unit tests) ----
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
-    # Platform seam. Everything below wires the IOS-XE families (Guest Shell
-    # and the SSH-to-self container), all of which reach the device through a
-    # CLI. An IOS-XR appmgr container has no CLI at all — it bind-mounts
-    # harddisk: and every device fact is a filesystem call — so conf
-    # `mode = xr` (written by device/xr/entrypoint.sh) selects that builder
-    # wholesale instead. Same 27-field Deps, same run_once.
-    if (cfg.get("mode") or "").strip() == "xr":
+    # One container selector owns both the backend and storage profile. An
+    # absent selector is the established Guest Shell path; container
+    # entrypoint.sh itself requires one and persists it before reaching here.
+    platform = (os.environ.get("IRIS_DEVICE_PLATFORM")
+                or cfg.get("device_platform") or "").strip()
+    agent_config.validate_device_platform(platform)
+    legacy_xr = (not platform and (cfg.get("mode") or "").strip() == "xr")
+    if platform == "xr-appmgr" or legacy_xr:
         import xr_deps
         return xr_deps.build_deps(cfg, conf_path, state_path)
     import base64
     import urllib.request
     import catalog_client
 
-    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
-    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
-    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli. Bound
+    # Guest Shell `cli` on the C9300 (default, unchanged) or SSH-to-self in the
+    # IOx profile; cli_ssh.select_cli reads the same device-platform key. Bound
     # (and `emit` defined) BEFORE make_catalog_context below: its fail-closed
     # path calls the error callback SYNCHRONOUSLY, unlike copy_to_root/reclaim
     # further down whose closures over `emit`/`cli_execute` aren't invoked
@@ -3412,7 +3532,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     ctx = make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
-        cfg["catalog_url"], cfg["catalog_token"], context=ctx)
+        cfg["catalog_url"], cfg["catalog_token"], context=ctx,
+        tracker_bearer=(platform == "iox"))
 
     def refresh():
         # Thin wrapper — the POST + client rebind + atomic conf rewrite +
@@ -3430,8 +3551,10 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
-    _mode = (os.environ.get("IRIS_RUNTIME_MODE")
-             or cfg.get("runtime_mode") or "guestshell")
+    _legacy_runtime = (os.environ.get("IRIS_RUNTIME_MODE")
+                       or cfg.get("runtime_mode") or "guestshell")
+    _container_iox = (platform == "iox"
+                      or (not platform and _legacy_runtime == "container"))
     _transport = getattr(cli_execute, "__self__", None)   # SSHCli in container mode
 
     def _push_scratch(fname, target_prefix):
@@ -3479,7 +3602,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # after a 1.2 GB scratch transfer adds failure modes without improving the
         # basename safety decision made before any destructive command.
         confirmed_running = lambda: running
-        if _mode == "container" and _transport is not None:
+        if _container_iox and _transport is not None:
             # C9k container: the SSD share (usbflash1:iox_host_data_share) is
             # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
             # disk speed and IOS places it with an internal disk-to-disk plain
@@ -3586,8 +3709,9 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         with open(torrent_path, "rb") as f:
             tb = base64.b64encode(f.read()).decode()
         params = ["token:" + cfg["rpc_secret"], tb, [],
-                  {"dir": dest_dir, "bt-seed-unverified": "true",
-                   "bt-max-peers": cfg.get("max_peers", "10")}]
+                  _aria_torrent_options(
+                      cfg, dest_dir, conf_path,
+                      require_tracker_bearer=(platform == "iox"))]
         payload = json.dumps({"jsonrpc": "2.0", "id": "a",
                               "method": "aria2.addTorrent",
                               "params": params}).encode()
@@ -3714,11 +3838,13 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         gsf = _guest_share_fs(fss)
         mdl = flash_target.device_model(_show("show version"))
         preferred = cfg.get("target_fs", "").strip()
-        prefix = (flash_target.choose_stage_fs(
-                      fss, model=mdl, guest_share_fs=gsf,
-                      preferred_fs=preferred)
-                  or flash_target.choose_target_fs(fss, flash_target.boot_path(sb))
-                  or "flash:")
+        prefix = _choose_ios_stage_prefix(
+            platform, fss, mdl, gsf, preferred, flash_target.boot_path(sb))
+        if not prefix:
+            emit("TARGET-FS",
+                 "no writable IOS staging filesystem could be proved from "
+                 "show/dir output; refusing to stage")
+            raise RuntimeError("no proved writable IOS staging filesystem")
         if preferred and prefix != preferred:
             emit("TARGET-FS",
                  "configured %s is not a writable IOS disk; using %s"
@@ -3762,7 +3888,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # reach IOS over a real vty, where `delete /force` runs directly — the
         # same command _copy_to_root_direct_impl already issues there before
         # every copy. Best-effort per name so one failure can't strand the rest.
-        if _mode == "container" and _transport is not None:
+        if _container_iox and _transport is not None:
             for n in names:
                 try:
                     cli_execute("delete /force %s%s" % (target_prefix, n))
@@ -3801,7 +3927,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 running_image=running_image, reclaimable=reclaimable,
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=(_mode == "container"),
+                io_transfer=_container_iox,
                 checkpoint=checkpoint, aria_session=aria_session,
                 copy_in_place=False)
 

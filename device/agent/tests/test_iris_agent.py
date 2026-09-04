@@ -129,6 +129,12 @@ CFG = {"device_id": "sw1", "stage_dir": "/stage",
        "token_expires_at": str(int(_time.time()) + 604_800)}
 
 
+def test_ios_stage_prefix_keeps_guestshell_fallback_but_iox_fails_closed():
+    args = ([], "", None, "", "")
+    assert iris_agent._choose_ios_stage_prefix("", *args) == "flash:"
+    assert iris_agent._choose_ios_stage_prefix("iox", *args) is None
+
+
 def test_no_assignment_still_heartbeats():
     # An unassigned device must register with the catalog (devices.json /
     # swarm map / telemetry posture) — assignment gates staging, not presence.
@@ -4450,6 +4456,62 @@ def test_torrent_is_not_refetched_while_its_identity_is_unchanged():
     state = {"img1": {"torrent_id": "sha:abc"}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert cat.downloaded == [] and aria == []
+
+
+def test_container_migrates_identity_equal_legacy_torrent_without_touching_payload():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    sizes = {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
+             "/stage/img1.torrent": 300}
+    removed = []
+    aria_removed = []
+    deps, _, _, aria, _, _, _, _ = make_deps(cat, sizes, removed=removed)
+    deps = deps._replace(
+        aria_stats=lambda p: {"gid": "g", "status": "active"},
+        aria_remove=lambda name: aria_removed.append(name))
+    cfg = dict(CFG, device_platform="iox", announce_token="announce-token")
+    state = {"img1": {"torrent_id": "sha:abc"}}
+
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert removed == []
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert sizes["/stage/img1.bin"] == 3
+    assert sizes["/stage/img1.bin.aria2"] == 1
+    assert state["img1"]["torrent_id"] == "sha:abc"
+    assert state["img1"]["torrent_auth_format"] == "bearer-v1"
+
+    # The persisted format marker makes the migration one-shot.
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+
+
+def test_container_migrates_a_completed_legacy_seed_before_complete_fast_path():
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    sizes = {"/stage/img1.bin": 10, "/stage/img1.torrent": 300}
+    removed = []
+    aria_removed = []
+    deps, _, _, aria, _, _, _, _ = make_deps(
+        cat, sizes, removed=removed, root_ok=True)
+    deps = deps._replace(aria_remove=lambda name: aria_removed.append(name))
+    cfg = dict(CFG, device_platform="xr-appmgr",
+               announce_token="announce-token")
+    state = {"img1": {"torrent_id": "sha:abc", "done": True,
+                       "copied": True}}
+
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert removed == []
+    assert sizes["/stage/img1.bin"] == 10
+    assert state["img1"]["torrent_auth_format"] == "bearer-v1"
 
 
 def test_bad_sha_clears_the_torrent_identity_so_the_next_tick_refetches():

@@ -16,8 +16,9 @@ This is the ONLY supported way to rotate the seeder announce credential
    a *previous* valid for that bounded window, and mint a fresh current. Durable
    persist happens BEFORE any canonical torrent mutation (via ``persist``).
 3. For each seeder torrent, prepare a raw-span-verified canonical replacement
-   whose outer announce carries ``announce_token=<current>`` and whose ``info``
-   byte span is SHA-1 identical to the old canonical (via torrent_personalize).
+   whose outer announce is token-free and whose ``info`` byte span is SHA-1
+   identical to the old canonical (via torrent_personalize). The re-add gives
+   aria2 the rotated credential as an Authorization header.
 4. Serially force-remove then re-add each torrent to the live seeder, updating
    the manifest phase per torrent.
 
@@ -70,16 +71,13 @@ import torrent_personalize
 
 SEEDER_PREV_CAP = 2
 
-DEFAULT_SWARM_URL = "http://127.0.0.1:9101/swarm"
+DEFAULT_SWARM_URL = "https://127.0.0.1:9101/swarm"
 
 
 def _default_swarm_url():
-    """Resolve the loopback ``/swarm`` URL, honoring an operator ``IRIS_SWARM_URL``
-    override and falling back to the token-free :data:`DEFAULT_SWARM_URL`. The
-    value is used only as the sender target; it is never echoed to output or
-    embedded in any raised message, so a credential-bearing override stays
-    confidential."""
-    return os.environ.get("IRIS_SWARM_URL") or DEFAULT_SWARM_URL
+    """Resolve and validate the same-container authenticated swarm target."""
+    return telemetry.validate_local_swarm_url(
+        os.environ.get("IRIS_SWARM_URL") or DEFAULT_SWARM_URL)
 
 
 class RotationError(Exception):
@@ -192,8 +190,9 @@ def prepare_replacement(canonical_bytes, announce_url):
 
 
 def _announce_url(base, token):
-    sep = "&" if "?" in base else "?"
-    return "%s%sannounce_token=%s" % (base, sep, token)
+    # Kept as a seam for the byte-safe rotation tests; credentials no longer
+    # enter torrent metadata or any URL.
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +667,11 @@ def make_swarm_probe(expected_info_hashes, not_before, url=None,
 def _http_swarm_sender(url, timeout):
     """Loopback ``/swarm`` GET returning the parsed JSON document. Errors
     propagate to the probe (which fails closed); the URL is never echoed."""
-    import urllib.request
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    import tier_auth
+    token, _ = tier_auth.load_pair(
+        os.environ.get("IRIS_MANAGEMENT_API_TOKEN_FILE", ""))
+    return json.loads(telemetry.local_swarm_get(
+        url, token.decode("utf-8"), timeout=timeout).decode())
 
 
 # ---------------------------------------------------------------------------

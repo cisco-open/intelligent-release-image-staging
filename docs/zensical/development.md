@@ -12,10 +12,11 @@ This page explains where to make changes without changing the repository's core 
 
 | Path | Purpose |
 | --- | --- |
-| `server/` | Server services, web console, catalog, telemetry, Docker build, and server tests. |
+| `server/` | Stateful server tier, state-free web-console tier, Docker builds, and server tests. |
 | `device/` | Guest Shell installer, bootstrap, EEM applets, agent code, and device tests. |
-| `device/iox/` | IOx package build, install, entrypoint, and tests. |
-| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
+| `device/container/` | The one device-container image definition, entrypoint, and reconcile script shared by IOx and IOS-XR appmgr. |
+| `device/iox/` | IOx wrapper-package build, install logic, and tests. |
+| `device/xr/` | IOS-XR appmgr wrapper metadata and tests. |
 | `fleet/` | CSV templates and generated per-device installer output. |
 | `tools/` | Operator helpers for bundles, installers, assignments, release packaging, and torrents. |
 | `lab/` | Lab helpers and diagnostics. |
@@ -71,10 +72,10 @@ the IOx certificate pins and uses a build-time proxy for the XR RPM. A green
 result cannot prove that a package contains the current agent. Rebuild after
 any shared-agent change and redeploy each affected device.
 
-`device/iox/build.sh`, `tools/build-xr-package.sh` and
+`tools/build-device-image.sh`, `device/iox/build.sh`, `tools/build-xr-package.sh` and
 `tools/make-agent-bundle.sh` each bake in `device/agent`,
-`device/verify_image.py` and their own `device/<platform>`/installer-script
-tree exactly as they sit in the checkout the script runs from — a worktree
+`device/verify_image.py` and the relevant container or installer-script tree
+exactly as they sit in the checkout the script runs from — a worktree
 that has fallen behind `main` under those paths ships an older agent with
 nothing in the built image/package saying so (issue #72, and #119 for the
 third script: this is how a stale candidate worktree made it into a

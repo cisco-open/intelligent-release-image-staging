@@ -103,7 +103,7 @@ import catalog
 import credential_cache
 import gui_app
 import gui_fleet
-import gui_server
+import management_api as gui_server
 import keyed_state
 import peer_endpoints
 import secrets_store

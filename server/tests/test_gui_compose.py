@@ -14,18 +14,46 @@ def _read(name):
 def test_compose_publishes_gui_port():
     # shared hosts may already have :8080 taken (e.g. Jenkins) — the published
     # side is overridable via IRIS_GUI_PUBLISH, defaulting to 8080.
+    import yaml
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
     assert '"${IRIS_GUI_PUBLISH:-8080}:8080"' in _read("docker-compose.yml")
+    assert services["console"]["ports"] == ["${IRIS_GUI_PUBLISH:-8080}:8080"]
+    assert not any(str(p).endswith(":8080")
+                   for p in services["iris"].get("ports", []))
 
 
-def test_entrypoint_launches_and_supervises_gui():
+def test_entrypoint_launches_and_supervises_management_not_console():
     txt = _read("docker-entrypoint.sh")
-    assert "gui_server.py" in txt
-    assert "IRIS_SECRETS_ENC" in txt          # persistence target exported for the GUI
-    assert 'wait -n "$T" "$C" "$S" "$A" "$G"' in txt
+    assert "python3 management_api.py & M=$!" in txt
+    assert "python3 gui_server.py" not in txt
+    assert "IRIS_SECRETS_ENC" in txt
+    assert 'wait -n "$T" "$C" "$S" "$A" "$M"' in txt
 
 
-def test_dockerfile_exposes_gui_port():
-    assert "8080" in _read("Dockerfile")
+def test_console_has_its_own_minimal_image_and_port():
+    server = _read("Dockerfile")
+    console = _read("Dockerfile.console")
+    assert "EXPOSE 8080" not in server
+    assert "EXPOSE 8080" in console
+    assert "COPY server/webroot/" in console
+    assert "gui_server.py" in console
+    assert "COPY device/" not in console and "COPY lab/" not in console
+    assert "/opt/iris/server/iris-gui" in server
+
+
+def test_console_image_has_independent_local_readiness_healthcheck():
+    console = _read("Dockerfile.console")
+    assert "HEALTHCHECK" in console
+    assert "127.0.0.1:%s/readyz" in console
+    assert "IRIS_GUI_PORT" in console
+    # The probe is local, follows the exact public-listener plaintext opt-in,
+    # and tolerates the TLS identity's self-signed or non-loopback SAN;
+    # /readyz itself checks only local files, not backend IO.
+    assert "_create_unverified_context" in console
+    assert 'IRIS_GUI_ALLOW_PLAINTEXT")=="1"' in console
+    assert 's="http" if' in console
+    assert "IRIS_MANAGEMENT_API_URL" not in next(
+        line for line in console.splitlines() if "urlopen" in line)
 
 
 def test_compose_declares_images_volume():
@@ -60,9 +88,25 @@ def test_server_image_bakes_device_and_lab_sources():
 
 def test_compose_builds_self_contained_image_from_repo_root():
     import yaml
-    build = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]["build"]
-    assert build["context"] == ".."
-    assert build["dockerfile"] == "server/Dockerfile"
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
+    assert services["iris"]["build"]["context"] == ".."
+    assert services["iris"]["build"]["dockerfile"] == "server/Dockerfile"
+    assert services["console"]["build"]["context"] == ".."
+    assert services["console"]["build"]["dockerfile"] == \
+        "server/Dockerfile.console"
+
+
+def test_setup_credential_is_mounted_only_in_state_owner():
+    import yaml
+    doc = yaml.safe_load(_read("docker-compose.yml"))
+    server = doc["services"]["iris"]
+    console = doc["services"]["console"]
+    assert server["environment"]["IRIS_CONSOLE_SETUP_TOKEN_FILE"] == \
+        "/run/iris/console-setup-token"
+    assert "iris_console_setup_token" in server["secrets"]
+    assert "IRIS_CONSOLE_SETUP_TOKEN_FILE" not in console["environment"]
+    assert "iris_console_setup_token" not in console.get("secrets", [])
+    assert "iris_console_setup_token" in doc["secrets"]
 
 
 def test_compose_artifacts_is_read_write_for_self_provisioning():
@@ -105,12 +149,23 @@ def test_entrypoint_creates_writable_staging_dir():
 
 def test_dockerfile_exposes_artifacts_seed_data_and_healthcheck():
     df = _read("Dockerfile")
-    assert "EXPOSE 6969 8443 8000 6881 8080 9101" in df
+    assert "EXPOSE 6969 8443 8000 6881 9101 9443" in df
+    assert "8080" not in next(line for line in df.splitlines()
+                              if line.startswith("EXPOSE "))
     assert "EXPOSE 6800" not in df
     # /readyz, not /healthz: the latter is unconditional and let a container
     # with a dead catalog/artifact listener stay `healthy` (IRIS-13-012).
     assert "HEALTHCHECK" in df and "9101/readyz" in df
+    assert "https://$IRIS_HOST_IP:9101/readyz" in df
+    assert "--cacert /etc/iris/tls/crt.pem" in df
     assert "9101/healthz" not in df
+
+
+def test_telemetry_ca_uses_the_persisted_public_certificate():
+    entrypoint = _read("docker-entrypoint.sh")
+    assert 'IRIS_TELEMETRY_CA="${IRIS_TELEMETRY_CA:-$IRIS_CONFIG/tls/crt.pem}"' \
+        in entrypoint
+    assert "$IRIS_RUN/tls/crt.pem" not in entrypoint
 
 
 def test_dockerfile_rejects_non_amd64_server_builds():
@@ -153,11 +208,53 @@ def test_dockerfile_runs_as_nonroot_fixed_uid():
 
 def test_compose_hardens_iris_service():
     import yaml
-    svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]
-    # restated uid so `docker compose run`/`exec` can't regress to root
-    assert svc["user"] == "10001:10001"
-    assert svc["cap_drop"] == ["ALL"]
-    assert "no-new-privileges:true" in svc["security_opt"]
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
+    for name in ("iris", "console"):
+        svc = services[name]
+        assert svc["user"] == "10001:10001"
+        assert svc["cap_drop"] == ["ALL"]
+        assert "no-new-privileges:true" in svc["security_opt"]
+
+
+def test_console_has_only_tier_material_and_runtime_tmpfs():
+    import yaml
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
+    console = services["console"]
+    mounts = "\n".join(console.get("volumes", []))
+    assert "iris-tier-auth:/run/iris-tier:ro" in mounts
+    assert "iris-management-ca:/run/iris-management-ca:ro" in mounts
+    assert "iris-state" not in mounts
+    assert "iris-config" not in mounts
+    assert "iris-images" not in mounts
+    assert "/srv/artifacts" not in mounts
+    assert any("/run/iris-console" in item for item in console["tmpfs"])
+    env = console["environment"]
+    assert env["IRIS_MANAGEMENT_API_URL"] == "https://iris:9443"
+    assert env["IRIS_GUI_ALLOW_PLAINTEXT"] == \
+        "${IRIS_GUI_ALLOW_PLAINTEXT:-}"
+
+
+def test_compose_mounts_optional_otlp_headers_only_in_server():
+    import yaml
+    services = yaml.safe_load(_read("docker-compose.yml"))["services"]
+    server = services["iris"]
+    console = services["console"]
+    assert server["environment"]["IRIS_OTLP_HEADERS_FILE"] == \
+        "/run/secrets/iris_otlp_headers"
+    mount = next(v for v in server["volumes"]
+                 if v.endswith(":/run/secrets/iris_otlp_headers:ro"))
+    assert mount.startswith("${IRIS_OTLP_HEADERS_FILE_HOST:-/dev/null}")
+    assert not any("iris_otlp_headers" in v
+                   for v in console.get("volumes", []))
+    assert "IRIS_OTLP_HEADERS_FILE" not in console["environment"]
+
+
+def test_entrypoint_normalizes_absent_optional_secret_bind_files():
+    entrypoint = _read("docker-entrypoint.sh")
+    assert '[ ! -f "$IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE" ]' in entrypoint
+    assert 'export IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE=""' in entrypoint
+    assert '[ ! -f "$IRIS_OTLP_HEADERS_FILE" ]' in entrypoint
+    assert 'export IRIS_OTLP_HEADERS_FILE=""' in entrypoint
 
 
 def test_compose_forwards_version_build_arg():
@@ -179,7 +276,7 @@ def test_compose_restores_the_licensed_font_by_bind_mount_only():
     restore it at runtime. The only sanctioned path is a Compose bind mount
     -- never re-adding the file to the build context."""
     import yaml
-    svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["iris"]
+    svc = yaml.safe_load(_read("docker-compose.yml"))["services"]["console"]
     mounts = [v for v in svc["volumes"] if "SharpSans-Bold.woff2" in v]
     assert len(mounts) == 1, "expected exactly one Sharp Sans bind mount"
     mount = mounts[0]

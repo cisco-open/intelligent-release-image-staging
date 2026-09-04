@@ -25,7 +25,9 @@ chmod +x "$STUB"
 trap 'rm -f "$STUB"' EXIT
 
 eval "$(awk '/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/' "$EP")"
-ARIA2="$STUB"; RPC_PORT=6800; MAX_PEERS=10; STAGE_DIR="$T"; HOOK=""
+ARIA2="$STUB"; RPC_PORT=6800; MAX_PEERS=10; MAX_CONCURRENT=100
+STAGE_DIR="$T"; HOOK=""; IRIS_LOG=off; LOG_FILE="$T/aria2c.log"
+ARIA2_CONF="$T/aria2.conf"
 ARIA2_PID=""; ARIA2_START=""
 
 fail() { echo "FAIL: $*"; exit 1; }

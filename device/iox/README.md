@@ -9,7 +9,7 @@ through SSH-to-self:
 | | Guest Shell agent | IOx app agent |
 |---|---|---|
 | reach IOS | in-process `cli` module | **SSH-to-self** (`cli_ssh`) to the app VLAN SVI |
-| runtime gate | default | `IRIS_RUNTIME_MODE=container` (baked in the image) |
+| runtime gate | no container selector | `IRIS_DEVICE_PLATFORM=iox` (set by the installer) |
 
 `device/agent/cli_ssh.py` re-binds `cli_execute`/`cli_configure` behind a runtime
 seam (`build_deps` → `cli_ssh.select_cli`). The C9300 Guest Shell path is
@@ -18,19 +18,24 @@ unchanged (default mode still does `from cli import execute, configure`).
 ## Build
 
 ```
-# ARM64 is the default
+# Build/verify the one persisted amd64+arm64 OCI archive; architecture flags
+# do not select or reduce an --image-only build.
 CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh --image-only
+
+# ARM64 is the default only when producing an IOx wrapper.
 CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
 
 # x86_64 Catalyst package
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   CATALOG_PEM=/path/to/iris-catalog.pem ./build.sh [OUTPUT_DIR]
 ```
-The default output is `device/iox/out/iris-arm64.tar`. Packaging also needs a
-configured `ioxclient`; `--image-only` does not. The build uses an
-architecture-matched `aria2c` from `ARIA2C_BIN`, a local agent bundle, or
-`deliverables/aria2c-<arch>`, verifying each against `tools/aria2c.sha256` and
-failing closed on a mismatch. The build never downloads a client: an earlier
+The default native-wrapper output is `device/iox/out/iris-arm64.tar`.
+`--image-only` instead persists the signable multi-platform archive at
+`artifacts/iris-device-$VERSION.oci.tar` and its adjacent `.manifest`.
+Packaging needs a configured `ioxclient`; `--image-only` does not. The shared
+multi-platform build uses `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` overrides, local agent
+bundles, or `deliverables/aria2c-<arch>`, verifying both architectures against
+`tools/aria2c.sha256` and failing closed on a mismatch. The build never downloads a client: an earlier
 network fallback could silently ship an unpatched third-party build into the
 image. Supply the pinned catalog cert with `CATALOG_PEM` (certificate block
 only — a combined cert+key file such as the server's `IRIS_CERT` is refused),
@@ -40,7 +45,7 @@ probe member `tools/check-package-freshness.sh` and the console read.
 
 ## Config delivery
 
-`entrypoint.sh` (PID 1) generates `iris/iris-agent.conf` under the CAF persistent
+`device/container/entrypoint.sh` (PID 1) generates `iris/iris-agent.conf` under the CAF persistent
 directory (`/iox_data` on the validated C9300 runtime, with `/data` as fallback)
 on first boot, starts `aria2c` as the BT RPC daemon, and runs
 `iris_agent.py --once` every `IRIS_TICK_SECONDS`. The generated secret-bearing
@@ -57,8 +62,14 @@ time via numbered app-hosting Docker `run-opts -e` entries, never baked in:
 | `IRIS_CATALOG_URL` | `catalog_url` | required reachable URL covered by the pinned cert |
 | `IRIS_TARGET_FS` | `target_fs` | optional writable IOS disk prefix; installer default `sdflash:` |
 | `IRIS_TELEMETRY` | `telemetry` | default `on` — post-staging telemetry reports + pull (set `off` to silence) |
-| `IRIS_SHARE_DIR` | `share_dir` | C9300 SSD-share path **inside the app** (paired with a `run-opts -v` bind mount); the agent lands its scratch there so the placement is a local disk write |
-| `IRIS_SHARE_IOS_PATH` | `share_ios_path` | the same share as IOS sees it, e.g. `usbflash1:iox_host_data_share`; both are required together for the C9300 share path below |
+| `IRIS_DEVICE_PLATFORM` | `device_platform` | required selector; this package accepts only `iox` |
+| `IRIS_SHARE_DIR` | `share_dir` | optional validated override; `iox` default `/mnt/share` |
+| `IRIS_SHARE_IOS_PATH` | `share_ios_path` | optional validated override; `iox` default `usbflash1:iox_host_data_share` |
+
+The `iox` profile derives the container share path (`/mnt/share`) and IOS share
+name (`usbflash1:iox_host_data_share`) itself. A Catalyst package supplies only
+the corresponding `-v` mount. Direct deployments may retain the existing
+overrides, but the entrypoint validates both before use; XR rejects them.
 
 The IOx agent reuses one short-lived SSH control connection for CLI and SCP
 work. This avoids opening a new VTY login for every filesystem check, transfer,
@@ -88,13 +99,13 @@ and verification call during an agent tick.
 2. **Mint the device token** (server):
    `docker compose -f server/docker-compose.yml exec iris iris-mint-enrollment <device-id>`
 
-3. **Get the package onto the device flash**: drop the architecture-matched tar into the
-   server's `artifacts/` directory — the `iris` container already serves it on
-   `:8000` over HTTPS, so there is no throwaway web server to start. The device
-   pulls it over verified HTTPS (against the server cert, via the per-device PKI
-   trustpoint configured first), landing it at `flash:iris-arm64.tar`. This is exactly
-   what `install.sh` automates; do it by hand only if you are not using the
-   one-shot installer.
+3. **Get the package onto the device flash**: place the architecture-matched
+   tar in the server's `artifacts/` directory. `install.sh` reads it locally
+   and pushes it over its authenticated, host-key-checked SCP session, landing
+   it at `flash:iris-arm64.tar` (or the selected package filesystem). The
+   credential is supplied to `sshpass` through the environment, never a URL,
+   argument, or log. Do this by hand only if you are not using the one-shot
+   installer.
 
    This is also the only manual prerequisite for **Console one-click onboarding**:
     once `iris-arm64.tar` is staged in `artifacts/`, the Console picks this installer
@@ -131,19 +142,16 @@ and verification call during an agent tick.
      run-opts 4 "-e IRIS_CATALOG_URL=https://<server-ip>:8443"
      run-opts 5 "-e IRIS_DEVICE_SSH_HOST=<svi-ip>"
      run-opts 6 "-e IRIS_DEVICE_SSH_USER=<user>"
-     run-opts 7 "-e IRIS_TARGET_FS=<ios-filesystem>:"
+     run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"
      run-opts 8 "-e IRIS_TELEMETRY=on"
-    !                                  C9k share-mount transfer only (9-11):
-     run-opts 9 "-e IRIS_SHARE_DIR=/mnt/share"
-     run-opts 10 "-e IRIS_SHARE_IOS_PATH=usbflash1:iox_host_data_share"
+    !                                  C9k share-mount transfer only:
      run-opts 11 "-v /vol/usb1/iox_host_data_share:/mnt/share"
    ```
 
    `install.sh` emits separate numbered `run-opts` lines because Catalyst app
    hosting limits each option line. For the validated C9300 path, use the
    amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
-   the share pair `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share`
-   `SHARE_IOS_PATH=usbflash1:iox_host_data_share` (run-opts 9-11 above; also
+   `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` (run-opts 11 above; also
    `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
    target exists). IE-3x00 defaults remain ARM64, `AppGigabitEthernet1/1`, and
    `sdflash:` with no share mount.

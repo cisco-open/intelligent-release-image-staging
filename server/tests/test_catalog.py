@@ -350,6 +350,8 @@ def _serve(tmp_path, token, device_id="sw-9", audit_path=None):
     }
     secrets_store.save(store, sp)
     s = _store(tmp_path)
+    # Device catalog views are assignment projections, not shared inventory.
+    s.set_policy(device_id, approved_image_id="img1")
     kwargs = {}
     if audit_path is not None:
         kwargs["audit_path"] = audit_path
@@ -458,11 +460,12 @@ def test_heartbeat_and_policy_endpoints(tmp_path):
                                              "version": "17.18",
                                              "stage_state": "ready"}))
         assert status == 200
-        status, _, body = _req(port, "GET", "/v1/devices", token="tok")
-        devices = json.loads(body)["devices"]
-        assert any(s["device_id"] == "sw-9" for s in devices)
-        device9 = [s for s in devices if s["device_id"] == "sw-9"][0]
-        assert device9["stage_state"] == "ready"
+        # Fleet enumeration moved to the management API; a device credential
+        # has no catalog-wide device collection.
+        status, _, _ = _req(port, "GET", "/v1/devices", token="tok")
+        assert status == 404
+        assert catalog.CatalogStore(str(tmp_path)).get_device(
+            "sw-9")["stage_state"] == "ready"
         status, _, body = _req(
             port, "GET", "/v1/devices/sw-9/policy", token="tok")
         assert status == 200          # default policy when none set
@@ -775,7 +778,16 @@ def test_auth_fail_writes_audit_line(tmp_path):
         fail_events = [e for e in lines if e["event"] == "auth_fail"]
         assert fail_events, "expected auth_fail audit line"
         assert fail_events[-1]["result"] == "fail"
-        assert fail_events[-1]["device_id"] == "dev-a"
+        # The path identity is unauthenticated attacker input; the audit line
+        # records the refusal without persisting that unbounded string.
+        assert fail_events[-1]["device_id"] == "unresolved"
+        attacker_id = "x" * 32000
+        _req(port, "POST", "/v1/devices/" + attacker_id + "/token-refresh",
+             token=tok_b, body=b"{}")
+        with open(audit_path, encoding="utf-8") as stream:
+            raw_audit = stream.read()
+        assert attacker_id not in raw_audit
+        assert max(len(line) for line in raw_audit.splitlines()) < 2048
     finally:
         srv.shutdown()
 
@@ -1893,13 +1905,9 @@ def test_pull_directive_lifecycle_with_ttl(tmp_path):
     assert s.pending_report("dev-1", now + 601) is None
 
 
-def test_list_devices_reaps_expired_pull_directive_for_a_device_that_never_returns(tmp_path):
-    """A device that was issued a pull directive and then never heartbeats or
-    reports again used to leave its expired row in pull_requests.d/ forever
-    (pending_request() only reaps the QUERIED device's own row, and nothing
-    else ever queries a vanished device). list_devices() is already an
-    O(fleet) console operation, so it piggybacks the reclaim -- without
-    reintroducing a fleet-wide sweep on any per-device path."""
+def test_list_devices_does_not_reap_expired_pull_directive(tmp_path):
+    """GET-backed fleet enumeration is side-effect free; expiration cleanup
+    belongs to a heartbeat/write path rather than this read."""
     s = catalog.CatalogStore(str(tmp_path))
     now = 1000.0
     assert s.request_report("ghost", now) is True
@@ -1910,12 +1918,11 @@ def test_list_devices_reaps_expired_pull_directive_for_a_device_that_never_retur
     later = now + catalog.CatalogStore.PULL_TTL + 1
     s.list_devices(later)
 
-    assert s._pulls.get("ghost") is None          # reclaimed by the sweep
+    assert s._pulls.get("ghost") is not None      # read did not rewrite state
 
 
 def test_list_devices_leaves_unexpired_pull_directive_alone(tmp_path):
-    """The fleet-wide sweep in list_devices() must not clear a directive that
-    has not expired yet."""
+    """A read does not clear an unexpired directive either."""
     s = catalog.CatalogStore(str(tmp_path))
     now = 1000.0
     assert s.request_report("dev-1", now) is True
@@ -2021,7 +2028,8 @@ def test_post_body_over_cap_is_413(tmp_path):
     try:
         status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok", big)
         assert status == 413
-        assert resp == {"error": "body too large"}
+        assert resp["status"] == 413
+        assert resp["type"].endswith("payload-too-large")
         # the cap is global to do_POST, not telemetry-specific
         status, resp = _post(port, "/v1/devices/sw-9/heartbeat", "tok", big)
         assert status == 413
@@ -2056,7 +2064,8 @@ def test_telemetry_gzip_bomb_is_413(tmp_path):
         status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok", bomb,
                              gzip_body=True)
         assert status == 413
-        assert resp == {"error": "body too large"}
+        assert resp["status"] == 413
+        assert resp["type"].endswith("payload-too-large")
     finally:
         srv.shutdown()
     assert catalog.CatalogStore(str(tmp_path)).get_telemetry("sw-9") == []
@@ -2070,7 +2079,8 @@ def test_telemetry_bad_gzip_is_400(tmp_path):
         status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok",
                              b"this is not gzip data", gzip_body=True)
         assert status == 400
-        assert resp == {"error": "bad request body"}
+        assert resp["status"] == 400
+        assert resp["type"].endswith("invalid-request-body")
     finally:
         srv.shutdown()
     assert catalog.CatalogStore(str(tmp_path)).get_telemetry("sw-9") == []
@@ -2109,7 +2119,8 @@ def test_telemetry_oversized_sanitized_report_is_400(tmp_path):
         assert len(body) < 65536, "fixture must clear the wire cap, not the store cap"
         status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok", body)
         assert status == 400
-        assert resp == {"error": "bad report"}
+        assert resp["status"] == 400 and resp["error"] == "bad report"
+        assert resp["type"].endswith("invalid-request")
         # a normal full-shape report is well under the bound and still stores.
         status, resp = _post(port, "/v1/devices/sw-9/telemetry", "tok",
                              json.dumps(_report()).encode())
@@ -2306,33 +2317,71 @@ def _serve_torrent(tmp_path, device_id="dev-t", catalog_tok="ctok",
     s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
+    s.set_policy(device_id, approved_image_id="img1")
     os.environ["IRIS_HOST_IP"] = host_ip
     srv = catalog.make_server("127.0.0.1", 0, s, sp)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
 
 
-def _req_headers(port, path, token):
+def _req_headers(port, path, token, extra_headers=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    c.request("GET", path, headers={"Authorization": "Bearer " + token})
+    headers = {"Authorization": "Bearer " + token}
+    headers.update(extra_headers or {})
+    c.request("GET", path, headers=headers)
     r = c.getresponse()
     body = r.read()
     return r.status, dict(r.getheaders()), body
 
 
-def test_device_gets_personalized_torrent_with_its_announce(tmp_path):
+def test_device_gets_token_free_torrent_for_header_announce_auth(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNTOKEN")
+    try:
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok",
+            {"X-IRIS-Tracker-Auth": "bearer"})
+        assert status == 200
+        meta = bencode.decode(body)
+        assert meta[b"announce"] == b"http://10.0.0.1:6969/announce"
+        assert b"ANNTOKEN" not in body
+        assert b"announce-list" not in meta
+        # info hash unchanged vs canonical
+        canon = _valid_torrent_bytes()
+        canon_info = bencode.decode(canon)[b"info"]
+        assert bencode.encode(meta[b"info"]) == bencode.encode(canon_info)
+    finally:
+        srv.shutdown()
+
+
+def test_tracker_auth_selector_is_interpreted_only_on_torrent_route(tmp_path):
+    srv, port = _serve_torrent(tmp_path, announce_val="ANNTOKEN")
+    try:
+        status, _, _ = _req_headers(
+            port, "/v1/images", "ctok",
+            {"X-IRIS-Tracker-Auth": "not-a-supported-selector"})
+        assert status == 200
+        status, headers, body = _req_headers(
+            port, "/v1/torrents/img1.torrent", "ctok",
+            {"X-IRIS-Tracker-Auth": "not-a-supported-selector"})
+        assert status == 400
+        assert headers["Content-Type"] == "application/problem+json"
+        assert json.loads(body)["code"] == "invalid-tracker-auth-selector"
+    finally:
+        srv.shutdown()
+
+
+def test_device_gets_legacy_query_torrent_without_opt_in_header(tmp_path):
+    """Unchanged Guest Shell requests remain byte-for-wire compatible."""
     srv, port = _serve_torrent(tmp_path, announce_val="ANNTOKEN")
     try:
         status, headers, body = _req_headers(
             port, "/v1/torrents/img1.torrent", "ctok")
         assert status == 200
         meta = bencode.decode(body)
-        assert b"announce_token=ANNTOKEN" in meta[b"announce"]
-        assert b"announce-list" not in meta
-        # info hash unchanged vs canonical
-        canon = _valid_torrent_bytes()
-        canon_info = bencode.decode(canon)[b"info"]
-        assert bencode.encode(meta[b"info"]) == bencode.encode(canon_info)
+        assert meta[b"announce"] == (
+            b"http://10.0.0.1:6969/announce?announce_token=ANNTOKEN")
+        assert headers.get("Vary") == (
+            "Authorization, X-IRIS-Tracker-Auth")
     finally:
         srv.shutdown()
 
@@ -2344,7 +2393,8 @@ def test_personalized_response_cache_headers(tmp_path):
             port, "/v1/torrents/img1.torrent", "ctok")
         assert status == 200
         assert headers.get("Cache-Control") == "private, no-store"
-        assert headers.get("Vary") == "Authorization"
+        assert headers.get("Vary") == (
+            "Authorization, X-IRIS-Tracker-Auth")
     finally:
         srv.shutdown()
 
@@ -3115,12 +3165,18 @@ def test_corrupt_policy_json_is_503_on_the_wire_not_an_empty_policy(tmp_path):
     try:
         s = catalog.CatalogStore(str(tmp_path))
         s.set_policy("sw-9", approved_image_ids=["img1"])
-        with open(s.policy_path, "w") as f:
+        # Policy has already migrated to keyed shards; corrupt the live row,
+        # not the deliberately retired legacy rollback-guard document.
+        shard = os.path.join(keyed_state.shard_dir(s.policy_path),
+                             "%02x.json" % keyed_state.bucket_of("sw-9"))
+        with open(shard, "w") as f:
             f.write("{not json")
         status, _, body = _req(port, "GET", "/v1/devices/sw-9/policy",
                                token="tok")
         assert status == 503
-        assert json.loads(body) == {"error": "state unavailable"}
+        problem = json.loads(body)
+        assert problem["status"] == 503
+        assert problem["type"].endswith("service-unavailable")
         # The heartbeat consults the policy for the live-sample gate: the
         # heartbeat itself must not be lost to a 500 with no body either.
         status, _, body = _req(port, "POST", "/v1/devices/sw-9/heartbeat",
@@ -3173,7 +3229,8 @@ def test_heartbeat_rejects_nan_and_infinity_literals(tmp_path):
             port, "/v1/devices/sw-1/heartbeat",
             b'{"free_flash_bytes": NaN, "version": Infinity}')
         assert status == 400
-        assert json.loads(body) == {"error": "bad json"}
+        problem = json.loads(body)
+        assert problem["status"] == 400 and problem["error"] == "bad json"
         status, _ = _hand_post(port, "/v1/devices/sw-1/telemetry",
                               b'{"event": "pull", "ts": NaN}')
         assert status == 400
@@ -3272,7 +3329,8 @@ def test_heartbeat_non_object_or_deeply_nested_body_is_400(tmp_path):
                      b"[" * 30000 + b"]" * 30000):
             status, resp = _hand_post(port, "/v1/devices/sw-1/heartbeat", body)
             assert status == 400, body[:10]
-            assert json.loads(resp) == {"error": "bad json"}
+            problem = json.loads(resp)
+            assert problem["status"] == 400 and problem["error"] == "bad json"
         status, resp = _hand_post(port, "/v1/devices/sw-1/telemetry",
                                  b"[" * 30000 + b"]" * 30000)
         assert status == 400
@@ -3291,7 +3349,9 @@ def test_chunked_post_is_411_and_does_not_blank_the_heartbeat(tmp_path):
             port, "/v1/devices/sw-1/heartbeat", None,
             extra_headers="Transfer-Encoding: chunked\r\n")
         assert status == 411
-        assert json.loads(resp) == {"error": "content-length required"}
+        problem = json.loads(resp)
+        assert problem["status"] == 411
+        assert problem["type"].endswith("content-length-required")
         status, _ = _hand_post(port, "/v1/devices/sw-1/heartbeat", None)
         assert status == 411                   # no length header at all
     finally:

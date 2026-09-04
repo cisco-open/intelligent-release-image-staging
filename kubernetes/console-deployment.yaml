@@ -1,0 +1,165 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iris-console
+  labels:
+    app.kubernetes.io/name: iris-console
+    app.kubernetes.io/component: console
+    app.kubernetes.io/part-of: iris
+spec:
+  # The active browser TLS context is process-local. Recreate avoids briefly
+  # routing users across old and new identities during a certificate rollout.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iris-console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iris-console
+        app.kubernetes.io/component: console
+        app.kubernetes.io/part-of: iris
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Projected Secret files are root-owned. fsGroup grants this fixed
+        # non-root identity read access without broadening their mode.
+        fsGroup: 10001
+      containers:
+        - name: console
+          # Kustomize replaces this fail-closed placeholder. The console has
+          # its own image and can roll independently from the device-facing tier.
+          image: iris-console@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - /opt/iris/server/gui_server.py
+          envFrom:
+            - configMapRef:
+                name: iris-console
+          env:
+            - name: IRIS_MANAGEMENT_API_TOKEN_FILE
+              value: /run/secrets/iris-tier-auth/current
+            - name: IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE
+              value: /run/secrets/iris-tier-auth/previous
+            - name: IRIS_MANAGEMENT_API_CA
+              value: /run/config/iris-management-ca/ca.crt
+            - name: IRIS_GUI_CERT
+              # The console fetches the active browser identity through the
+              # authenticated management API, then atomically writes it only
+              # to this pod-local memory volume for initial load/hot reload.
+              value: /run/iris/console-cert.pem
+            # An independent browser identity lets this stateless tier start
+            # and serve local health/static content during a server-tier cold
+            # start.  A management-configured custom identity can replace the
+            # runtime copy later; this Secret remains the bootstrap/default.
+            - name: IRIS_GUI_DEFAULT_CERT
+              value: /run/secrets/iris-console-tls/tls.crt
+            - name: IRIS_GUI_DEFAULT_KEY
+              value: /run/secrets/iris-console-tls/tls.key
+          ports:
+            - name: console
+              containerPort: 8080
+              protocol: TCP
+          # Readiness is deliberately local: a starting or restarting server
+          # tier makes API calls return 503 but cannot deadlock console startup.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: console
+              scheme: HTTPS
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: console
+              scheme: HTTPS
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: console
+              scheme: HTTPS
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: runtime
+              mountPath: /run/iris
+            - name: tmp
+              mountPath: /tmp
+            - name: tier-auth
+              mountPath: /run/secrets/iris-tier-auth
+              readOnly: true
+            - name: management-ca
+              mountPath: /run/config/iris-management-ca
+              readOnly: true
+            - name: console-tls
+              mountPath: /run/secrets/iris-console-tls
+              readOnly: true
+          # Initial operator budget, not a measured capacity claim. Measure the
+          # real request mix before changing it; the cap prevents UI work from
+          # starving the tracker on a shared node.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tier-auth
+          secret:
+            secretName: iris-tier-auth
+            defaultMode: 0440
+            items:
+              - key: current
+                path: current
+              - key: previous
+                path: previous
+        - name: management-ca
+          configMap:
+            name: iris-management-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: console-tls
+          secret:
+            secretName: iris-console-tls
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key

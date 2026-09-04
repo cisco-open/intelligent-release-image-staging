@@ -43,7 +43,11 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
 # docker-archive rootfs.tar itself and package the directory.
 
 @test "build.sh exports rootfs.tar via skopeo docker-archive" {
-  run grep -F -- 'skopeo copy "docker-daemon:$IMAGE_TAG" "docker-archive:$CTX/rootfs.tar:$IMAGE_TAG"' "$BUILD"
+  run grep -F -- 'skopeo copy --override-os linux --override-arch "$IOX_ARCH"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F -- '"oci-archive:$OCI_ARCHIVE"' "$BUILD"
+  [ "$status" -eq 0 ]
+  run grep -F -- '"docker-archive:$CTX/rootfs.tar:iris-device:$IOX_ARCH"' "$BUILD"
   [ "$status" -eq 0 ]
 }
 
@@ -53,7 +57,7 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
 }
 
 @test "build.sh rejects OCI-index rootfs archives" {
-  run grep -F 'grep -qx "index.json"' "$BUILD"
+  run grep -F 'tar tf "$CTX/rootfs.tar" | grep -qx index.json' "$BUILD"
   [ "$status" -eq 0 ]
 }
 
@@ -87,4 +91,61 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   [ "$status" -eq 0 ]
   run grep -F '( cd "$CTX" && "$IOXCLIENT" package . )' "$BUILD"
   [ "$status" -ne 0 ]
+}
+
+@test "IOx wrapper atomically publishes provenance bound to the canonical OCI" {
+  STUB="$BATS_TEST_TMPDIR/stub"
+  BIN="$BATS_TEST_TMPDIR/bin"
+  OUT="$BATS_TEST_TMPDIR/out"
+  mkdir -p "$STUB/device/iox" "$STUB/tools" "$BIN" "$OUT"
+  ln -s "$BUILD" "$STUB/device/iox/build.sh"
+  printf 'descriptor\n' > "$STUB/device/iox/package.yaml"
+  printf 'descriptor\n' > "$STUB/device/iox/package-amd64.yaml"
+  printf '0.0.0-test\n' > "$STUB/VERSION"
+  cat > "$STUB/tools/build-device-image.sh" <<'STUB_COMMON'
+#!/usr/bin/env bash
+set -eu
+ctx=""
+while [ $# -gt 0 ]; do
+  case "$1" in --context) ctx="$2"; shift 2 ;; *) shift ;; esac
+done
+archive="$TEST_ROOT/canonical.oci.tar"
+printf 'oci\n' > "$archive"
+printf '%s\n' "$archive" > "$ctx/iris-device-oci-path"
+printf '%s\n' 'public cert' > "$ctx/iris-catalog.pem"
+cat > "$ctx/iris-device-oci.manifest" <<EOF
+format=iris-device-oci-v1
+source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+index_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+archive_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+platforms=linux/amd64,linux/arm64
+EOF
+STUB_COMMON
+  cat > "$BIN/skopeo" <<'STUB_SKOPEO'
+#!/usr/bin/env bash
+for arg in "$@"; do case "$arg" in docker-archive:*) out="${arg#docker-archive:}"; out="${out%%:*}" ;; esac; done
+d="$(mktemp -d)"
+printf '[{"Config":"config.json","RepoTags":["iris-device:test"],"Layers":[]}]\n' > "$d/manifest.json"
+tar cf "$out" -C "$d" manifest.json
+rm -rf "$d"
+STUB_SKOPEO
+  cat > "$BIN/ioxclient" <<'STUB_IOX'
+#!/usr/bin/env bash
+printf 'iox wrapper bytes\n' > package.tar
+STUB_IOX
+  chmod +x "$STUB/tools/build-device-image.sh" "$BIN/skopeo" "$BIN/ioxclient"
+
+  run env PATH="$BIN:$PATH" TEST_ROOT="$BATS_TEST_TMPDIR" \
+    bash "$STUB/device/iox/build.sh" "$OUT"
+  [ "$status" -eq 0 ]
+  [ -f "$OUT/iris-arm64.tar" ]
+  manifest="$OUT/iris-arm64.tar.manifest"
+  [ -f "$manifest" ]
+  grep -q '^wrapper_kind=iox$' "$manifest"
+  grep -q '^platform=linux/arm64$' "$manifest"
+  grep -q '^canonical_index_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb$' "$manifest"
+  grep -q '^canonical_archive_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc$' "$manifest"
+  grep -q '^canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$' "$manifest"
+  grep -q "^wrapper_sha256=$(sha256sum "$OUT/iris-arm64.tar" | awk '{print $1}')$" "$manifest"
+  ! find "$OUT" -maxdepth 1 -name '.iris-arm64.tar.*' | grep -q .
 }

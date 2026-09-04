@@ -27,6 +27,13 @@ IRIS serves the Prometheus text format at `/metrics` on port 9101:
 ```yaml
 scrape_configs:
   - job_name: iris
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/iris-observability-token
+    tls_config:
+      ca_file: /etc/prometheus/secrets/iris-catalog.pem
+      server_name: 203.0.113.10
     static_configs:
       - targets: ['203.0.113.10:9101']
 ```
@@ -34,12 +41,23 @@ scrape_configs:
 Two conditions gate that endpoint:
 
 * `IRIS_OBSERVABILITY=1` must be set. With telemetry off, `/metrics` answers
-  404 while the rest of the 9101 listener (`/healthz`, `/swarm`, `/swarmmap`)
-  keeps running — so Prometheus reads the target as **down** and the board
-  renders blank. That is telemetry being off, not a broken server. See
+  404 while the minimal probes and management-authenticated `/swarm` keep
+  running — so Prometheus reads the target as **down** and the board renders
+  blank. That is telemetry being off, not a broken server. See
   [observability](../observability.md).
 * `IRIS_METRICS_PORT` must not be empty or `0`, which disables the listener
   entirely.
+* The scraper must present the raw observability bearer from its mounted
+  `current` file and verify the TLS identity with the catalog CA. `server_name`
+  above must match a certificate IP or DNS SAN.
+
+On a Compose deployment, create that raw token with `umask 077`, export its
+host path as `IRIS_OBSERVABILITY_TOKEN_FILE_HOST`, and make it readable by uid
+`10001`; then mount the same file into Prometheus at the `credentials_file`
+path above. The optional
+`IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST` exists only for rotation. See
+[Telemetry export](../telemetry-export.md#turning-export-on) for the exact host
+commands.
 
 Scraping `/metrics` directly and remote-writing it from a collector are
 equally fine — the board only needs the series to reach Prometheus. If you take

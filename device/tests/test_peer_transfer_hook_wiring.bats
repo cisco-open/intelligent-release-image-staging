@@ -13,11 +13,10 @@
 # changeable, and RpcMethod.cc:158-164 filters per-download options through
 # getInitialOption(), silently dropping the rest -- so passing it in
 # aria2.addTorrent's options dict would be discarded with no error at all.
-# There are three launchers: device/guestshell-start.sh (Catalyst AND router --
+# There are two launchers: device/guestshell-start.sh (Catalyst AND router --
 # router-install.sh runs the same bootstrap chain, differing only in the
-# /bootflash prefix), device/iox/entrypoint.sh (IE3400 arm64 and the amd64
-# app-hosting package), and device/xr/entrypoint.sh (Cisco 8000 series, added
-# with IOS-XR support after this file first said "exactly two").
+# /bootflash prefix), and the unified device/container/entrypoint.sh (IOx and
+# IOS-XR appmgr profiles).
 #
 # The Guest Shell launcher's own behaviour is covered in
 # device/test_guestshell_start.bats.
@@ -25,7 +24,7 @@
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   DEVICE="$REPO/device"
-  ENTRYPOINT="$DEVICE/iox/entrypoint.sh"
+  ENTRYPOINT="$DEVICE/container/entrypoint.sh"
   HOOK_SRC="$DEVICE/agent/peer-transfer-hook.sh"
   TMPD="$BATS_TEST_TMPDIR/w"
   mkdir -p "$TMPD/bin" "$TMPD/stage"
@@ -45,7 +44,8 @@ run_start_aria2c() {
   PATH="$TMPD/bin:$PATH" bash -c '
     set -eu
     ARIA2="'"$TMPD"'/bin/aria2c-stub"
-    RPC_PORT=6800; MAX_PEERS=10; STAGE_DIR="'"$TMPD"'/stage"
+    RPC_PORT=6800; MAX_PEERS=10; MAX_CONCURRENT=100; STAGE_DIR="'"$TMPD"'/stage"
+    ARIA2_CONF="'"$TMPD"'/aria2.conf"
     HOOK="'"$1"'"
     eval "$(awk "/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/" "'"$ENTRYPOINT"'")"
     ARIA2_PID=""; ARIA2_START=""
@@ -82,7 +82,9 @@ run_start_aria2c() {
   # assertions here could never go red.
   [[ "$out" == *"--enable-dht=false"* ]] || return 1
   [[ "$out" == *"--bt-seed-unverified=true"* ]] || return 1
-  [[ "$out" == *"--rpc-secret=supervisorsecret"* ]] || return 1
+  [[ "$out" == *"--conf-path=$TMPD/aria2.conf"* ]] || return 1
+  [[ "$out" != *"supervisorsecret"* ]] || return 1
+  grep -qx 'rpc-secret=supervisorsecret' "$TMPD/aria2.conf" || return 1
   [[ "$out" == *"--dir=$TMPD/stage"* ]]
 }
 
@@ -106,6 +108,13 @@ run_start_aria2c() {
   run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
   [ "$status" -eq 0 ]
   grep -qx "IRIS_RPC_SECRET=supervisorsecret" "$TMPD/env.txt"
+}
+
+@test "entrypoint keeps the RPC secret out of aria2 argv" {
+  run run_start_aria2c "/opt/iris/agent/peer-transfer-hook.sh"
+  [ "$status" -eq 0 ]
+  ! grep -q 'supervisorsecret' "$TMPD/launched.txt"
+  [ "$(stat -c %a "$TMPD/aria2.conf")" = 600 ]
 }
 
 @test "entrypoint runs aria2c as a tracked child, not a detached daemon" {
@@ -132,19 +141,19 @@ run_start_aria2c() {
 # Packaging: the hook has to reach the device before it can be wired
 # ---------------------------------------------------------------------------
 
-@test "the IOx image copies the hook in and gives it the exec bit" {
+@test "the unified image copies the hook in and gives it the exec bit" {
   # aria2 execs the value with execlp -- no shell, no PATH search fallback for
   # a non-executable file. Without the bit the hook is silently never run.
   grep -q '^COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh$' \
-    "$DEVICE/iox/Dockerfile"
-  grep -q 'chmod +x .*/opt/iris/agent/peer-transfer-hook.sh' "$DEVICE/iox/Dockerfile"
+    "$DEVICE/container/Dockerfile"
+  grep -q 'chmod +x .*/opt/iris/agent/peer-transfer-hook.sh' "$DEVICE/container/Dockerfile"
 }
 
-@test "the IOx build stages the hook into the docker context" {
+@test "the canonical image build stages the hook into the docker context" {
   # It is not *.py, so the agent glob does not carry it; the Dockerfile COPYs
   # it by name, so a missing line here fails the build on a missing source.
-  grep -q 'cp "\$REPO/device/agent/peer-transfer-hook.sh" "\$CTX/agent/"' \
-    "$DEVICE/iox/build.sh"
+  grep -q 'cp "\$REPO/device/agent/peer-transfer-hook.sh" "\$CONTEXT_DIR/agent/"' \
+    "$REPO/tools/build-device-image.sh"
 }
 
 @test "the Guest Shell bundle ships the hook, executable, beside the agent" {

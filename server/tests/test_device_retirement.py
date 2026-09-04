@@ -324,7 +324,7 @@ def test_device_seeder_id_is_reserved_at_enrollment(tmp_path, monkeypatch):
 def test_gui_revoke_helper_aborts_on_persist_failure(tmp_path, monkeypatch):
     """_revoke_device_secrets re-raises on a persist failure so the caller
     aborts the delete with no state change."""
-    import gui_server
+    import management_api as gui_server
     import gui_app
     sp = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(sp)
@@ -343,7 +343,7 @@ def test_gui_revoke_helper_aborts_on_persist_failure(tmp_path, monkeypatch):
 
 
 def test_gui_revoke_helper_absent_device(tmp_path):
-    import gui_server
+    import management_api as gui_server
     import gui_app
     sp = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(sp)

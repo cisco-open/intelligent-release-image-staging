@@ -116,9 +116,11 @@ MAX_BODY=1000000
 # cannot make a genuinely empty swarm answer anything other than empty.
 attempt=1
 while :; do
-  BODY=`curl -s -f --connect-timeout 1 --max-time 2 --max-filesize "$MAX_BODY" \
-    -H 'Content-Type: application/json' --data-binary "$REQ" \
-    "http://127.0.0.1:$PORT/jsonrpc" 2>/dev/null` || exit 0
+  # stdin keeps the RPC secret out of curl's world-readable process argv.
+  BODY=`printf '%s' "$REQ" | \
+    curl -s -f --connect-timeout 1 --max-time 2 --max-filesize "$MAX_BODY" \
+      -H 'Content-Type: application/json' --data-binary @- \
+      "http://127.0.0.1:$PORT/jsonrpc" 2>/dev/null` || exit 0
 
   # Time-bounded for the same reason: aria2 is local and already holds the
   # answer in memory, so a stall means something is wrong. Over any bound curl

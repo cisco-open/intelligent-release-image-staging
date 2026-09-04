@@ -90,14 +90,31 @@ The public story is peer-assisted staging. The server implements that with a few
 | Telemetry service | Receives device reports and exposes health, swarm, and metrics surfaces. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
-All of these services except the device agent run inside one container as the
-unprivileged user `iris`,
-a fixed uid/gid `10001` baked into the image. Every listener binds an
-unprivileged port, so the runtime drops all Linux capabilities and forbids
-privilege escalation. Nothing chowns anything at runtime, so the host paths that
-cross the container boundary — the age identity file, the artifacts directory,
-and the persistent volumes — have to be owned by that uid before the stack
-starts. See [Runtime identity](server.md#runtime-identity).
+IOx and IOS-XR appmgr use the same multi-architecture device image and the
+same entrypoint. `IRIS_DEVICE_PLATFORM=iox` or `xr-appmgr` selects the storage
+and device-integration profile; a missing or unknown value fails before any
+staging directory is created. Cisco's IOx tar and appmgr RPM remain different
+transport envelopes, but they carry the canonical image for the selected CPU
+architecture rather than separately maintained payloads.
+
+The server-side services are split across two containers. The stateful server
+tier runs the catalog, tracker, artifact server, seeder, telemetry service, and
+the authenticated management API. A separate, state-free console tier serves
+the browser application and forwards its allowlisted `/api/v1` requests to that
+management API over authenticated TLS. Device agents still call the catalog
+and tracker directly; unchanged Guest Shell onboarding also fetches from the
+artifact listener. Devices never call the management API, and only the server
+tier mounts device, catalog, image, or encrypted configuration state.
+
+Both containers run as the unprivileged user `iris`, a fixed uid/gid `10001`
+baked into their images. Every listener binds an unprivileged port, so the
+runtime drops all Linux capabilities and forbids privilege escalation. Nothing
+chowns anything at runtime, so the host paths that cross the server-container
+boundary — the age identity file, the one-use Console setup-token file, the
+artifacts directory, and any persistent volumes retained from an older
+root-running deployment — have to be owned by that uid before the stack starts.
+Fresh named volumes inherit the image's ownership when they are initialized. See
+[Runtime identity](server.md#runtime-identity).
 
 ## Storage and state
 

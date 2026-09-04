@@ -391,10 +391,10 @@ def test_durable_persist_before_canonical_replacement(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Raw-span verified replacement + announce_token= current
+# Raw-span verified replacement + token-free canonical announce
 # ---------------------------------------------------------------------------
 
-def test_replacement_preserves_info_hash_and_uses_current_token(tmp_path):
+def test_replacement_preserves_info_hash_without_embedding_token(tmp_path):
     sp = _seeder_store(tmp_path)
     manifest_path = str(tmp_path / "recovery.json")
     canon = _canonical()
@@ -415,11 +415,13 @@ def test_replacement_preserves_info_hash_and_uses_current_token(tmp_path):
                                     "gid-old")],
         tracker_announce_base="http://h:6969/announce", deps=deps)
 
-    # The add carried the NEW current token, info hash unchanged.
+    # The rotated current remains in the secret store; neither it nor any
+    # credential is embedded in the torrent handed to aria2.
     new_tok = secrets_store.load(sp)["seeder"]["announce_token"]["value"]
     add_ev = [e for e in seeder.events if e[0] == "add"][0]
     ann = add_ev[2]
-    assert ("announce_token=%s" % new_tok).encode() in ann
+    assert ann == b"http://h:6969/announce"
+    assert new_tok.encode() not in ann
     # canonical file on disk now updated + info hash identical
     updated = torrent.read_bytes()
     up_hash = hashlib.sha1(
@@ -1354,18 +1356,18 @@ def test_swarm_probe_never_leaks_token_or_url_in_output(capsys):
 def test_make_swarm_probe_honors_iris_swarm_url_env(monkeypatch):
     # When no explicit url is passed, the probe resolves IRIS_SWARM_URL at
     # construction so an operator override reaches the sender.
-    monkeypatch.setenv("IRIS_SWARM_URL", "http://127.0.0.1:9999/swarm")
+    monkeypatch.setenv("IRIS_SWARM_URL", "https://127.0.0.1:9101/swarm")
     seen = []
     doc = _serving_swarm(["abc"])
     probe = rot.make_swarm_probe(
         ["abc"], 99, sender=lambda u, t: (seen.append(u) or doc),
         sleep=lambda s: None, retries=1)
     assert probe() is True
-    assert seen == ["http://127.0.0.1:9999/swarm"]
+    assert seen == ["https://127.0.0.1:9101/swarm"]
 
 
 def test_make_swarm_probe_explicit_url_overrides_env(monkeypatch):
-    monkeypatch.setenv("IRIS_SWARM_URL", "http://127.0.0.1:9999/swarm")
+    monkeypatch.setenv("IRIS_SWARM_URL", "https://127.0.0.1:9101/swarm")
     seen = []
     doc = _serving_swarm(["abc"])
     probe = rot.make_swarm_probe(
@@ -1377,12 +1379,27 @@ def test_make_swarm_probe_explicit_url_overrides_env(monkeypatch):
 
 
 def test_make_swarm_probe_never_leaks_env_url_on_error(monkeypatch, capsys):
-    # A secret-bearing IRIS_SWARM_URL must never surface in output/errors.
+    # A credential-bearing URL is rejected before any sender can receive it,
+    # and its value must never surface in output/errors.
     monkeypatch.setenv("IRIS_SWARM_URL",
                        "http://user:s3cr3t-token@127.0.0.1:9999/swarm")
-    probe = rot.make_swarm_probe(
-        ["abc"], 99, sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
-        sleep=lambda s: None, retries=1)
-    assert probe() is False
+    with pytest.raises(ValueError, match="invalid local swarm URL"):
+        rot.make_swarm_probe(
+            ["abc"], 99,
+            sender=lambda u, t: (_ for _ in ()).throw(OSError("x")),
+            sleep=lambda s: None, retries=1)
     out = capsys.readouterr()
     assert "s3cr3t-token" not in (out.out + out.err)
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:9101/swarm",
+    "https://telemetry.example:9101/swarm",
+    "https://127.0.0.1:9102/swarm",
+    "https://127.0.0.1:9101/healthz",
+    "https://127.0.0.1:9101/swarm?next=https://example.test",
+])
+def test_default_swarm_url_rejects_nonlocal_or_wrong_origin(monkeypatch, url):
+    monkeypatch.setenv("IRIS_SWARM_URL", url)
+    with pytest.raises(ValueError, match="invalid local swarm URL"):
+        rot._default_swarm_url()

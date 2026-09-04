@@ -17,12 +17,13 @@ setup() {
 # Dry-run text pins
 # ---------------------------------------------------------------------------
 
-@test "dry-run renders the hardware-proven activate line with the three secrets" {
+@test "dry-run renders the hardware-proven activate line with its secret redacted" {
   # Rewritten (was pinned to the pre-#123/#124 opts string) to also cover the
   # bounded container-log driver and the IRIS_LOG env now on the line.
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=<redacted> --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+  [[ "$output" != *'deadbeefcafe'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,48 @@ setup() {
   CATALOG_TOKEN='bad"value' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
   [[ "$output" == *"CATALOG_TOKEN must not contain a double quote"* ]]
+}
+
+@test "dry-run rejects appmgr/config injection across XR supplied fields" {
+  local name value
+  while IFS='|' read -r name value; do
+    run env "$name=$value" bash "$INSTALL" --dry-run
+    [ "$status" -ne 0 ] || { echo "$name unexpectedly accepted"; return 1; }
+    [[ "$output" != *$'\ncommit\nreload\n'* ]] || return 1
+  done <<'EOF'
+APPID|iris;commit
+SOURCE_NAME|iris-xr;commit
+DEVICE_IP|192.0.2.10;reload
+DEVICE_ID|8010-r1;reload
+MODEL|8201;reload
+IRIS_TELEMETRY|on;reload
+IRIS_TELEMETRY_STREAM|off;reload
+IRIS_LOG|on;reload
+XR_MIN_FREE_BYTES|2147483648;reload
+ACTIVATE_TIMEOUT|300;reload
+ACTIVATE_POLL|10;reload
+EOF
+}
+
+@test "dry-run rejects CR/LF without echoing the catalog credential" {
+  CATALOG_TOKEN=$'literal-secret\r\ncommit' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'literal-secret'* ]]
+  [[ "$output" != *$'\ncommit\n'* ]]
+}
+
+@test "dry-run rejects catalog URL userinfo without printing it" {
+  CATALOG_URL=https://user:literal-secret@192.0.2.20:8443 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without credentials"* ]]
+  [[ "$output" != *"literal-secret"* ]]
+}
+
+@test "dry-run rejects unsafe package paths before printing an scp command" {
+  XR_RPM_FILE=$'/tmp/iris-xr.rpm\nreload' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'scp push'* ]]
 }
 
 @test "real install without credentials fails through the friendly guard, not an unbound variable" {

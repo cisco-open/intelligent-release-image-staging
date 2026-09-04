@@ -1,0 +1,25 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: iris-console
+  labels:
+    app.kubernetes.io/name: iris-console
+    app.kubernetes.io/component: console
+    app.kubernetes.io/part-of: iris
+spec:
+  type: LoadBalancer
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+    - IPv4
+  selector:
+    app.kubernetes.io/name: iris-console
+    app.kubernetes.io/component: console
+  ports:
+    - name: console
+      port: 8080
+      targetPort: console
+      protocol: TCP

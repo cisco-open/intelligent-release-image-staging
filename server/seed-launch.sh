@@ -84,6 +84,25 @@ CONF="$RUN_DIR/seeder.aria2.conf"
 chmod 0600 "$CONF"
 unset RPC_SECRET
 
+# Tracker authentication is an HTTP Authorization header, never a query
+# parameter in the torrent and never an argv value. Append it directly from
+# the tmpfs secret store into the mode-0600 aria2 config.
+PYTHONPATH="$SCRIPT_DIR" python3 - "${IRIS_SECRETS:-$RUN_DIR/secrets.json}" "$CONF" <<'PY' || {
+import os
+import sys
+import secrets_store
+
+store = secrets_store.load(sys.argv[1])
+token = store.get("seeder", {}).get("announce_token", {}).get("value")
+if not isinstance(token, str) or not token:
+    raise SystemExit(1)
+with open(sys.argv[2], "a") as stream:
+    stream.write("header=Authorization: Bearer %s\n" % token)
+PY
+  echo "FATAL: seeder announce credential missing or unreadable — refusing to launch" >&2
+  exit 1
+}
+
 exec "$ARIA2" \
   --conf-path="$CONF" \
   --listen-port="$LISTEN_PORT" \

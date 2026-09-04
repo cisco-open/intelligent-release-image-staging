@@ -9,6 +9,8 @@ The shim must make an SSH-to-self IOS session look EXACTLY like the Guest Shell
 command's output text (no prompt, no echoed command, no login/enable noise), so
 the existing text-exact parsers (flash_target, flashcheck) keep working unchanged.
 All tests inject a fake transcript runner -- no real SSH."""
+import pytest
+
 import cli_ssh
 
 
@@ -196,7 +198,7 @@ def test_select_cli_defaults_to_guestshell():
     assert execute == "GS_EXEC" and configure == "GS_CONF"
 
 
-def test_select_cli_container_mode_builds_ssh_transport():
+def test_select_cli_iox_platform_builds_ssh_transport():
     cfg = {
         "device_ssh_host": "198.51.100.253",
         "device_ssh_user": "dnac",
@@ -207,7 +209,7 @@ def test_select_cli_container_mode_builds_ssh_transport():
         raise AssertionError("must NOT import guestshell cli in container mode")
 
     execute, configure = cli_ssh.select_cli(
-        cfg, env={"IRIS_RUNTIME_MODE": "container"},
+        cfg, env={"IRIS_DEVICE_PLATFORM": "iox"},
         guestshell_factory=explode)
     # bound to a live SSHCli instance's methods
     assert execute.__self__.__class__ is cli_ssh.SSHCli
@@ -215,9 +217,9 @@ def test_select_cli_container_mode_builds_ssh_transport():
     assert execute.__self__.host == "198.51.100.253"
 
 
-def test_select_cli_container_mode_via_conf_key():
+def test_select_cli_iox_platform_via_conf_key():
     cfg = {
-        "runtime_mode": "container",
+        "device_platform": "iox",
         "device_ssh_host": "10.0.0.1",
         "device_ssh_user": "u",
         "device_ssh_pass": "p",
@@ -226,6 +228,19 @@ def test_select_cli_container_mode_via_conf_key():
                                     guestshell_factory=lambda: (_ for _ in ()).throw(
                                         AssertionError("should not import guestshell")))
     assert execute.__self__.host == "10.0.0.1"
+
+
+def test_absent_selector_retains_legacy_container_runtime_seam():
+    cfg = {
+        "runtime_mode": "container",
+        "device_ssh_host": "10.0.0.2",
+        "device_ssh_user": "u",
+        "device_ssh_pass": "p",
+    }
+    execute, _ = cli_ssh.select_cli(
+        cfg, env={}, guestshell_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("legacy container mode must still select SSH")))
+    assert execute.__self__.host == "10.0.0.2"
 
 
 # ---- emit() must be best-effort: a transport failure must never propagate ----
@@ -288,6 +303,15 @@ def test_sshcli_put_raises_on_scp_failure():
     assert False, "expected CliTransportError when scp fails"
 
 
+def test_sshcli_rejects_option_shaped_user_and_relative_scp_source():
+    with pytest.raises(ValueError, match="device_ssh_user"):
+        cli_ssh.SSHCli(host="198.51.100.253", user="-oProxyCommand=bad")
+    cli = cli_ssh.SSHCli(host="198.51.100.253", user="dnac",
+                         password="p", scp_runner=lambda *_: None)
+    with pytest.raises(ValueError, match="local path"):
+        cli.put("-oProxyCommand=bad", "sdflash:x.bin")
+
+
 def test_sshcli_uses_shared_control_connection_for_cli_and_scp():
     cli = cli_ssh.SSHCli(host="h", user="u", password="p",
                           control_path="/data/iris/ios-%r@%h:%p")
@@ -331,11 +355,11 @@ def test_hostkey_options_missing_file_falls_back_to_legacy(tmp_path):
         "-o", "UserKnownHostsFile=/dev/null"]
 
 
-def test_select_cli_container_mode_passes_known_hosts_through(tmp_path):
+def test_select_cli_iox_platform_passes_known_hosts_through(tmp_path):
     kh = tmp_path / "known_hosts"
     kh.write_text("h ssh-rsa AAAA fake\n")
     cfg = {
-        "runtime_mode": "container",
+        "device_platform": "iox",
         "device_ssh_host": "h",
         "device_ssh_user": "u",
         "device_ssh_pass": "p",
@@ -346,11 +370,11 @@ def test_select_cli_container_mode_passes_known_hosts_through(tmp_path):
     assert "StrictHostKeyChecking=yes" in execute.__self__._hostkey_options()
 
 
-def test_select_cli_container_mode_no_known_hosts_key_stays_legacy():
+def test_select_cli_iox_platform_no_known_hosts_key_stays_legacy():
     # a fleet conf that predates the pin key: SSHCli must come up with the
     # exact legacy no-verify options.
     cfg = {
-        "runtime_mode": "container",
+        "device_platform": "iox",
         "device_ssh_host": "h",
         "device_ssh_user": "u",
         "device_ssh_pass": "p",

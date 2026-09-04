@@ -6,30 +6,34 @@ SPDX-License-Identifier: Apache-2.0
 
 # Container deployments
 
-IRIS ships a seed-server role plus two app-hosting agent variants built around
-the same catalog and private-swarm protocol. The seed server coordinates and
-originates content; each agent consumes an assignment, verifies the synchronized
-image, and writes it to platform storage without installing or activating it.
+IRIS ships separate server and Console tiers plus one multi-architecture device
+container built around the same catalog and private-swarm protocol. The server
+coordinates and originates content; the Console is a state-free browser-facing
+gateway; each agent consumes an assignment, verifies the synchronized image,
+and writes it to platform storage without installing or activating it.
 
 | Role | Image architecture | Durable storage | Deployment target |
 | --- | --- | --- | --- |
-| Seed server | `linux/amd64` | State, encrypted config, images, served artifacts | Docker Compose or one Kubernetes pod |
-| App-hosting agent | `linux/arm64` or `linux/amd64` | CAF persistent disk | Cisco IE or Catalyst 9300 IOx app hosting |
-| IOS-XR appmgr agent | `linux/amd64` | Router `harddisk:` bind mount | Cisco 8000-series IOS-XR appmgr |
+| Server tier | `linux/amd64` | State, encrypted config, images, served artifacts | Docker Compose or its own Kubernetes Deployment |
+| Console tier | `linux/amd64` | None | Docker Compose or its own Kubernetes Deployment |
+| Unified device agent | `linux/arm64` or `linux/amd64` | Platform-selected CAF disk or `harddisk:` mount | Cisco IOx or IOS-XR appmgr |
 
 ## End-to-end data path
 
 ```mermaid
 flowchart LR
-    Operator["Operator image source"] --> Seed["Seed server container"]
+    Browser["Operator browser"] --> Console["Console container :8080"]
+    Console -->|"HTTPS + tier token :9443"| Seed["Server container"]
+    Operator["Operator image source"] --> Seed
     Seed --> Catalog["Catalog + private tracker"]
     Seed --> Swarm["BitTorrent pieces"]
-    Catalog --> Agent["IOx agent container"]
-    Swarm --> Scratch["Persistent /data/iris scratch"]
+    Catalog --> Agent["Unified IOx / XR image"]
+    Swarm --> Scratch["Platform-selected persistent storage"]
     Agent --> Scratch
-    Scratch --> Hand["Hand-off: SSD share write (Catalyst 9300) or SCP push (IE-3400 / share fallback)"]
-    Hand --> Verify["Plain copy, byte-size attested"]
-    Verify --> Target["Selected IOS filesystem root"]
+    Scratch --> Hand["IOx: SSD share or SCP hand-off"]
+    Hand --> Verify["IOS-XE plain copy, byte-size attested"]
+    Verify --> Target["Selected IOS-XE filesystem root"]
+    Scratch --> XR["XR: verified /hostmount is harddisk:"]
 ```
 
 The final copy deliberately crosses back into IOS. The CAF persistent disk is
@@ -47,6 +51,12 @@ bootflash. On IE-3400 (where IOx cannot bind-mount the SD card) — or on a
 Catalyst 9300 whose share mount is unavailable — the agent SCP-pushes the
 file to `guest-share` through SSH-to-self instead. See
 [IOx App](iox.md#runtime-behavior).
+
+The Console does not mount catalog state, device credentials, image roots, or
+served artifacts. Browser `/api/v1` requests remain same-origin at the Console;
+it forwards allowlisted operations to the server's internal `/internal/v1`
+management API over authenticated, CA-pinned HTTPS. Devices do not use that
+management API: they continue to call the device catalog and tracker directly.
 
 ## Seed-server image
 
@@ -67,9 +77,12 @@ whatever the build host cached, which can be weeks of Debian security updates
 behind the tag. Set `IRIS_NO_PULL=1` on the helper scripts to keep a cached base
 for an A/B build of an unrelated change.
 
-The image exposes all device-facing services, includes a Docker health check
-that probes `/readyz` (so a container whose catalog or artifact listener died
-does not report `healthy`), and keeps aria2 RPC on loopback only.
+The image exposes the device-facing services, includes a Docker health check
+that probes `/readyz` (so a container whose catalog, artifact, or internal
+management listener died does not report `healthy`), and keeps aria2 RPC on
+loopback only. The separate Console image exposes only 8080 and has its own
+local health/readiness checks; Console readiness deliberately does not depend
+on the server being ready, avoiding a cold-start dependency cycle.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which
@@ -79,7 +92,8 @@ startup.
 
 The read-only mount is one of the seed server's two image roots. The other is
 the `iris-images` uploads volume (`IRIS_IMAGES_DIR`, default
-`/var/lib/iris-images`), which holds images the console received over HTTP.
+`/var/lib/iris-images`), which holds images uploaded through the Console's
+authenticated HTTPS API.
 Publishing seeds an image from its own directory rather than copying it, so an
 image staged on the host is published in place and the read-only root stays
 read-only. See [Server](server.md#publishing-images).
@@ -87,9 +101,10 @@ read-only. See [Server](server.md#publishing-images).
 ### Non-root runtime
 
 Every seed-server service runs as the fixed uid and gid `10001`, and Compose
-drops all capabilities. Two host paths — the age identity file and the served
-artifacts directory — plus the host tree behind `IRIS_IMAGE_ROOT` must be
-accessible to that uid, and a deployment upgraded from a root-runtime release
+drops all capabilities. The age identity and Console setup-token files, the
+served artifacts directory, and the host tree behind `IRIS_IMAGE_ROOT` must be
+accessible to that uid; both credential files must remain mode 600 or 400. A
+deployment upgraded from a root-runtime release
 needs a one-time migration of its named volumes. Both procedures live in
 [Runtime identity](server.md#runtime-identity), with the migration command in
 [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
@@ -98,9 +113,33 @@ Deployment records persist under `IRIS_STATE` on the `iris-state` volume, so
 undeploy-from-record and restart recovery behave identically to the Kubernetes
 PVC layout. See [Management Type and VLAN Ownership](management-type.md).
 
-## App-hosting image
+## Unified app-hosting image
 
-Build only the Docker image when iterating locally:
+`device/container/Dockerfile` and `device/container/entrypoint.sh` are the one
+image definition and runtime entrypoint for IOx and IOS-XR. The required
+`IRIS_DEVICE_PLATFORM` value selects the profile:
+
+| Value | Scratch/control path | Final IOS filesystem | Runtime path |
+| --- | --- | --- | --- |
+| `iox` | CAF persistent storage, normally `/data/iris` | Platform-aware writable media selected and attested by the existing flash-target logic | IOS-XE SSH-to-self and optional shared-disk hand-off |
+| `xr-appmgr` | `/hostmount/iris-work` | `harddisk:` through the verified `/hostmount` bind mount | IOS-XR appmgr helpers; no SSH config or credentials |
+
+The selector is validated before any directory is created. Missing and unknown
+values fail closed rather than guessing where a multi-gigabyte image belongs.
+The image contains OpenSSH and `sshpass` because the IOx profile requires them;
+the XR profile rejects IOx SSH/share variables and never creates an SSH
+dependency. BusyBox supplies `ps`, `top`, `free`, and `kill` on both
+architectures, preserving the field-diagnostics decision.
+
+Guest Shell is not packaged from this image. Its existing agent bundle,
+bootstrap/EEM launcher, and installer remain a separate, unchanged delivery
+path.
+
+Build only the canonical image when iterating locally. `--image-only` is not
+architecture-selected: every run builds or verifies one OCI archive containing
+both `linux/amd64` and `linux/arm64`, by default
+`artifacts/iris-device-$VERSION.oci.tar`, plus the adjacent
+`.oci.tar.manifest`:
 
 ```bash
 CATALOG_PEM=/path/to/iris-catalog.pem \
@@ -130,46 +169,85 @@ fails closed without it.
 
 ### Package footprint
 
-Approximate figures, measured on 2026-09-02 from packages built with these
-scripts on the current `python:3.12-slim-trixie` (IOx) and
-`python:3.12-alpine3.24` (XR) bases; a rebuild on a newer base tag moves them
-by a few megabytes. *Delivered* is the file the device downloads and stores;
-*on device* is what stays after install — the unpacked image layers for a
-container, the unpacked bundle for Guest Shell. The IOx descriptor's
-`memory: 768` and `disk: 2048` are runtime quotas, not package use, and
-staged IOS images are deliberately not counted.
+The canonical OCI is measured per platform as compressed layer bytes and
+uncompressed rootfs bytes; those are the only comparable values until native
+IOx/RPM wrappers are actually built. A 2026-09-04 source-exact build from this
+tree, using the current lab's public catalog TLS leaf, measured:
 
-| Agent package | Delivered | On device | Notes |
-| --- | ---: | ---: | --- |
-| `iris-agent.tgz` (Guest Shell: Catalyst 9300, routers) | ~5 MB | ~15 MB | static `aria2c` (~8 MB) plus the exec-capable copy Guest Shell keeps in its home directory; the Guest Shell runtime itself is part of IOS-XE |
-| `iris-amd64.tar` (Catalyst 9000 IOx) | ~60 MB | ~160 MB | Debian trixie base with CPython, OpenSSH client and `aria2c` |
-| `iris-arm64.tar` (IE-3x00 / IR IOx) | ~60 MB | ~185 MB | same image on aarch64 |
-| `iris-xr.rpm` (Cisco 8000 appmgr) | ~30 MB | ~70 MB | Alpine base; about half of the earlier Debian-based RPM |
+| Platform/object | Compressed layer bytes | Uncompressed layer bytes | Previous separate-image unpacked bytes | Unpacked delta |
+| --- | ---: | ---: | ---: | ---: |
+| `linux/amd64` unified (IOx comparison) | 27,907,984 | 74,469,376 | 159,014,912 | -84,545,536 (-53.2%) |
+| `linux/amd64` unified (XR comparison) | 27,907,984 | 74,469,376 | 70,798,336 | +3,671,040 (+5.2%) |
+| `linux/arm64` unified (IOx comparison) | 28,957,268 | 78,494,720 | 185,548,800 | -107,054,080 (-57.7%) |
 
-The base image dominates: Debian userland plus CPython account for roughly
-130 MB of the IOx image, while IRIS's own additions are the static `aria2c`
-(7.7 MB), the OpenSSH client the IOx SSH-to-self transport needs (about
-5.5 MB) and under 0.5 MB of agent code. Rebuilding on a newer base tag
-changes these numbers by a few megabytes either way.
+The whole two-platform OCI archive is 56,904,192 bytes. Its measured identity
+is index `sha256:4331b1e68eb3be4266fcccf2ff80e0cf9eaba11a9bd1db5cbe8e5063265dc5a5`,
+archive SHA-256
+`56f538b73ca9d471d8b7e13269db0451faeb2c267aa72d2d049dd39ea3d7a27f`,
+and source SHA-256
+`44b4ea29cfbe2557423a90fade833a669972f668be2e5f16deb2bcd61cea7cc4`.
+The architecture manifests are
+`sha256:6b2fbf2b1ca7f2101ce631fce72dabfc54f009a3c7941561d4a4c7a541174efc`
+(amd64) and
+`sha256:bb07a2c94c1ba45311847fbae9d981bb7f8e223e85a1e922f9068b2010c7d635`
+(arm64). This is measurement evidence, not a release artifact: a release build
+that embeds another deployment's pinned catalog CA necessarily has different
+digests. Native wrapper size is deliberately not inferred from the earlier
+Debian packages because no native wrapper was built in this measurement.
 
-`aria2c` is handed in, never downloaded: the build takes it from an explicit
-`ARIA2C_BIN` override, a matching local agent bundle, or the handed-in
+The large IOx reduction comes from converging on the already-qualified Alpine
+runtime instead of carrying the former Debian userland. The modest increase
+against the former XR image is the shared OpenSSH/`sshpass` closure required by
+IOx. Both manifests retain BusyBox `ps`, `top`, `free`, and `kill`, the static
+architecture-matched `aria2c`, pinned certificate, full agent source set, and
+reconcile/supervision paths. Splitting the tiny platform-only Python modules
+would save at most tens of kilobytes and would defeat the one-content audit
+boundary, so it remains rejected.
+
+These comparison values are the last verified separate images, after the
+field-diagnostics decision restored `procps` to IOx and after the last agent
+source refresh. The earlier slimming experiment recorded 157,999,616
+(amd64 IOx), 183,948,288 (arm64 IOx), and 70,754,304 (XR) bytes before those
+two follow-up changes; mixing those intermediate numbers into this table would
+understate the IOx baseline by 1,015,296/1,600,512 bytes and the XR baseline by
+44,032 bytes.
+
+Guest Shell remains a separate, unchanged bundle/runtime and is not included
+in the canonical image measurements. The IOx descriptor's `memory: 768` and
+`disk: 2048` values are runtime quotas, not package size; staged IOS images are
+also excluded.
+
+`aria2c` is handed in, never downloaded: the build takes each architecture
+from an explicit `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` override, a matching local agent bundle, or the handed-in
 `deliverables/aria2c-<arch>` binary, verifying it against
 `tools/aria2c.sha256` and failing closed on a mismatch. The catalog certificate must either be supplied
 locally or fetched with an explicitly supplied SHA-256 certificate
 fingerprint.
+
+The sidecar records `index_digest`, `archive_sha256`, `source_sha256`, and the
+two platforms. A matching archive is reused; a pre-existing archive whose
+manifest or source digest does not match is refused unless
+`IRIS_FORCE_DEVICE_IMAGE_BUILD=1` explicitly permits replacement. Replacement
+is built in a private sibling directory and each file is published by rename,
+so neither the archive nor manifest is exposed half-written. During replacement
+the old sidecar is removed before the new archive is visible; a reader therefore
+sees either matching provenance or no provenance, never a stale manifest beside
+new bytes. Each IOx tar and XR RPM follows the same fail-closed publication
+order with an adjacent `.manifest` that binds its `wrapper_sha256` and selected
+platform to those three canonical digests.
 
 The installer passes all environment-specific values at deployment time. No
 lab address is baked in:
 
 | Variable | Purpose |
 | --- | --- |
+| `IRIS_DEVICE_PLATFORM` | Required exact profile selector: `iox` or `xr-appmgr`; missing/unknown values stop before writes. |
 | `IRIS_CATALOG_URL` | Reachable HTTPS catalog URL covered by the pinned certificate. |
 | `IRIS_CATALOG_TOKEN` | Per-device enrollment token. |
 | `IRIS_DEVICE_ID` | Catalog identity for the device. |
 | `IRIS_DEVICE_SSH_HOST` | IOS SVI used for SSH-to-self and SCP. |
 | `IRIS_DEVICE_SSH_USER` / `IRIS_DEVICE_SSH_PASS` | Scoped IOS transport credential. |
-| `IRIS_TARGET_FS` | Optional IOS filesystem prefix such as `sdflash:`, `usbflash1:`, or `bootflash:`. |
+| `IRIS_TARGET_FS` | IOx-only optional filesystem preference; it is validated against live writable media. XR rejects it and always derives `harddisk:`. |
 
 An explicit target is accepted only if `show file systems` reports it as a
 writable disk and it is not `crashinfo:`. If it is unavailable, the agent logs
@@ -182,6 +260,13 @@ Guest Shell — and `AppGigabitEthernet1/0/1`.
 
 - The seed-server image is amd64 so the static binary packed into Catalyst
   Guest Shell bundles remains x86_64.
+- The canonical image is architecture-specific under one multi-architecture
+  identity. IOx still needs an `ioxclient` tar envelope and XR still needs an
+  appmgr RPM envelope; those wrapper bytes and metadata cannot be identical.
+  Both wrappers consume the same canonical image manifest for their CPU, so
+  an amd64 IOx wrapper and the XR wrapper contain the identical rootfs/config
+  digest. If Cisco requires native wrapper signatures, each native envelope
+  must still be signed in addition to the common image digest.
 - IOx packages are architecture-specific. On IE-3400 the image hand-off uses
   SSH-to-self SCP because IOx there does not expose the SD card as a container
   bind mount; on Catalyst 9300 the app-hosting SSD share is bind-mounted and carries the

@@ -87,7 +87,7 @@ ALLOWLIST = [
      "narrates the change using both the old and new vocabulary by design"),
 
     # -- decision 5 hard exclusions: RFC / IOS / CSV-guard sites -------
-    ("server/gui_server.py", ('attachment; filename=',),
+    ("server/management_api.py", ('attachment; filename=',),
      "Content-Disposition: attachment (RFC 6266) on the CSV export/example "
      "download headers -- hard exclusion, decision 5"),
     ("tools/gen-device-installers.sh", ('*"network_attachment"*',),

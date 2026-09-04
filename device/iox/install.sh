@@ -7,9 +7,10 @@
 # Repeatable IRIS installer for Catalyst devices with IOx app hosting. It
 # deploys the agent as an architecture-matched IOx Docker app (iris-arm64.tar) instead
 # of into Guest Shell, but uses the SAME transport as
-# device/device-install.sh: push the IRIS PKI trustpoint over SSH FIRST, then
-# `copy https://STAGE_HOST:8000/<pkg>` from the always-on container artifact
-# server (no throwaway HTTP server). The agent then pulls its assigned image over
+# device/device-install.sh: the onboarding host pushes the package over the
+# already-authenticated IOS SCP service. The enrollment token therefore never
+# enters a URL, an IOS HTTP-client configuration, or a process argument. The
+# agent then pulls its assigned image over
 # the swarm and copies it to an IOS-visible disk via a plain `copy`, such as
 # sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
 # ONLY; never install/activate/reload the IOS image.
@@ -20,14 +21,12 @@
 # Required env:
 #   DEVICE_IP VLAN SVI_IP SVI_MASK GUEST_IP CATALOG_TOKEN DEVICE_ID STAGE_HOST
 #   DEVICE_SSH_PASS  — the device login the container uses for its SSH-to-self CLI
-#   IRIS_CRT_FILE    — local path to the server's BARE cert (crt.pem) for the
-#                      trustpoint + the preflight --cacert (the generator supplies it)
 #   DEVICE_USER (+ DEVICE_PASS) — for lab/device-run.sh; export or 'source' creds/
 # Optional (defaults):
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
-#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/iox/entrypoint.sh);
+#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/container/entrypoint.sh);
 #     off by default for flash write endurance. Forwarded verbatim as an
 #     -e run-opts value so the container actually sees an operator's opt-in --
 #     previously this script dropped it silently and the entrypoint's own
@@ -42,12 +41,6 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 : "${DEVICE_IP:?set DEVICE_IP}"
 : "${CATALOG_TOKEN:?set CATALOG_TOKEN}"; : "${DEVICE_ID:?set DEVICE_ID}"
 : "${STAGE_HOST:?set STAGE_HOST}"; : "${DEVICE_SSH_PASS:?set DEVICE_SSH_PASS}"
-IRIS_CRT_FILE="${IRIS_CRT_FILE:-}"
-if [ "$DRY" -eq 0 ]; then
-  : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE — local path to the bare server cert crt.pem}"
-  [ -r "$IRIS_CRT_FILE" ] || { echo "ERROR: IRIS_CRT_FILE=$IRIS_CRT_FILE not readable" >&2; exit 1; }
-fi
-
 # Management type model. routed: IRIS creates a dedicated VLAN/SVI and the app SSHes
 # to that SVI. inband: the app attaches to an EXISTING operator-owned VLAN that
 # IRIS never creates/changes/removes, and SSHes to the existing IOS management
@@ -89,7 +82,7 @@ DEVICE_SSH_USER="${DEVICE_SSH_USER:-dnac}"
 TARGET_FS="${TARGET_FS:-sdflash:}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
-# Same fail-closed default as device/iox/entrypoint.sh's own IRIS_LOG parsing
+# Same fail-closed default as device/container/entrypoint.sh's IRIS_LOG parsing
 # -- this is only the plumbing that lets an operator's opt-in actually reach
 # it; the default stays off either way.
 IRIS_LOG="${IRIS_LOG:-off}"
@@ -114,17 +107,120 @@ INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-300}"
 ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-300}"
 START_TIMEOUT="${START_TIMEOUT:-300}"
 STATE_POLL="${STATE_POLL:-5}"
+
+_single_line() {
+  case "$2" in *$'\n'*|*$'\r'*)
+    echo "ERROR: $1 must be a single line" >&2; exit 2 ;;
+  esac
+}
+
+_safe_word() {
+  _single_line "$1" "$2"
+  [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] \
+    || { echo "ERROR: $1 contains unsafe characters" >&2; exit 2; }
+}
+
+_safe_host() {
+  _single_line "$1" "$2"
+  [[ "$2" =~ ^[A-Za-z0-9._:-]+$ ]] \
+    || { echo "ERROR: $1 is not a safe host" >&2; exit 2; }
+}
+
+_uint_between() {
+  local name="$1" value="$2" minimum="$3" maximum="$4"
+  [[ "$value" =~ ^[0-9]+$ ]] && [ "${#value}" -le 9 ] \
+    || { echo "ERROR: $name must be an integer from $minimum to $maximum" >&2; exit 2; }
+  [ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] \
+    || { echo "ERROR: $name must be an integer from $minimum to $maximum" >&2; exit 2; }
+}
+
+_ipv4() {
+  local name="$1" value="$2" a b c d part
+  _single_line "$name" "$value"
+  [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+    || { echo "ERROR: $name must be an IPv4 address" >&2; exit 2; }
+  IFS=. read -r a b c d <<<"$value"
+  for part in "$a" "$b" "$c" "$d"; do
+    [ "$((10#$part))" -le 255 ] \
+      || { echo "ERROR: $name must be an IPv4 address" >&2; exit 2; }
+  done
+}
+
+_netmask() {
+  _ipv4 "$1" "$2"
+  case "$2" in
+    0.0.0.0|128.0.0.0|192.0.0.0|224.0.0.0|240.0.0.0|248.0.0.0|252.0.0.0|254.0.0.0|255.0.0.0|\
+    255.128.0.0|255.192.0.0|255.224.0.0|255.240.0.0|255.248.0.0|255.252.0.0|255.254.0.0|255.255.0.0|\
+    255.255.128.0|255.255.192.0|255.255.224.0|255.255.240.0|255.255.248.0|255.255.252.0|255.255.254.0|255.255.255.0|\
+    255.255.255.128|255.255.255.192|255.255.255.224|255.255.255.240|255.255.255.248|255.255.255.252|255.255.255.254|255.255.255.255) ;;
+    *) echo "ERROR: $1 must be a contiguous IPv4 netmask" >&2; exit 2 ;;
+  esac
+}
+
+_boolean() {
+  _single_line "$1" "$2"
+  case "$2" in on|off|1|0|true|false|yes|no|ON|OFF|TRUE|FALSE|YES|NO) ;;
+    *) echo "ERROR: $1 has an invalid boolean value" >&2; exit 2 ;;
+  esac
+}
+
+_https_url() {
+  local name="$1" value="$2"
+  _single_line "$name" "$value"
+  printf '%s' "$value" | python3 -c '
+import sys
+from urllib.parse import urlsplit
+try:
+    value = urlsplit(sys.stdin.read())
+    port = value.port
+    valid = (value.scheme == "https" and value.hostname is not None
+             and value.username is None and value.password is None
+             and (port is None or 1 <= port <= 65535))
+except ValueError:
+    valid = False
+raise SystemExit(0 if valid else 1)
+' >/dev/null 2>&1 \
+    || { echo "ERROR: $name must be an https URL without credentials" >&2; exit 2; }
+}
+
 for _budget in INSTALL_TIMEOUT ACTIVATE_TIMEOUT START_TIMEOUT STATE_POLL; do
   _value="${!_budget}"
-  case "$_value" in
-    ''|*[!0-9]*) echo "ERROR: $_budget must be a whole number of seconds" >&2; exit 2 ;;
-  esac
-  [ "$_value" -gt 0 ] \
-    || { echo "ERROR: $_budget must be greater than zero" >&2; exit 2; }
+  _uint_between "$_budget" "$_value" 1 86400
 done
 unset _budget _value
+_uint_between VLAN "$VLAN" 1 4094
+_uint_between CPU "$CPU" 1 1048576
+_uint_between MEM "$MEM" 1 1048576
+_uint_between DISK "$DISK" 1 1048576
+_ipv4 GUEST_IP "$GUEST_IP"
+_ipv4 GW_IP "$GW_IP"
+_netmask SVI_MASK "$SVI_MASK"
+if [ "$MANAGEMENT_TYPE" = routed ]; then _ipv4 SVI_IP "$SVI_IP"; fi
+_ipv4 IOS_SSH_HOST "$IOS_SSH_HOST"
+_safe_host DEVICE_IP "$DEVICE_IP"
+_safe_host STAGE_HOST "$STAGE_HOST"
+_safe_word DEVICE_ID "$DEVICE_ID"
+[[ "$APP_INTF" =~ ^[A-Za-z][A-Za-z0-9./_-]*$ ]] \
+  || { echo "ERROR: APP_INTF contains unsafe characters" >&2; exit 2; }
+_boolean IRIS_TELEMETRY "$IRIS_TELEMETRY"
+_boolean IRIS_TELEMETRY_STREAM "$IRIS_TELEMETRY_STREAM"
+_boolean IRIS_LOG "$IRIS_LOG"
 [[ "$TARGET_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
   || { echo "ERROR: TARGET_FS must be an IOS filesystem prefix such as sdflash:" >&2; exit 2; }
+[[ "$PKG_FS" =~ ^[A-Za-z][A-Za-z0-9_-]*:$ ]] \
+  || { echo "ERROR: PKG_FS must be an IOS filesystem prefix such as flash:" >&2; exit 2; }
+[[ "$PKG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+  || { echo "ERROR: PKG must be a safe basename" >&2; exit 2; }
+if [ -n "$SHARE_HOST_PATH" ]; then
+  _single_line SHARE_HOST_PATH "$SHARE_HOST_PATH"
+  [[ "$SHARE_HOST_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    && [[ "/$SHARE_HOST_PATH/" != *"/../"* ]] \
+    || { echo "ERROR: SHARE_HOST_PATH must be a safe absolute path" >&2; exit 2; }
+  _single_line SHARE_IOS_PATH "$SHARE_IOS_PATH"
+  [[ "$SHARE_IOS_PATH" =~ ^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] \
+    && [[ "/${SHARE_IOS_PATH#*:}/" != *"/../"* ]] \
+    || { echo "ERROR: SHARE_IOS_PATH must be a safe IOS filesystem path" >&2; exit 2; }
+fi
 
 # The values below ride inside the double-quoted `run-opts N "-e K=V"` lines
 # of the app-hosting block (appid_block). A literal double-quote or newline
@@ -138,8 +234,8 @@ unset _budget _value
 # whitespace (it stays inside the quotes); the identity/URL values are not.
 _no_quotes_or_newlines() {
   case "$2" in
-    *'"'*|*$'\n'*)
-      echo "ERROR: $1 must not contain a double quote or newline" >&2
+    *'"'*|*$'\n'*|*$'\r'*)
+      echo "ERROR: $1 must not contain a double quote, CR, or LF" >&2
       exit 1 ;;
   esac
   if [ "${3:-}" = "no-whitespace" ]; then
@@ -157,9 +253,46 @@ _no_quotes_or_newlines DEVICE_SSH_USER "$DEVICE_SSH_USER" no-whitespace
 # IRIS_LOG rides the same quoted run-opts value as everything else above;
 # reuse the one guard rather than trusting a bare on/off-shaped value.
 _no_quotes_or_newlines IRIS_LOG "$IRIS_LOG" no-whitespace
+_https_url CATALOG_URL "$CATALOG_URL"
+[[ "$CATALOG_TOKEN" =~ ^[A-Za-z0-9._~+/-]+=*$ ]] \
+  || { echo "ERROR: CATALOG_TOKEN contains unsafe characters" >&2; exit 2; }
+[[ "$DEVICE_SSH_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
+  || { echo "ERROR: DEVICE_SSH_USER is not a safe SSH username" >&2; exit 2; }
+if [ -n "${DEVICE_USER:-}" ]; then
+  [[ "$DEVICE_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
+    || { echo "ERROR: DEVICE_USER is not a safe SSH username" >&2; exit 2; }
+fi
+if [ -n "${MODEL:-}" ]; then _safe_word MODEL "$MODEL"; fi
+if [ -n "${EXPECTED_DEVICE_IDENTITY:-}" ]; then
+  _safe_word EXPECTED_DEVICE_IDENTITY "$EXPECTED_DEVICE_IDENTITY"
+fi
 APPID=iris
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
+
+# Resolve and prove the package before any idempotent teardown mutates the
+# device. Console onboarding mounts the served artifact directory locally.
+ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/../.." && pwd)/artifacts}"
+PKG_FILE="${IRIS_IOX_PACKAGE_FILE:-$ART/$PKG}"
+if [ "$DRY" -eq 0 ]; then
+  : "${DEVICE_USER:?set DEVICE_USER for the authenticated SCP push}"
+  : "${DEVICE_PASS:?set DEVICE_PASS for the authenticated SCP push}"
+  [[ "$DEVICE_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
+    || { echo "ERROR: DEVICE_USER is not a safe SSH username" >&2; exit 2; }
+  [[ "$DEVICE_IP" =~ ^[A-Za-z0-9._:-]+$ ]] \
+    || { echo "ERROR: DEVICE_IP is not a safe SSH host" >&2; exit 2; }
+  case "$PKG_FILE" in
+    /*) ;;
+    *) echo "ERROR: IRIS_IOX_PACKAGE_FILE must be an absolute path" >&2; exit 2 ;;
+  esac
+  case "$PKG_FILE" in *$'\n'*|*$'\r'*)
+    echo "ERROR: IRIS_IOX_PACKAGE_FILE must be a single line" >&2; exit 2 ;;
+  esac
+  if [ ! -r "$PKG_FILE" ]; then
+    echo "ERROR: IOx package is not readable: $PKG_FILE" >&2
+    exit 1
+  fi
+fi
 
 # A deployment record binds this deployment to one physical device and
 # platform.  Check both before an idempotent reinstall tears down the app on
@@ -180,24 +313,6 @@ if [ "$DRY" -eq 0 ]; then
     "$(printf '%s' "$MODEL" | tr '[:lower:]' '[:upper:]')" ] \
     || { echo "ERROR: device model mismatch; expected $MODEL, detected ${LIVE_MODEL:-unknown}; refusing to configure $DEVICE_IP" >&2; exit 1; }
 fi
-
-# --- the PKI trustpoint that lets `copy https:` validate the self-signed cert ---
-# (identical idiom to device/device-install.sh: no-then-re-add, paste the BARE
-# crt.pem, answer the two yes/no prompts; non-circular — trust rides the SSH we
-# already have, bulk transfer rides the HTTPS it authorizes.)
-trustpoint_block() {
-  echo "no crypto pki trustpoint IRIS"; echo "yes"
-  echo "crypto pki trustpoint IRIS"
-  echo " enrollment terminal"; echo " revocation-check none"; echo "exit"
-  echo "crypto pki authenticate IRIS"
-  if [ -n "$IRIS_CRT_FILE" ] && [ -r "$IRIS_CRT_FILE" ]; then
-    cat "$IRIS_CRT_FILE"
-  else
-    echo "! <contents of \$IRIS_CRT_FILE (the bare crt.pem) inserted here at apply time>"
-  fi
-  echo "quit"; echo "yes"
-  echo "ip http client secure-trustpoint IRIS"
-}
 
 ios_net() {           # networking + IOx enable (idempotent)
 if [ "$MANAGEMENT_TYPE" = "inband" ]; then
@@ -267,19 +382,27 @@ app-hosting appid $APPID
   run-opts 4 "-e IRIS_CATALOG_URL=$CATALOG_URL"
   run-opts 5 "-e IRIS_DEVICE_SSH_HOST=$IOS_SSH_HOST"
   run-opts 6 "-e IRIS_DEVICE_SSH_USER=$DEVICE_SSH_USER"
-  run-opts 7 "-e IRIS_TARGET_FS=$TARGET_FS"
-  run-opts 8 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
-  run-opts 9 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
-  run-opts 10 "-e IRIS_LOG=$IRIS_LOG"
+  run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"
+  run-opts 8 "-e IRIS_TARGET_FS=$TARGET_FS"
+  run-opts 9 "-e IRIS_TELEMETRY=$IRIS_TELEMETRY"
+  run-opts 10 "-e IRIS_TELEMETRY_STREAM=$IRIS_TELEMETRY_STREAM"
+  run-opts 11 "-e IRIS_LOG=$IRIS_LOG"
 EOF
 if [ -n "$SHARE_HOST_PATH" ]; then
 cat <<EOF
-  run-opts 11 "-e IRIS_SHARE_DIR=/mnt/share"
-  run-opts 12 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
-  run-opts 13 "-v $SHARE_HOST_PATH:/mnt/share"
+  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"
+  run-opts 13 "-e IRIS_SHARE_IOS_PATH=$SHARE_IOS_PATH"
+  run-opts 14 "-v $SHARE_HOST_PATH:/mnt/share"
 EOF
 fi
 echo "end"
+}
+
+appid_block_redacted() {
+  # A dry run is commonly pasted into an issue or build log.  Keep the shape
+  # of every run-opt visible without printing either credential.
+  local DEVICE_SSH_PASS='<redacted>' CATALOG_TOKEN='<redacted>'
+  appid_block
 }
 
 iox_ready() {
@@ -335,16 +458,14 @@ clear_partial_app_config() {
 if [ "$DRY" -eq 1 ]; then
   echo "===== IOS NETWORKING ($MANAGEMENT_TYPE; apply via lab/device-run.sh $DEVICE_IP) ====="
   ios_net
-  echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="
-  trustpoint_block
   echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for the image copy) ====="
-  appid_block
+  appid_block_redacted
   if [ -n "$SHARE_IOS_PATH" ]; then
     echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
     echo "mkdir $SHARE_IOS_PATH"
   fi
-  echo "===== INSTALL COPY (over verified https) ====="
-  printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG"
+  echo "===== INSTALL PUSH (host -> device over authenticated SCP) ====="
+  printf 'scp -O <artifacts>/%s %s@%s:%s%s\n' "$PKG" '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$PKG"
   echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
   if [ "$MANAGEMENT_TYPE" = "inband" ]; then
     echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
@@ -441,29 +562,34 @@ for _ in $(seq 1 24); do
 done
 [ "$vok" -eq 1 ] || { echo "  ERROR: could not disable app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
 
-echo "[4/9] push PKI trustpoint over SSH (so 'copy https:' validates the server cert)"
-{ echo "configure terminal"; trustpoint_block; echo "end"; } | RUN >/dev/null
+echo "[4/9] package transport uses authenticated SCP (no IOS HTTP credential or trustpoint required)"
 
-echo "[5/9] preflight: is https://$STAGE_HOST:8000/$PKG reachable? (HEAD, advisory)"
-# HEAD only (-I) so we don't pull the whole package; -k because the DEVICE (not us)
-# validates the cert against the trustpoint we just pasted. Advisory: a flaky
-# operator->server link must not block a deploy the DEVICE can complete — the
-# device copy below is the authoritative gate (with retries).
-if curl -skf -I --max-time 8 "https://$STAGE_HOST:8000/$PKG" >/dev/null 2>&1; then
-  echo "    reachable (HTTP HEAD ok)"
-else
-  echo "    WARN: preflight inconclusive from here; relying on the device copy"
-fi
+echo "[5/9] local package preflight passed"
 
-echo "[6/9] copy $PKG -> ${PKG_FS} over verified https (retry x3)"
+scp_device() {
+  # IOS-XE HTTP Basic requires URL credentials or persistent global client
+  # credentials. Both leak an enrollment secret, so initial delivery uses the
+  # already-authenticated device SSH boundary instead. -O selects the legacy
+  # SCP protocol implemented by IOS. Host identity is pinned by the same policy
+  # as lab/device-run.sh; sshpass reads DEVICE_PASS from the environment.
+  # shellcheck source=lab/iris-ssh-policy.sh
+  . "$HERE/../../lab/iris-ssh-policy.sh" || return 1
+  iris_ssh_policy "$DEVICE_IP" || return 1
+  local rc=0
+  SSHPASS="$DEVICE_PASS" sshpass -e scp -O -o ConnectTimeout=15 \
+    "${IRIS_SSH_OPTS[@]}" "$1" "${DEVICE_USER}@${DEVICE_IP}:$2" || rc=$?
+  iris_ssh_cleanup
+  return "$rc"
+}
+
+echo "[6/9] push $PKG -> ${PKG_FS} over authenticated SCP (retry x3)"
 printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
 ok=0
 for a in 1 2 3; do
-  out="$(printf 'copy https://%s:8000/%s %s%s\n' "$STAGE_HOST" "$PKG" "$PKG_FS" "$PKG" | RUN 2>/dev/null || true)"
-  case "$out" in *"bytes copied"*) ok=1; break ;; esac
-  echo "    copy attempt $a/3 failed; retrying"; sleep 8
+  if scp_device "$PKG_FILE" "${PKG_FS}${PKG}"; then ok=1; break; fi
+  echo "    SCP attempt $a/3 failed; retrying"; sleep 8
 done
-[ "$ok" -eq 1 ] || { echo "  ERROR: copy of $PKG failed after 3 attempts" >&2; exit 1; }
+[ "$ok" -eq 1 ] || { echo "  ERROR: SCP push of $PKG failed after 3 attempts" >&2; exit 1; }
 
 echo "[7/9] configure app-hosting appid $APPID + install/activate/start"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null

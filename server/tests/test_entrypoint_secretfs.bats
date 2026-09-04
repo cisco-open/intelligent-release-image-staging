@@ -6,7 +6,7 @@
 
 setup() {
   TMP="$(mktemp -d)"
-  mkdir -p "$TMP/config/tls" "$TMP/run" "$TMP/state" "$TMP/log" \
+  mkdir -p "$TMP/config/tls" "$TMP/run/tls" "$TMP/state" "$TMP/log" \
     "$TMP/images" "$TMP/artifacts"
   export IRIS_IMAGES_DIR="$TMP/images"
   export IRIS_ARTIFACTS_DIR="$TMP/artifacts"
@@ -33,6 +33,9 @@ EOF
   printf 'AGEFAKE\nrpcsecretval\n' > "$TMP/config/rpc-secret.age"
   printf 'AGEFAKE\nkeypem\n' > "$TMP/config/tls/key.pem.age"
   printf 'crtpem\n' > "$TMP/config/tls/crt.pem"
+  # Model the management-only TLS certificate mounted by the deployment. The
+  # entrypoint now fails closed unless this separate identity is present.
+  printf 'managementcrtpem\n' > "$TMP/run/tls/management-crt.pem"
 }
 
 teardown() { rm -rf "$TMP"; }

@@ -12,6 +12,28 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Security
+- **The browser Console is now isolated from device, catalog, image, and
+  credential state.** Compose and Kubernetes run it as a state-free service
+  with no server data volume; its `/api/v1` gateway reaches the server's
+  internal `/internal/v1` management API over CA-pinned HTTPS using a scoped,
+  file-mounted current/previous credential. Missing or wrong tier credentials
+  fail before route lookup or request-body buffering, while browser sessions,
+  CSRF, `X-IRIS-Poll`, and private/no-store response handling remain enforced.
+- **Fresh deployments now require an operator-held Console setup token.** The
+  shared first-run password is gone: Compose requires
+  `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, mounted only into the server tier, and
+  Kubernetes uses the equivalent server-only Secret. Signing in as `iris`
+  with that deployment-unique value mints a one-use, ten-minute setup grant;
+  missing or unreadable setup material makes an unconfigured server fail
+  closed, and the token cannot reopen setup after the first admin is created.
+- **The unified IOx/XR agent no longer puts tracker credentials in announce
+  URLs, and registered non-probe APIs authenticate before disclosing resource
+  existence.** Aria2 supplies its resource-bound announce bearer as a request
+  header from local configuration/RPC state rather than argv. The unchanged
+  Guest Shell path retains its existing personalized query-token and
+  TLS-protected artifact-capability compatibility. JSON API errors use a
+  redacted RFC 9457 shape; tracker failures remain bencoded for BitTorrent
+  compatibility.
 - **`GET /v1/devices/<id>/policy` is now bound to the requesting device.**
   It was a shared route — any enrolled device's catalog token could read any
   other device's policy — and the response now carries a `plans` map with a
@@ -40,6 +62,23 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   existence and metadata did.
 
 ### Added
+- **IOx and IOS-XR appmgr now package one canonical multi-architecture device
+  image and run one entrypoint.** `IRIS_DEVICE_PLATFORM=iox|xr-appmgr` is the
+  required selector and is persisted for restart/upgrade; missing or unknown
+  values stop before filesystem writes. IOx retains live storage selection,
+  SSH-to-self, and share/SCP placement, while XR retains its verified
+  `harddisk:` bind mount and cannot configure the IOx SSH path. The common
+  Alpine image keeps `ps`, `top`, `free`, and `kill` for field diagnosis.
+- **The supported deployment topology now has independent server and Console
+  services.** Compose and Kubernetes give them separate images, processes,
+  health checks, resources, and network surfaces; only the server mounts the
+  RWO data volume, and Kubernetes uses a private management Service plus
+  NetworkPolicy and immutable image references.
+- **Every registered API operation now has a checked-in OpenAPI 3.1 contract.** A
+  bidirectional route/spec test catches undocumented implementations and stale
+  specification entries; the human reference documents authentication,
+  Problem Details, pagination, concurrency, idempotency, retry, and version
+  retirement policy.
 - **A routed device's SVI can now opt into IS-IS per device, not just
   fleet-wide.** `device/device-install.sh`'s `SVI_IGP=isis` env var (default
   `none`) was the only way to add `ip router isis` to the IRIS SVI, and being
@@ -91,13 +130,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   redeploy. See [Device agents → Device-side logging (flash write
   endurance)](docs/zensical/device-agents.md#device-side-logging-flash-write-endurance).
 - **The fleet and swarm console projections can be asked for a page.**
-  `GET /api/devices` accepts `limit` (1–1000, clamped), `offset` and `q` — a
+  `GET /api/v1/devices` accepts `limit` (1–1000, clamped), `offset` and `q` — a
   case-insensitive substring over the same four fields the console's own
-  search box covers — and `GET /api/swarm` accepts `limit`/`offset` over the
+  search box covers — and `GET /api/v1/swarm` accepts `limit`/`offset` over the
   participant list flattened across images. Paging is opt-in: with no
   parameters both routes return the complete projection they always have, and
-  `/api/swarm` still passes the hub's bytes through untouched. Every
-  `/api/devices` response now states `total` and the fleet-store `revision`
+  `/api/v1/swarm` still passes the hub's bytes through untouched. Every
+  `/api/v1/devices` response now states `total` and the fleet-store `revision`
   behind the same read, so a caller can always tell a page from the fleet and
   can tell a coherent page walk from one that raced a fleet edit; a malformed
   or non-positive `limit`/`offset` is a 400 rather than a quietly different
@@ -108,7 +147,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **The Devices console now uses that paged projection instead of fetching
   the whole fleet on every 10-second poll.** Two prerequisites had to land
   first, because a truncated table an operator reads as the complete fleet
-  is worse than a slow one: `GET /api/devices` now accepts every one of the
+  is worse than a slow one: `GET /api/v1/devices` now accepts every one of the
   filter bar's six column filters — `management_type`, `platform`, `cred`,
   `telemetry`, `peer` and `status` (plus the existing `q`) — server-side,
   condition-for-condition the same as the console's own client-side
@@ -122,7 +161,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   every matching device is selected, rather than ever silently meaning
   "this page." The table itself pages at 200 rows once a filter's match
   count exceeds that, with Previous/Next controls and a "Page X of Y"
-  readout; `/api/overview`'s attention rollup keeps fetching the whole,
+  readout; `/api/v1/overview`'s attention rollup keeps fetching the whole,
   unfiltered fleet, since its aggregates are fleet-wide by definition. See
   [Console → Paging and selection at fleet scale](docs/zensical/console.md#paging-and-selection-at-fleet-scale).
 - **The transfer-lifecycle store's bounds are now numbers an operator can
@@ -146,7 +185,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   timer fires on IOS's own fixed clock, and the IOx/XR container supervisors
   slept a flat `IRIS_TICK_SECONDS` — turning an ordinary tick into a
   fleet-wide burst of policy GETs, heartbeats and tracker re-announces.
-  `device/iox/entrypoint.sh` and `device/xr/entrypoint.sh` now dither every
+  the common `device/container/entrypoint.sh` now dithers every
   ordinary tick by ±10% of the tick length (`IRIS_TICK_JITTER_PCT`), spread
   their first tick across the whole tick window once at startup
   (`IRIS_STARTUP_JITTER`), and back off exponentially, capped at
@@ -166,7 +205,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `known_hosts` (trust-on-first-use), but a device that is later re-imaged
   or replaced presents a new key and every session then fails with a
   changed-key error — with no way to clear the stale entry short of shell
-  access to the state volume. `POST /api/devices/<id>/forget-host-key`
+  access to the state volume. `POST /api/v1/devices/<id>/forget-host-key`
   (console: the deployment-details drawer's **Forget host key** button)
   removes just that device's entry from the persistent `known_hosts`;
   `lab/iris-ssh-policy.sh` gained the underlying `iris_ssh_forget` function.
@@ -292,7 +331,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   even that write fails — or the tracker process itself is down —
   `peer-enforcement.json` simply stops changing, and a console reading only
   its last recorded `state` (possibly `enforced`) would show it as healthy
-  indefinitely. `GET /api/peer-policy` now derives `enforcement.stale` from
+  indefinitely. `GET /api/v1/peer-policy` now derives `enforcement.stale` from
   how long it has been since `last_reconciled_at` (never, or more than five
   minutes), and the peer-policy badge shows `<state> (stale)` — regardless
   of what that state is — with the last-reconciled time and `last_error` in
@@ -360,7 +399,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   state](docs/zensical/reference.md#keyed-per-device-state) and [Operations →
   Rollback after the shard
   migration](docs/zensical/operations.md#rollback-after-the-shard-migration),
-  both updated to cover it). A new `POST /api/devices/bulk-credential`
+  both updated to cover it). A new `POST /api/v1/devices/bulk-credential`
   endpoint additionally collapses the console's *N* per-device requests for a
   bulk credential reassignment into one call (`FleetStore.bulk_upsert`) that
   groups the underlying shard writes, so a shard holding many of the selected
@@ -721,7 +760,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   booleans strict, image-id lists image-id-shaped); a wrong-typed field
   stores as absent. State files and JSON responses are written with
   `allow_nan=False`, so one device can no longer break the console's
-  `/api/devices` or swarm JSON for every operator. Report, transfer, request
+  `/api/v1/devices` or swarm JSON for every operator. Report, transfer, request
   and image ids are matched whole (a trailing newline no longer passes).
 - **v2 terminal reports may omit `window` and `content`.** An agent that
   measured nothing may leave them out or send `null`; the stored report then
@@ -870,7 +909,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pinned base image and take minutes, which made the default suite depend on the
   machine running it. They are now skipped unless `IRIS_TEST_HOST_INTEGRATION=1`
   is set, so a clean checkout is green and an operator can still run them
-  deliberately before a release or after touching `device/xr/Dockerfile`. See
+  deliberately before a release or after touching
+  `device/container/Dockerfile`. See
   [Validation](docs/zensical/validation.md#opt-in-host-integration-tests).
 - **A `constrained` link means a slower telemetry cadence, and only that.** The
   agent's tier comment promised a trimmed payload on a constrained link; the
@@ -893,7 +933,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   `Secure` cookie set over plain HTTP. `IRIS_GUI_ALLOW_PLAINTEXT=1` opts into
   plaintext deliberately (loopback or an isolated lab only); the session
   cookie then drops its `Secure` attribute so sign-in works, and a warning is
-  logged. `POST /api/settings/gui-cert` reports `applied: false` with a note
+  logged. `POST /api/v1/settings/gui-cert` reports `applied: false` with a note
   when the listener is not serving TLS. See
   [Security](docs/zensical/security.md#tls-and-certificates).
 - **`iris-gui-admin` ends every live console session.** The break-glass reset
@@ -911,7 +951,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   idle timeout Settings advertises. Operator input still counts.
 - **The bulk *Set credential* modal opens on a disabled placeholder.** Apply
   with nothing chosen is a no-op; clearing the credential is a distinct
-  entry that asks for confirmation. A failed `/api/credentials` read now
+  entry that asks for confirmation. A failed `/api/v1/credentials` read now
   keeps the last good profile list, disables the pickers and says so,
   instead of rendering every device as "no credential".
 - **Trust-store uploads and downloads are validated as X.509.** A
@@ -971,15 +1011,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   are now pinned to the commits their `v4`/`v5`/`v4` tags resolved to on
   2026-09-04 rather than to the mutable tags (IRIS-13-015); a moved or
   compromised tag can no longer run with that write token.
-- **Kubernetes ConfigMap is generated from `kubernetes/iris-seed-server.env`**
-  (kustomize `configMapGenerator`, hash-suffixed name) so edits roll the pod on
-  re-apply; `kubernetes/configmap.yaml` is gone. The env file is tracked
-  (explicitly unignored from the `*.env` rule; it holds the former ConfigMap's
-  sentinel values and paths, no secrets), so `kubectl apply -k kubernetes`
-  works from a fresh clone. Both containers pull with
-  `imagePullPolicy: Always` because the tag is a mutable placeholder, and
-  `kubectl -n iris rollout restart deployment/iris-seed-server` is documented
-  for same-tag rebuilds.
+- **Kubernetes ConfigMaps are generated from the tracked server and Console env
+  files** (kustomize `configMapGenerator`, hash-suffixed names), so an edit
+  rolls only the affected Deployment on re-apply; the former hand-written
+  `kubernetes/configmap.yaml` is gone. Kustomize also replaces deliberately
+  unusable server/Console image placeholders with operator-supplied immutable
+  digests and both Deployments use `imagePullPolicy: IfNotPresent`; a mutable
+  same-tag rollout is no longer part of the supported manifest contract.
 - **The seeder's RPC secret leaves the command line.** `server/seed-launch.sh`
   writes a mode-0600 `seeder.aria2.conf` under `IRIS_RUN` and passes
   `--conf-path`, so the secret is no longer readable in
@@ -987,22 +1025,24 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **`tools/stage-iox-package.sh`** places the package atomically in the
   `docker cp` branch too, and checks `/proc/sys/fs/binfmt_misc/qemu-aarch64`
   for arm64 emulation before falling back to pulling a probe image.
-- **The IOS-XR agent image moves to Alpine.** `device/xr/Dockerfile` now builds
-  from `python:3.12-alpine3.24`, pinned by index digest, with only `curl` and
-  `ca-certificates` added. `iris-xr.rpm` drops from 51.6 MB to 26.4 MB
-  delivered and from 145 MB to 71 MB unpacked on the router. Every functional
+- **The unified IOx/XR agent image uses Alpine.**
+  `device/container/Dockerfile` builds from
+  `python:3.12-alpine3.24`, pinned by index digest. The earlier XR-only
+  comparison dropped its wrapper from 51.6 MB to 26.4 MB delivered and from
+  145 MB to 71 MB unpacked; the unified image adds the OpenSSH/`sshpass`
+  surface IOx requires. Every functional
   gate was run side by side with the Debian image before adoption: pinned
   catalog TLS (success and wrong-certificate rejection with identical
   error text), Python ssl/gzip/hashlib/fcntl/statvfs, DNS on musl, the
   BusyBox-ash entrypoint including secret rotation and crash recovery,
   interrupted-torrent resume, indefinite seeding, the completion hook, and
   the agent's own test suite inside the image. This is a deliberate
-  departure from the Debian-trixie lineage the server and IOx images keep
-  in lockstep (issue #13): the XR image has no `openssl` CLI consumer and
-  the RPM is the size-critical delivery. Bump the digest when the tag moves.
-- **Container agents supervise aria2c by exact PID; `procps` is gone from
-  both device images.** `device/iox/entrypoint.sh` and
-  `device/xr/entrypoint.sh` now launch aria2c as a tracked child of the
+  departure from the Debian-trixie lineage the server keeps (issue #13): the
+  device image has no `openssl` CLI consumer. Bump the digest when the tag
+  moves.
+- **Container agents supervise aria2c by exact PID and retain field
+  diagnostics.** `device/container/entrypoint.sh` launches aria2c as a tracked
+  child of the
   PID-1 shell (stdio on `/dev/null`, exactly what `--daemon` did) and act
   only on that PID plus its `/proc` start time — never on `pgrep -f` /
   `pkill -f` name matching. Two latent supervisor faults go with it: a
@@ -1011,9 +1051,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   and a container stop killed aria2c before it saved its `.aria2` control
   file. The supervisor now sends TERM (and CONT), waits up to 5 s, then
   KILLs and reaps, so an interrupted download keeps its checkpoint and a
-  stopped daemon is replaced within a tick. `ps`, `top`, `free` and
-  `/usr/bin/kill` leave the images with `procps`; nothing in the product
-  used them. Saves ~1 MB unpacked (1.6 MB on arm64) per image.
+  stopped daemon is replaced within a tick. Alpine's BusyBox keeps `ps`,
+  `top`, `free`, and `kill` available in the signed image for field diagnosis
+  without the separate `procps` package.
 - **IOx packages no longer carry the docker build context.**
   `device/iox/build.sh` packages from a directory holding only
   `package.yaml` and `rootfs.tar`; `ioxclient package` had been tarring the
@@ -1070,7 +1110,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   unauthenticated connection can no longer make the console hold up to
   8 MiB per request; the TLS handshake runs in the per-connection worker
   thread, so one idle TCP connection to port 8080 no longer freezes the
-  console for every operator; `/api/*` responses carry
+  console for every operator; `/api/v1/*` responses carry
   `Cache-Control: private, no-store` and the static assets revalidate with
   `Last-Modified`/`304`.
 - **A corrupt live secrets store is no longer mistaken for an empty one.**
@@ -1237,7 +1277,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   catalog entry is left for the restart re-seed.
 - **Image delete stops the seeder before unlinking the file, and says when it
   could not.** The stop used to run last and swallow every failure while the
-  audit row said `deleted`; the `DELETE /api/images/<id>` response now carries
+  audit row said `deleted`; the `DELETE /api/v1/images/<id>` response now carries
   `warnings` and the audit detail records a failed stop (class name only).
 - **The canonical torrent's announce honours `IRIS_TRACKER_PORT` /
   `IRIS_TRACKER_ANNOUNCE`** the same way per-device personalization and the
@@ -1292,7 +1332,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   record left `unknown`, `drifted` or `needs-reconcile` survived a successful
   re-onboard and resurfaced as teardown authority once the newer record was
   removed; it is now `abandoned` with the reason recorded. `POST
-  /api/devices` also ignores a client-supplied `os_family` (machine-determined
+  `/api/v1/devices` also ignores a client-supplied `os_family` (machine-determined
   from the device banner) and `registered_at`.
 - **IOx package freshness checks find the pinned certificate again.** The
   2026-09-02 packaging slimming dropped the top-level `iris-catalog.pem` from
@@ -1366,7 +1406,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   on the state volume or calls `/etc/iris` wholly encrypted — `audit.jsonl` is
   plaintext there, and the page says so. `reference.md` gains the peer-policy
   routes (including the API's only compare-and-set write and its refusal
-  codes), `GET /api/install-options`, and 14 previously undocumented
+  codes), `GET /api/v1/install-options`, and 14 previously undocumented
   environment knobs with their real defaults and parser behaviour.
   `operations.md` drops citations to an untracked internal file and a
   lab-host-specific paragraph. `kubernetes.md`, `containers.md` and
@@ -1488,7 +1528,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   server correctly refused (409) but for the wrong reason, spuriously
   conflicting on every off-page device in a bulk assignment. The console now
   fetches each selected id's real current row first (a bounded
-  `/api/devices` walk keyed by device_id — no request at all when the whole
+  `/api/v1/devices` walk keyed by device_id — no request at all when the whole
   selection is already on the rendered page) before opening the picker.
 - **The stage-host credential store, its Settings route, and its console
   form are gone.** Console onboarding always stages per-device material
@@ -1496,10 +1536,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   recipe), so the stage-host SSH credential the form collected was never
   reachable by any onboarding path — a password field with no consumer.
   Removed: `CredentialStore.set_stage_host`/`get_stage_host`/
-  `stage_host_secrets`/`clear_stage_host`, the `POST`/`DELETE
-  /api/settings/stage-host` routes, the `stage_host` card from
-  `GET /api/settings/setup-status` (now four cards, not five) and from
-  `GET /api/settings`, and the Settings/first-run-wizard form and template.
+  `stage_host_secrets`/`clear_stage_host`, the `POST`/`DELETE`
+  `/api/settings/stage-host` routes, the `stage_host` card from
+  `GET /api/v1/settings/setup-status` (now four cards, not five) and from
+  `GET /api/v1/settings`, and the Settings/first-run-wizard form and template.
   The wizard is now three steps (telemetry, device packages, image
   verification), not four. A remote `STAGE_HOST` for a manual, off-console
   `device/device-install.sh` run is unaffected — that path still reads
@@ -1515,7 +1555,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   that entry. The attestation now lands on its own `operator_attested_signature`
   field, written once at publish time and never touched by the reconciler;
   `cisco_signature_verified` stays exclusively the reconciler's. Both are
-  now guaranteed-present booleans on every `/api/images` row (like
+  now guaranteed-present booleans on every `/api/v1/images` row (like
   `quarantined`/`hash_verification`) and both are shown, distinctly, in the
   image-detail drawer. Pre-existing catalog entries are left as they are:
   an already-stored `cisco_signature_verified` cannot be attributed after

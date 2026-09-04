@@ -17,7 +17,7 @@ import time
 import audit_export
 import gui_app
 import gui_creds
-import gui_server
+import management_api as gui_server
 
 
 # ---- helpers --------------------------------------------------------------

@@ -42,6 +42,7 @@ nav = [
   ] },
   { "Reference and development" = [
     { "Reference" = "reference.md" },
+    { "Problem type registry" = "problems.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },
   ] },
