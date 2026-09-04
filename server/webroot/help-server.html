@@ -20,11 +20,12 @@
     <h1>Server-side setup &amp; troubleshooting</h1>
 
     <h2>First run</h2>
-    <p>Before an admin account exists, sign in as <code>iris</code> using the
-    operator-created value in <code>IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST</code>.
-    The file is mounted only in the server tier, and the credential becomes
-    inert as soon as the admin account exists. The CLI alternative from the
-    server host is:</p>
+    <p>Before an admin account exists, sign in with the default credential
+    <code>iris</code> / <code>irisisgreat!</code> — it works only pre-setup
+    and takes you straight to the wizard that creates the real admin account.
+    The moment an admin exists the pair loses its special first-run status and
+    is checked only against the stored administrator account. The CLI
+    alternative from the server host is:</p>
     <pre class="log">docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin</pre>
 
     <h2>Recovery checklist</h2>

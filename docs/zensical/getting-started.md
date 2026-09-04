@@ -33,25 +33,22 @@ umask 077
 mkdir -p ~/.config/iris
 age-keygen -o ~/.config/iris/age.txt
 age-keygen -y ~/.config/iris/age.txt
-openssl rand -hex 32 > ~/.config/iris/console-setup-token
 
 export IRIS_HOST_IP=<server-ip>
 export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
-export IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST=$HOME/.config/iris/console-setup-token
 ```
 
 ## Give the runtime user the host paths
 
 Every service in the container runs as the fixed uid/gid `10001` with all Linux
 capabilities dropped. The image cannot chown host paths, so grant that uid the
-two credential files and writable artifacts directory that cross the container
-boundary before the first start, and again whenever one is recreated:
+age identity file and writable artifacts directory that cross the container
+boundary before the first start, and again whenever either is recreated:
 
 ```bash
 # from the repository root
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"                 # keep it mode 600
-sudo chown 10001 "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"     # keep it mode 600
 sudo chown -R 10001:10001 "${IRIS_ARTIFACTS_HOST_DIR:-artifacts}"
 ```
 
@@ -70,8 +67,8 @@ The optional previous-token host path is needed only during rotation; see
 
 Compose reads the same directory as `${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}`,
 resolved relative to `server/docker-compose.yml` — the repository's `artifacts/`
-directory either way. Without these three paths, the server cannot read its
-key/setup material or write served artifacts; see
+directory either way. Without these two paths, the server cannot read its key
+material or write served artifacts; see
 [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
 
 A fresh install needs nothing more — a new named volume inherits the image's
@@ -129,16 +126,16 @@ container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
 
 ## Create the console admin
 
-Open `https://<server-ip>:8080/`. Before an admin exists, sign in as `iris`
-using the exact contents of `$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST` as the
-password. The token is deployment-unique and server-mounted; it does not create
-a session, but exchanges once for the ten-minute account-creation grant. To
-read it without changing host-file ownership, use:
+Open `https://<server-ip>:8080/` and sign in with the default first-run
+credential `iris` / `irisisgreat!`. This works only before an admin account
+exists. It does not create a session; it returns a one-use setup grant that
+expires after ten minutes and takes you to account creation. Creating the admin
+permanently ends that special behavior.
 
-```bash
-docker compose -f server/docker-compose.yml exec iris \
-  cat /run/iris/console-setup-token
-```
+!!! warning "Complete the first-run claim on a trusted network"
+    Whoever reaches a brand-new Console first can claim the administrator
+    account. Keep port 8080 restricted to a trusted management network and
+    complete this step immediately after deployment.
 
 Or set the admin account from the container instead:
 

@@ -101,9 +101,9 @@ read-only. See [Server](server.md#publishing-images).
 ### Non-root runtime
 
 Every seed-server service runs as the fixed uid and gid `10001`, and Compose
-drops all capabilities. The age identity and Console setup-token files, the
-served artifacts directory, and the host tree behind `IRIS_IMAGE_ROOT` must be
-accessible to that uid; both credential files must remain mode 600 or 400. A
+drops all capabilities. The age identity file, the served artifacts directory,
+and the host tree behind `IRIS_IMAGE_ROOT` must be accessible to that uid; the
+identity file must remain mode 600 or 400. A
 deployment upgraded from a root-runtime release
 needs a one-time migration of its named volumes. Both procedures live in
 [Runtime identity](server.md#runtime-identity), with the migration command in

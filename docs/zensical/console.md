@@ -17,16 +17,16 @@ https://<server-ip>:8080/
 ```
 
 The server uses a self-signed certificate by default. Before an admin account
-exists, sign in as `iris` with the deployment-unique token from the protected
-file named by `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`. There is no shared default.
-The correct token yields a one-use, ten-minute grant and takes you to the
-account-creation page; it cannot reopen setup once the real admin exists. Read
-the runtime copy without placing it in an argument or log:
+exists, sign in with the default credential `iris` / `irisisgreat!`. A correct
+login creates no session; it yields a one-use setup grant that expires after
+ten minutes and takes you to the account-creation page. Creating the real admin
+permanently ends this special behavior, after which the pair is checked only
+against the stored administrator credentials and normally fails.
 
-```bash
-docker compose -f server/docker-compose.yml exec iris \
-  cat /run/iris/console-setup-token
-```
+!!! warning "The first reachable caller can claim a fresh Console"
+    Keep the Console on a trusted management network and complete admin setup
+    immediately after deployment. Do not expose a brand-new Console to an
+    untrusted network while no administrator exists.
 
 Or create the initial admin from the container instead:
 

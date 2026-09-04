@@ -289,7 +289,6 @@ _COMPOSE_UNAVAILABLE = {
     "IRIS_OBSERVABILITY_TOKEN_FILE_HOST": "host path of an observability-token bind mount",
     "IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST": "host path of the previous-token bind mount",
     "IRIS_OTLP_HEADERS_FILE_HOST": "host path of the OTLP-header bind mount",
-    "IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST": "host path of the Console setup-token secret",
     # Build argument, not a runtime variable.
     "IRIS_VERSION": "docker build arg",
     # Read by the IOS-XR appmgr container's own entrypoint on the device, not

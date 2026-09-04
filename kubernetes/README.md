@@ -88,33 +88,19 @@ kubectl -n iris create secret generic iris-age \
 Put the printed public recipient (and preferably an offline break-glass
 recipient) in `IRIS_AGE_RECIPIENTS` in `iris-seed-server.env`.
 
-### First-run Console setup token
+### First-run Console administrator
 
-There is no shared default Console password. Create one high-entropy first-run
-token as a protected file, then mount it only into the server tier:
+After both Deployments are ready, open the Console from the trusted management
+network and sign in with the default first-run credential `iris` / `irisisgreat!`.
+This login creates no session; it returns a one-use setup grant that expires
+after ten minutes and leads to administrator creation. Creating the
+administrator permanently ends that special behavior, after which the pair is
+checked only against the stored administrator credentials and normally fails.
 
-```bash
-umask 077
-mkdir -p iris-console-setup
-openssl rand -hex 32 > iris-console-setup/token
-kubectl -n iris create secret generic iris-console-setup \
-  --from-file=token=iris-console-setup/token \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-At the first Console sign-in, use username `iris` and the exact contents of
-that local token file as the password. A correct value yields a ten-minute,
-one-use setup grant for choosing the permanent administrator credentials; it
-never creates a session itself. A missing, malformed, or weak token makes a
-fresh server refuse startup. The Secret is projected only into
-`iris-seed-server`, never into `iris-console`, and no token value belongs in a
-ConfigMap, command argument, URL, or log.
-
-Before the administrator is created, rotate by replacing the local file,
-re-applying the Secret, and restarting `iris-seed-server`. After successful
-setup the token is permanently inert; you may delete `iris-console-setup` and
-restart the server because the projection is optional for an already-configured
-store.
+Whoever reaches a brand-new Console first can claim the administrator account.
+Restrict the Console LoadBalancer to trusted operators and complete setup
+immediately after deployment; do not expose an unconfigured Console to an
+untrusted network.
 
 ### Management-tier bearer token
 

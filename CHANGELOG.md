@@ -19,13 +19,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   file-mounted current/previous credential. Missing or wrong tier credentials
   fail before route lookup or request-body buffering, while browser sessions,
   CSRF, `X-IRIS-Poll`, and private/no-store response handling remain enforced.
-- **Fresh deployments now require an operator-held Console setup token.** The
-  shared first-run password is gone: Compose requires
-  `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, mounted only into the server tier, and
-  Kubernetes uses the equivalent server-only Secret. Signing in as `iris`
-  with that deployment-unique value mints a one-use, ten-minute setup grant;
-  missing or unreadable setup material makes an unconfigured server fail
-  closed, and the token cannot reopen setup after the first admin is created.
+- **The split Console preserves the existing first-run administrator claim.**
+  Before an administrator exists, `iris` / `irisisgreat!` mints a one-use,
+  ten-minute setup grant rather than a session; creating the administrator
+  permanently ends that special behavior. Because the first caller who can
+  reach a fresh Console can claim it, keep the Console on a trusted network
+  and complete setup immediately after deployment.
 - **The unified IOx/XR agent no longer puts tracker credentials in announce
   URLs, and registered non-probe APIs authenticate before disclosing resource
   existence.** Aria2 supplies its resource-bound announce bearer as a request

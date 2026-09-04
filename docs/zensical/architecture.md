@@ -110,9 +110,9 @@ Both containers run as the unprivileged user `iris`, a fixed uid/gid `10001`
 baked into their images. Every listener binds an unprivileged port, so the
 runtime drops all Linux capabilities and forbids privilege escalation. Nothing
 chowns anything at runtime, so the host paths that cross the server-container
-boundary — the age identity file, the one-use Console setup-token file, the
-artifacts directory, and any persistent volumes retained from an older
-root-running deployment — have to be owned by that uid before the stack starts.
+boundary — the age identity file, the artifacts directory, and any persistent
+volumes retained from an older root-running deployment — have to be owned by
+that uid before the stack starts.
 Fresh named volumes inherit the image's ownership when they are initialized. See
 [Runtime identity](server.md#runtime-identity).
 

@@ -88,13 +88,12 @@ root on every deploy, fresh or upgraded, or the server starts and then fails to
 read its own key material and cannot write served artifacts:
 
 ```bash
-chmod 600 "$IRIS_AGE_KEY_FILE_HOST" "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"
+chmod 600 "$IRIS_AGE_KEY_FILE_HOST"
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"
-sudo chown 10001 "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST"
 sudo chown -R 10001:10001 artifacts          # or "$IRIS_ARTIFACTS_HOST_DIR"
 ```
 
-Keep both credential files at mode `600` (or `400`); changing the owner does
+Keep the age identity at mode `600` (or `400`); changing the owner does
 not change the mode. `IRIS_ARTIFACTS_HOST_DIR` defaults to `../artifacts` relative to
 `server/docker-compose.yml`, which is the repository's `artifacts/` directory.
 

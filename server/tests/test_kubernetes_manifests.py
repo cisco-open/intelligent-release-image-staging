@@ -307,29 +307,19 @@ def test_otlp_collector_headers_are_an_optional_server_only_secret():
     )
 
 
-def test_first_run_setup_token_is_optional_after_claim_and_server_only():
+def test_default_first_run_has_no_setup_token_projection():
     server_pod = _pod(_load("deployment.yaml"))
     console_pod = _pod(_load("console-deployment.yaml"))
     server = server_pod["containers"][0]
     console = console_pod["containers"][0]
 
-    secret = _volume(server_pod, "console-setup")["secret"]
-    assert secret["secretName"] == "iris-console-setup"
-    assert secret["defaultMode"] == 0o440
-    assert secret["optional"] is True
-    assert secret["items"] == [{"key": "token", "path": "token"}]
-    assert _mount(server, "console-setup") == {
-        "name": "console-setup",
-        "mountPath": "/run/secrets/iris-console-setup",
-        "readOnly": True,
-    }
-    assert _env(server)["IRIS_CONSOLE_SETUP_TOKEN_FILE"] == (
-        "/run/secrets/iris-console-setup/token"
-    )
-    assert "IRIS_CONSOLE_SETUP_TOKEN_FILE" not in _env(console)
-    assert not any(
-        volume["name"] == "console-setup" for volume in console_pod["volumes"]
-    )
+    for pod, container in ((server_pod, server), (console_pod, console)):
+        assert "IRIS_CONSOLE_SETUP_TOKEN_FILE" not in _env(container)
+        assert not any(
+            volume["name"] == "console-setup" for volume in pod["volumes"])
+        assert not any(
+            mount["name"] == "console-setup"
+            for mount in container.get("volumeMounts", []))
 
 
 def test_probes_are_per_tier_and_do_not_create_cold_start_dependency():
@@ -456,8 +446,9 @@ def test_operator_readme_documents_split_topology_and_safe_copy():
     assert "exact DNS name or IP address" in readme
     assert "iris-observability-auth" in readme
     assert "iris-otlp-headers" in readme
-    assert "iris-console-setup" in readme
-    assert "There is no shared default Console password" in readme
+    assert "iris-console-setup" not in readme
+    assert "There is no shared default Console password" not in readme
+    assert "`iris` / `irisisgreat!`" in readme
     assert "openssl rand -hex 32 > iris-observability-auth/current" in readme
     assert "credentials_file:" in readme
     assert "ca_file:" in readme

@@ -16,11 +16,10 @@
 # so docker compose exec can use iris-publish without repeating them.
 #
 # NON-ROOT: the container runs as the fixed uid/gid 10001 (image user `iris`).
-# Three host-side paths cross the container boundary and must be made accessible
+# Two host-side paths cross the container boundary and must be made accessible
 # to that uid ON EVERY DEPLOY (fresh or upgraded) — the Dockerfile cannot chown
 # the host:
 #   sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"            # keep it mode 600
-#   sudo chown 10001 "$IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST" # keep it mode 600
 #   sudo chown -R 10001:10001 artifacts                   # from the REPO ROOT
 # (the IRIS_ARTIFACTS_HOST_DIR default below is ../artifacts because Compose
 # resolves it relative to THIS file's directory, server/ — pasting that literal
@@ -219,11 +218,6 @@ services:
       IRIS_RPC_SECRET_FILE: "/run/iris/rpc-secret"
       IRIS_CERT: "/run/iris/tls/cert.pem"
       IRIS_SECRETS_ENC: "/etc/iris/secrets.json.age"
-      # First-run web setup accepts the nonsecret username `iris` plus the
-      # operator-created high-entropy value in this server-only file. The
-      # entrypoint copies the Docker Secret into private tmpfs before use.
-      IRIS_CONSOLE_SETUP_TOKEN_SOURCE: "/run/secrets/iris_console_setup_token"
-      IRIS_CONSOLE_SETUP_TOKEN_FILE: "/run/iris/console-setup-token"
       IRIS_AUDIT: "/etc/iris/audit.jsonl"
       IRIS_IMAGES_DIR: "/var/lib/iris-images"
       IRIS_ARTIFACTS_DIR: "/srv/artifacts"
@@ -272,7 +266,6 @@ services:
       - /run/iris:uid=10001,gid=10001,mode=0700
     secrets:
       - iris_age_key
-      - iris_console_setup_token
     expose:
       - "9443"          # management API, reachable only on the Compose network
     # survives crashes AND host/docker restarts (only a manual `docker stop` sticks)
@@ -335,7 +328,3 @@ secrets:
     # path on the docker host to the age IDENTITY (private key) file, umask 077.
     # NEVER committed; NEVER on the encrypted volume.
     file: "${IRIS_AGE_KEY_FILE_HOST:?Set IRIS_AGE_KEY_FILE_HOST to the host path of the age identity}"
-  iris_console_setup_token:
-    # Raw high-entropy first-run value. Mounted only in the state-owning
-    # server; the public Console/BFF never receives this Secret.
-    file: "${IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST:?Set IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST to the operator-created Console setup token file}"

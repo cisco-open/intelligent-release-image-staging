@@ -174,37 +174,31 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
-# The initial username is an identifier, not a credential. Its password is a
-# deployment-unique high-entropy value mounted only in the management tier via
-# IRIS_CONSOLE_SETUP_TOKEN_FILE. There is deliberately no built-in fallback:
-# a missing/unusable file makes every initial login fail closed.
-SETUP_USER = "iris"
+# Public, non-configurable default first-run credential, retained for
+# compatibility. A fresh Console must stay on a trusted network until claimed.
+# The pair is accepted only while no administrator exists and mints a
+# short-lived, one-use setup grant; it never creates a session or persistent
+# account. Once setup completes, the pair is handled as an ordinary
+# administrator login and normally fails unless the operator chose these exact
+# permanent credentials.
+DEFAULT_SETUP_USER = "iris"
+DEFAULT_SETUP_PASS = "irisisgreat!"
 _SETUP_GRANT_TTL = 600  # seconds (10 minutes)
 
 
-def _is_setup_credential(username, password, token_file):
-    """Validate the operator-held first-run credential without disclosure.
-
-    ``tier_auth`` supplies strict regular-file, permissions, size, and minimum
-    entropy checks. Both comparisons always execute, and an unavailable file
-    is indistinguishable from a wrong credential on the wire.
-    """
-    available = True
-    try:
-        expected, _ = tier_auth.load_pair(
-            token_file, scope="console-setup")
-    except tier_auth.CredentialUnavailable:
-        expected = b"\0" * tier_auth.MIN_TOKEN_BYTES
-        available = False
+def _is_default_credential(username, password):
+    """Constant-time comparison of both fields against the first-run pair."""
     try:
         supplied_user = username.encode("utf-8")
-        supplied_token = password.encode("utf-8")
+        supplied_password = password.encode("utf-8")
     except UnicodeError:
         supplied_user = b""
-        supplied_token = b""
-    user_ok = hmac.compare_digest(supplied_user, SETUP_USER.encode("utf-8"))
-    token_ok = hmac.compare_digest(supplied_token, expected)
-    return available and user_ok and token_ok
+        supplied_password = b""
+    user_ok = hmac.compare_digest(
+        supplied_user, DEFAULT_SETUP_USER.encode("utf-8"))
+    password_ok = hmac.compare_digest(
+        supplied_password, DEFAULT_SETUP_PASS.encode("utf-8"))
+    return user_ok and password_ok
 
 
 def _mint_setup_grant(app):
@@ -973,8 +967,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
-                 management_previous_token_file=None,
-                 setup_token_file=None):
+                 management_previous_token_file=None):
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -2201,8 +2194,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 })
                 return
             if path in ("/", "/index.html") and app.needs_setup():
-                # First-run: land on the LOGIN page — the operator-provided
-                # iris setup token is what mints the grant. setup.html
+                # First-run: land on the login page, where the built-in pair
+                # mints the one-use grant. setup.html
                 # itself stays a plain static page; visiting it grantless just
                 # bounces back to login client-side.
                 self._serve_static("/login.html"); return
@@ -3049,16 +3042,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(429, {"error": "too many login attempts"},
                                extra_headers=[("Retry-After", str(retry))])
                     return
-                if app.needs_setup() and _is_setup_credential(
-                        username, password, setup_token_file):
-                    # The deployment-unique setup credential does not create a
-                    # session. It hands back a short-lived one-time grant for
-                    # /api/setup; no secret value reaches logs, argv, or URLs.
+                if app.needs_setup() and _is_default_credential(
+                        username, password):
+                    # The first-run pair does not create a session. It hands
+                    # back a short-lived one-time grant for /api/setup.
                     login_limiter.success(src_ip)
                     grant = _mint_setup_grant(app)
                     self._audit("login", "auth", action="login",
                                actor="console:" + username, result="ok",
-                               detail="operator setup credential accepted",
+                               detail="default credential -> setup grant issued",
                                src_ip=src_ip)
                     self._json(200, {"setup": True, "setup_grant": grant})
                     return
@@ -4653,8 +4645,6 @@ def main():
     token_file = os.environ.get("IRIS_MANAGEMENT_API_TOKEN_FILE", "").strip()
     previous_token_file = os.environ.get(
         "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE", "").strip() or None
-    setup_token_file = os.environ.get(
-        "IRIS_CONSOLE_SETUP_TOKEN_FILE", "").strip() or None
     if not certfile or not os.path.isfile(certfile):
         print("iris-management: management TLS certificate unavailable; "
               "refusing to start", file=sys.stderr, flush=True)
@@ -4674,15 +4664,6 @@ def main():
     # /api/help call already sees the durable value.
     read_instance_id(state_dir)
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
-    if app.needs_setup():
-        try:
-            tier_auth.load_pair(setup_token_file, scope="console-setup")
-        except tier_auth.CredentialUnavailable as exc:
-            print("iris-management: initial Console setup credential is "
-                  "unavailable; refusing to start (%s)" % exc,
-                  file=sys.stderr, flush=True)
-            sys.exit(2)
-
     def _bg_audit(**kw):
         # audit sink for background jobs (onboard runs, async image publishes)
         event = kw.pop("event")
@@ -4715,8 +4696,7 @@ def main():
             host, port, app, images, fleet, creds, catalog, onboard, None,
             certfile=certfile, keyfile=keyfile, audit_path=audit_path,
             record_store=record_store, management_token_file=token_file,
-            management_previous_token_file=previous_token_file,
-            setup_token_file=setup_token_file)
+            management_previous_token_file=previous_token_file)
     except ConsoleTLSError as exc:
         print("iris-management: %s" % exc, file=sys.stderr, flush=True)
         sys.exit(2)

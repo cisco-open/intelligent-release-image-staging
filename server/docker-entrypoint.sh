@@ -36,7 +36,6 @@ IRIS_GUI_CERT="${IRIS_GUI_CERT:-$IRIS_RUN/tls/gui-cert.pem}"
 IRIS_GUI_FALLBACK_CERT="${IRIS_GUI_FALLBACK_CERT:-$IRIS_RUN/tls/console-fallback.pem}"
 IRIS_MANAGEMENT_API_CERT="${IRIS_MANAGEMENT_API_CERT:-$IRIS_RUN/tls/management-crt.pem}"
 IRIS_MANAGEMENT_API_KEY="${IRIS_MANAGEMENT_API_KEY:-$IRIS_RUN/tls/key.pem}"
-IRIS_CONSOLE_SETUP_TOKEN_FILE="${IRIS_CONSOLE_SETUP_TOKEN_FILE:-$IRIS_RUN/console-setup-token}"
 mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_TRUST_DIR" "$IRIS_LOG" \
   "$IRIS_RUN/tls"
 # Keep the plaintext dir private. Running non-root (uid 10001), we may not OWN
@@ -45,22 +44,6 @@ mkdir -p "$IRIS_STATE/torrents" "$IRIS_CONFIG/tls" "$IRIS_TRUST_DIR" "$IRIS_LOG"
 # (fsGroup grants group access only) and chmod by a non-owner fails. The mount
 # options / fsGroup are the enforcement there, so don't abort on it.
 chmod 700 "$IRIS_RUN" 2>/dev/null || true
-
-# Docker Compose file-backed Secrets may be exposed with engine-controlled
-# permissions. Copy the first-run Console credential into this container's
-# private tmpfs and validate the private copy in management_api.py. Kubernetes
-# mounts a group-readable projected Secret directly and leaves SOURCE unset.
-if [ -n "${IRIS_CONSOLE_SETUP_TOKEN_SOURCE:-}" ]; then
-  if [ ! -f "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" ] || \
-     [ ! -s "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" ]; then
-    echo "FATAL: Console setup credential source is unavailable — refusing to start" >&2
-    exit 1
-  fi
-  setup_tmp="${IRIS_CONSOLE_SETUP_TOKEN_FILE}.tmp"
-  cp "$IRIS_CONSOLE_SETUP_TOKEN_SOURCE" "$setup_tmp"
-  chmod 600 "$setup_tmp"
-  mv -f "$setup_tmp" "$IRIS_CONSOLE_SETUP_TOKEN_FILE"
-fi
 
 # At-rest: the persistent volume holds ONLY ciphertext (*.age). The master
 # age identity is supplied out-of-band (a Docker secret), never on the volume.
@@ -260,7 +243,6 @@ export IRIS_SECRETS_ENC="${IRIS_SECRETS_ENC:-$IRIS_CONFIG/secrets.json.age}"
 export IRIS_AGE_BIN IRIS_AGE_KEY_FILE
 export IRIS_GUI_CERT IRIS_GUI_FALLBACK_CERT IRIS_TRUST_DIR IRIS_CA_BUNDLE
 export IRIS_MANAGEMENT_API_CERT IRIS_MANAGEMENT_API_KEY
-export IRIS_CONSOLE_SETUP_TOKEN_FILE
 
 # Compose represents an omitted optional bind with /dev/null.  Never pass that
 # character device to strict credential-file validation as an alleged previous

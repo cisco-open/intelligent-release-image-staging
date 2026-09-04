@@ -129,7 +129,7 @@ and distribute through the swarm like any other image.
 | Check | Expected result |
 | --- | --- |
 | Server starts | Console, catalog, tracker, artifact server, and telemetry ports are reachable. |
-| Runtime uid owns the host paths | The age key file, one-use Console setup-token file, and host `artifacts/` directory are owned by uid `10001`, and any volume carried over from a root-runtime release is migrated ([Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)). The Console Images screen lists no file as `not readable by the server`. |
+| Runtime uid owns the host paths | The age key file and host `artifacts/` directory are owned by uid `10001`, and any volume carried over from a root-runtime release is migrated ([Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)). The Console Images screen lists no file as `not readable by the server`. |
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
 | Import publishes in place | A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no `.torrent` beside it. |

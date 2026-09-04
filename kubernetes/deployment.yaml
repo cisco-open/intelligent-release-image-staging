@@ -99,11 +99,6 @@ spec:
               value: /run/secrets/iris-management-tls/tls.crt
             - name: IRIS_MANAGEMENT_API_KEY
               value: /run/secrets/iris-management-tls/tls.key
-            # First-run browser setup uses a deployment-unique credential
-            # known to the operator. It is mounted only in this state-owning
-            # tier; the public Console/BFF never receives the file.
-            - name: IRIS_CONSOLE_SETUP_TOKEN_FILE
-              value: /run/secrets/iris-console-setup/token
             # Prometheus is optional, but enabling it never makes /metrics
             # anonymous.  This separate principal is deliberately not the
             # management-tier credential; current+previous files permit a
@@ -195,9 +190,6 @@ spec:
             - name: otlp-headers
               mountPath: /run/secrets/iris-otlp-headers
               readOnly: true
-            - name: console-setup
-              mountPath: /run/secrets/iris-console-setup
-              readOnly: true
             # Every server-side device session shells out to lab/device-run.sh,
             # which writes a mktemp transcript copy AND its enable-escalation
             # marker under ${TMPDIR:-/tmp}. Those land in the container's
@@ -275,14 +267,3 @@ spec:
             items:
               - key: headers
                 path: headers
-        - name: console-setup
-          secret:
-            secretName: iris-console-setup
-            defaultMode: 0440
-            # Once the first admin exists, this credential is permanently
-            # inert and the Secret may be removed. A fresh store still fails
-            # closed in management_api.py when the optional projection is empty.
-            optional: true
-            items:
-              - key: token
-                path: token

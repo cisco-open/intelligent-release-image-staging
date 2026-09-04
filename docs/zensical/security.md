@@ -298,20 +298,17 @@ combination is a locked-out, un-migrated fleet, not a migrated one. See
 ## First-run admin claim
 
 Before an admin account exists, the console's normal login page accepts the
-non-secret username `iris` only with a deployment-unique, high-entropy token
-from `IRIS_CONSOLE_SETUP_TOKEN_FILE`. Compose supplies an operator-created file
-as a server-only Docker Secret; Kubernetes projects a dedicated server-only
-Secret. The Console/BFF never mounts it. Missing, malformed, broadly readable,
-or weak runtime material makes a fresh management tier refuse startup rather
-than fall back to a shared password.
+documented default credential `iris` / `irisisgreat!` and, instead of a
+session, mints a one-use, 10-minute setup grant that leads into administrator
+creation. That pair authorizes nothing else and stops receiving special
+treatment the moment a real administrator account exists; afterwards it is
+checked only against the stored administrator credentials, with failures
+rate-limited and audited like any other login. The operator may name the real
+administrator `iris` or even deliberately retain the default pair.
 
-A correct comparison is constant-time and, instead of a session, mints a
-single-use, 10-minute setup grant for choosing the real admin credentials.
-Committing that account permanently disables the bootstrap path even if a
-read-only Secret remains mounted. Wrong attempts are rate-limited and audited
-without recording the supplied value. Rotate the file/Secret and restart the
-server before setup if exposure is suspected; after setup it cannot reclaim
-the account.
+This is a deliberate trade: whoever reaches a brand-new Console first can
+claim the administrator account. Complete setup immediately after deploying,
+and keep the Console on a trusted management network until you have.
 
 ## Secrets
 

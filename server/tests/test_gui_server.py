@@ -3663,9 +3663,7 @@ def test_swarm_proxy_and_error(tmp_path):
 def _serve_fresh(tmp_path):
     """A server whose store has NO admin yet (first-run/setup state)."""
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
-    srv = gui_server.make_server(
-        "127.0.0.1", 0, app, certfile=None,
-        setup_token_file=_write_setup_token(tmp_path))
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, app, srv.shutdown
@@ -3675,21 +3673,11 @@ def _setup_headers(host, port):
     return {"Origin": "http://%s:%d" % (host, port)}
 
 
-_TEST_SETUP_TOKEN = "s" * 64
-
-
-def _write_setup_token(tmp_path, mode=0o600):
-    token = tmp_path / "console-setup-token"
-    token.write_text(_TEST_SETUP_TOKEN + "\n")
-    token.chmod(mode)
-    return str(token)
-
-
-def _setup_login_grant(host, port):
-    """Exchange the operator-held first-run credential for a setup grant."""
+def _default_login_grant(host, port):
+    """Exchange the documented default pair for a one-time setup grant."""
     st, hd, b = _req(host, port, "POST", "/api/login",
-                     {"username": gui_server.SETUP_USER,
-                      "password": _TEST_SETUP_TOKEN})
+                     {"username": gui_server.DEFAULT_SETUP_USER,
+                      "password": gui_server.DEFAULT_SETUP_PASS})
     assert st == 200
     body = json.loads(b)
     assert body["setup"] is True and body["setup_grant"]
@@ -3697,18 +3685,23 @@ def _setup_login_grant(host, port):
     return body["setup_grant"]
 
 
+def test_default_setup_pair_is_stable():
+    assert gui_server.DEFAULT_SETUP_USER == "iris"
+    assert gui_server.DEFAULT_SETUP_PASS == "irisisgreat!"
+
+
 def test_setup_serves_wizard_and_creates_admin(tmp_path):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        # while no admin exists, GET / serves the LOGIN page; the operator's
-        # file-mounted credential mints the setup grant. The setup
+        # while no admin exists, GET / serves the LOGIN page; the documented
+        # default pair mints the setup grant. The setup
         # page itself stays reachable as a static page for the redirect.
         st, hd, b = _req(host, port, "GET", "/")
         assert st == 200 and b'id="login-form"' in b
         st, hd, b = _req(host, port, "GET", "/setup.html")
         assert st == 200 and b'id="setup-form"' in b
         # The server hands back a one-time grant instead of a session.
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         {"username": "admin", "password": "password",
                          "setup_grant": grant},
@@ -3755,10 +3748,11 @@ def test_normal_mode_serves_login_not_setup(tmp_path):
                          "setup_grant": "unavailable-after-setup"},
                         headers=_setup_headers("127.0.0.1", port))
         assert st == 409
-        # The setup credential is inert once an admin exists.
+        # The default pair is not special once an admin exists: it is an
+        # ordinary failed login, not a setup grant.
         st, _, b = _req("127.0.0.1", port, "POST", "/api/login",
-                        {"username": gui_server.SETUP_USER,
-                         "password": _TEST_SETUP_TOKEN})
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
         assert st == 401
         assert "setup" not in json.loads(b)
     finally:
@@ -3774,7 +3768,7 @@ def test_setup_requires_and_consumes_grant(tmp_path):
         st, _, _ = _req(host, port, "POST", "/api/setup", payload, headers=headers)
         assert st == 403                         # no grant
 
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         payload | {"setup_grant": "wrong-grant"}, headers=headers)
         assert st == 403                         # wrong grant
@@ -3795,7 +3789,7 @@ def test_setup_grant_expires(tmp_path, monkeypatch):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         monkeypatch.setattr(gui_server.time, "time", lambda: 10000.0)
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         monkeypatch.setattr(gui_server.time, "time",
                             lambda: 10000.0 + gui_server._SETUP_GRANT_TTL)
         st, _, _ = _req(host, port, "POST", "/api/setup",
@@ -3808,11 +3802,11 @@ def test_setup_grant_expires(tmp_path, monkeypatch):
         stop()
 
 
-def test_setup_grant_regenerated_on_each_operator_login_latest_wins(tmp_path):
+def test_setup_grant_regenerated_on_each_default_login_latest_wins(tmp_path):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        grant1 = _setup_login_grant(host, port)
-        grant2 = _setup_login_grant(host, port)
+        grant1 = _default_login_grant(host, port)
+        grant2 = _default_login_grant(host, port)
         assert grant1 != grant2
         headers = _setup_headers(host, port)
         # the superseded grant no longer works
@@ -3829,14 +3823,14 @@ def test_setup_grant_regenerated_on_each_operator_login_latest_wins(tmp_path):
         stop()
 
 
-def test_wrong_or_public_default_credentials_never_mint_setup_grant(tmp_path):
-    """Only the operator-held file value can authorize first-run setup."""
+def test_only_exact_default_pair_mints_setup_grant(tmp_path):
+    """Either correct field alone is an ordinary failed login."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         for creds in (
-            {"username": gui_server.SETUP_USER, "password": "irisisgreat!"},
-            {"username": gui_server.SETUP_USER, "password": "wrong"},
-            {"username": "not-iris", "password": _TEST_SETUP_TOKEN},
+            {"username": gui_server.DEFAULT_SETUP_USER, "password": "wrong"},
+            {"username": "not-iris",
+             "password": gui_server.DEFAULT_SETUP_PASS},
         ):
             st, _, b = _req(host, port, "POST", "/api/login", creds)
             assert st == 401
@@ -3846,23 +3840,11 @@ def test_wrong_or_public_default_credentials_never_mint_setup_grant(tmp_path):
         stop()
 
 
-def test_setup_credential_file_failures_are_closed(tmp_path):
-    missing = tmp_path / "missing-setup-token"
-    assert not gui_server._is_setup_credential(
-        gui_server.SETUP_USER, _TEST_SETUP_TOKEN, str(missing))
-
-    broad = _write_setup_token(tmp_path, mode=0o604)
-    assert not gui_server._is_setup_credential(
-        gui_server.SETUP_USER, _TEST_SETUP_TOKEN, broad)
-    assert not gui_server._is_setup_credential(
-        "not-iris", _TEST_SETUP_TOKEN, broad)
-
-
-def test_operator_setup_credential_full_happy_path(tmp_path):
-    """End to end: operator credential -> grant -> setup -> real session."""
+def test_default_credential_full_happy_path(tmp_path):
+    """End to end: default login -> grant -> setup -> real session."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         {"username": "opuser", "password": "opuserpassword",
                          "setup_grant": grant},
@@ -3878,10 +3860,10 @@ def test_operator_setup_credential_full_happy_path(tmp_path):
 
 
 def test_admin_may_be_named_iris(tmp_path):
-    """The setup username remains legal for the persistent admin account."""
+    """The default username remains legal for the persistent admin account."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         {"username": "iris", "password": "a-real-password",
                          "setup_grant": grant},
@@ -3895,32 +3877,33 @@ def test_admin_may_be_named_iris(tmp_path):
         assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
         assert json.loads(b)["username"] == "iris"
 
-        # The operator-held setup token no longer means anything post-setup.
+        # The default pair no longer means anything special post-setup, and
+        # does not match this admin's real password.
         st, _, b = _req(host, port, "POST", "/api/login",
-                        {"username": gui_server.SETUP_USER,
-                         "password": _TEST_SETUP_TOKEN})
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
         assert st == 401
         assert "setup" not in json.loads(b)
     finally:
         stop()
 
 
-def test_admin_named_iris_with_same_password_as_setup_token(tmp_path):
-    """After setup, matching credentials use only the persisted admin hash."""
+def test_admin_named_iris_with_default_password(tmp_path):
+    """After setup, the same pair uses only the persisted admin hash."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        grant = _setup_login_grant(host, port)
+        grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         {"username": "iris",
-                         "password": _TEST_SETUP_TOKEN,
+                         "password": gui_server.DEFAULT_SETUP_PASS,
                          "setup_grant": grant},
                         headers=_setup_headers(host, port))
         assert st == 200
         assert app.needs_setup() is False
 
         st, hd, b = _req(host, port, "POST", "/api/login",
-                         {"username": gui_server.SETUP_USER,
-                          "password": _TEST_SETUP_TOKEN})
+                         {"username": gui_server.DEFAULT_SETUP_USER,
+                          "password": gui_server.DEFAULT_SETUP_PASS})
         assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
         assert json.loads(b)["username"] == "iris"
         assert "setup" not in json.loads(b)
@@ -3928,17 +3911,17 @@ def test_admin_named_iris_with_same_password_as_setup_token(tmp_path):
         stop()
 
 
-def test_no_public_setup_password_exists_in_runtime_sources():
-    """The retired public password must not re-enter shipped runtime code."""
+def test_bootstrap_token_strings_removed_repo_wide():
+    """The earlier file-backed GUI bootstrap-token mechanism stays removed."""
     repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=repo_root, capture_output=True,
         text=True, check=True).stdout.splitlines()
-    needles = ("irisisgreat!", "DEFAULT_SETUP_PASS")
+    needles = ("gui-bootstrap-token", "bootstrap_token")
     self_path = "server/tests/" + os.path.basename(__file__)
     hits = []
     for rel in tracked:
-        if rel in (self_path, "CHANGELOG.md") or rel.startswith("docs/"):
+        if rel in (self_path, "CHANGELOG.md"):
             continue
         try:
             with open(os.path.join(repo_root, rel), "rb") as f:
@@ -5267,12 +5250,11 @@ def test_setup_emits_enriched_audit(tmp_path):
     app = gui_app.GuiApp(secrets_path)          # no admin yet -> needs_setup
     audit_path = str(tmp_path / "audit.jsonl")
     srv = gui_server.make_server("127.0.0.1", 0, app, audit_path=audit_path,
-                                 certfile=None,
-                                 setup_token_file=_write_setup_token(tmp_path))
+                                 certfile=None)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        grant = _setup_login_grant("127.0.0.1", port)
+        grant = _default_login_grant("127.0.0.1", port)
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/setup",
                         {"username": "root", "password": "pw12345678",
                          "setup_grant": grant},
@@ -5283,11 +5265,12 @@ def test_setup_emits_enriched_audit(tmp_path):
         assert ev["target"] == "root"
         assert ev["detail"] == "initial admin account created"
         assert ev["src_ip"] == "127.0.0.1"
-        # The operator-credential login that produced the grant is itself
+        # The default-credential login that produced the grant is itself
         # audited as an ordinary successful login (category "auth")
         login_ev = [e for e in _read_audit_lines(audit_path)
                     if e.get("event") == "login"][0]
-        assert login_ev["actor"] == "console:" + gui_server.SETUP_USER
+        assert login_ev["actor"] == (
+            "console:" + gui_server.DEFAULT_SETUP_USER)
         assert login_ev["category"] == "auth" and login_ev["result"] == "ok"
     finally:
         srv.shutdown()
@@ -5314,8 +5297,8 @@ def test_setup_wrong_grant_is_audited(tmp_path):
         srv.shutdown()
 
 
-def test_setup_login_failure_is_audited_category_auth(tmp_path):
-    """A failed setup login is an ordinary audited authentication failure."""
+def test_default_login_failure_is_audited_category_auth(tmp_path):
+    """A failed default login is an ordinary audited authentication failure."""
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
     audit_path = str(tmp_path / "audit.jsonl")
@@ -5325,7 +5308,7 @@ def test_setup_login_failure_is_audited_category_auth(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         st, _, _ = _req("127.0.0.1", port, "POST", "/api/login",
-                        {"username": gui_server.SETUP_USER,
+                        {"username": gui_server.DEFAULT_SETUP_USER,
                          "password": "wrong"})
         assert st == 401
         ev = [e for e in _read_audit_lines(audit_path)
@@ -10070,8 +10053,8 @@ def test_corrupt_secrets_store_fails_closed_with_503(tmp_path):
         assert json.loads(b)["code"] == "service-unavailable"
         assert b"secrets store" not in b
         st, _, b = _req(host, port, "POST", "/api/login",
-                        {"username": gui_server.SETUP_USER,
-                         "password": _TEST_SETUP_TOKEN})
+                        {"username": gui_server.DEFAULT_SETUP_USER,
+                         "password": gui_server.DEFAULT_SETUP_PASS})
         assert st == 503 and b"setup_grant" not in b
         with open(app.secrets_path) as f:
             assert f.read() == "{ truncated"         # nothing persisted over it

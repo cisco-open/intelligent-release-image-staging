@@ -96,17 +96,19 @@ def test_compose_builds_self_contained_image_from_repo_root():
         "server/Dockerfile.console"
 
 
-def test_setup_credential_is_mounted_only_in_state_owner():
+def test_default_setup_has_no_deployment_token_plumbing():
     import yaml
     doc = yaml.safe_load(_read("docker-compose.yml"))
     server = doc["services"]["iris"]
     console = doc["services"]["console"]
-    assert server["environment"]["IRIS_CONSOLE_SETUP_TOKEN_FILE"] == \
-        "/run/iris/console-setup-token"
-    assert "iris_console_setup_token" in server["secrets"]
-    assert "IRIS_CONSOLE_SETUP_TOKEN_FILE" not in console["environment"]
-    assert "iris_console_setup_token" not in console.get("secrets", [])
-    assert "iris_console_setup_token" in doc["secrets"]
+    for service in (server, console):
+        assert "IRIS_CONSOLE_SETUP_TOKEN_SOURCE" not in service["environment"]
+        assert "IRIS_CONSOLE_SETUP_TOKEN_FILE" not in service["environment"]
+        assert "iris_console_setup_token" not in service.get("secrets", [])
+    assert "iris_console_setup_token" not in doc.get("secrets", {})
+    entrypoint = _read("docker-entrypoint.sh")
+    assert "IRIS_CONSOLE_SETUP_TOKEN" not in entrypoint
+    assert "console-setup-token" not in entrypoint
 
 
 def test_compose_artifacts_is_read_write_for_self_provisioning():

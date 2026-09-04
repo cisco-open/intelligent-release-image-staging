@@ -50,7 +50,6 @@ knowing them in advance saves a stalled PoC:
 | You see | Why | What to set |
 | --- | --- | --- |
 | The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
-| A fresh server tier refuses to start because Console setup material is unavailable | First-run setup must not be claimable with a shared default credential | Create a deployment-unique token with a private umask, export `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, and make the file mode 600/readable by uid 10001 as shown in Getting Started |
 | A device refuses the SSH connection, naming legacy algorithms | Old SHA-1 key exchange and `ssh-rsa` host keys are no longer offered by default | `IRIS_SSH_LEGACY=1`, only for devices too old to offer anything current |
 | A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm which, then remove that host's entry from the known-hosts file under the IRIS state directory |
 | Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS no longer applies a routing protocol to the interfaces it creates unless asked | `SVI_IGP=isis` when the fabric runs IS-IS; leave unset otherwise |
@@ -95,10 +94,9 @@ At the end of every step, state the next action required from me.
    Compose on one server. Use [Kubernetes](kubernetes.md) only when a
    single-replica Kubernetes deployment and its persistent volume are intended.
 2. **Bring up the server.** Complete [Getting Started → Configure the
-   server](getting-started.md#configure-the-server): create the age identity and
-   deployment-unique Console setup token outside the repository with a private
-   umask, and export both host paths. Give uid `10001` both files and the host
-   `artifacts/` directory — the container runs non-root and cannot chown host paths; see
+   server](getting-started.md#configure-the-server): create the age identity
+   outside the repository and export its host path. Give uid `10001` that file
+   and the host `artifacts/` directory — the container runs non-root and cannot chown host paths; see
    [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
    Then run
    `tools/start-compose-server.sh` on the Linux Compose host. It
@@ -108,11 +106,15 @@ At the end of every step, state the next action required from me.
    port is overridable in Compose when `:8080` is already taken on the host —
    the container always listens on 8080 internally; substitute your published
    port in every URL in this guide.
-3. **Create the Console admin.** Accept the self-signed certificate warning only
-   for the expected server, sign in as `iris` with the deployment-unique token
-   from `IRIS_CONSOLE_SETUP_TOKEN_FILE_HOST`, and create the initial admin
-   account. There is no shared default, and the token becomes inert once an
-   admin exists. The next sign-in opens
+3. **Create the Console admin immediately, before exposing it beyond the trusted
+   management network.** Whoever reaches a brand-new Console first can claim
+   the administrator account. Accept the self-signed certificate warning only
+   for the expected server, sign in with the default first-run credential
+   `iris` / `irisisgreat!`, and create the initial admin account. That login
+   creates no session: it returns a one-use setup grant that expires after ten
+   minutes. Creating the administrator permanently ends this special behavior;
+   the pair is then checked only against the stored administrator credentials
+   and normally fails. The next sign-in opens
    the first-run setup wizard at `#setup`, a Magnetic Stepper with a step
    panel on the left and each step's own controls on the right: telemetry
    destination, device packages, and image verification — the Cisco source

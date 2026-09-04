@@ -106,8 +106,6 @@ age-keygen -y iris-age.txt
 kubectl apply -f kubernetes/namespace.yaml
 kubectl -n iris create secret generic iris-age \
   --from-file=identity=iris-age.txt
-kubectl -n iris create secret generic iris-console-setup \
-  --from-file=token=/secure/path/console-setup-token
 kubectl -n iris create secret generic iris-tier-auth \
   --from-file=current=/secure/path/management-current \
   --from-file=previous=/secure/path/management-previous
@@ -126,14 +124,16 @@ kubectl -n iris create secret tls iris-console-tls \
 kubectl apply -k kubernetes
 ```
 
-Generate `/secure/path/console-setup-token` as a raw, protected value with at
-least 32 random bytes (for example, `openssl rand -hex 32 > ...`). It is the
-first-run password for the non-secret username `iris`, not a shared default.
-Only the server Deployment mounts it. Missing or invalid material makes a
-fresh server refuse startup; a correct login exchanges it for the existing
-ten-minute, one-use setup grant. Once the permanent administrator exists the
-token cannot reopen setup, and the optional `iris-console-setup` Secret may be
-removed before a server restart.
+After both Deployments are ready, open the Console from the trusted management
+network and sign in with the default first-run credential `iris` /
+`irisisgreat!`. The login creates no session; it returns a one-use setup grant
+that expires after ten minutes and leads to administrator creation. Creating
+the administrator permanently ends this special behavior.
+
+!!! warning "The first reachable caller can claim a fresh Console"
+    Restrict the Console LoadBalancer to trusted operators and complete setup
+    immediately after deployment. Do not make a brand-new Console reachable
+    from an untrusted network while no administrator exists.
 
 Each `current` file is required. Create the corresponding `previous` key as an
 empty file initially; the pod projections require the key even when there is
