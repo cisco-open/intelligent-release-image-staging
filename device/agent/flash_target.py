@@ -119,9 +119,13 @@ def choose_stage_fs(file_systems, model=None, guest_share_fs=None,
     place the image copy — or None to defer to choose_target_fs (the boot FS).
 
     The staging FS is the writable disk that hosts the guestshell scratch
-    (guest-share/). On the C9300 that's flash: (returns None -> caller uses the
-    boot FS). On the IE3k, IOx runs from sdflash:, so the scratch and copy live
-    there.
+    (guest-share/). On a healthy C9300 that's flash:, and it is returned here
+    by the guest_share_fs branch (iris_agent._guest_share_fs probes where
+    guest-share/ lives, which is flash: on that platform) — NOT by falling
+    through to None. That it coincides with the BOOT filesystem is a platform
+    fact, not something this function enforces; choose_target_fs is only the
+    fallback when no preferred/guest-share/IE3k answer exists. On the IE3k,
+    IOx runs from sdflash:, so the scratch and copy live there.
 
       preferred_fs   : operator-selected IOS prefix. Used only when it names a
                        writable non-crash disk returned by `show file systems`.
@@ -144,9 +148,25 @@ def choose_stage_fs(file_systems, model=None, guest_share_fs=None,
     return None
 
 
+# Suffix a root-copy replacement (iris_agent._copy_to_root_impl /
+# _copy_to_root_direct_impl) appends to a real image name to stage its bytes
+# under a temporary name, prove them, and only then rename them into place —
+# so the destination is never deleted ahead of a copy that might fail or lose
+# power mid-transfer. Fixed and reserved: no real Cisco image or
+# catalog-published filename is expected to carry it, so a name built from it
+# can never coincide with the running image or the BOOT target. Included in
+# _ARTIFACT_RE below so a leftover from an attempt that crashed before
+# cleaning up after itself (iris_agent._reclaim_failed_root_copy normally
+# handles that, but not a crash mid-cycle — see its docstring) is not stuck
+# invisible to the generic low-space sweep.
+ROOT_COPY_TMP_SUFFIX = ".iris-tmp"
+
 # Cisco image-artifact names only — anchored on the platform image prefix so we
-# never match unrelated files. Plus the literal packages.conf.
-_ARTIFACT_RE = re.compile(r"^(cat9k|ie3x00)[A-Za-z0-9._-]*\.(bin|pkg|conf)$")
+# never match unrelated files. Plus the literal packages.conf. Either may also
+# carry ROOT_COPY_TMP_SUFFIX (a root-copy replacement's own in-flight name).
+_ARTIFACT_RE = re.compile(
+    r"^(cat9k|ie3x00)[A-Za-z0-9._-]*\.(bin|pkg|conf)(\.iris-tmp)?$")
+_TMP_PACKAGES_CONF = "packages.conf" + ROOT_COPY_TMP_SUFFIX
 
 
 def reclaimable_artifacts(dir_output, protect):
@@ -155,7 +175,11 @@ def reclaimable_artifacts(dir_output, protect):
     'packages.conf'), are regular files (perms start '-', never directories),
     and are NOT in `protect` (running image, staging filename + .aria2/.torrent,
     IRIS's own placed root copy). The seeding scratch lives under guest-share/
-    (a subdir, never a root regular-file row) so it is never a candidate."""
+    (a subdir, never a root regular-file row) so it is never a candidate.
+
+    Also matches either name plus ROOT_COPY_TMP_SUFFIX, so a root-copy
+    replacement's own stale temp-name leftover is reclaimable by this generic
+    sweep too — not just by its own next retry's delete-first."""
     out = []
     for raw in (dir_output or "").splitlines():
         parts = raw.split()
@@ -167,7 +191,7 @@ def reclaimable_artifacts(dir_output, protect):
         name = parts[-1]
         if name in protect:
             continue
-        if name == "packages.conf" or _ARTIFACT_RE.match(name):
+        if name in ("packages.conf", _TMP_PACKAGES_CONF) or _ARTIFACT_RE.match(name):
             out.append(name)
     return out
 

@@ -226,9 +226,47 @@ The agent loop is deliberately boring:
 5. Download missing content through `aria2c`.
 6. Verify the downloaded file hash.
 7. Place the image at the storage root and attest it by exact byte size. On
-   IOS-XE that is a copy; on IOS-XR the download already landed there through
-   the bind mount, so the agent only attests it.
+   IOS-XE that is a copy — [crash-safely, never deleting a
+   pre-existing same-named file first](#crash-safe-same-name-replacement); on
+   IOS-XR the download already landed there through the bind mount, so the
+   agent only attests it.
 8. Report health, progress, and errors.
+
+## Crash-safe same-name replacement
+
+Placing an image under a name IRIS finds already on the storage root — the
+operator's ordinary republish flow, or a name the `BOOT` variable currently
+points at — never deletes the old file first. IOS-XE stages the new bytes
+under a reserved temp name (`<image>.iris-tmp`), verifies presence and exact
+byte size there, and only then `rename`s the proven copy over the real name:
+a directory-entry update, not a data transfer, so it is the smallest window
+this driver can make the exposure. A failure or power loss at any point
+before that rename leaves the previous file exactly as it was; a failure at
+the rename step itself is not assumed to mean it failed — the agent
+re-checks the real name afterwards and reports whichever state it actually
+finds. IOS-XR is unaffected: `attest_in_place` never writes a second copy at
+all.
+
+A leftover temp-name file — from an attempt that crashed before its own
+retry could clean up after it — is covered by the same low-space
+bundle-reclaim sweep as any other unused image artifact on a **bundle-mode**
+device, so it does not sit invisible on an otherwise-full box there. On an
+**install-mode** device this sweep does not apply: low-space reclaim there
+runs `install remove inactive`, which manages installed packages and does
+not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name
+leftover on an install-mode device is not automatically reclaimed by
+either path. Either way, IRIS only ever attempts the low-space reclaim once
+per acquisition cycle for a given image — a content republish under the
+same id, an image returning from park, or that image's own placement
+succeeding all start a fresh cycle and re-arm the attempt.
+
+The old file and the new temp copy do coexist on the storage root until the
+rename, but this costs no *extra* headroom on top of the existing staging
+scratch: the old file was already occupying space before the replacement
+began, so the free-space check the agent reads never counted it as
+available in the first place — only the new temp copy is new consumption.
+[Sizing the storage root](management-type.md#sizing-the-storage-root) covers
+the same figure whether or not the destination name is already occupied.
 
 ## Cadence jitter and overload backoff
 
@@ -285,33 +323,76 @@ Every platform stages images to `flash:` / `bootflash:` / `sdflash:` /
 chatty and continuous for the whole life of a transfer — and with
 `--seed-ratio=0.0` (the private-swarm flag every launcher sets, since a
 staged device seeds forever) a log left on never stops growing. `IRIS_LOG`
-(default `off`, all three platforms) makes that log opt-in rather than
-always-on:
+(default `off`, all three platforms) makes **that one file** — `aria2c.log`
+— opt-in rather than always-on. It is deliberately narrow: it never touches
+the separate `%IRIS-6-<MNEMONIC>` operator lines `emit()` writes on every
+tick, on every platform, regardless of `IRIS_LOG` — see "What `IRIS_LOG`
+does not stop" below, which is platform-specific and, on IOS-XR, not "no
+recurring write" at all.
 
-- **Off (the default) is genuinely no recurring flash write from this
-  source**, not a smaller or rotated file. With no `--log=` on the launch
-  line, aria2c's own daemon mode already redirects its stdio to `/dev/null`
-  (Guest Shell, via `--daemon=true`); the container supervisors
-  (`device/iox/entrypoint.sh`, `device/xr/entrypoint.sh`) already redirect
-  their tracked child's stdio to `/dev/null` unconditionally, so there is
-  nothing extra to suppress there either.
+- **Off (the default) stops aria2c's own `aria2c.log` from being written,
+  full stop** — not a smaller or rotated file, on any platform. With no
+  `--log=` on the launch line, aria2c's own daemon mode already redirects
+  its stdio to `/dev/null` (Guest Shell, via `--daemon=true`); the container
+  supervisors (`device/iox/entrypoint.sh`, `device/xr/entrypoint.sh`)
+  already redirect their tracked child's stdio to `/dev/null`
+  unconditionally, so there is nothing extra to suppress there either.
 - **On** adds `--log=<stage dir>/aria2c.log` to the launch line. Guest Shell
   relies on the existing per-tick `rotate-logs.sh` (driven by
   `bootstrap.sh`, see [Agent installation](#agent-installation)) to keep it
   bounded; IOx and XR have never shipped `rotate-logs.sh` into the image (no
   bash dependency added just for this), so their launch line instead adds
   aria2's own `--log-max-size=50M --log-max-files=1` to bound growth.
-- **What is unaffected either way.** Turning logging off never suppresses
-  anything an operator needs to diagnose a failure in the moment: IOS
-  syslog (`emit()`, sent via `send log` on Guest Shell/IOx, or written as
-  `%IRIS-6-<MNEMONIC>` lines to the XR container's stdout that appmgr
-  captures) and the heartbeat's `stage_error` field both keep working
-  regardless. Staging, verification, and telemetry reporting are
-  unaffected. Only the continuous local `aria2c.log` file is optional.
-- **Turning it on is an explicit operator act.** On IOx/XR it is a normal
-  deploy-time `run-opts -e` Docker variable, the same mechanism as
-  `IRIS_TICK_SECONDS`. On Guest Shell, set it in the device's persisted
-  `iris-agent.conf` (see [Reference → Device agent config
+- **What `IRIS_LOG` does not stop — uniform in principle, not in where it
+  lands.** `emit()`'s `%IRIS-6-<MNEMONIC>` operator lines (every startup
+  failure, every stage transition) and the heartbeat's `stage_error` field
+  are unaffected by `IRIS_LOG` on every platform. Where those lines actually
+  go is platform-specific, though, and matters for "does `off` mean zero
+  recurring write":
+- **Guest Shell and IOx** have a real IOS CLI to hand: `emit()` issues
+  `send log facility IRIS severity 6 ...` into genuine device syslog (IOx
+  SSHes to the host IOS box's own management SVI for this — see
+  `IRIS_DEVICE_SSH_HOST`/`IRIS_DEVICE_SSH_USER` in [Container deployments →
+  Package footprint](containers.md#package-footprint)). That syslog write is
+  IOS's own concern, not IRIS's, and was never on `flash:` to begin with —
+  so on these two platforms `IRIS_LOG=off` really is zero recurring write
+  from IRIS.
+- **IOS-XR has no CLI to ask** (the reason it runs as a container rather
+  than Guest Shell at all — see `device/agent/xr_deps.py`'s module
+  docstring). `emit()` there writes only to the container's own stdout,
+  which appmgr captures into a container log — **so on XR, `IRIS_LOG=off`
+  does not mean zero recurring write**: roughly one `%IRIS` line lands in
+  that container log every ~60s tick either way. Find them with `show
+  appmgr application name iris logs` on the router (not `show logging` —
+  nothing reaches XR's own syslog, by design; see the deviation note in
+  `xr_deps.py`). That write is now bounded rather than unbounded:
+  `device/xr-install.sh` always adds `--log-driver json-file --log-opt
+  max-size=1m --log-opt max-file=3` to the appmgr activation's
+  `docker-run-opts`, independent of `IRIS_LOG` and not itself
+  operator-configurable. 3 MiB total, rotated across 3 files, retains
+  roughly 11 days of that stdout history at the ~1-line/60s emit rate —
+  comfortably past a long weekend — for about 0.08% of the ~3.9 GB
+  `/misc/app_host` partition XR's container logs live on. Deliberately
+  never `--log-driver=none`: `none` would discard every `%IRIS` line,
+  including every pre-heartbeat startup failure, with no second channel to
+  fall back on, which is exactly the failure mode the owner's conditional
+  approval of `none` ("as long as syslog messages for iris are not
+  affected") rules out on this platform.
+- Staging, verification, and telemetry reporting are unaffected by
+  `IRIS_LOG` on every platform either way — only the continuous local
+  `aria2c.log` file is what the toggle actually controls.
+- **Turning it on is an explicit operator act, and now reaches every
+  platform.** `device/xr-install.sh` and `device/iox/install.sh` both
+  forward an operator's `IRIS_LOG` into the container as `--env
+  IRIS_LOG=…`/`run-opts N "-e IRIS_LOG=…"` at deploy time, validated with
+  the same quoting guard every other interpolated value on that activation
+  line already gets (a literal `"` or newline would otherwise break out of
+  the quoted `docker-run-opts`/`run-opts` string). Before this, neither
+  installer passed `IRIS_LOG` at all, so the two container entrypoints'
+  built-in default silently won regardless of what an operator set — the
+  documented opt-in was unreachable on exactly the platforms whose
+  entrypoints implement it. On Guest Shell, set it in the device's
+  persisted `iris-agent.conf` (see [Reference → Device agent config
   keys](reference.md#device-agent-config-keys)) — `guestshell-start.sh`
   itself only reads its own live process environment on every 60s EEM tick,
   so nothing set any other way (e.g. hand-edited into the guest user's shell
@@ -331,7 +412,7 @@ always-on:
 
 See [Reference → Device container environment
 variables](reference.md#device-container-environment-variables) for the
-exact parsing rule.
+exact parsing rule and the XR container-log bound.
 
 ## Verification gates
 

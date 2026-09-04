@@ -46,6 +46,17 @@ _ROOT_COPY_MAX_ATTEMPTS = 4
 _ROOT_COPY_BACKOFF_BASE = 5 * 60
 _ROOT_COPY_BACKOFF_MAX = 60 * 60
 
+
+def _root_copy_tmp_name(fname):
+    """The reserved temp name a root-copy replacement (_copy_to_root_impl /
+    _copy_to_root_direct_impl) stages its new bytes under, proves by presence
+    + exact size, and only then renames over the real name. Fixed suffix
+    (flash_target.ROOT_COPY_TMP_SUFFIX) that no real Cisco image or
+    catalog-published filename is expected to carry, so this can never
+    coincide with the running image or the BOOT target — the real name is
+    never deleted or overwritten until the replacement is proven good."""
+    return fname + flash_target.ROOT_COPY_TMP_SUFFIX
+
 # Board #60: a park-pass record that has no root_file AND that the catalog no
 # longer answers for at all (e.g. the aria_add call site's bare
 # {'download_started': True}, once its image is deleted from the catalog) can
@@ -70,10 +81,16 @@ ROOT_COPY_RUNNING_IMAGE_UNKNOWN = object()
 # applet run that never fired, a delete-first that raised. It exists because the
 # terminal-state reclaim (_reclaim_failed_root_copy) is only safe when THIS
 # attempt's `delete /force` actually executed — that delete is what proves a file
-# sitting at the image name is our own partial. After a pre-IOS failure nothing
-# was deleted, so a file at that name is the OPERATOR'S, and on the
-# running-image-refusal path it is the running image itself: deleting it strands
-# a bundle-mode box in rommon at the next reload.
+# sitting at the TEMP name (_root_copy_tmp_name) is our own partial. The real
+# image name is never deleted or overwritten by a failed attempt at all — every
+# destructive command a copy attempt issues, up to and including the final
+# rename that puts proven bytes in place, targets the temp name or runs only
+# once this agent's own verify has already blessed what's under it. After a
+# pre-IOS failure nothing was deleted anywhere, so a file at the temp name (if
+# any) is stale debris from an EARLIER attempt at most, and a file at the real
+# name is the OPERATOR'S — on the running-image-refusal path it is the running
+# image itself: deleting either would strand a bundle-mode box in rommon at
+# the next reload.
 #
 # Retry/backoff accounting treats this EXACTLY like plain False — the attempt
 # counts, the backoff advances, copy_terminal still eventually fires, because an
@@ -92,6 +109,16 @@ ROOT_COPY_NOT_ATTEMPTED = object()
 #                   "" when IOS positively reports no BOOT target, None when
 #                   the read failed. None is "unknown", and every destructive
 #                   reclaim treats it exactly like an unknown running image.
+#
+# NOTE: an earlier revision of the crash-safety fix (temp-name copy, verify,
+# rename into place) added a `root_file_size` probe here to charge the copy
+# gate extra headroom for a pre-existing same-named destination file. That
+# double-counted: deps.target_fs()'s `free` already excludes whatever
+# currently occupies the destination name, and the corrected sequence writes
+# no new bytes for that old file at all — it stays put until the final
+# `rename`, a directory-entry update that moves no data. The probe and its
+# surcharge were removed (scrubber #138); the gate charges exactly the bytes
+# the temp copy actually writes, same as before the crash-safety fix.
 Deps = collections.namedtuple(
     "Deps", "catalog emit boot_image aria_add file_size verify free_bytes "
             "version copy_to_root purge_others reclaim root_present "
@@ -658,8 +685,18 @@ def _protect_set(image, state):
 
 
 def _reset_copy_failures(st):
+    # copy_reclaim_tried/reclaim_tried (scrubber #139) join the reset: both are
+    # once-EVER guards (nothing else ever clears them) that exist only to stop
+    # a still-too-full device from stacking reclaim attempts WITHIN one
+    # acquisition cycle. Every call site of this function starts a genuinely
+    # NEW cycle — a content republish under the same id, an image coming back
+    # from park, or this image's own placement having just succeeded — so a
+    # low-space device deserves one fresh reclaim attempt for it too, exactly
+    # like copy_attempts/copy_terminal get a clean slate here. Leaving them
+    # set would mean a device that burned its once-guard on an EARLIER
+    # image's content can never reclaim again for this id, permanently.
     for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error",
-                "ios_copy_started"):
+                "ios_copy_started", "copy_reclaim_tried", "reclaim_tried"):
         st.pop(key, None)
 
 
@@ -674,88 +711,95 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
 
     Why it has to happen here: after copy_terminal is set, no further copy
     fires, so the placement path's delete-first never runs again. Without this
-    the leftover sits at the boot-FS root under the REAL Cisco image name,
-    burning ~1.2 GB indefinitely — and an operator listing flash: would see
-    what looks like a perfectly good image. state['root_file'] is only set on
-    SUCCESS, so no other cleanup path owns this file.
+    the leftover sits at the boot-FS root indefinitely.
+
+    WHAT IS LEFT TO RECLAIM, under the corrected placement sequence: every
+    copy attempt (_copy_to_root_impl / _copy_to_root_direct_impl) now stages
+    its bytes under a RESERVED TEMP NAME (_root_copy_tmp_name) and touches the
+    REAL image name only in its very last step — a rename, gated on this
+    agent's own verified-good check of the temp copy, and only reached once
+    that check has passed. A cycle that goes terminal can therefore only have
+    left debris under the temp name: the real name is never deleted or
+    overwritten by a failed attempt, so this function must never touch it —
+    and does not: everything below acts on _root_copy_tmp_name(fname), never
+    on fname itself.
 
     WHY A DELETE HERE CAN BE SAFE: a placement attempt that reached IOS begins
-    with `delete /force <FS><filename>` — the IRIS-COPYROOT applet's action 020
-    on the Guest Shell path, the vty command on the direct path. So a file
-    present at that name after such an attempt fails can only be the partial
-    THAT attempt wrote.
+    with `delete /force <FS><temp name>` — the IRIS-COPYROOT applet's action
+    020 on the Guest Shell path, the vty command on the direct path. So a file
+    present at the temp name after such an attempt fails can only be the
+    partial THAT attempt (or an earlier one that also never finished) wrote.
 
     THAT INVARIANT DOES NOT HOLD UNCONDITIONALLY, and this function must never
     assume it. Attempts that fail BEFORE any IOS command — the running-image
     refusals, an scp push that raised, an applet run that never fired — delete
-    nothing, so a file at that name is the operator's, and on the
-    running-image-refusal path it IS the running image. Two independent layers
-    keep that file safe:
+    nothing. Two independent layers keep the real image name (and, by
+    construction, the temp name too) safe:
 
       Layer 1 (caller): run_once only calls this when at least one attempt in
         this image's cycle came back a genuine post-delete-first False
         (st["ios_copy_started"]); ROOT_COPY_NOT_ATTEMPTED never sets it.
-      Layer 2 (below, unconditional): re-read the running image and refuse if
-        the target matches its basename, or if the running image cannot be
-        confirmed at all. This holds even if Layer 1 regresses, and mirrors the
-        same running_image()/_ios_basename comparison copy_to_root makes before
-        any destructive command. An unknown running image is treated exactly as
-        _reclaim_for_mode treats it (#4): no protect-set can be built, so no
-        delete may run.
+      Layer 2 (below): defence in depth, not the primary guarantee — the temp
+        name is `fname` plus a reserved suffix
+        (flash_target.ROOT_COPY_TMP_SUFFIX) that no real Cisco image or
+        catalog-published name is expected to carry, so it cannot coincide
+        with the running image or the BOOT target by construction alone.
+        These reads are kept anyway, on the same footing as every other
+        destructive reclaim in this file: an unreadable fact still means
+        refuse rather than guess, even for a name that should never match.
 
     Stage-only: this reclaims exactly one name — IRIS's own failed copy — and
     is reclamation, not install activity. Best-effort; a delete that raises is
     logged and swallowed, since the terminal state is already reported."""
     fname = image["filename"]
+    tmp = _root_copy_tmp_name(fname)
     # ---- Layer 2: independent last-line check, before ANY delete is issued ----
     try:
         running = deps.running_image()
     except Exception as e:
         deps.emit("ROOTCOPY-RECLAIM-REFUSED",
-                  "%s left in place at %s: running image unknown "
+                  "%s temp copy left at %s%s: running image unknown "
                   "(show version read raised: %s) — refusing a delete that "
-                  "cannot be proven safe" % (fname, target_prefix, e))
+                  "cannot be proven safe" % (fname, target_prefix, tmp, e))
         return
     if not running:
         deps.emit("ROOTCOPY-RECLAIM-REFUSED",
-                  "%s left in place at %s: running image unknown — refusing a "
-                  "delete that cannot be proven safe" % (fname, target_prefix))
+                  "%s temp copy left at %s%s: running image unknown — "
+                  "refusing a delete that cannot be proven safe"
+                  % (fname, target_prefix, tmp))
         return
-    if _ios_basename(running).casefold() == fname.casefold():
+    if _ios_basename(running).casefold() == tmp.casefold():
         deps.emit("ROOTCOPY-RECLAIM-REFUSED",
-                  "%s left in place at %s: it IS the running image (%s) — "
+                  "%s temp copy left at %s%s: it IS the running image (%s) — "
                   "refusing destructive delete"
-                  % (fname, target_prefix, running))
+                  % (fname, target_prefix, tmp, running))
         return
     # ---- Layer 2b: the BOOT variable, same rule, same footing ----
-    # Even when what sits at this name is provably THIS attempt's partial,
-    # BOOT pointing at the name means the device boots it next: deleting it
-    # leaves BOOT dangling and the next reload in rommon. The partial stays
-    # for the operator, who already has ROOTCOPY-GIVEUP in the log. An
-    # unreadable BOOT variable refuses for the reason an unknown running
+    # An unreadable BOOT variable refuses for the reason an unknown running
     # image does: no protect set can be built, so no delete may run.
     boot = _boot_target(deps)
     if boot is None:
         deps.emit("ROOTCOPY-RECLAIM-REFUSED",
-                  "%s left in place at %s: BOOT variable unknown — refusing a "
-                  "delete that cannot be proven safe" % (fname, target_prefix))
+                  "%s temp copy left at %s%s: BOOT variable unknown — "
+                  "refusing a delete that cannot be proven safe"
+                  % (fname, target_prefix, tmp))
         return
-    if _is_boot_target(boot, fname):
+    if _is_boot_target(boot, tmp):
         deps.emit("ROOTCOPY-RECLAIM-REFUSED",
-                  "%s left in place at %s: it is the BOOT target — refusing "
-                  "destructive delete; the failed copy at this name is left "
-                  "for the operator" % (fname, target_prefix))
+                  "%s temp copy left at %s%s: it is the BOOT target — "
+                  "refusing destructive delete; the failed copy is left for "
+                  "the operator" % (fname, target_prefix, tmp))
         return
     try:
-        deps.reclaim_bundle(target_prefix, [fname])
+        deps.reclaim_bundle(target_prefix, [tmp])
     except Exception as e:
         deps.emit("ROOTCOPY-RECLAIM-FAIL",
-                  "%s failed placement left at %s; delete raised: %s"
-                  % (fname, target_prefix, e))
+                  "%s failed placement left at %s%s; delete raised: %s"
+                  % (fname, target_prefix, tmp, e))
         return
     deps.emit("ROOTCOPY-RECLAIM",
-              "%s placement gave up; deleted this attempt's partial copy from %s"
-              % (fname, target_prefix))
+              "%s placement gave up; deleted this attempt's partial copy "
+              "from %s%s" % (fname, target_prefix, tmp))
 
 
 def _ios_basename(path):
@@ -1722,6 +1766,21 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # keep-seeding-only — the staged file keeps feeding the swarm,
             # the running image is untouched, and we surface the shortfall
             # instead of failing a copy.
+            #
+            # A pre-existing file at image["filename"] (the operator's
+            # ordinary same-name republish flow, or any other file already
+            # sitting at this name) needs NO extra charge here. The
+            # crash-safety sequence (stage under a temp name, prove it, then
+            # `rename` over the real name — see copy_to_root) never deletes
+            # that old file first and never writes new bytes for it: it
+            # stays exactly where it is until the final rename, a
+            # directory-entry update that moves no data. deps.target_fs()'s
+            # `free` already excludes whatever currently occupies
+            # image["filename"], so charging for it again here would double
+            # count the same bytes and refuse placements that physically fit
+            # (scrubber #138). The only NEW bytes this attempt writes are the
+            # temp copy, exactly `size` (doubled under io_transfer, same as
+            # a fresh name).
             if not st.get("copied"):
                 mode = deps.detect_mode()
                 target_prefix, free = deps.target_fs()
@@ -2683,7 +2742,7 @@ def _root_present_from_dir(dir_out, fname, expected_size=None):
 
 def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
                         poll_attempts=180, poll_interval_s=5.0,
-                        sleep_fn=time.sleep, expected_size=None):
+                        sleep_fn=None, expected_size=None):
     """Bless the target-FS root copy by presence AND exact size, independent
     of however the file arrived at the target-FS root.
 
@@ -2727,6 +2786,9 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
     Default poll budget (180 * 5 s ≈ 895 s) is sized to track a copy path's
     typical ~900 s execution budget, so a legitimately slow ~1.2 GB copy
     isn't abandoned a few minutes early."""
+    if sleep_fn is None:
+        sleep_fn = _SLEEP    # late-bound so tests' _SLEEP stub reaches the poll
+
     emit_fn("ROOTCOPY-VERIFYING", "%s awaiting root copy" % fname)
     last_size = None
     # Records the outcome of the LAST poll that actually saw the row, so the
@@ -2773,43 +2835,190 @@ def _agent_reverify_root(fname, target_prefix, cli_execute_fn, emit_fn,
     return False
 
 
+def _agent_reverify_rename(fname, target_prefix, cli_execute_fn, emit_fn,
+                           poll_attempts=12, poll_interval_s=5.0,
+                           sleep_fn=None, expected_size=None):
+    """Bless Phase 2 (the `rename` that puts the proven temp copy in place) by
+    proving the rename itself MOVED those bytes — not merely that something of
+    the expected size now happens to sit at `<fname>`.
+
+    Presence-and-size at `<fname>` alone cannot tell a genuine rename apart
+    from one that silently no-ops onto a file already sitting there of the
+    same size (scrubber #130): IOS-XE `rename` is not the only command this
+    file has found to no-op silently on some platform/AAA combination rather
+    than error (see the `delete` note at _reclaim_bundle_impl's docstring and
+    the EEM `copy` no-op noted in _copy_to_root_direct_impl's), and a
+    same-size collision at the destination is exactly the ordinary same-name
+    replacement flow this whole crash-safety sequence exists for. The temp
+    name (`_root_copy_tmp_name(fname)`) is reserved and IRIS's own — no other
+    writer in this fleet is expected to name anything that way — so its
+    disappearance is the one piece of evidence a stale pre-existing file at
+    `<fname>` cannot forge.
+
+    Success requires BOTH facts, observed together in the SAME poll
+    iteration:
+      * `dir <FS><fname>` reports the expected size — identical rules to
+        _agent_reverify_root's single-name poll: present-but-unreadable or
+        wrong-size just keeps polling; only a mismatch persisting the whole
+        budget fails.
+      * `dir <FS><tmp>` reports the temp name is GONE. A `dir` call that
+        itself raises is NOT read as proof of absence — that would let one
+        flaky read masquerade as a completed rename — it is treated exactly
+        like "still there": keep polling, and count it against success at
+        the end of the budget like any other unresolved fact.
+
+    Default poll budget (12 * 5s = 60s) tracks the rename applet's own
+    `event none maxrun 60` (see the IRIS-COPYROOT Phase 2 template) — a
+    directory-entry update, not a copy, so it does not need
+    _agent_reverify_root's ~900s budget sized for a real ~1.2 GB data
+    transfer (scrubber #140; that function still owns Phase 1's poll, on its
+    own default).
+
+    Returns bool; emits ROOTCOPY-VERIFYING/ROOTCOPY/ROOTCOPY-FAIL like
+    _agent_reverify_root, but a no-op rename gets its own honest message
+    naming the temp file that survived, rather than a generic size mismatch —
+    an operator chasing "cannot confirm the rename landed" and one chasing
+    "the copy never reached full size" need different next steps."""
+    if sleep_fn is None:
+        sleep_fn = _SLEEP    # late-bound so tests' _SLEEP stub reaches the poll
+
+    tmp = _root_copy_tmp_name(fname)
+    emit_fn("ROOTCOPY-VERIFYING", "%s awaiting rename into place" % fname)
+    last_size = None
+    size_unreadable = False
+    fname_ok = False
+    tmp_gone = False
+    for i in range(poll_attempts):
+        try:
+            dir_out = cli_execute_fn("dir %s%s" % (target_prefix, fname))
+        except Exception:
+            dir_out = ""
+        fname_ok = False
+        if dir_out and "%Error" not in dir_out and "No such file" not in dir_out \
+                and fname in dir_out:
+            if expected_size is None:
+                fname_ok = True
+                size_unreadable = False
+            else:
+                observed = _dir_size_of(dir_out, fname)
+                if observed is None:
+                    size_unreadable = True
+                else:
+                    size_unreadable = False
+                    last_size = observed
+                    fname_ok = (observed == expected_size)
+        try:
+            tmp_out = cli_execute_fn("dir %s%s" % (target_prefix, tmp))
+        except Exception:
+            tmp_out = None       # unreadable: NOT proof of absence, see docstring
+        if tmp_out is None:
+            tmp_gone = False
+        else:
+            tmp_gone = not (tmp_out and "%Error" not in tmp_out
+                            and "No such file" not in tmp_out and tmp in tmp_out)
+        if fname_ok and tmp_gone:
+            if expected_size is None:
+                emit_fn("ROOTCOPY",
+                        "%s placed at flash root, rename confirmed" % fname)
+            else:
+                emit_fn("ROOTCOPY", "%s placed at flash root, size verified "
+                        "(%d bytes), rename confirmed" % (fname, expected_size))
+            return True
+        if i < poll_attempts - 1:
+            sleep_fn(poll_interval_s)
+    if fname_ok and not tmp_gone:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s rename did not land: %s%s is still present, so the file "
+                "at %s%s cannot be confirmed as the bytes this attempt "
+                "proved — treated as unplaced"
+                % (fname, target_prefix, tmp, target_prefix, fname))
+    elif size_unreadable:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy present but size unreadable from dir output; "
+                "cannot confirm the catalog's %s bytes — treated as unplaced"
+                % (fname, expected_size))
+    elif last_size is not None:
+        emit_fn("ROOTCOPY-FAIL", "%s root copy size mismatch: dir shows %d, "
+                "catalog says %d — partial copy treated as absent"
+                % (fname, last_size, expected_size))
+    else:
+        emit_fn("ROOTCOPY-FAIL",
+                "%s root copy never appeared at flash root" % fname)
+    return False
+
+
 def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                        emit_fn, reverify_fn=_agent_reverify_root,
                        copy_source=None, running_image_fn=None,
-                       expected_size=None):
-    """Copy the staged image to the target filesystem root, then confirm it
-    landed.
+                       expected_size=None, rename_reverify_fn=_agent_reverify_rename):
+    """Copy the staged image to the target filesystem root under a RESERVED
+    TEMP NAME, prove it, and only then rename it over the real name — so
+    `<fname>` (whatever it holds now — an older copy, nothing, or the file
+    the BOOT variable names) is never deleted ahead of a copy that might fail
+    or lose power mid-transfer. Two IRIS-COPYROOT EEM applet runs do the
+    privileged work inside native IOS (operator requirement + `authorization
+    bypass` for AAA nodes), because the device's guestshell can't run `copy`
+    or an overwriting `rename` directly (both prompt for confirmation, which
+    hangs the guestshell `cli` module the same way an interactive `copy`
+    does):
 
-    The IRIS-COPYROOT EEM applet does the privileged work inside native IOS
-    (operator requirement + `authorization bypass` for AAA nodes), because the
-    device's guestshell can't run `copy` directly:
-      1. After confirming `<fname>` is not the running image, `delete /force
-         <FS><fname>` clears any stale same-named leftover so
-         the presence check below is scoped to THIS attempt. Harmless if no
-         such file exists (`file prompt quiet` suppresses the prompt).
-      2. `copy <FS>/guest-share/iris/<fname> <FS><fname>` — a plain copy, no
-         in-band signature check. Source and destination are both the chosen
-         staging FS: flash: on the C9300, sdflash: on the IE3k (where IOx and
-         the guest-share scratch live on the SD card).
-    The applet logs a NEUTRAL `ROOTCOPY-ATTEMPTED` breadcrumb only — it makes
-    no pass/fail claim. The verdict belongs entirely to reverify_fn
-    (_agent_reverify_root) — see its docstring for the presence + exact
-    catalog byte size contract this function relies on.
+      Phase 1 — stage and prove, never touching `<fname>`:
+        1. After confirming `<fname>` is not the running image, `delete
+           /force <FS><fname>.iris-tmp` clears any stale leftover from an
+           earlier interrupted attempt at the reserved temp name
+           (_root_copy_tmp_name) — always safe, since that name is IRIS's own
+           and can never be the running image or the BOOT target. Harmless if
+           no such file exists (`file prompt quiet` suppresses the prompt).
+        2. `copy <FS>/guest-share/iris/<fname> <FS><fname>.iris-tmp` — a plain
+           copy, no in-band signature check, landing at the temp name.
+        reverify_fn then polls the TEMP name for presence + exact catalog
+        size. A False here means the real name was NEVER TOUCHED: the device
+        is exactly as bootable as before this attempt started.
+
+      Phase 2 — put the proven bytes in place (only reached once Phase 1's
+        reverify has passed):
+        3. `rename <FS><fname>.iris-tmp <FS><fname>` — a directory-entry
+           update, not a data transfer (IOS accepts an existing destination
+           the same way `copy` does, silently confirmed by `file prompt
+           quiet`), so this is the only step that ever touches `<fname>`, and
+           it is as short as this driver can make it — no separate delete of
+           the old `<fname>` precedes it, so there is no client-orchestrated
+           window where `<fname>` is definitely gone and the replacement is
+           not yet in place. rename_reverify_fn then polls BOTH `<fname>`
+           (presence + exact size) AND the temp name (must now be GONE) for
+           the final verdict, regardless of whether the rename command
+           itself raised (a raise here is ambiguous about whether IOS
+           actually completed it, not evidence either way) — presence and
+           size at `<fname>` alone cannot tell a genuine rename apart from
+           one that silently no-ops onto a pre-existing file of the same
+           size (scrubber #130); the temp name's disappearance is what the
+           no-op case cannot forge.
+
+    Each applet logs a NEUTRAL breadcrumb only — it makes no pass/fail claim.
+    Phase 1's verdict belongs entirely to reverify_fn (_agent_reverify_root)
+    and Phase 2's to rename_reverify_fn (_agent_reverify_rename) — see each
+    one's docstring for its contract. Both phases reuse the SAME applet name
+    (IRIS-COPYROOT, redefined between runs) so the uninstall scripts' existing
+    `no event manager applet IRIS-COPYROOT` keeps covering it without
+    changes.
 
     Module-level + injected callables so it's unit-testable. Returns True/False
     — or ROOT_COPY_NOT_ATTEMPTED when it gives up before any IOS command runs
-    (either running-image refusal, or the applet run raising), because the
-    caller's terminal reclaim must not treat those as "our partial is at that
+    (either running-image refusal, or Phase 1's applet run raising before its
+    delete-first can be assumed to have executed), because the caller's
+    terminal reclaim must not treat those as "our partial is at the temp
     name".
 
     `copy_source` (optional) overrides the copy SOURCE. Default (None) is
     the Guest Shell scratch on the staging FS (`<FS>/guest-share/iris/<fname>`)
     — the C9300 path, unchanged. The IOx path SCP-pushes its local scratch to
     that same IOS-visible location before using the direct SSH copy helper. The
-    destination is always the target-FS root.
+    destination is always the target-FS root (via the temp name, then a
+    rename).
 
-    `expected_size` is forwarded to reverify_fn unchanged; None (the default)
-    keeps the old presence-only behaviour for callers with no catalog size."""
+    `expected_size` is forwarded unchanged to reverify_fn (Phase 1) and
+    rename_reverify_fn (Phase 2); None (the default) keeps the old
+    presence-only behaviour for callers with no catalog size."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
@@ -2824,13 +3033,14 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
             return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
+    tmp = _root_copy_tmp_name(fname)
     cli_configure_fn([
         "no event manager applet IRIS-COPYROOT",
         "event manager applet IRIS-COPYROOT authorization bypass",
         "event none maxrun 900",
         'action 010 cli command "enable"',
-        'action 020 cli command "delete /force %s%s"' % (target_prefix, fname),
-        'action 030 cli command "copy %s %s%s"' % (src, target_prefix, fname),
+        'action 020 cli command "delete /force %s%s"' % (target_prefix, tmp),
+        'action 030 cli command "copy %s %s%s"' % (src, target_prefix, tmp),
         'action 040 syslog msg "ROOTCOPY-ATTEMPTED %s"' % fname,
     ])
     try:
@@ -2838,23 +3048,57 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
     except Exception as e:
         # The applet never fired (or we cannot tell that it did), so its
         # action 020 delete-first cannot be assumed to have run. Anything at
-        # the target name is therefore NOT provably our partial: report the
-        # failure, but withhold the reclaim authorisation.
+        # the temp name is therefore NOT provably our partial: report the
+        # failure, but withhold the reclaim authorisation. `<fname>` itself
+        # was never referenced by this applet at all.
         emit_fn("ROOTCOPY-FAIL",
                 "%s applet run raised before any IOS work could be confirmed: "
                 "%s" % (fname, e))
         return ROOT_COPY_NOT_ATTEMPTED
-    return reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
-                       expected_size=expected_size)
+    if not reverify_fn(tmp, target_prefix, cli_execute_fn, emit_fn,
+                       expected_size=expected_size):
+        # The temp copy never proved good. `<fname>` — whatever it held
+        # before this attempt, BOOT target or not — was never referenced by
+        # any command above, so the device remains exactly as bootable as it
+        # was before this attempt started.
+        return False
+    # Phase 2: the new bytes are proven present and exactly the right size,
+    # still under the temp name. A second, short applet run puts them in
+    # place with a single rename — see the docstring above for why this is
+    # the smallest window this driver can make the replacement's exposure.
+    cli_configure_fn([
+        "no event manager applet IRIS-COPYROOT",
+        "event manager applet IRIS-COPYROOT authorization bypass",
+        "event none maxrun 60",
+        'action 010 cli command "enable"',
+        'action 020 cli command "rename %s%s %s%s"'
+        % (target_prefix, tmp, target_prefix, fname),
+        'action 030 syslog msg "ROOTCOPY-PLACED %s"' % fname,
+    ])
+    try:
+        cli_execute_fn("event manager run IRIS-COPYROOT")
+    except Exception as e:
+        # Unlike Phase 1, a raise here is NOT treated as "nothing happened":
+        # Phase 1 already proved good bytes exist at the temp name, so the
+        # only open question is whether the rename itself landed.
+        # rename_reverify_fn below is the actual verdict either way.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s rename-into-place applet raised; the verified bytes at "
+                "%s are unharmed either way, and the dir check below is the "
+                "real verdict on whether the rename landed: %s"
+                % (fname, tmp, e))
+    return rename_reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                              expected_size=expected_size)
 
 
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
-                              running_image_fn=None, expected_size=None):
-    """Copy the staged image to the target-FS root by running a plain `copy`
-    DIRECTLY in the agent's IOS vty — no EEM applet. This is the container /
-    SSH-to-self (IE-3x00) path.
+                              running_image_fn=None, expected_size=None,
+                              rename_reverify_fn=_agent_reverify_rename):
+    """Copy the staged image to the target-FS root by running plain `copy`/
+    `rename` commands DIRECTLY in the agent's IOS vty — no EEM applet. This is
+    the container / SSH-to-self (IE-3x00) path.
 
     The IRIS-COPYROOT applet offload (see _copy_to_root_impl) exists ONLY because
     the C9300's Guest Shell `cli` module can't drive an interactive `copy`
@@ -2864,24 +3108,56 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     (the applet completes in ~3 s reporting success but transfers nothing),
     so the applet path is both unnecessary and broken here.
 
-    Same two privileged steps the applet did, now issued directly:
-      1. After confirming `<fname>` is not the running image, `delete /force
-         <FS><fname>` clears any stale same-named leftover so the
-         dir-presence verdict is scoped to THIS attempt (`file prompt quiet`
-         suppresses the prompt; harmless if absent).
-      2. `copy <src> <FS><fname>` — a plain copy, no in-band signature check.
-         `copy` is synchronous, so the file is present the moment it returns
-         (though possibly still short of its final size on a slow transfer).
-    Verdict belongs entirely to reverify_fn (_agent_reverify_root) — see its
-    docstring for the presence + exact catalog byte size contract this
-    function relies on (and to which `expected_size` is forwarded unchanged).
-    Keeps the success-log gating identical to the applet path and
-    unit-testable. Returns True/False — or ROOT_COPY_NOT_ATTEMPTED when it gives
-    up before the delete-first completes (either running-image refusal, or the
-    delete itself raising), because the caller's terminal reclaim must not treat
-    those as "our partial is at that name". A `copy` that raises AFTER the
-    delete-first is a plain False: that leftover really is ours. `copy_source`
-    overrides the SOURCE like _copy_to_root_impl."""
+    Same two-phase stage-then-place sequence _copy_to_root_impl uses, issued
+    directly instead of through an EEM applet:
+
+      Phase 1 — stage and prove, never touching `<fname>`:
+        1. After confirming `<fname>` is not the running image, `delete
+           /force <FS><fname>.iris-tmp` clears any stale leftover from an
+           earlier interrupted attempt at the reserved temp name
+           (_root_copy_tmp_name) — always safe, since that name is IRIS's own
+           and can never be the running image or the BOOT target (`file
+           prompt quiet` suppresses the confirmation prompt; harmless if
+           absent).
+        2. `copy <src> <FS><fname>.iris-tmp` — a plain copy, no in-band
+           signature check, landing at the temp name. `copy` is synchronous,
+           so the file is present the moment it returns (though possibly
+           still short of its final size on a slow transfer).
+        reverify_fn then polls the TEMP name for presence + exact catalog
+        size. A False here means `<fname>` was NEVER TOUCHED by this attempt:
+        the device is exactly as bootable as before this attempt started.
+
+      Phase 2 — put the proven bytes in place (only reached once Phase 1's
+        reverify has passed):
+        3. `rename <FS><fname>.iris-tmp <FS><fname>` — a directory-entry
+           update, not a data transfer (IOS accepts an existing destination
+           the same way `copy` does, silently confirmed by `file prompt
+           quiet`), so this is the only step that ever touches `<fname>`, and
+           it is as short as this driver can make it — no separate delete of
+           the old `<fname>` precedes it, so there is no window where
+           `<fname>` is definitely gone and the replacement is not yet in
+           place. rename_reverify_fn then polls BOTH `<fname>` (presence +
+           exact size) AND the temp name (must now be GONE) for the final
+           verdict, regardless of whether the rename command itself raised
+           (a raise here is ambiguous about whether IOS actually completed
+           it, not evidence either way) — presence and size at `<fname>`
+           alone cannot tell a genuine rename apart from one that silently
+           no-ops onto a pre-existing file of the same size (scrubber #130);
+           the temp name's disappearance is what the no-op case cannot
+           forge.
+
+    Phase 1's verdict belongs entirely to reverify_fn (_agent_reverify_root)
+    and Phase 2's to rename_reverify_fn (_agent_reverify_rename) — see each
+    one's docstring for its contract (`expected_size` is forwarded unchanged
+    to both). Keeps the success-log gating identical to the applet path and
+    unit-testable. Returns True/False — or
+    ROOT_COPY_NOT_ATTEMPTED when it gives up before Phase 1's delete-first
+    completes (either running-image refusal, or the delete itself raising),
+    because the caller's terminal reclaim must not treat those as "our
+    partial is at the temp name". A `copy` that raises AFTER Phase 1's
+    delete-first is a plain False: that leftover really is ours (at the temp
+    name — `<fname>` itself is still untouched). `copy_source` overrides the
+    SOURCE like _copy_to_root_impl."""
     if running_image_fn is not None:
         running = running_image_fn()
         if not running:
@@ -2896,24 +3172,52 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
             return ROOT_COPY_NOT_ATTEMPTED
     src = (copy_source(fname, target_prefix) if copy_source
            else "%s/guest-share/iris/%s" % (target_prefix, fname))
+    tmp = _root_copy_tmp_name(fname)
+    tmp_dst = "%s%s" % (target_prefix, tmp)
     dst = "%s%s" % (target_prefix, fname)
     try:
-        cli_execute_fn("delete /force %s" % dst)
+        cli_execute_fn("delete /force %s" % tmp_dst)
     except Exception as e:
-        # The delete-first itself failed, so the name was never cleared: a file
-        # there is the operator's, not ours. Withhold reclaim authorisation.
+        # The temp-name delete-first itself failed, so it was never cleared —
+        # but `<fname>` was never referenced either way. Withhold reclaim
+        # authorisation.
         emit_fn("ROOTCOPY-FAIL",
-                "%s delete-first raised; no copy attempted: %s" % (fname, e))
+                "%s temp-name delete-first raised; no copy attempted: %s"
+                % (fname, e))
         return ROOT_COPY_NOT_ATTEMPTED
     try:
-        cli_execute_fn("copy %s %s" % (src, dst))
+        cli_execute_fn("copy %s %s" % (src, tmp_dst))
     except Exception as e:
-        # delete-first DID run: whatever is at the name now is our own partial,
-        # so a plain False (reclaim-authorising) is correct here.
-        emit_fn("ROOTCOPY-FAIL", "%s direct copy raised: %s" % (fname, e))
+        # delete-first DID run: whatever is at the temp name now is our own
+        # partial, so a plain False (reclaim-authorising) is correct here.
+        # `<fname>` itself is untouched either way.
+        emit_fn("ROOTCOPY-FAIL", "%s copy to the temp name raised: %s"
+                % (fname, e))
         return False
-    ok = reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
-                     expected_size=expected_size)
+    if not reverify_fn(tmp, target_prefix, cli_execute_fn, emit_fn,
+                       expected_size=expected_size):
+        # The temp copy never proved good. `<fname>` — whatever it held
+        # before this attempt, BOOT target or not — was never referenced by
+        # any command above, so the device remains exactly as bootable as it
+        # was before this attempt started.
+        return False
+    # Phase 2: the new bytes are proven present and exactly the right size,
+    # still under the temp name. One rename puts them in place — see the
+    # docstring above for why this is the smallest window this driver can
+    # make the replacement's exposure.
+    try:
+        cli_execute_fn("rename %s %s" % (tmp_dst, dst))
+    except Exception as e:
+        # Unlike the copy above, a raise here is NOT treated as "nothing
+        # happened": Phase 1 already proved good bytes exist at the temp
+        # name, so the only open question is whether the rename itself
+        # landed. rename_reverify_fn below is the actual verdict either way.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s rename into place raised; the verified bytes at %s are "
+                "unharmed either way, and the dir check below is the real "
+                "verdict on whether the rename landed: %s" % (fname, tmp, e))
+    ok = rename_reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
+                            expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
     # intermediary (the swarm seeds from the CAF-persistent stage_dir), so a
     # verified placement deletes it — otherwise a duplicate image doubles
@@ -3146,9 +3450,10 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     def copy_to_root(fname, target_prefix="flash:", expected_size=None):
         # Thin wrapper — the actual flow lives in module-level impls so
         # behavioural tests can inject all callables and prove the success log
-        # is gated by _agent_reverify_root's pass. expected_size is forwarded
+        # is gated by _agent_reverify_root's Phase 1 pass and
+        # _agent_reverify_rename's Phase 2 pass. expected_size is forwarded
         # unchanged to whichever impl the platform branch below selects, and
-        # from there to _agent_reverify_root's presence + exact-size contract.
+        # from there to both functions' presence + exact-size contracts.
         running = running_image()
         if not running:
             emit("ROOTCOPY-REFUSED",

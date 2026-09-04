@@ -171,6 +171,31 @@ def test_reclaimable_empty():
     assert ft.reclaimable_artifacts(None, set()) == []
 
 
+def test_reclaimable_includes_root_copy_temp_name_leftovers():
+    # A root-copy replacement (iris_agent._copy_to_root_impl /
+    # _copy_to_root_direct_impl) stages under "<real name>.iris-tmp" and only
+    # renames into place once verified. A leftover from an attempt that
+    # crashed before its own cleanup ran must still be visible to the
+    # generic low-space sweep, or a device stuck full because of exactly that
+    # leftover could never recover space to retry.
+    dir_out = (
+        "467220  -rw-  100  Jun 17 2026 09:59:48 +00:00  "
+        "cat9k_iosxe.26.01.01.SPA.bin.iris-tmp\n"
+        "467256  -rw-    7  Apr 29 2026 11:44:52 +00:00  packages.conf.iris-tmp\n"
+        "11353194496 bytes total (2627305472 bytes free)\n"
+    )
+    got = set(ft.reclaimable_artifacts(dir_out, set()))
+    assert got == {"cat9k_iosxe.26.01.01.SPA.bin.iris-tmp", "packages.conf.iris-tmp"}
+
+
+def test_reclaimable_temp_name_still_honours_protect_set():
+    dir_out = ("467220  -rw-  100  Jun 17 2026 09:59:48 +00:00  "
+               "cat9k_iosxe.26.01.01.SPA.bin.iris-tmp\n"
+               "11353194496 bytes total (2627305472 bytes free)\n")
+    protect = {"cat9k_iosxe.26.01.01.SPA.bin.iris-tmp"}
+    assert ft.reclaimable_artifacts(dir_out, protect) == []
+
+
 # --- device_model: hardware model from `show version`, for the swarm map ---
 
 def test_device_model_c9300():
