@@ -102,18 +102,20 @@ previous install — see
 ### IOx: what the installer pushes
 
 `device/iox/install.sh` never touches Guest Shell. It pushes the built package
-(`iris-arm64.tar` or `iris-amd64.tar`) from the server host to the target IOS
-filesystem over the same authenticated, host-key-checked SCP transport, then
-drives the app-hosting lifecycle
-directly: `app-hosting install` → `activate` → `start`. Deployment-specific
-values — the enrollment token, device id, and SSH-to-self credentials — are
-passed as numbered `run-opts -e` Docker options at deploy time and never baked
-into the image. `IRIS_DEVICE_PLATFORM=iox` selects and persists the IOx
-profile; `device/container/entrypoint.sh` (PID 1) writes the values into
+(`iris-arm64.tar` or `iris-amd64.tar`) and current public catalog certificate
+from the server host to the target IOS filesystem over the same authenticated,
+host-key-checked SCP transport. After package installation reaches `DEPLOYED`,
+the installer copies the certificate into app-hosting application data before
+it activates and starts the app. The deployment-neutral package contains no
+server certificate; the common container entrypoint reads the runtime copy
+from CAF's app-data directory. Deployment-specific values — the enrollment
+token, device id, and SSH-to-self credentials — are passed as numbered
+`run-opts -e` Docker options at deploy time and never baked into the image.
+`IRIS_DEVICE_PLATFORM=iox` selects and persists the IOx profile;
+`device/container/entrypoint.sh` (PID 1) writes the values into
 `iris-agent.conf` on first boot only if no config already exists on the
-persistent mount. There is no EEM timer on IOx: the common entrypoint is its
-own supervisor loop, running the agent once every
-`IRIS_TICK_SECONDS` (default 60s).
+persistent mount. There is no EEM timer on IOx: the common entrypoint is its own
+supervisor loop, running the agent once every `IRIS_TICK_SECONDS` (default 60s).
 
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
 
@@ -129,23 +131,32 @@ performs the same teardown standalone, for a clean removal with no reinstall.
 
 ### IOS-XR: what the installer pushes
 
-`device/xr-install.sh` deploys the agent to a Cisco 8000-series router
-running IOS-XR as an **appmgr Docker application**. It pushes the pre-built
-`iris-xr.rpm` to `harddisk:` over scp, registers it (`appmgr package install
-rpm`), and activates it in config mode with host networking and one bind
-mount: `-v /misc/disk1:/hostmount`. `/misc/disk1` **is** `harddisk:`, so the
-container writes straight to the router's own filesystem. Secrets and the
-device id are passed as `--env` options on the activation line and are never
-baked into the image. `IRIS_DEVICE_PLATFORM=xr-appmgr` selects and persists
-the XR profile; `device/container/entrypoint.sh` writes the configuration on
-first boot and uses the same supervisor as IOx. The XR profile verifies the
-`harddisk:` mount before its first write, rejects all IOx SSH/share variables,
-and never instantiates the SSH transport even though the common image contains
-the client binaries IOx needs. `device/xr-uninstall.sh` is the record-driven
+`device/xr-install.sh` deploys the agent to a Cisco 8000-series router running
+IOS-XR as an **appmgr Docker application**. It pushes the pre-built
+`iris-xr.rpm` and current public catalog certificate to `harddisk:` over scp,
+registers the RPM (`appmgr package install rpm`), and activates it in config
+mode with host networking and the `/misc/disk1:/hostmount` bind mount.
+`/misc/disk1` **is** `harddisk:`, so the container
+writes straight to the router's own filesystem and reads the runtime trust
+anchor at `/hostmount/iris-catalog.pem`. The deployment-neutral RPM contains no
+server certificate. Secrets and the device id are passed as `--env` options on
+the activation line and are never baked into the image.
+`IRIS_DEVICE_PLATFORM=xr-appmgr` selects and persists the XR profile;
+`device/container/entrypoint.sh` writes the configuration on first boot and
+uses the same supervisor as IOx. The XR profile verifies the `harddisk:` mount
+before its first write, rejects all IOx SSH/share variables, and never
+instantiates the SSH transport even though the common image contains the client
+binaries IOx needs. `device/xr-uninstall.sh` is the record-driven
 inverse: deactivate, uninstall the source, remove the RPM and the agent's
 `iris-work/` directory, and sweep any `*.torrent`/`*.aria2`/`*.peers.json`
 sidecar the agent left at `harddisk:` root — this platform has no placement
 step, so those land next to any staged image, not inside `iris-work/`.
+
+All three onboarding paths deliver the current public certificate at runtime.
+A server-certificate rotation therefore requires re-onboarding devices so that
+file is replaced, but it does not require rebuilding the Guest Shell bundle,
+IOx tars, or XR RPM. A shared-agent source change is the opposite: rebuild all
+package families, then redeploy affected devices so they receive the new code.
 
 Nothing is installed or activated on the device's *software*: as on every
 other platform, IRIS distributes, verifies, and stages an image, and stops
@@ -207,6 +218,22 @@ the other paths. A fresh download has nothing on disk to read, and a completed
 file being re-added to seed is skipped by `--bt-seed-unverified`, so a device
 seeding its staged images does not re-hash them at launch.
 
+Every aria2 launcher also loads the device's pinned `iris-catalog.pem` as its
+CA and keeps certificate checking enabled for tracker announces on TCP 6969.
+IOx and IOS-XR attach their bearer credential as a per-torrent header; Guest
+Shell keeps its legacy query credential, now inside the same verified TLS
+transport. A transport-generation marker makes an upgraded agent refetch and
+re-add only the small torrent metadata once. The image payload and any `.aria2`
+resume bitfield remain in place.
+
+Guest Shell additionally copies the validated CA to a content-addressed path
+on its executable filesystem and launches aria2 against that immutable
+generation. Aria2 loads CA bytes only when it starts, so merely replacing
+`iris-catalog.pem` at the same path during re-onboard would otherwise leave a
+healthy daemon trusting the previous certificate. A changed digest (or an
+older launch line with no CA pin) now forces one restart; a malformed or
+unverifiable snapshot fails before launch.
+
 ### Failure mode: a busy aria2c read as a dead one
 
 The health probe above has to answer two different questions, and for a while
@@ -251,16 +278,21 @@ The agent loop is deliberately boring:
 
 Placing an image under a name IRIS finds already on the storage root — the
 operator's ordinary republish flow, or a name the `BOOT` variable currently
-points at — never deletes the old file first. IOS-XE stages the new bytes
-under a reserved temp name (`<image>.iris-tmp`), verifies presence and exact
-byte size there, and only then `rename`s the proven copy over the real name:
-a directory-entry update, not a data transfer, so it is the smallest window
-this driver can make the exposure. A failure or power loss at any point
-before that rename leaves the previous file exactly as it was; a failure at
-the rename step itself is not assumed to mean it failed — the agent
-re-checks the real name afterwards and reports whichever state it actually
-finds. IOS-XR is unaffected: `attest_in_place` never writes a second copy at
-all.
+points at — never deletes the old file first. On Guest Shell, the agent first
+uses the existing local `flash:` / `bootflash:` mount to compare that root
+file's exact size and SHA-256 with the catalog. An exact match is adopted in
+place, including on IOS releases where `rename` will not overwrite an existing
+destination. An unreadable or mismatched root file is left untouched and
+reported as `copy_failed`; replacing it is an explicit operator decision, not
+a destructive guess by IRIS.
+
+When no destination exists, IOS-XE stages the new bytes under a reserved temp
+name (`<image>.iris-tmp`), verifies presence and exact byte size there, and
+then renames the proven copy to the real name. A failure or power loss before
+that rename leaves any previous file exactly as it was; a failure at the
+rename step is not assumed to mean it failed — the agent re-checks the real
+name afterwards and reports whichever state it actually finds. IOS-XR is
+unaffected: `attest_in_place` never writes a second copy at all.
 
 A leftover temp-name file — from an attempt that crashed before its own
 retry could clean up after it — is covered by the same low-space
@@ -270,10 +302,15 @@ device, so it does not sit invisible on an otherwise-full box there. On an
 runs `install remove inactive`, which manages installed packages and does
 not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name
 leftover on an install-mode device is not automatically reclaimed by
-either path. Either way, IRIS only ever attempts the low-space reclaim once
-per acquisition cycle for a given image — a content republish under the
-same id, an image returning from park, or that image's own placement
-succeeding all start a fresh cycle and re-arm the attempt.
+either path. The narrow exception is Guest Shell adoption of an already
+size-and-SHA-verified root file: if the failed attempt's reserved
+`<image>.iris-tmp` also exists, IRIS reclaims exactly that temp name and
+re-stats it before reporting the root ready. If cleanup cannot be proved, the
+agent fails closed instead of claiming adoption. Either way, IRIS only ever
+attempts the low-space reclaim once per acquisition cycle for a given image —
+a content republish under the same id, an image returning from park, or that
+image's own placement succeeding all start a fresh cycle and re-arm the
+attempt.
 
 The old file and the new temp copy do coexist on the storage root until the
 rename, but this costs no *extra* headroom on top of the existing staging

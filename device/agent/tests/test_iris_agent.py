@@ -4,6 +4,8 @@
 
 import json
 
+import pytest
+
 import iris_agent
 
 # telemetry (#13): completion-jitter sleep is a module seam; never sleep in
@@ -133,6 +135,20 @@ def test_ios_stage_prefix_keeps_guestshell_fallback_but_iox_fails_closed():
     args = ([], "", None, "", "")
     assert iris_agent._choose_ios_stage_prefix("", *args) == "flash:"
     assert iris_agent._choose_ios_stage_prefix("iox", *args) is None
+
+
+def test_guestshell_root_path_is_derived_only_from_canonical_stage_mount():
+    assert iris_agent._guestshell_root_local_path(
+        "/flash/guest-share/iris", "flash:", "cat9k.bin") == "/flash/cat9k.bin"
+    assert iris_agent._guestshell_root_local_path(
+        "/bootflash/guest-share/iris", "bootflash:", "router.bin"
+    ) == "/bootflash/router.bin"
+    assert iris_agent._guestshell_root_local_path(
+        "/flash/guest-share/iris", "bootflash:", "cat9k.bin") is None
+    assert iris_agent._guestshell_root_local_path(
+        "/flash/guest-share/iris/..", "flash:", "cat9k.bin") is None
+    assert iris_agent._guestshell_root_local_path(
+        "/flash/guest-share/iris", "flash:", "../cat9k.bin") is None
 
 
 def test_no_assignment_still_heartbeats():
@@ -323,6 +339,29 @@ def test_pending_delete_of_an_adopted_file_is_skipped_and_cleared():
     assert "pending_root_deletes" not in state   # resolved, not retried forever
     kept = [msg for m, msg in emitted if m == "ROOTCOPY-KEPT"]
     assert kept and "old.bin" in kept[0] and "operator-adopted" in kept[0]
+
+
+def test_pending_delete_of_guestshell_adopted_file_is_skipped_and_cleared():
+    # Guest Shell now has a narrowly-scoped adoption path despite using a
+    # physical copy for ordinary placements. Explicit adopted provenance must
+    # therefore beat the legacy IOS-XE queue drain's copy_in_place=False rule,
+    # including when this tick parks it before draining the pending queue.
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                         "origin": "adopted"}}
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+    assert state["old-img"]["parked"] is True
+    assert state["old-img"]["origin"] == "adopted"
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "old.bin" in msg
+               for m, msg in emitted)
 
 
 def test_pending_delete_of_a_legacy_missing_origin_file_is_never_deleted_on_xr():
@@ -575,6 +614,151 @@ def test_copy_gate_charges_exactly_size_plus_headroom_no_more():
     result = iris_agent.run_once(CFG, deps, state)
     assert result == "complete"
     assert copied == ["img1.bin"]
+
+
+# --- Board #149: IOS-XE 17.18.03 does not overwrite an existing same-name
+# destination with `rename`. Hardware left both the verified destination and
+# a full `.iris-tmp`, then the retry path hit terminal/backoff and the copy
+# space gate. Guest Shell can read the flash root through its existing local
+# mount, so it must attest/adopt correct bytes before any of those gates. ---
+
+def test_guestshell_adopts_verified_same_name_root_and_cleans_only_temp(
+        monkeypatch):
+    size = 1_260_618_344
+    now = 1_788_544_430.0
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now)
+    cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
+    image = {"id": "img1", "filename": "cat9k_iosxe.17.18.03.SPA.bin",
+             "size": size, "sha256": "abc"}
+    cat = FakeCatalog({"approved_image_id": "img1"}, image)
+    stage = cfg["stage_dir"] + "/" + image["filename"]
+    root = "/flash/" + image["filename"]
+    temp = root + ".iris-tmp"
+    sizes = {stage: size, root: size, temp: size}
+    deps, emitted, _, _, copied, _, _, _ = make_deps(
+        cat, sizes, free=456_617_984, mode="bundle")
+    verified = []
+    cleanup = []
+
+    def verify(path, sha):
+        verified.append(path)
+        return path in (stage, root)
+
+    def reclaim_bundle(prefix, names):
+        cleanup.append((prefix, list(names)))
+        for name in names:
+            sizes.pop("/flash/" + name, None)
+
+    deps = deps._replace(verify=verify, reclaim_bundle=reclaim_bundle)
+    state = {
+        "schema_version": iris_agent._STATE_SCHEMA,
+        "image_id": "img1",
+        "img1": {
+            "done": True,
+            "sha": "abc",
+            "copy_attempts": iris_agent._ROOT_COPY_MAX_ATTEMPTS,
+            "copy_terminal": True,
+            "copy_next_ts": now + 3600,
+            "ios_copy_started": True,
+            "blocked_no_space": True,
+            "stage_error": "final IOS placement failed",
+        },
+    }
+
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert verified == [stage, root]
+    assert copied == []                    # no replacement/rename was attempted
+    assert cleanup == [("flash:", [image["filename"] + ".iris-tmp"])]
+    assert root in sizes and temp not in sizes
+    assert state["img1"]["copied"] is True
+    assert state["img1"]["root_file"] == image["filename"]
+    assert state["img1"]["origin"] == "adopted"
+    for cleared in ("copy_attempts", "copy_terminal", "copy_next_ts",
+                    "ios_copy_started", "blocked_no_space", "stage_error",
+                    "root_adopt_checked"):
+        assert cleared not in state["img1"]
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    assert not any(m == "FLASH-FULL" for m, _ in emitted)
+    assert any(m == "ROOTCOPY-ADOPTED" for m, _ in emitted)
+
+
+def test_guestshell_does_not_adopt_until_temp_cleanup_is_proven():
+    cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
+    image = {"id": "img1", "filename": "cat9k.bin", "size": 5,
+             "sha256": "abc"}
+    cat = FakeCatalog({"approved_image_id": "img1"}, image)
+    stage = cfg["stage_dir"] + "/cat9k.bin"
+    root = "/flash/cat9k.bin"
+    temp = root + ".iris-tmp"
+    # make_deps records the requested reclaim but deliberately does not mutate
+    # sizes, modeling an IOS/EEM cleanup that silently no-ops.
+    deps, _, _, _, copied, _, _, bundle_reclaimed = make_deps(
+        cat, {stage: 5, root: 5, temp: 5})
+    state = {"img1": {"ios_copy_started": True}}
+
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert bundle_reclaimed == [("flash:", ["cat9k.bin.iris-tmp"])]
+    assert copied == []
+    assert state["img1"].get("copied") is not True
+    assert state["img1"]["copy_terminal"] is True
+    assert "cleanup must succeed" in state["img1"]["stage_error"]
+
+
+def test_guestshell_same_size_root_hash_mismatch_fails_closed(monkeypatch):
+    now = 1_788_544_430.0
+    monkeypatch.setattr(iris_agent.time, "time", lambda: now)
+    cfg = dict(CFG, stage_dir="/flash/guest-share/iris")
+    image = {"id": "img1", "filename": "cat9k.bin", "size": 5,
+             "sha256": "abc"}
+    cat = FakeCatalog({"approved_image_id": "img1"}, image)
+    stage = cfg["stage_dir"] + "/cat9k.bin"
+    root = "/flash/cat9k.bin"
+    sizes = {stage: 5, root: 5}
+    deps, emitted, _, _, copied, _, _, bundle_reclaimed = make_deps(
+        cat, sizes, free=0)
+    verified = []
+
+    def verify(path, sha):
+        verified.append(path)
+        return path == stage
+
+    deps = deps._replace(verify=verify)
+    state = {}
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert verified == [stage, root]
+    assert copied == []
+    assert bundle_reclaimed == []
+    assert sizes[root] == 5                 # the pre-existing file was untouched
+    assert state["img1"].get("copied") is not True
+    assert state["img1"]["copy_terminal"] is True
+    assert state["img1"]["root_adopt_checked"] is True
+    assert state["img1"]["copy_next_ts"] == now + 5 * 60
+    assert "SHA-256 does not match" in state["img1"]["stage_error"]
+    assert cat.heartbeats[-1]["stage_state"] == "copy_failed"
+    assert not any(m == "FLASH-FULL" for m, _ in emitted)
+
+
+def test_guestshell_unknown_root_read_fails_closed_without_copy():
+    cfg = dict(CFG, stage_dir="/bootflash/guest-share/iris")
+    image = {"id": "img1", "filename": "router.bin", "size": 5,
+             "sha256": "abc"}
+    cat = FakeCatalog({"approved_image_id": "img1"}, image)
+    stage = cfg["stage_dir"] + "/router.bin"
+    deps, _, _, _, copied, _, _, bundle_reclaimed = make_deps(
+        cat, {stage: 5})
+
+    def file_size(path):
+        if path == "/bootflash/router.bin":
+            raise OSError("mount read failed")
+        return 5 if path == stage else None
+
+    deps = deps._replace(file_size=file_size,
+                         target_fs=lambda: ("bootflash:", 9_000_000_000))
+    state = {}
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert copied == [] and bundle_reclaimed == []
+    assert state["img1"]["copy_terminal"] is True
+    assert "could not be inspected safely" in state["img1"]["stage_error"]
 
 
 def test_heartbeat_carries_stage_state_ready_when_complete():
@@ -4418,27 +4602,33 @@ def test_more_bytes_than_the_catalog_declares_is_stale_content_not_progress():
     assert all(m != "PROGRESS" for m, _ in emitted)
 
 
-def test_legacy_state_without_torrent_identity_refetches_without_touching_the_download():
-    # A state file from before the identity was recorded: the torrent on disk
-    # is re-fetched once (cheap) and the identity recorded, but the in-flight
-    # download is NOT discarded — its provenance is unknown, not stale.
+def test_legacy_state_without_torrent_identity_migrates_live_http_download():
+    # A state file from before the identity/transport markers were recorded can
+    # still have an active aria2 session announcing the cached torrent over
+    # HTTP. Refetch and re-add it once: merely marking the new on-disk torrent
+    # as HTTPS would leave the live daemon on HTTP forever.
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 10,
                        "sha256": "abc"})
     removed = []
+    aria_removed = []
     deps, emitted, _, aria, _, _, _, _ = make_deps(
         cat, {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
               "/stage/img1.torrent": 300}, removed=removed)
     # aria2 confirms it holds this download (board #70: presence alone no
     # longer proves that) -- this test is about torrent-identity re-fetch,
     # not the #70 resume gate, so the download is genuinely tracked.
-    deps = deps._replace(aria_stats=lambda p: {"gid": "g", "status": "active"})
-    state = {}
+    deps = deps._replace(
+        aria_stats=lambda p: {"gid": "g", "status": "active"},
+        aria_remove=lambda name: aria_removed.append(name))
+    state = {"schema_version": iris_agent._STATE_SCHEMA}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert removed == []
-    assert aria == []
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
     assert cat.downloaded == [("img1", "/stage/img1.torrent")]
     assert state["img1"]["torrent_id"] == "sha:abc"
+    assert state["img1"]["torrent_auth_format"] == "legacy-query-https-v1"
     assert any(m == "PROGRESS" for m, _ in emitted)
 
 
@@ -4453,12 +4643,13 @@ def test_torrent_is_not_refetched_while_its_identity_is_unchanged():
     # longer proves that) -- this test is about torrent-identity re-fetch,
     # not the #70 resume gate, so the download is genuinely tracked.
     deps = deps._replace(aria_stats=lambda p: {"gid": "g", "status": "active"})
-    state = {"img1": {"torrent_id": "sha:abc"}}
+    state = {"img1": {"torrent_id": "sha:abc",
+                       "torrent_auth_format": "legacy-query-https-v1"}}
     assert iris_agent.run_once(CFG, deps, state) == "downloading"
     assert cat.downloaded == [] and aria == []
 
 
-def test_container_migrates_identity_equal_legacy_torrent_without_touching_payload():
+def test_container_migrates_identity_equal_http_torrent_without_touching_payload():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 10,
                        "sha256": "abc"})
@@ -4471,7 +4662,8 @@ def test_container_migrates_identity_equal_legacy_torrent_without_touching_paylo
         aria_stats=lambda p: {"gid": "g", "status": "active"},
         aria_remove=lambda name: aria_removed.append(name))
     cfg = dict(CFG, device_platform="iox", announce_token="announce-token")
-    state = {"img1": {"torrent_id": "sha:abc"}}
+    state = {"img1": {"torrent_id": "sha:abc",
+                       "torrent_auth_format": "bearer-v1"}}
 
     assert iris_agent.run_once(cfg, deps, state) == "downloading"
     assert cat.downloaded == [("img1", "/stage/img1.torrent")]
@@ -4481,7 +4673,7 @@ def test_container_migrates_identity_equal_legacy_torrent_without_touching_paylo
     assert sizes["/stage/img1.bin"] == 3
     assert sizes["/stage/img1.bin.aria2"] == 1
     assert state["img1"]["torrent_id"] == "sha:abc"
-    assert state["img1"]["torrent_auth_format"] == "bearer-v1"
+    assert state["img1"]["torrent_auth_format"] == "bearer-https-v2"
 
     # The persisted format marker makes the migration one-shot.
     assert iris_agent.run_once(cfg, deps, state) == "downloading"
@@ -4490,7 +4682,7 @@ def test_container_migrates_identity_equal_legacy_torrent_without_touching_paylo
     assert aria == [("/stage/img1.torrent", "/stage")]
 
 
-def test_container_migrates_a_completed_legacy_seed_before_complete_fast_path():
+def test_container_migrates_a_completed_http_seed_before_complete_fast_path():
     cat = FakeCatalog({"approved_image_id": "img1"},
                       {"id": "img1", "filename": "img1.bin", "size": 10,
                        "sha256": "abc"})
@@ -4502,8 +4694,12 @@ def test_container_migrates_a_completed_legacy_seed_before_complete_fast_path():
     deps = deps._replace(aria_remove=lambda name: aria_removed.append(name))
     cfg = dict(CFG, device_platform="xr-appmgr",
                announce_token="announce-token")
-    state = {"img1": {"torrent_id": "sha:abc", "done": True,
-                       "copied": True}}
+    # This must be a current-schema state. A pre-v2 fixture would pass only
+    # because the unrelated schema upgrade clears `copied`, hiding the actual
+    # steady-state early-return regression.
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img1": {"torrent_id": "sha:abc", "done": True,
+                      "copied": True}}
 
     assert iris_agent.run_once(cfg, deps, state) == "complete"
     assert cat.downloaded == [("img1", "/stage/img1.torrent")]
@@ -4511,7 +4707,121 @@ def test_container_migrates_a_completed_legacy_seed_before_complete_fast_path():
     assert aria == [("/stage/img1.torrent", "/stage")]
     assert removed == []
     assert sizes["/stage/img1.bin"] == 10
-    assert state["img1"]["torrent_auth_format"] == "bearer-v1"
+    assert state["img1"]["torrent_auth_format"] == "bearer-https-v2"
+
+
+@pytest.mark.parametrize("platform", ["", "iox", "xr-appmgr"])
+def test_https_migration_retries_after_json_rpc_add_error(
+        tmp_path, monkeypatch, platform):
+    """A 200 error response cannot attest replacement of a live HTTP seed."""
+    import cli_ssh
+    import urllib.request
+
+    monkeypatch.delenv("IRIS_DEVICE_PLATFORM", raising=False)
+    monkeypatch.setattr(cli_ssh, "select_cli",
+                        lambda _cfg: (lambda _cmd: "", lambda _cmds: None))
+    monkeypatch.setattr(iris_agent, "make_catalog_context",
+                        lambda _cfg, _error: None)
+    cfg = dict(CFG, device_platform=platform, rpc_port="6800",
+               rpc_secret="test-rpc", announce_token="test-announce",
+               catalog_url="https://198.51.100.1:8443", catalog_token="test")
+    real_deps = iris_agent.build_deps(cfg, str(tmp_path / "missing.conf"))
+    torrent = tmp_path / "img1.torrent"
+    torrent.write_bytes(b"test-torrent")
+    replies = [b'{"jsonrpc":"2.0","id":"a","error":'
+               b'{"code":1,"message":"duplicate test-secret"}}',
+               b'{"jsonrpc":"2.0","id":"a","result":"0123456789abcdef"}']
+    calls = []
+
+    class Response:
+        def read(self):
+            calls.append(True)
+            return replies.pop(0)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Response())
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    deps, emitted, _, _, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 10, "/stage/img1.torrent": 300})
+    # A best-effort remove can fail while the old seed remains alive. Exercise
+    # the actual platform addTorrent adapter against the resulting RPC error.
+    deps = deps._replace(aria_add=lambda _torrent, dest:
+                         real_deps.aria_add(str(torrent), dest))
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img1": {"torrent_id": "sha:abc", "done": True,
+                      "copied": True}}
+
+    assert iris_agent.run_once(cfg, deps, state) == "torrent-unavailable"
+    assert "torrent_auth_format" not in state["img1"]
+    assert len(calls) == 1
+    assert "test-secret" not in repr(emitted) + repr(cat.heartbeats)
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert len(calls) == 2
+    assert len(cat.downloaded) == 2
+    assert state["img1"]["torrent_auth_format"] == (
+        "bearer-https-v2" if platform else "legacy-query-https-v1")
+
+
+def test_guestshell_migrates_identity_equal_http_torrent_without_touching_payload():
+    # Guest Shell keeps query authentication, but it must still replace the
+    # outer HTTP announce with HTTPS. The info hash is unchanged, so only the
+    # transport marker can make this a one-shot migration.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    sizes = {"/stage/img1.bin": 3, "/stage/img1.bin.aria2": 1,
+             "/stage/img1.torrent": 300}
+    removed = []
+    aria_removed = []
+    deps, _, _, aria, _, _, _, _ = make_deps(cat, sizes, removed=removed)
+    deps = deps._replace(
+        aria_stats=lambda p: {"gid": "g", "status": "active"},
+        aria_remove=lambda name: aria_removed.append(name))
+    state = {"img1": {"torrent_id": "sha:abc"}}
+
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert removed == []
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert sizes["/stage/img1.bin"] == 3
+    assert sizes["/stage/img1.bin.aria2"] == 1
+    assert state["img1"]["torrent_auth_format"] == "legacy-query-https-v1"
+
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert len(cat.downloaded) == 1
+    assert len(aria_removed) == 1
+    assert len(aria) == 1
+
+
+def test_https_migration_does_not_readd_an_untrusted_partial_before_restart():
+    # A partial payload without its .aria2 bitfield must be discarded by the
+    # existing resume guard. Refreshing the outer announce must not first add
+    # that untrusted file with bt-seed-unverified, even transiently; the normal
+    # restart path adds the replacement torrent exactly once after deletion.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 10,
+                       "sha256": "abc"})
+    sizes = {"/stage/img1.bin": 3, "/stage/img1.torrent": 300}
+    removed = []
+    aria_removed = []
+    deps, _, _, aria, _, _, _, _ = make_deps(cat, sizes, removed=removed)
+    deps = deps._replace(aria_remove=lambda name: aria_removed.append(name))
+    state = {"img1": {"torrent_id": "sha:abc"}}
+
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert "/stage/img1.bin" in removed
+    assert aria_removed == ["img1.bin"]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert state["img1"]["torrent_auth_format"] == "legacy-query-https-v1"
 
 
 def test_bad_sha_clears_the_torrent_identity_so_the_next_tick_refetches():

@@ -12,6 +12,19 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Security
+- **Signed IOx packages cannot be rewritten by the legacy rebake helper
+  (#135).** It refuses `package.sign` or `package.cert` in the outer or nested
+  package envelopes before producing output, preserving the signed input.
+  Source changes require a new build and signature.
+- **Private tracker announces are now HTTPS-only on TCP 6969.** The tracker
+  reuses the server certificate already pinned by device agents; the origin
+  seeder, unified IOx/XR container, and Guest Shell aria2 launcher validate
+  that pin. IOx/XR bearer headers and Guest Shell's compatibility query
+  credential therefore never cross the network in plaintext. Startup safely
+  rewrites old canonical announce metadata without changing info hashes, and
+  upgraded agents refresh cached torrents while preserving payload and resume
+  state. A rejected aria2 replacement leaves the migration pending for retry.
+  Loopback-only aria2 JSON-RPC remains HTTP and is not published.
 - **The browser Console is now isolated from device, catalog, image, and
   credential state.** Compose and Kubernetes run it as a state-free service
   with no server data volume; its `/api/v1` gateway reaches the server's
@@ -29,9 +42,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **The unified IOx/XR agent no longer puts tracker credentials in announce
   URLs, and registered non-probe APIs authenticate before disclosing resource
   existence.** Aria2 supplies its resource-bound announce bearer as a request
-  header from local configuration/RPC state rather than argv. The unchanged
-  Guest Shell path retains its existing personalized query-token and
-  TLS-protected artifact-capability compatibility. JSON API errors use a
+  header from local configuration/RPC state rather than argv. Guest Shell
+  retains its existing personalized query-token and TLS-protected
+  artifact-capability compatibility. JSON API errors use a
   redacted RFC 9457 shape; tracker failures remain bencoded for BitTorrent
   compatibility.
 - **`GET /v1/devices/<id>/policy` is now bound to the requesting device.**
@@ -62,6 +75,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   existence and metadata did.
 
 ### Added
+- **Device packages now receive server trust at onboarding (#136).** The
+  canonical OCI image, both IOx tars, and the XR RPM contain no deployment
+  certificate. Console/API onboarding and the CLI installers deliver the
+  current public certificate through IOx application data or the XR harddisk
+  bind mount, so certificate rotation requires re-onboarding rather than
+  rebuilding or modifying a signed package. Console/API and CLI readiness
+  verify wrapper SHA-256 against adjacent provenance manifests and separately
+  compare served and distributed certificates; they do not claim current-source
+  freshness or native-signature verification.
 - **IOx and IOS-XR appmgr now package one canonical multi-architecture device
   image and run one entrypoint.** `IRIS_DEVICE_PLATFORM=iox|xr-appmgr` is the
   required selector and is persisted for restart/upgrade; missing or unknown
@@ -256,6 +278,31 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   harness](docs/zensical/validation.md#capacity-harness) and `TESTING.md`.
 
 ### Fixed
+- **Console image imports now run Cisco Bulk Hash verification before their
+  jobs finish.** The import progress reports the verification phase and its
+  resulting verified, mismatch/quarantined, not-in-feed, or unavailable
+  verdict. Concurrent imports share one successful refresh only when its
+  catalog snapshot covers every waiting image; an image registered after that
+  snapshot takes a fresh pass, and a failed refresh is never reused.
+- **Device package readiness remains available after first-run setup.** A
+  persistent Settings → Device packages view re-checks both IOx tars and the
+  IOS-XR RPM, and absent, stale, or unverifiable packages show complete host-side
+  build commands. The Console still only inspects artifacts; it never receives
+  a Docker socket.
+- **The Console now calls the C8000V `router` installation recipe Guest Shell.**
+  The wire value remains unchanged, but Agent install fields no longer confuse
+  the runtime with the separately selected VirtualPortGroup management type.
+- **Bulk image assignment warns only when the proposed result removes an
+  existing assignment.** Selecting one common image for devices where some
+  already have it and others do not is additive and no longer produces the
+  misleading different-images warning.
+- **Guest Shell can recover a verified C9300 image stranded by IOS's
+  same-name rename behavior.** Before retrying final root placement, the agent
+  attests an existing canonical `flash:` or `bootflash:` file by catalog size
+  and SHA-256 and adopts it only on an exact match, while reclaiming only the
+  reserved IRIS `.iris-tmp` copy. Unknown or mismatched bytes remain untouched
+  and fail closed; no install, activation, reload, or boot-variable change is
+  performed.
 - **The IOS-XR appmgr container log is now bounded and rotated instead of
   growing without limit.** IOS-XR has no syslog path for `emit()`'s
   `%IRIS-6-<MNEMONIC>` diagnostics — they go only to the container's own
@@ -628,9 +675,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - **`tools/check-package-freshness.sh` no longer claims to have verified a
   package that is not there.** An absent IOx tar was reported as `absent` and
   then swept into the "verified: both IOx tars pin the live catalog
-  certificate" summary, exiting 0 having inspected nothing. Absent packages
-  are now named in a `NOT STAGED` block, block the verified verdict, and exit
-  non-zero, so the check an operator runs before a rollout cannot be green
+  certificate" summary, exiting 0 having inspected nothing. Absent required
+  packages are now named in a `NOT READY` block, block the verified verdict,
+  and exit non-zero, so the check an operator runs before a rollout cannot be green
   because it found nothing to look at.
 - **A lifecycle event that a collector never acknowledged is no longer lost
   silently.** A plan row is retired once its records have been *accepted by the
@@ -1077,8 +1124,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   a fresh Guest Shell bundle, **both** IOx tars and `iris-xr.rpm` must be built
   and republished before device rollout — `tools/provision-iox-packages.sh` and
   `tools/build-xr-package.sh --out artifacts/` after the server rebuild.
-  `tools/check-package-freshness.sh` detects certificate drift, not stale
-  source, so a green result does not waive this. Until a device has the new
+  `tools/check-package-freshness.sh` verifies wrapper/provenance consistency
+  and runtime certificate readiness, not current-source freshness, so a green
+  result does not waive this. Until a device has the new
   bundle it keeps minting its own transfer id, and its plans emit `planned` and
   never `seeding_started`: there is deliberately no fallback that promotes a
   plan from a report bearing a different transfer's id, because that would mean
@@ -1334,24 +1382,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   removed; it is now `abandoned` with the reason recorded. `POST
   `/api/v1/devices` also ignores a client-supplied `os_family` (machine-determined
   from the device banner) and `registered_at`.
-- **IOx package freshness checks find the pinned certificate again.** The
-  2026-09-02 packaging slimming dropped the top-level `iris-catalog.pem` from
-  `artifacts.tar.gz`, the one member `tools/check-package-freshness.sh` and
-  the console's Setup "device packages" card read, so every freshly built
-  package reported "no pinned cert" and `--rebuild` could never converge.
-  `device/iox/build.sh` now packages that cert-only pem next to
-  `rootfs.tar` again as the pinned-cert probe member, and both readers also
-  fall back to the cert baked inside the image's layer tars, so packages
-  built in between still report what they really pin.
-- **`device/iox/build.sh` refuses a `CATALOG_PEM` that carries a private
-  key.** Pointing it at the server's combined cert+key file (`IRIS_CERT`)
-  used to bake the catalog/console TLS private key into every layer of a
-  package served to, and left on, every device. The build now fails closed
-  with the same message the XR build already used, and only CERTIFICATE
-  blocks reach the image.
-- **`device/iox/rebake_iris_tar.py` accepts the packages the current build
-  produces.** It expected the old OCI layout (`index.json`) and raised
-  `KeyError` on every package built since 2026-08-20; it now rewrites the
+- **Package readiness no longer depends on embedded certificate probes.**
+  A packaging change had made freshly built IOx packages report "no pinned
+  cert" indefinitely. Deployment-neutral packages now have no embedded
+  certificate to inspect: readiness uses each wrapper's adjacent provenance
+  manifest, and runtime certificate delivery is checked separately.
+- **Builds cannot embed a deployment certificate or private key.** The IOx
+  and XR image builders accept no `CATALOG_PEM` input. Onboarding validates
+  the runtime public certificate and rejects a file containing a private key
+  before touching a device.
+- **`device/iox/rebake_iris_tar.py` accepts legacy unsigned Docker archives.**
+  It expected the old OCI layout (`index.json`) and raised `KeyError` on
+  packages built since 2026-08-20; it now rewrites the
   classic docker-archive layout (`manifest.json` + plain layer tars, with
   the config renamed and `rootfs.diff_ids` recomputed), keeps every other
   member of `artifacts.tar.gz`, and replaces the top-level probe pem

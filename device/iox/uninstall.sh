@@ -16,7 +16,8 @@
 #     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
 #     timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
+#   - delete the staged app package (<pkg-fs>iris-arm64.tar), the runtime
+#     certificate source (<pkg-fs>iris-catalog.pem), and, on C9k share
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
 #     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
@@ -125,7 +126,8 @@ if [ "$DRY" -eq 1 ]; then
     echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
   fi
   config_cleanup
-  echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
+  echo "===== [3/4] delete ${PKG_FS}${PKG} and ${PKG_FS}iris-catalog.pem ====="
+  echo "delete /force ${PKG_FS}iris-catalog.pem"
   if [ -n "$SHARE_IOS_PATH" ]; then
     echo "delete /force $SHARE_IOS_PATH/iris-staged.bin"
     echo "delete /force $SHARE_IOS_PATH/iris-staged.bin.part"
@@ -206,8 +208,9 @@ else
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | RUN >/dev/null
 
-echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
-printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
+echo "[3/4] delete ${PKG_FS}${PKG} and ${PKG_FS}iris-catalog.pem (IOx package inputs)"
+printf 'delete /force %s%s\ndelete /force %siris-catalog.pem\n' \
+  "$PKG_FS" "$PKG" "$PKG_FS" | RUN >/dev/null 2>&1 || true
 if [ -n "$SHARE_IOS_PATH" ]; then
   echo "  also removing the IRIS-prefixed transfer files from the share"
   # our transient staging files at the share ROOT (name-prefix isolation),

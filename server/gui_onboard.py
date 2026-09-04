@@ -1173,7 +1173,7 @@ class OnboardService:
             # stores compatibility artifacts (default /srv/artifacts,
             # bind-mounted from the host).
             "IRIS_STAGE_LOCAL": "1",
-            "IRIS_ARTIFACTS_DIR": os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts"),
+            "IRIS_ARTIFACTS_DIR": self.artifacts_dir,
         })
         if target.get("model"):
             env["MODEL"] = target["model"]
@@ -1194,6 +1194,9 @@ class OnboardService:
         # business in the environment of every installer and its ssh children.
         env.pop("HOST_USER", None)
         env.pop("HOST_PASS", None)
+        # Direct CLI callers may choose a CA file, but service onboarding must
+        # use the same current public certificate selected by its own config.
+        env.pop("IRIS_CATALOG_CA_FILE", None)
         # Console-driven feature flags (e.g. the telemetry checkboxes) applied
         # last: explicit operator intent beats any inherited process env.
         if env_extra:
@@ -2067,7 +2070,18 @@ class OnboardService:
         The next session re-verifies and re-pins the peer's NEW key on first
         contact -- the same trust-on-first-use flow a brand-new device gets,
         never a switch to unverified connections."""
-        dev = self.fleet.get_device(device_id) if self.fleet else None
+        try:
+            dev = self.fleet.get_device(device_id) if self.fleet else None
+        except Exception as exc:
+            # gui_fleet imports this module for shared model/platform
+            # validation, so importing its exception at module scope would
+            # create a circular import. Resolve it only on this uncommon
+            # storage-failure path and preserve the method's non-raising
+            # ``(False, message)`` contract for a corrupt fleet shard.
+            import gui_fleet
+            if isinstance(exc, gui_fleet.FleetStateError):
+                return False, "fleet state unavailable"
+            raise
         if dev is None:
             return False, "no such device"
         peer = (dev.get("device_ip") or "").strip()

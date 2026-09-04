@@ -11,13 +11,18 @@ def _read(name):
         return f.read()
 
 
-def test_compose_publishes_gui_port():
+def test_compose_publishes_gui_only_on_configured_host_ip():
     # shared hosts may already have :8080 taken (e.g. Jenkins) — the published
-    # side is overridable via IRIS_GUI_PUBLISH, defaulting to 8080.
+    # side is overridable via IRIS_GUI_PUBLISH, defaulting to 8080. Anchor it to
+    # the configured IRIS address rather than publishing on every host NIC.
     import yaml
     services = yaml.safe_load(_read("docker-compose.yml"))["services"]
-    assert '"${IRIS_GUI_PUBLISH:-8080}:8080"' in _read("docker-compose.yml")
-    assert services["console"]["ports"] == ["${IRIS_GUI_PUBLISH:-8080}:8080"]
+    published = ("${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP}:"
+                 "${IRIS_GUI_PUBLISH:-8080}:8080")
+    assert services["console"]["ports"] == [published]
+    # 0.0.0.0 is correct inside the container; host-side publication is the
+    # boundary that prevents an unrelated host interface reaching this socket.
+    assert services["console"]["environment"]["IRIS_GUI_HOST"] == "0.0.0.0"
     assert not any(str(p).endswith(":8080")
                    for p in services["iris"].get("ports", []))
 

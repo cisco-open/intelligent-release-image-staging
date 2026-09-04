@@ -48,19 +48,21 @@ _run_entrypoint() {
 # ---------------------------------------------------------------------------
 
 @test "entrypoint refuses a stage dir that is not a mounted filesystem" {
-  # A plain directory under the test tmpdir is on the same filesystem as
-  # the container root would be: no bind mount, so the entrypoint must stop
-  # before it creates anything or synthesizes a conf.
+  # /tmp can itself be a bind mount in a sandbox. A nonexistent direct child
+  # of / has no non-root mount ancestor on any host. This validation-only
+  # sentinel must be rejected before mkdir or conf synthesis; never create it.
+  unmounted="/__iris_xr_not_a_mount_${BASHPID}"
+  [ ! -e "$unmounted" ]
   run env -i PATH="$PATH" \
     IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
-    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE/not-a-mount" \
+    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$unmounted" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 IRIS_DEVICE_ID=8010-r1 \
     bash "$ENTRYPOINT"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a mounted filesystem"* ]]
   [[ "$output" == *"harddisk:"* ]]
-  [ ! -d "$STAGE/not-a-mount/iris-work" ]
+  [ ! -e "$unmounted" ]
   [ ! -f "$CONF" ]
 }
 
@@ -203,13 +205,13 @@ _run_entrypoint() {
   [ "$status" -eq 0 ]
 }
 
-@test "conf synthesis defaults catalog_ca to the baked-in cert path" {
+@test "conf synthesis uses the runtime certificate on the harddisk bind mount" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
     IRIS_DEVICE_ID=8010-r1
   run cat "$CONF"
-  [[ "$output" == *"catalog_ca = /opt/iris/iris-catalog.pem"* ]]
+  [[ "$output" == *"catalog_ca = $STAGE/iris-catalog.pem"* ]]
 }
 
 @test "conf synthesis writes device_model from the installer's env" {
@@ -422,6 +424,14 @@ device_id = sentinel-device
 mode = xr
 EOF
   chmod 600 "$CONF"
+}
+
+@test "real reconcile replaces the legacy baked certificate path before validating it" {
+  _drop_conf_missing_target_fs_and_stage_dir
+  printf '%s\n' 'catalog_ca = /opt/iris/iris-catalog.pem' >> "$CONF"
+  _run_entrypoint_real_reconcile
+  grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
+  ! grep -q '^catalog_ca = /opt/iris/iris-catalog.pem$' "$CONF"
 }
 
 @test "real reconcile: a dropped conf missing target_fs is force-corrected to harddisk:, not wiped by agent_config's IOx default" {

@@ -139,6 +139,7 @@ set -eu
 eval "$(awk '/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/' "$1")"
 ARIA2="$2"; RPC_PORT=6800; MAX_PEERS=10; MAX_CONCURRENT=100; STAGE_DIR="$3"; HOOK=""
 ARIA2_CONF="$3/aria2.conf"
+TRACKER_CA="$3/iris-catalog.pem"
 IRIS_LOG="${IRIS_LOG:-off}"; LOG_FILE="$STAGE_DIR/aria2c.log"
 ARIA2_PID=""; ARIA2_START=""
 start_aria2c s1 >/dev/null
@@ -164,6 +165,10 @@ HARNESS
     # seeding its staged images does not re-hash them on every relaunch.
     run grep -qx -- '--bt-seed-unverified=true' "$argv"
     [ "$status" -eq 0 ] || { echo "--bt-seed-unverified lost in $ep"; cat "$argv"; return 1; }
+    run grep -qx -- "--ca-certificate=$BATS_TEST_TMPDIR/launch/iris-catalog.pem" "$argv"
+    [ "$status" -eq 0 ] || { echo "tracker CA pin lost in $ep"; cat "$argv"; return 1; }
+    run grep -qx -- '--check-certificate=true' "$argv"
+    [ "$status" -eq 0 ] || { echo "tracker certificate checking lost in $ep"; cat "$argv"; return 1; }
   done
 }
 

@@ -291,6 +291,15 @@ reuses a Cisco filename mismatches and quarantines on its next verification
 run; the check has no way to distinguish that from tampering, which is the
 point.
 
+Every Console upload or **Import from disk** publish starts a reconciliation
+immediately, independent of the schedule. Its job progresses from `publishing`
+to `verifying`, then reports the new image's verdict. Concurrent imports share
+a successful refresh when its catalog snapshot covers their images. An image
+registered after that snapshot takes a fresh pass, and a failed refresh is
+never reused as success. A feed failure is
+reported as verification incomplete without falsely claiming the durable
+publish failed.
+
 The schedule has three modes: **off** (the default), **daily**, and
 **weekly** — both timed modes fire at a configured `hour_utc` (0-23), and
 weekly always anchors to Monday UTC; there is no day-of-week setting. A slot
@@ -505,58 +514,62 @@ management CA independently; a token does not enable plaintext fallback.
 
 ## TLS rotation and device packages
 
-Rotating or regenerating the server's TLS certificate invalidates prebuilt
-device packages: each `iris-arm64.tar` / `iris-amd64.tar` bakes the catalog's
-certificate in at **build** time, and so does `iris-xr.rpm`, the IOS-XR agent
-package for Cisco 8000 Series Routers (`tools/build-xr-package.sh`). The
-server only refreshes the *served* `iris-catalog.pem` on container start — it
-does not rebuild any of the three. A rebuilt server, a fresh volume, or a
-deliberate certificate rotation all silently break every package that was
-built before the change.
+The canonical device image, both IOx wrappers (`iris-arm64.tar` and
+`iris-amd64.tar`), and the IOS-XR wrapper (`iris-xr.rpm`) are
+**deployment-neutral**. None contains a server certificate, and none needs
+`CATALOG_PEM` at build time. Console and API onboarding invoke the same
+platform installers available from the CLI, and every path delivers the
+current public certificate beside the package instead:
 
-Symptom: the device installs cleanly and its IOx app (or, on IOS-XR, its
-appmgr container) reports RUNNING, and its TCP connection to the catalog even
-succeeds, but it can never authenticate and so never checks in. The only
-evidence is a `TOKEN-REFRESH-FAIL` line in the **device's own syslog** —
-nothing on the server distinguishes "never onboarded" from "onboarded but
-rejecting our certificate". Guest Shell devices are immune: their served
-artifacts, including `iris-catalog.pem`, are regenerated on every container
-start, and the installer always fetches whatever is current.
+- IOx copies it into app-hosting application data after package installation
+  and before activation. The container reads that runtime file from CAF's app
+  data directory.
+- IOS-XR copies it to `harddisk:/iris-catalog.pem`, which the appmgr container
+  reads through its `/hostmount` harddisk bind mount.
+- Guest Shell receives the same current public certificate with its other
+  short-lived onboarding artifacts.
 
-Two ways to catch this before it reaches a device:
+Rotating or regenerating the server certificate therefore does **not** make an
+IOx tar or XR RPM stale and does not require a package rebuild. It does leave
+already-onboarded agents trusting the previous certificate. Re-onboard every
+affected device so its runtime trust file is replaced; the same unchanged IOx
+or XR package may be reused. Console onboarding requires the normal undeploy,
+then onboard sequence because preflight refuses an already-running IRIS agent.
 
-- Console **Settings → Setup** carries a *device packages* card showing each
-  package's build time and state (`ok`, `stale`, `absent`, `unknown`) against
-  the server's live certificate, including the `iris-xr.rpm` row — see
-  [Setup](console.md#setup). That row is checked differently from the two
-  tars: this module has no RPM/cpio reader, so it can only compare the RPM's
-  build time against the live certificate, not pin the certificate baked
-  inside it the way it does for the tars.
-- `tools/check-package-freshness.sh` is the read-only, scriptable equivalent
-  for all three packages. It compares the certificate the catalog actually
-  serves, the copy handed to Guest Shell devices, and the certificate pinned
-  inside each served IOx package. For `iris-xr.rpm`, it uses the same explicit
-  build-time proxy as the Setup card: built before the certificate's
-  `notBefore` is stale; built after it is only `OK-BY-MTIME`, never a contents
-  inspection:
+Console **Settings → Device packages** (also linked from the setup flow) keeps
+the two readiness questions separate:
 
-  ```bash
-  tools/check-package-freshness.sh              # report only
-  tools/check-package-freshness.sh --rebuild    # report, then rebuild if stale
-  ```
+- Each package row checks that the wrapper is readable and non-empty, that its
+  adjacent `.manifest` has the expected wrapper kind, filename, platform, and
+  canonical OCI digests, and that the manifest's wrapper SHA-256 matches the
+  served bytes. `ok` proves that byte-to-provenance binding only; it does not
+  inspect package contents or validate a native signature. `stale` means the
+  wrapper digest disagrees with its manifest. Missing, unreadable, or malformed
+  evidence reports `absent` or `unknown`, never success.
+- The card separately compares the certificate the live services present with
+  the public `iris-catalog.pem` copy onboarding distributes. A missing copy or
+  mismatch means new onboarding is not ready. Reconcile that served artifact;
+  rebuilding deployment-neutral packages cannot repair certificate drift.
 
-  Run it after any catalog certificate change. `--rebuild` rebuilds stale IOx
-  tars only; build the XR RPM separately with the command below.
+`tools/check-package-freshness.sh` is the scriptable equivalent. Its default
+mode is read-only; `--rebuild` rebuilds wrapper families whose package or
+provenance evidence is missing or invalid, then rechecks. It will not rebuild
+packages to paper over a served-versus-distributed certificate failure.
 
-Remedy: re-run `tools/provision-iox-packages.sh`, then re-onboard the affected
-IOx devices. For IOS-XR, rebuild the RPM with `tools/build-xr-package.sh
---out artifacts/`, pointing `CATALOG_PEM` at the NEW live certificate
-(certificate block only — the same rebuild the fresh-volume reset sequence in
-[aiagent.md](aiagent.md) performs for IOS-XR after bring-up), then redeploy
-the affected Cisco 8000 Series routers. If instead the certificate the server
-currently serves disagrees with the copy already handed to devices,
-rebuilding packages alone will not fix it — new onboards are affected too —
-so reconcile the certificate first.
+Package rebuilds remain mandatory after a shared agent or device-image source
+change. Build and publish both wrapper families, including their adjacent
+provenance manifests:
+
+```bash
+tools/provision-iox-packages.sh
+tools/build-xr-package.sh --out artifacts/
+tools/check-package-freshness.sh
+```
+
+Then redeploy affected devices so they actually run the new agent bytes. A
+green package row verifies the served wrapper against its manifest; it does
+not compare the package with the current checkout or confirm that an already
+deployed device was upgraded.
 
 ## Redeploying agents after an artifact rebuild
 
@@ -579,7 +592,7 @@ credential. It requires `--maintenance-frozen`, which acknowledges a freeze the
 operator has already put in place — the command never creates one. Preflight
 binds every published image's canonical torrent to exactly one active aria2 GID
 and refuses before touching anything if an image has no canonical torrent, is not
-uniquely active, the announce base is not a usable HTTP IPv4 endpoint (loopback,
+uniquely active, the announce base is not a usable HTTPS IPv4 endpoint (loopback,
 link-local, unspecified and multicast addresses are refused; any routable
 address is accepted), durable encrypted secrets are missing, or a recovery
 manifest from an earlier run is still on disk. A refusal names its reason on

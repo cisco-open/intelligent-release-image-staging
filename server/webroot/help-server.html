@@ -34,7 +34,7 @@
       container, then read <code>docker logs iris</code> for catalog,
       tracker, seeder, or secretfs errors.</li>
       <li>Confirm devices can reach ports <code>8443</code> (catalog),
-      <code>8000</code> (artifacts), <code>6969</code> (tracker), and
+      <code>8000</code> (artifacts), <code>6969</code> (HTTPS tracker), and
       <code>6881</code> (seeder); operators need <code>8080</code>
       (this console).</li>
       <li>Check host-path ownership: every service runs at uid 10001. An
@@ -49,14 +49,19 @@
       answers only a minimal <code>{"ok":true}</code> probe body.</li>
     </ol>
 
-    <h2>Staged IOx packages drift</h2>
+    <h2>Device packages and certificate changes</h2>
     <p>The IOx tars (<code>iris-arm64.tar</code> / <code>iris-amd64.tar</code>)
-    bake the catalog CA and agent code in at build time. After a TLS
-    certificate rotation <em>or</em> a release bump, already-staged tars are
-    stale: the app runs and TCP connects, but pinning fails and the device
-    never heartbeats. Rebuild and restage with
-    <code>tools/provision-iox-packages.sh</code>, then re-onboard the
-    affected IOx devices.</p>
+    and <code>iris-xr.rpm</code> contain agent code but no deployment
+    certificate. Onboarding supplies the current public certificate
+    separately. After certificate rotation, re-onboard affected devices;
+    the existing packages can be reused. Agent source changes require
+    rebuilding every package: run <code>tools/provision-iox-packages.sh</code>
+    for IOx and <code>tools/build-xr-package.sh --out artifacts/</code> for
+    IOS-XR from the repository root. The Console's
+    Settings → Device packages page reports all three artifacts and can
+    re-check their bytes against build provenance, but builds must run on
+    the Docker host. A ready result does not validate a native signature;
+    signed packages must remain immutable.</p>
 
     <h2>Where state lives</h2>
     <ul>

@@ -35,8 +35,6 @@ COPY agent/*.py /opt/iris/agent/
 # execs it directly -- execlp, no shell -- so it needs the exec bit below.
 COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh
 COPY agent/VERSION /opt/iris/agent/VERSION
-# pinned catalog server cert (public; used to VERIFY catalog TLS)
-COPY iris-catalog.pem /opt/iris/iris-catalog.pem
 COPY entrypoint.sh /entrypoint.sh
 COPY reconcile.sh /reconcile.sh
 RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-transfer-hook.sh \
@@ -50,8 +48,7 @@ ENV PATH="/opt/iris/bin:${PATH}" \
     IRIS_MAX_PEERS="10" \
     IRIS_MAX_CONCURRENT="100" \
     IRIS_TELEMETRY="on" \
-    IRIS_LOG="off" \
-    IRIS_CATALOG_CA="/opt/iris/iris-catalog.pem"
+    IRIS_LOG="off"
 
 WORKDIR /opt/iris
 STOPSIGNAL SIGTERM

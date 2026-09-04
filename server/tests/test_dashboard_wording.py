@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import re
 
@@ -101,14 +102,19 @@ def test_grafana_never_rates_the_untraced_residue_gauge():
         "rate()/increase()/deriv()/resets() applied to the residue gauge: %s" % bad
 
 
-def test_grafana_catalog_id_variable_passes_non_bin_images_through():
-    """The variable mirrors publish.derive_id, which strips .SPA.bin/.bin and
-    returns every other basename UNCHANGED. A Grafana variable regex that fails
-    to match DROPS the value from the option list, so a regex anchored on a
-    mandatory .bin suffix makes every .iso/.tar/.rpm image disappear from the
-    picker instead of mapping to itself."""
-    var = next(v for v in _grafana()["templating"]["list"]
-               if v.get("name") == "image_catalog_id")
+def test_grafana_image_picker_uses_catalog_ids_and_passes_non_bin_images():
+    """The one image picker mirrors publish.derive_id: .SPA.bin/.bin is
+    stripped, while every other basename stays unchanged. A regex that does
+    not match drops the value from Grafana's option list entirely."""
+    variables = _grafana()["templating"]["list"]
+    image_vars = [v for v in variables if v.get("name") == "image"]
+    assert len(image_vars) == 1
+    assert not any(v.get("name") == "image_catalog_id" for v in variables)
+    var = image_vars[0]
+    assert var["hide"] == 0
+    assert var["multi"] is True
+    assert var["includeAll"] is True
+    assert var["allValue"] == ".*"
     body = var["regex"].strip("/")
     compiled = re.compile(body)
     for name, expected in (
@@ -123,15 +129,151 @@ def test_grafana_catalog_id_variable_passes_non_bin_images_through():
             "%s -> %r, expected %r" % (name, match.group(1), expected)
 
 
-def test_grafana_catalog_id_variable_is_visible():
-    """hide: 2 removed the picker from the UI, so it stayed pinned to its
-    shipped All value: narrowing $image narrowed only the Prometheus (origin)
-    leg while the Loki (delivery) leg still matched every image, and every
-    derived peer share was silently inflated."""
-    var = next(v for v in _grafana()["templating"]["list"]
-               if v.get("name") == "image_catalog_id")
-    assert var.get("hide", 0) != 2, \
-        "image_catalog_id must be operator-visible; it does not follow $image"
+def test_grafana_single_image_picker_filters_every_prometheus_and_loki_leg():
+    """Catalog-id reports and basename metrics/logs use the same selection.
+
+    This pins every current image-bearing target, not only the five mixed
+    arithmetic panels: adding a new raw ``$image`` matcher would otherwise
+    silently reintroduce two incompatible identifier forms elsewhere.
+    """
+    dash = _grafana()
+    basename = '(${image})(([.]SPA)?[.]bin)?'
+    catalog = '${image}'
+    prometheus = set()
+    reports = set()
+    peers = set()
+    for panel in dash["panels"]:
+        for target in panel.get("targets", []) or []:
+            expr = target.get("expr") or ""
+            source = (target.get("datasource") or {}).get("type")
+            key = (panel["id"], target.get("refId"))
+            if source == "prometheus" and "image=~" in expr:
+                prometheus.add(key)
+                assert 'image=~"%s"' % basename in expr, key
+                assert 'image=~"$image"' not in expr, key
+            if source != "loki" or "iris_image_id=~" not in expr:
+                continue
+            if 'otel_log_name="iris.device.transfer.report"' in expr:
+                reports.add(key)
+                assert 'iris_image_id=~"%s"' % catalog in expr, key
+                assert basename not in expr, key
+            elif ('otel_log_name="iris.swarm.peer_bytes"' in expr or
+                  'otel_log_name="iris.swarm.peer_rate"' in expr):
+                peers.add(key)
+                assert 'iris_image_id=~"%s"' % basename in expr, key
+            else:
+                raise AssertionError("unclassified Loki image target %r" %
+                                     (key,))
+
+    assert prometheus == {
+        (5, "A"), (6, "B"), (7, "B"), (8, "A"), (9, "A"),
+        (11, "A"), (12, "A"), (13, "A"), (14, "A"), (14, "B"),
+        (16, "A"), (16, "B"), (17, "A"), (18, "A"), (20, "A"),
+        (20, "B"), (20, "C"), (20, "D"), (20, "E"), (20, "F"),
+        (20, "G"), (20, "H"), (20, "I"), (20, "J"), (21, "A"),
+        (21, "B"), (21, "C"), (22, "A"), (23, "A"), (23, "B"),
+        (29, "A"), (30, "A"), (31, "A"), (33, "A"), (34, "A"),
+    }
+    assert reports == {
+        (4, "A"), (6, "A"), (7, "A"), (11, "L"), (12, "L"),
+        (32, "B"),
+    }
+    assert peers == {
+        (25, "A"), (26, "A"), (27, "A"), (28, "A"), (32, "A"),
+    }
+
+    info_hash = next(v for v in dash["templating"]["list"]
+                     if v.get("name") == "info_hash")
+    assert 'image=~"%s"' % basename in info_hash["definition"]
+    assert 'image=~"%s"' % basename in info_hash["query"]["query"]
+
+
+def test_grafana_image_matchers_have_valid_quoted_strings_and_literal_suffixes():
+    """Quoted PromQL/LogQL regex strings need a second escaping layer.
+
+    These printable matchers use the JSON-compatible subset of Go string
+    literals. Decode that layer before checking regex behavior, so a raw
+    backslash-dot cannot pass merely because Python's regex accepts it.
+    """
+    dash = _grafana()
+    expressions = [target.get("expr", "")
+                   for panel in dash["panels"]
+                   for target in panel.get("targets", []) or []]
+    info_hash = next(v for v in dash["templating"]["list"]
+                     if v.get("name") == "info_hash")
+    expressions.extend((info_hash["definition"], info_hash["query"]["query"]))
+    checked = 0
+    for expression in expressions:
+        if "(${image})(" not in expression:
+            continue
+        expression = expression.replace("${image}", "image-test")
+        literals = re.findall(r'(?:image|iris_image_id)=~("(?:[^"\\]|\\.)*")',
+                              expression)
+        assert literals, expression
+        for literal in literals:
+            pattern = re.compile(json.loads(literal))
+            for name in ("image-test", "image-test.bin", "image-test.SPA.bin"):
+                assert pattern.fullmatch(name), (literal, name)
+            for name in ("image-testxbin", "image-testxSPAxbin", "other.bin"):
+                assert not pattern.fullmatch(name), (literal, name)
+            checked += 1
+    assert checked > 40
+
+
+def test_grafana_dotted_multi_selection_uses_datasource_escaping_and_grouping():
+    """Default datasource interpolation escapes both regex and query strings.
+
+    Grafana's Prometheus formatter groups multi-values; Loki's joins with |.
+    These fixtures represent their documented/source-tested output for two
+    dotted IDs. Explicit :regex would bypass that second escaping layer, and
+    omitting our outer grouping would apply the suffix only to Loki's last ID.
+    """
+    dash = _grafana()
+    expressions = [(target.get("expr", ""),
+                    (target.get("datasource") or {}).get("type"))
+                   for panel in dash["panels"]
+                   for target in panel.get("targets", []) or []]
+    info_hash = next(v for v in dash["templating"]["list"]
+                     if v.get("name") == "info_hash")
+    expressions.extend(((info_hash["definition"], "prometheus"),
+                        (info_hash["query"]["query"], "prometheus")))
+    selected = ("cat9k.26.01", "c8000v.26.01")
+    escaped_values = r'cat9k\\.26\\.01|c8000v\\.26\\.01'
+    checked = 0
+    for expression, source in expressions:
+        if "${image" not in expression:
+            continue
+        assert "${image:regex}" not in expression, expression
+        assert source in ("prometheus", "loki")
+        replacement = ("(" + escaped_values + ")"
+                       if source == "prometheus" else escaped_values)
+        basename = "(${image})(" in expression
+        rendered = expression.replace("${image}", replacement)
+        literals = re.findall(r'(?:image|iris_image_id)=~("(?:[^"\\]|\\.)*")',
+                              rendered)
+        assert literals, rendered
+        for literal in literals:
+            pattern = re.compile(json.loads(literal))
+            for name in selected:
+                assert pattern.fullmatch(name), (source, literal, name)
+                for suffix in (".bin", ".SPA.bin"):
+                    assert bool(pattern.fullmatch(name + suffix)) == basename, \
+                        (source, literal, name + suffix)
+                assert not pattern.fullmatch(name + "-other.bin"), literal
+                assert not pattern.fullmatch(name.replace(".", "x")), literal
+            assert not pattern.fullmatch("unselected.26.01.bin"), literal
+            checked += 1
+    assert checked > 45
+
+
+def test_grafana_one_picker_wording_has_no_manual_coupling_caveat():
+    text = os.path.join(DASHBOARDS, "grafana-iris-swarm.json")
+    with open(text, encoding="utf-8") as stream:
+        body = stream.read()
+    assert "image_catalog_id" not in body
+    assert "NARROWING CAVEAT" not in body
+    assert "set **both** pickers" not in body
+    assert "single **Image** picker" in body
 
 
 def test_grafana_prose_states_the_formula_the_panels_implement():

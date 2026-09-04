@@ -178,17 +178,22 @@ value, index construction raises and every request in that lane is refused — a
 tracker 403 or a catalog authorization failure — rather than silently resolving
 to whichever record loaded last. No error message carries the offending value.
 
-### The announce credential travels over HTTP
+### Tracker transport security
 
-The tracker announce is an **HTTP** URL, so the announce credential rides an
-unencrypted hop. The address may be any routable IPv4 the operator uses —
-fleets are not always on RFC1918 space — and rotation only refuses a base no
-peer could dial (loopback, link-local, unspecified, multicast).
+The tracker on TCP 6969 is **HTTPS-only** and presents the same server
+certificate that devices already pin for the catalog. The origin seeder and
+every device aria2 process load that public certificate as their CA and keep
+certificate verification enabled. A plaintext request fails during the TLS
+handshake and never reaches tracker authentication.
 
-That makes the placement of the announce endpoint a deployment decision with a
-real consequence: on a routable address the credential crosses that network in
-cleartext. Put the tracker on a management network you trust. The catalog
-(HTTPS) and the console are the surfaces that do carry transport security.
+IOx and IOS-XR send their resource-bound announce credential in an
+`Authorization: Bearer` header. Guest Shell retains its BEP-compatible query
+credential, but the complete request is encrypted by TLS and the credential is
+never logged. During upgrade, canonical and cached torrents have only their
+outer announce URL replaced; the raw `info` dictionary and info hash stay
+unchanged, so staged bytes and aria2 resume state survive. The local aria2
+JSON-RPC endpoint remains HTTP on `127.0.0.1` only and is not a network-facing
+tracker surface.
 
 ### Peer policy failure posture
 
@@ -307,8 +312,12 @@ rate-limited and audited like any other login. The operator may name the real
 administrator `iris` or even deliberately retain the default pair.
 
 This is a deliberate trade: whoever reaches a brand-new Console first can
-claim the administrator account. Complete setup immediately after deploying,
-and keep the Console on a trusted management network until you have.
+claim the administrator account. Compose narrows the default exposure by
+publishing port 8080 only on `IRIS_HOST_IP`, not on every host interface. That
+binding is not caller authorization: anyone who can reach that address can
+still race the intended operator. Restrict the port to trusted operator sources
+(or apply the equivalent policy to the Kubernetes Console LoadBalancer) and
+complete setup immediately after deploying.
 
 ## Secrets
 

@@ -46,10 +46,15 @@ reconciliation rather than blindly retrying a device operation. See
 [Management Type and VLAN Ownership](management-type.md).
 
 IOx onboarding needs `iris-arm64.tar` and/or `iris-amd64.tar` under
-`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. Kubernetes does not
-run host-side package builders. Build the packages elsewhere and copy them to
-the server pod with `kubectl cp --no-preserve`. Rebuild and re-copy every device
-package after a certificate rotation or shared-agent/image-definition change.
+`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. Copy each package's
+adjacent `.manifest` as well, because readiness binds the served wrapper bytes
+to their canonical OCI provenance. Kubernetes does not run host-side package
+builders. Build the deployment-neutral packages elsewhere and copy them to the
+server pod with `kubectl cp --no-preserve`. Rebuild and re-copy every package
+after a shared-agent or common image-definition change. A certificate rotation
+does not require rebuilding them: refresh the distributed
+`/data/artifacts/iris-catalog.pem` and re-onboard devices so IOx app data or the
+IOS-XR harddisk bind mount receives the new runtime trust anchor.
 
 ## External address
 
@@ -62,6 +67,9 @@ The server Service sets `externalTrafficPolicy: Local`. The tracker uses the
 connection source address when a device does not send an explicit peer IP, so
 source NAT could advertise an unreachable node address. See Kubernetes
 [source-IP behavior](https://kubernetes.io/docs/tutorials/services/source-ip/).
+Port 6969 is an HTTPS listener using the same server certificate devices pin
+for the catalog; the Service remains a layer-4 TCP mapping and terminates no
+TLS itself.
 
 The management Service is ClusterIP-only and port 9443 is absent from both
 LoadBalancers. Its ingress NetworkPolicy selects only Console pods. Network

@@ -12,6 +12,8 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +40,12 @@ MIN_INTERVAL = 10
 # the server. IRIS_HTTP_TIMEOUT overrides; garbage/non-positive -> default.
 HANDLER_TIMEOUT = 30.0
 
+# A TCP client that never sends a TLS ClientHello must occupy only its bounded
+# worker, never the single accept loop.  Keep the bound independent from the
+# HTTP request timeout: the latter is re-armed by BaseHTTPRequestHandler after
+# the handshake completes.
+_HANDSHAKE_TIMEOUT = 30
+
 
 def handler_timeout(env=None):
     raw = (os.environ if env is None else env).get("IRIS_HTTP_TIMEOUT")
@@ -50,7 +58,8 @@ def handler_timeout(env=None):
 
 class _TrackerServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
     """ThreadingHTTPServer with a fleet-sized accept backlog and a bounded
-    pool of concurrently running handler threads.
+    pool of concurrently running handler threads.  TLS handshakes happen in
+    those workers, not on the listening socket.
 
     The stdlib default ``request_queue_size`` is 5. Every peer in the swarm
     re-announces on the same interval, so a rollout burst overflows the
@@ -64,9 +73,33 @@ class _TrackerServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
     """
 
     request_queue_size = 128
+    tls_context = None
     # No long-lived connections here -- announce/scrape are bounded bencoded
     # exchanges. Sized to the fleet-sized accept backlog above.
     max_concurrent_requests = 256
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(request,
+                                                       server_side=True)
+            except (ssl.SSLError, OSError, ValueError):
+                # A failed or timed-out handshake is this connection's
+                # problem and must not stall announces from the rest of the
+                # fleet.
+                self.shutdown_request(request)
+                return
+            try:
+                request.settimeout(None)   # Handler.timeout re-arms it
+            except OSError:
+                pass
+        super().process_request_thread(request, client_address)
 
 
 def _valid_ipv4(addr):
@@ -225,8 +258,8 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
                 on_endpoint_change=None, on_announce_refused=None,
-                scrape_authorizer=None):
-    """Build the tracker HTTP server.
+                scrape_authorizer=None, certfile=None):
+    """Build the tracker server (TLS when *certfile* is supplied).
 
     Typed identity/policy integration (spec §6/§7):
 
@@ -573,7 +606,14 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
         def log_message(self, *args):
             pass
 
-    return _TrackerServer((host, port), Handler)
+    tls_context = None
+    if certfile:
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(certfile)
+    srv = _TrackerServer((host, port), Handler)
+    srv.tls_context = tls_context
+    return srv
 
 
 def _start_pruner(registry):
@@ -1134,6 +1174,11 @@ def main():
     host = os.environ.get("IRIS_TRACKER_HOST", "0.0.0.0")
     port = int(os.environ.get("IRIS_TRACKER_PORT", "6969"))
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    certfile = os.environ.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+    if not os.path.isfile(certfile):
+        print("iris-tracker: TLS certificate unavailable; refusing plaintext "
+              "tracker transport", file=sys.stderr, flush=True)
+        sys.exit(2)
 
     # Telemetry owns a registry wired to its event hook. The hub always
     # runs; its OTLP destination is resolved per sample pass (deployment
@@ -1209,17 +1254,23 @@ def main():
                     os.path.join(state_dir, "peer-policy.lkg.json"))
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
 
-    srv = make_server(
-        host, port, secrets_path, registry=registry,
-        on_announce=hub.note_announce,
-        policy_paths=policy_paths, endpoints_path=endpoints_path,
-        pending_queue=reconciler._pending,
-        on_endpoint_failure=reconciler.wake,
-        on_endpoint_change=reconciler.wake,
-        on_announce_refused=hub.note_announce_refused,
-        scrape_authorizer=_catalog_scrape_authorizer(state_dir))
+    try:
+        srv = make_server(
+            host, port, secrets_path, registry=registry,
+            on_announce=hub.note_announce,
+            policy_paths=policy_paths, endpoints_path=endpoints_path,
+            pending_queue=reconciler._pending,
+            on_endpoint_failure=reconciler.wake,
+            on_endpoint_change=reconciler.wake,
+            on_announce_refused=hub.note_announce_refused,
+            scrape_authorizer=_catalog_scrape_authorizer(state_dir),
+            certfile=certfile)
+    except (OSError, ssl.SSLError, ValueError):
+        print("iris-tracker: TLS certificate unusable; refusing plaintext "
+              "tracker transport", file=sys.stderr, flush=True)
+        sys.exit(2)
     reconciler.start()
-    print("tracker on http://%s:%d/announce" % (host, port), flush=True)
+    print("tracker on https://%s:%d/announce" % (host, port), flush=True)
     srv.serve_forever()
 
 

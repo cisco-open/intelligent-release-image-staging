@@ -83,7 +83,7 @@ The public story is peer-assisted staging. The server implements that with a few
 | Component | Responsibility |
 | --- | --- |
 | Catalog | Serves image metadata, assignments, token refresh, and device reports. |
-| Tracker | Authenticates private BitTorrent announces. |
+| Tracker | Authenticates private BitTorrent announces over pinned HTTPS. |
 | Seeder | Provides the initial image pieces through `aria2c`; its JSON-RPC port stays local-only. |
 | Artifact server | Serves bootstrap scripts, catalog trust material, and agent bundles over HTTPS. |
 | Console | Browser UI for image, device, onboarding, monitoring, settings, and audit workflows. |

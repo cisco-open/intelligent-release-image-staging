@@ -132,33 +132,42 @@ At the end of every step, state the next action required from me.
    `iris-publish` from inside the server container. Publishing creates catalog
    and torrent metadata; it does not change any device.
 5. **Add devices.** Use the Console Devices page or its example CSV. Set each
-   model when known and choose the agent install explicitly: `guestshell` for
-   the standard C9300 path, `iox` only for a supported IOx device, `router` for
-   a Catalyst 8000 (C8xxx, IOS-XE) router VPG deployment, or `xr-appmgr` for a
-   Cisco 8000 series (IOS-XR) router — `xr-appmgr` rows
+   model when known and choose the agent install explicitly. Choose **Guest
+   Shell** for the standard C9300 path or a Catalyst 8000 (C8xxx, IOS-XE) router
+   VPG deployment, **IOx** for a supported IOx device, or **XR appmgr container** for a
+   Cisco 8000 series (IOS-XR) router. CSV/API platform values remain
+   `guestshell`, `router`, `iox`, and `xr-appmgr`, respectively. `xr-appmgr` rows
    use management type `xr-host` and app addressing instead of VLAN/SVI fields;
    see [Management type](management-type.md) for the full column matrix.
 6. **Confirm device packages are ready.** The server bring-up step stages arm64
    `iris-arm64.tar` for IE-3400 and amd64 `iris-amd64.tar` for Catalyst 9300 IOx. A Catalyst 9300
    IOx deployment also requires a USB SSD and the Catalyst 9300 app-hosting interface.
    See [IOx App](iox.md). The XR package is **not** staged by the bring-up
-   scripts: when Cisco 8000 (IOS-XR) devices are in scope, build it once with
-   `tools/build-xr-package.sh --out artifacts/` on the Docker host (x86_64) so
-   onboarding finds `artifacts/iris-xr.rpm` to push to the router.
-   Rebuild all served packages — both IOx tars and the XR RPM — after **any
-   agent code change**, not only after a server certificate rotation: packages
-   are prebuilt, so a stale package silently ships the old agent.
-   `tools/check-package-freshness.sh` verifies the IOx tars pin the live
-   catalog certificate, and covers the XR RPM too — by build time against the
-   moment that certificate came into existence (its `notBefore`), since it
-   cannot unpack the RPM to check what it actually pins the way it does for
-   the tars. The IOx certificate contents are inspected; the XR RPM contents
-   are not. The comparison is
-   deliberately against the certificate's own `notBefore` rather than the
-   mtime of the `iris-catalog.pem` file: that file is a staged copy rewritten
-   at every bring-up, so its mtime tracks the last staging rather than the
-   certificate, and using it reported a perfectly good RPM as needing a
-   rebuild simply because the pem had been re-copied.
+   scripts: when Cisco 8000 (IOS-XR) devices are in scope, run
+   `tools/build-xr-package.sh --out artifacts/` from the repository root on
+   the Docker host (x86_64). Onboarding then finds `artifacts/iris-xr.rpm` to
+   push to the router.
+   The canonical OCI archive, both IOx tars, and the XR RPM are
+   deployment-neutral: none contains the server certificate, and none needs
+   `CATALOG_PEM` at build time. IOx onboarding supplies the current public
+   certificate as application data; XR onboarding copies it to the router's
+   `harddisk:` beside the RPM. After certificate rotation, re-onboard deployed
+   devices so they receive the new trust anchor; do not rebuild packages just
+   because the certificate changed.
+   Rebuild all served packages after **any source included in a device package
+   changes**: they are prebuilt, so otherwise onboarding silently ships old
+   code. A change under `device/agent/` also requires a fresh Guest Shell
+   bundle. The Console/API setup status reports package readiness from the
+   wrapper bytes and adjacent build-provenance manifest. It does not infer
+   readiness from certificate age, inspect package contents, or validate a
+   native package signature. Its separate certificate check only confirms that
+   the live server and the public copy handed out during onboarding agree.
+   `tools/check-package-freshness.sh` provides the same checks from the Docker
+   host; a green result does not compare the package with the current checkout
+   or confirm that an already-deployed device was upgraded. Keep native signed
+   wrappers unchanged: the legacy IOx rebake helper refuses packages containing
+   signature metadata. See [Artifact handling](iox.md#artifact-handling) for
+   publishing signed output with its matching provenance manifest.
 7. **Onboard devices.** Start one-click onboarding from the Console and watch
    each job to completion. A Catalyst 9300 can use either Guest Shell or IOx; an
    explicit IOx choice with an unknown model fails before it touches the device.
@@ -212,13 +221,12 @@ first-run slate instead of deploying over live state:
    image root (`IRIS_IMAGE_ROOT`, default `/opt/images`, bind-mounted read-only)
    are untouched either way and reappear through the Console **Import from
    disk** panel after setup.
-5. Treat every prebuilt agent package as stale after the wipe — no condition
-   to check: the next bootstrap mints a new server certificate, and all
-   packages pin the old one at build time. The bring-up script in step 6
-   restages both IOx tars against the new certificate; rebuild the XR package
-   after bring-up (`tools/build-xr-package.sh --out artifacts/` with
-   `CATALOG_PEM` pointing at the NEW live certificate, certificate block
-   only) when IOS-XR devices are in scope.
+5. Do not treat a deployment-neutral package as stale merely because the wipe
+   minted a new server certificate. The canonical OCI archive, both IOx tars,
+   and the XR RPM remain reusable when their source is unchanged. The bring-up
+   path stages the new public certificate separately; subsequent IOx and XR
+   onboarding delivers it at runtime. If this reset also moved to changed
+   agent/container source, rebuild every device package before onboarding.
 6. Bring the stack back up with `tools/start-compose-server.sh` — not raw
    `docker compose up`. The entrypoint fails closed when the encrypted secrets
    file is missing from the freshly recreated config volume, and only the

@@ -19,6 +19,9 @@ IRIS_LOG="${IRIS_LOG:-/var/log/iris}"
 IMAGES_DIR="${IMAGES_DIR:-/opt/images/iosxe/c9300}"
 RPC_PORT="${RPC_PORT:-6800}"
 ARIA2="${ARIA2:-$IRIS_ROOT/bin/aria2c}"
+TRACKER_CA="${IRIS_TRACKER_CA:-$IRIS_CONFIG/tls/crt.pem}"
+[ -s "$TRACKER_CA" ] \
+  || { echo "FATAL: tracker CA missing or empty; refusing unverified tracker transport" >&2; exit 1; }
 
 # Plaintext rpc-secret lives in tmpfs (decrypted at entrypoint). The volume-path
 # fallback below is legacy and unreached in practice: the entrypoint always sets
@@ -84,7 +87,7 @@ CONF="$RUN_DIR/seeder.aria2.conf"
 chmod 0600 "$CONF"
 unset RPC_SECRET
 
-# Tracker authentication is an HTTP Authorization header, never a query
+# Tracker authentication is an HTTPS Authorization header, never a query
 # parameter in the torrent and never an argv value. Append it directly from
 # the tmpfs secret store into the mode-0600 aria2 config.
 PYTHONPATH="$SCRIPT_DIR" python3 - "${IRIS_SECRETS:-$RUN_DIR/secrets.json}" "$CONF" <<'PY' || {
@@ -113,6 +116,8 @@ exec "$ARIA2" \
   --enable-dht=false \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \
+  --ca-certificate="$TRACKER_CA" \
+  --check-certificate=true \
   --bt-seed-unverified=true \
   --seed-ratio=0.0 \
   --max-concurrent-downloads="$SEED_MAX_CONCURRENT" \

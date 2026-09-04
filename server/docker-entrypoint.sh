@@ -279,6 +279,16 @@ if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then
   exit 0
 fi
 
+# Canonical torrents survive container upgrades. Rewrite every active persisted
+# announce before ANY network-facing process starts. Keeping this synchronous
+# here, rather than inside the concurrently launched seeder, prevents catalog /
+# management publish from replacing a same-ID torrent between migration's read
+# and atomic write. The helper preserves the raw info span (and therefore the
+# swarm hash) and fails closed on malformed active input.
+PYTHONPATH="$script_dir" python3 "$script_dir/migrate_tracker_announces.py" \
+  "$IRIS_STATE" \
+  || { echo "FATAL: canonical tracker announce migration failed" >&2; exit 1; }
+
 cd /opt/iris/server
 PIDS=()
 

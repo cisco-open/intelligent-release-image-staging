@@ -45,9 +45,10 @@ own controls on the right — which walks the other three in order:
    health are published. Already satisfied if the deployment environment sets
    `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
    shows as done rather than being hidden.
-2. **Device packages** — whether each served IOx package still pins the
-   certificate this server hands to devices, plus the IOS-XR agent RPM
-   (`iris-xr.rpm`), checked differently — see below.
+2. **Device packages** — whether each served IOx package and the IOS-XR agent
+   RPM (`iris-xr.rpm`) matches its canonical-image provenance, plus whether
+   the live and distributed copies of the runtime certificate agree — see
+   below.
 3. **Image verification** — the Cisco Bulk Hash source check against every
    staged image. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
@@ -64,8 +65,8 @@ any order.
 Every step can be skipped, and re-entering `#setup` resumes at the first one
 still outstanding. That is not merely a convenience: **the device-packages step
 can never be completed from the console**, because the console container has no
-Docker socket and so can detect a stale package but not rebuild one. That step
-is therefore a report and a command to run on the Docker host, plus a
+Docker socket and so can inspect packages but not rebuild one. That step is
+therefore a report and a command to run on the Docker host, plus a
 **Re-check** button — not a form whose submit button would be pretending to do
 something. A wizard that insisted on completion could never be finished.
 
@@ -115,7 +116,8 @@ diagnostic beside the pill; inspect the device's `IRIS ROOTCOPY-FAIL` syslog
 entry for the full device-side detail.
 
 On the Images screen, every picked or dropped file gets its own upload row —
-filename, progress bar, then publish state — with its own publish poller, so
+filename, progress bar, publish state, then Cisco Bulk Hash verification —
+with its own publish poller, so
 concurrent uploads report independently and a failed file names its error
 without stopping the others. Finished rows fade out on their own; failed rows
 stay until dismissed. A file over the 4 GB upload cap is refused in the
@@ -142,8 +144,12 @@ Importing publishes **in place**: the publish seeds from the file's own
 directory, so nothing is copied and the read-only root stays read-only, and the
 `.torrent` is written to the server's state directory rather than next to the
 image. The import runs as an ordinary publish job with the same progress
-reporting as an upload, and is recorded in Audit as `image_import` (also with
-`result=fail` when a request is rejected).
+reporting as an upload. After publication it immediately reconciles the
+catalog against Cisco's Bulk Hash feed even when the schedule is off; the job
+stays in `verifying` until that pass returns and reports `verified`,
+`mismatch`, `not in feed`, or an explicit incomplete-check reason. Publication
+remains durable if the feed is unavailable. The import is recorded in Audit as
+`image_import` (also with `result=fail` when a request is rejected).
 
 A file is offered only when it has an explicit Cisco software suffix (`.bin`,
 `.iso`, `.tar`, or `.rpm`), passes the filename charset gate, is not a dotfile
@@ -467,11 +473,11 @@ later verification step instead of exposing only one total duration.
 
 ## Settings
 
-Settings is a sidebar feature with its own sub-menu — **Setup**, **General**,
-**TLS & trust**, **Telemetry**, and **Audit export** — rather than an in-page
-tab strip. Each sub-page is deep-linkable: `#settings/setup`,
-`#settings/general`, `#settings/tls`, `#settings/telemetry`,
-`#settings/audit`.
+Settings is a sidebar feature with its own sub-menu — **Setup**, **Device
+packages**, **General**, **TLS & trust**, **Telemetry**, and **Audit export** —
+rather than an in-page tab strip. Each sub-page is deep-linkable, including
+`#settings/setup`, `#settings/packages`, `#settings/general`,
+`#settings/tls`, `#settings/telemetry`, and `#settings/audit`.
 
 ### Setup
 
@@ -495,36 +501,38 @@ success — and `absent` is rendered as a neutral, not-applicable chip rather
 than a warning, since (as the device packages paragraph below explains) it
 routinely just means an architecture this deployment does not use.
 
-The **device packages** card exists because the IOx device packages
-(`iris-arm64.tar`, `iris-amd64.tar`) — and the IOS-XR agent RPM
-(`iris-xr.rpm`) — bake the catalog's TLS certificate in at **build** time.
-If the server's certificate later changes — a rebuilt server, a fresh
-volume, a deliberate rotation — every package already built against the old
-certificate silently stops working: the device installs and its app reports
-RUNNING, but it can never authenticate to the catalog and so never checks
-in. See
-[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
-for the full failure mode and the fix. The card lists each package's build
-time and state against the server's live certificate; `absent` for an
-architecture you do not deploy (for example `iris-amd64.tar` at a site with
-no Catalyst 9300 IOx devices, or `iris-xr.rpm` with no Cisco 8000 devices)
-needs no action. A `stale` row links to the rebuild command; if instead the
-certificate the server currently serves disagrees with the copy already
-handed to devices, the card names that condition specifically, because
-rebuilding packages alone would not fix it.
+The Setup card links to the persistent **Settings › Device packages** page,
+where the same status remains available after the first-run flow is dismissed.
+That page re-checks all three artifacts on demand and prints the complete
+Docker-host build command for every absent, stale, or unverifiable package
+family; the Console container only inspects packages and never receives a
+Docker socket.
 
-The `iris-xr.rpm` row is checked differently from the two tars, and its
-detail text says so: this module has no RPM/cpio reader, so it cannot pin
-the certificate baked *inside* the RPM the way it does for the tars — it can
-only compare the RPM's build time against the server's live certificate.
-`ok` means the RPM was built after the current certificate (the best
-available evidence, not a contents check); `stale` means it predates the
-certificate and may still pin an old one. Either way the row says plainly
-that only build time was verified, never contents. Its rebuild command is
-`tools/build-xr-package.sh --out artifacts/`, not the IOx tars' — a
-different script for a different package format — and needs `CATALOG_PEM`
-pointed at the live certificate (certificate block only) the same way the
-tars' rebuild does.
+The **device packages** status covers deployment-neutral wrappers. The two IOx
+packages (`iris-arm64.tar`, `iris-amd64.tar`) and IOS-XR RPM (`iris-xr.rpm`)
+contain the shared agent but no deployment certificate. Each row binds the
+served wrapper's SHA-256 to an adjacent provenance manifest naming its wrapper
+kind, platform, and canonical OCI image/source digests. `ok` means those bytes
+and metadata agree; it does not claim to inspect the package contents or
+validate its native signature. `stale` means the wrapper digest no longer
+matches its manifest, while missing or malformed evidence is `absent` or
+`unknown`. `absent` for an architecture you do not deploy needs no action.
+Build time is informational, never a proxy for certificate freshness.
+
+The card performs a separate TLS readiness check between the certificate the
+live service presents and the public `iris-catalog.pem` copy that onboarding
+distributes. A mismatch or unreadable copy makes the aggregate state non-green
+because new onboards would receive unusable trust, but it does not make any
+package row certificate-stale. Reconcile the served/distributed certificate;
+rebuilding a deployment-neutral package cannot fix that condition.
+
+When a wrapper or its provenance really needs rebuilding, use
+`tools/provision-iox-packages.sh` for both IOx tars and
+`tools/build-xr-package.sh --out artifacts/` for the XR RPM. Certificate
+rotation needs no package rebuild: re-onboard affected devices to replace the
+runtime certificate delivered through IOx app data, the IOS-XR harddisk bind
+mount, or the Guest Shell artifact flow. See
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 ### TLS & trust
 

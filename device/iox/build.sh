@@ -8,10 +8,10 @@
 #
 #   device/iox/build.sh [--image-only] [--amd64|--arm64] [OUTPUT_DIR]
 #
-# Image inputs (ARIA2C_BIN_AMD64, ARIA2C_BIN_ARM64, CATALOG_PEM,
-# CATALOG_PEM_URL and fingerprint) are validated by the shared builder. This
-# wrapper owns only the IOx descriptor/classic-archive envelope; IOS-XR
-# packages the same amd64 manifest.
+# Image inputs (ARIA2C_BIN_AMD64 and ARIA2C_BIN_ARM64) are validated by the
+# shared builder. Deployment trust material is supplied at install/runtime;
+# this wrapper owns only the IOx descriptor/classic-archive envelope. IOS-XR
+# packages the same deployment-neutral amd64 manifest.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -98,12 +98,11 @@ if tar tf "$CTX/rootfs.tar" | grep -qx index.json \
 fi
 
 # ioxclient packages its entire working directory. Keep it deliberately small:
-# rootfs, descriptor, and the public pinned-cert probe used by freshness checks.
+# the deployment-neutral rootfs and descriptor only.
 PKG="$CTX/pkg"
 mkdir -p "$PKG"
 mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"
 cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"
-cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"
 ( cd "$PKG" && "$IOXCLIENT" package . )
 artifact_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.XXXXXX")"
 manifest_tmp="$(mktemp "$OUT/.${PACKAGE_NAME}.manifest.XXXXXX")"

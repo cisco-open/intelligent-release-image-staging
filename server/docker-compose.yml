@@ -139,8 +139,8 @@ services:
       # "unset" to the reader on the other side, the code's own default is
       # restated as the fallback rather than the empty string.
       IRIS_HTTP_TIMEOUT: "${IRIS_HTTP_TIMEOUT:-}"
-      # int() with no guard in tracker.py, and an empty value would build
-      # "http://<host>:/announce" in the catalog -- restate the default.
+      # int() with no guard in tracker.py, and an empty value would build an
+      # invalid HTTPS announce authority in the catalog -- restate the default.
       # Changing it needs the 6969 port mapping below changed to match.
       IRIS_TRACKER_PORT: "${IRIS_TRACKER_PORT:-6969}"
       IRIS_TRACKER_ANNOUNCE: "${IRIS_TRACKER_ANNOUNCE:-}"
@@ -224,7 +224,7 @@ services:
       IMAGES_ROOT: "/opt/images"
       IMAGES_DIR: "/opt/images/iosxe/c9300"
     ports:
-      - "6969:6969"     # tracker (http)
+      - "6969:6969"     # tracker (https)
       - "8443:8443"     # catalog (https)
       - "8000:8000"     # artifact server (agent bundle + per-device configs)
       - "6881:6881"     # seeder's BitTorrent data port (peers fetch pieces here)
@@ -303,7 +303,11 @@ services:
       IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE: "/run/iris-tier/previous.json"
       IRIS_MANAGEMENT_API_CA: "/run/iris-management-ca/ca.pem"
     ports:
-      - "${IRIS_GUI_PUBLISH:-8080}:8080"
+      # Publish only on the explicitly configured IRIS host address. The
+      # Console still listens on every interface inside its isolated container
+      # so Docker forwarding works, but it is not exposed through every host
+      # NIC (including an unintended public or lab-facing interface).
+      - "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP}:${IRIS_GUI_PUBLISH:-8080}:8080"
     volumes:
       - iris-tier-auth:/run/iris-tier:ro
       - iris-management-ca:/run/iris-management-ca:ro

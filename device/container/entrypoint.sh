@@ -156,8 +156,8 @@ esac
 # stale or misspelled combination must fail instead of choosing storage.
 [ -z "${IRIS_RUNTIME_MODE:-}" ] || fatal "IRIS_RUNTIME_MODE is obsolete; set only IRIS_DEVICE_PLATFORM"
 
-# Tests need a writable temporary mount. Production path overrides are refused
-# so a deployment cannot redirect a multi-gigabyte image by accident.
+# Tests need writable temporary paths. Production overrides are refused so a
+# deployment cannot redirect either staged images or the pinned trust anchor.
 case "${IRIS_CONTAINER_TESTING:-0}" in 0|1) ;; *) fatal "IRIS_CONTAINER_TESTING must be 0 or 1" ;; esac
 case "${IRIS_TEST_SKIP_MOUNT_CHECK:-0}" in 0|1) ;; *) fatal "IRIS_TEST_SKIP_MOUNT_CHECK must be 0 or 1" ;; esac
 if [ "${IRIS_CONTAINER_TESTING:-0}" != 1 ]; then
@@ -165,6 +165,7 @@ if [ "${IRIS_CONTAINER_TESTING:-0}" != 1 ]; then
   [ -z "${IRIS_WORK_DIR:-}" ] || fatal "IRIS_WORK_DIR is test-only; storage derives from IRIS_DEVICE_PLATFORM"
   [ -z "${IRIS_AGENT_CONF:-}" ] || fatal "IRIS_AGENT_CONF is test-only in a device container"
   [ -z "${IRIS_AGENT_STATE:-}" ] || fatal "IRIS_AGENT_STATE is test-only in a device container"
+  [ -z "${IRIS_CATALOG_CA:-}" ] || fatal "IRIS_CATALOG_CA is test-only; the trust anchor derives from IRIS_DEVICE_PLATFORM"
 fi
 
 case "$DEVICE_PLATFORM" in
@@ -172,6 +173,16 @@ case "$DEVICE_PLATFORM" in
     PERSIST_ROOT="${CAF_APP_PERSISTENT_DIR:-/data}"
     STAGE_DIR="$PERSIST_ROOT/iris"
     WORK_DIR="$STAGE_DIR"
+    # The installer delivers the current server certificate through IOS-XE's
+    # application-data channel after the package is installed.  Unlike a file
+    # baked into the OCI image, this survives package signing and can be
+    # refreshed on every onboard without rebuilding the package.
+    if [ "${IRIS_CONTAINER_TESTING:-0}" = 1 ]; then
+      CATALOG_CA="${IRIS_CATALOG_CA:-$PERSIST_ROOT/iris-catalog.pem}"
+    else
+      : "${CAF_APP_APPDATA_DIR:?CAF_APP_APPDATA_DIR is required for the IOx catalog certificate}"
+      CATALOG_CA="$CAF_APP_APPDATA_DIR/iris-catalog.pem"
+    fi
     # Empty means prove a writable target from live IOS show/dir output. An
     # explicit, validated installer override remains supported for IOx models
     # whose storage policy is known by their deployment record.
@@ -185,6 +196,9 @@ case "$DEVICE_PLATFORM" in
   xr-appmgr)
     STAGE_DIR="/hostmount"
     WORK_DIR="$STAGE_DIR/iris-work"
+    # xr-install.sh pushes the current certificate beside the RPM on
+    # harddisk:.  /hostmount is the hardware-proven harddisk: bind mount.
+    CATALOG_CA="/hostmount/iris-catalog.pem"
     TARGET_FS="harddisk:"
     SHARE_DIR=""
     SHARE_IOS_PATH=""
@@ -200,6 +214,7 @@ if [ "${IRIS_CONTAINER_TESTING:-0}" = 1 ]; then
   else
     WORK_DIR="$STAGE_DIR"
   fi
+  CATALOG_CA="${IRIS_CATALOG_CA:-$STAGE_DIR/iris-catalog.pem}"
 fi
 CONF="${IRIS_AGENT_CONF:-$WORK_DIR/iris-agent.conf}"
 STATE="${IRIS_AGENT_STATE:-$WORK_DIR/iris-agent.state}"
@@ -208,6 +223,7 @@ absolute_path STAGE_DIR "$STAGE_DIR"
 absolute_path WORK_DIR "$WORK_DIR"
 absolute_path IRIS_AGENT_CONF "$CONF"
 absolute_path IRIS_AGENT_STATE "$STATE"
+absolute_path catalog_ca "$CATALOG_CA"
 if [ "$DEVICE_PLATFORM" = iox ]; then
   single_line IRIS_TARGET_FS "$TARGET_FS"
   [ -z "$TARGET_FS" ] \
@@ -382,7 +398,7 @@ if [ ! -f "$CONF" ]; then
     : "${IRIS_DEVICE_SSH_PASS:?set IRIS_DEVICE_SSH_PASS to the IOS SSH password}"
   fi
 
-  absolute_path IRIS_CATALOG_CA "${IRIS_CATALOG_CA:-/opt/iris/iris-catalog.pem}"
+  absolute_path catalog_ca "$CATALOG_CA"
   if [ "$DEVICE_PLATFORM" = iox ]; then
     single_line IRIS_DEVICE_SSH_ENABLE "${IRIS_DEVICE_SSH_ENABLE:-$IRIS_DEVICE_SSH_PASS}"
     if [ -n "${IRIS_DEVICE_SSH_PORT:-}" ]; then
@@ -408,7 +424,7 @@ if [ ! -f "$CONF" ]; then
       "stage_dir = ${STAGE_DIR}" \
       "target_fs = ${TARGET_FS}" \
       "rpc_secret = " \
-      "catalog_ca = ${IRIS_CATALOG_CA:-/opt/iris/iris-catalog.pem}" \
+      "catalog_ca = ${CATALOG_CA}" \
       "token_expires_at = 0"
     if [ "$DEVICE_PLATFORM" = iox ]; then
       printf '%s\n' \
@@ -513,6 +529,11 @@ fi
 reconcile_conf_key telemetry "${IRIS_TELEMETRY:-}"
 reconcile_conf_key telemetry_stream "${IRIS_TELEMETRY_STREAM:-}"
 reconcile_conf_fact stage_dir "$STAGE_DIR"
+# The certificate location is a platform fact, not persisted operator state.
+# Reconcile before checking the file so a package upgrade repairs the old
+# baked-image path instead of failing before it can use the runtime-delivered
+# certificate.
+reconcile_conf_fact catalog_ca "$CATALOG_CA"
 if [ "$DEVICE_PLATFORM" = iox ]; then
   # A non-empty deployment override wins after redeploy. With none, retain a
   # persisted target; a new blank conf lets flash_target.py auto-detect live.
@@ -542,6 +563,21 @@ reconcile_conf_fact device_platform "$DEVICE_PLATFORM"
 # package). The baked VERSION file wins on every start.
 reconcile_conf_key agent_version \
   "$(cat /opt/iris/agent/VERSION 2>/dev/null || echo unknown)"
+
+# aria2 performs tracker HTTPS itself, outside the Python catalog client, so
+# it must receive the same pinned certificate as a global launch option. Read
+# the reconciled value (not merely the environment default) and prove it is a
+# usable CA bundle before starting a daemon; otherwise a syntactically valid
+# but missing/corrupt pin would leave the app RUNNING while every announce
+# failed in the background.
+TRACKER_CA="$(conf_value catalog_ca "$CONF")"
+[ -n "$TRACKER_CA" ] || fatal "persisted config is missing catalog_ca"
+absolute_path catalog_ca "$TRACKER_CA"
+[ -r "$TRACKER_CA" ] && [ -s "$TRACKER_CA" ] \
+  || fatal "catalog_ca is not a readable certificate file"
+python3 -c 'import ssl, sys; ssl.create_default_context(cafile=sys.argv[1])' \
+  "$TRACKER_CA" >/dev/null 2>&1 \
+  || fatal "catalog_ca is not a valid certificate bundle"
 
 # --- 2/3. aria2c supervisor + agent tick loop ----------------------------------
 read_secret() {
@@ -652,8 +688,7 @@ start_aria2c() {
   # daemon(0,0) did, minus the double fork. The redirect is not optional:
   # aria2c writes a progress readout line every second, to a pipe as readily
   # as to a terminal, for as long as anything is downloading OR seeding, and a
-  # staged device seeds indefinitely -- that would flood the app log. The
-  # aria2c options themselves are unchanged.
+  # staged device seeds indefinitely -- that would flood the app log.
   # --check-integrity=true is a RESUME guard. Without it aria2 trusts the piece
   # map recorded in the .aria2 control file, so a completed piece that rotted
   # on flash (bit-rot, a torn write during a power loss) survives the resume:
@@ -678,6 +713,7 @@ start_aria2c() {
     --conf-path="$ARIA2_CONF" \
     --enable-rpc=true --rpc-listen-all=false \
     --rpc-listen-port="$RPC_PORT" \
+    --ca-certificate="$TRACKER_CA" --check-certificate=true \
     --enable-dht=false --enable-peer-exchange=false --bt-enable-lpd=false \
     --bt-max-peers="$MAX_PEERS" --bt-seed-unverified=true --seed-ratio=0.0 \
     --check-integrity=true \

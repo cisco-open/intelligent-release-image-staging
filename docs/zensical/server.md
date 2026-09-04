@@ -46,7 +46,7 @@ artifacts, and test output from the build context.
 
 | Port | Transport | Protocol | Service | Purpose |
 | --- | --- | --- | --- | --- |
-| 6969 | TCP | HTTP | Tracker | Private BitTorrent announces: IOx/XR use a Bearer header; unchanged Guest Shell clients retain query-token compatibility. |
+| 6969 | TCP | HTTPS | Tracker | Private BitTorrent announces: IOx/XR use a Bearer header; Guest Shell retains query-token compatibility inside TLS. All agents pin the server certificate. |
 | 8443 | TCP | HTTPS | Catalog | Image metadata, device assignments, token refresh, and reports. |
 | 8000 | TCP | HTTPS | Artifact server | Bootstrap, agent bundle, pinned certificate, and staged install assets. |
 | 6881 | TCP | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
@@ -175,7 +175,7 @@ COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
 ```
 
 `IRIS_CONTAINER` is the same variable `tools/apply-assignments.sh`,
-`tools/stage-iox-package.sh`, `tools/gen-device-installers.sh` and
+`tools/stage-iox-package.sh`, `tools/gen-device-installers.sh`, and
 `tools/check-package-freshness.sh` already honour, so one setting names the
 container and points the helpers at it. `tools/start-compose-server.sh` resolves
 the container from its own Compose project, so it needs no override.
@@ -319,7 +319,11 @@ See [Kubernetes](kubernetes.md) for address and scaling constraints.
 On startup, the container refreshes derivable served files such as the Guest
 Shell agent bundle, bootstrap script, and catalog certificate. The two IOx tars
 and `iris-xr.rpm` remain operator-built: the container serves them but does not
-modify them. All three bake the catalog CA and shared agent at build time, so
-rebuild them after a certificate rotation **or any `device/agent/` change**.
+modify them. They contain the shared agent and carry adjacent manifests binding
+their wrapper bytes to the canonical OCI image, but contain no deployment
+certificate. Rebuild all package families after any `device/agent/` or common
+device-image change. A certificate rotation instead requires re-onboarding
+devices so the current public certificate is delivered at runtime; the same
+packages can be reused.
 See [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
 and [Embedded agent packages](development.md#embedded-agent-packages).

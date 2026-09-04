@@ -6,8 +6,8 @@
 
 # Record-driven inverse of device/xr-install.sh. IRIS on a Cisco 8000-series
 # IOS-XR router is: the appmgr application '$APPID' (default iris), its
-# registered package source '$SOURCE_NAME' (default iris-xr), the RPM staged
-# at harddisk: root, the agent's own iris-work/ control-file directory
+# registered package source '$SOURCE_NAME' (default iris-xr), the RPM and
+# runtime catalog certificate staged at harddisk: root, the agent's own iris-work/ control-file directory
 # under the bind-mounted harddisk: (agentinfo/plans/2026-08-28-xr-agent.md,
 # Task 3), and any *.torrent/*.aria2/*.peers.json sidecar aria2 or the agent
 # left at harddisk: ROOT. Sidecars land there, not inside iris-work/, because
@@ -65,7 +65,7 @@
 #   DESTRUCTIVE to the package/files rides this login.
 #
 #   session 2/2 (sweep_verify_request/run_sweep_verify): the destructive
-#   commands (source uninstall, delete the RPM, empty-then-delete the work
+#   commands (source uninstall, delete the RPM and runtime certificate, empty-then-delete the work
 #   dir) + the sidecar sweep (three unconditional harddisk: root globs --
 #   *.torrent, *.aria2, *.peers.json; no listing needed, see the fix-wave
 #   note below) + the final three-way verify -- composed and sent ONLY when
@@ -182,6 +182,7 @@ SOURCE_NAME="${SOURCE_NAME:-iris-xr}"
 FORCE_AGENT_ONLY="${IRIS_FORCE_AGENT_ONLY:-0}"
 WORK_DIR_PATH="/misc/disk1/iris-work"
 RPM_PATH="/misc/disk1/$SOURCE_NAME.rpm"
+CERT_PATH="/misc/disk1/iris-catalog.pem"
 
 # Shared marker family every request below uses -- defined up front (ahead of
 # the DEVICE_IP/RUN() setup further down) so dry-run can call the SAME
@@ -213,7 +214,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Session 2/2 (sweep+verify): the destructive commands -- source uninstall,
-# delete the RPM, empty-then-delete the work dir, and the sidecar sweep --
+# delete the RPM and runtime certificate, empty-then-delete the work dir, and the sidecar sweep --
 # only when $include_destructive = 1 (set to 1 by the live path ONLY once
 # session 1's paired adjudication has NOT concluded a real failure), then the
 # final three-way verify. Every destructive line here is native XR EXEC
@@ -252,8 +253,9 @@ sweep_verify_request() {
   local include_destructive="$1"
   local destructive=""
   if [ "$include_destructive" = "1" ]; then
-    destructive="$(printf 'appmgr package uninstall source %s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s/*\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/*.torrent\ndelete /noprompt harddisk:/*.aria2\ndelete /noprompt harddisk:/*.peers.json\n' \
-      "$SOURCE_NAME" "${RPM_PATH##*/}" "${WORK_DIR_PATH##*/}" "${WORK_DIR_PATH##*/}")"
+    destructive="$(printf 'appmgr package uninstall source %s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/%s/*\ndelete /noprompt harddisk:/%s\ndelete /noprompt harddisk:/*.torrent\ndelete /noprompt harddisk:/*.aria2\ndelete /noprompt harddisk:/*.peers.json\n' \
+      "$SOURCE_NAME" "${RPM_PATH##*/}" "${CERT_PATH##*/}" \
+      "${WORK_DIR_PATH##*/}" "${WORK_DIR_PATH##*/}")"
   fi
 cat <<EOF
 $destructive
@@ -475,7 +477,7 @@ xr_command_rejected() {
 # last-match landed inside the same blob, and each "section" came back holding
 # the next line we had TYPED ($FILES became the literal string `dir harddisk:`).
 # Every residue check then read no-match as nothing-there and the run exited 0
-# announcing a clean teardown -- with all seven destructive commands already
+# announcing a clean teardown -- with all eight destructive commands already
 # sent and the app table never actually read. A marker proves what was typed,
 # never what ran.
 #
@@ -691,6 +693,9 @@ if table_contains "$SOURCES" "$SOURCE_NAME"; then
 fi
 if files_line_match "$FILES" "(^|[[:space:]])$(ere_escape "$SOURCE_NAME")\\.rpm\$"; then
   forbidden="${forbidden}${forbidden:+, }$RPM_PATH"
+fi
+if files_line_match "$FILES" '(^|[[:space:]])iris-catalog\.pem$'; then
+  forbidden="${forbidden}${forbidden:+, }$CERT_PATH"
 fi
 if files_line_match "$FILES" '(^|[[:space:]])iris-work$'; then
   # Three-way adjudication (run-4 hardware ruling, 2026-08-31): iris-work

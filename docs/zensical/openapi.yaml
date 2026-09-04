@@ -34,7 +34,7 @@
   "x-iris-retained-v1-exceptions": {
     "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
     "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
-    "trackerTransport": "Port 6969 remains HTTP for existing BEP/embedded clients. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for unchanged Guest Shell bundles and are never logged. TLS conversion requires coordinated device trust deployment.",
+    "trackerTransport": "Port 6969 is HTTPS-only and uses the server certificate already pinned by device agents. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for Guest Shell compatibility, are protected by TLS, and are never logged.",
     "guestShellArtifacts": "Unchanged IOS Guest Shell copy HTTPS cannot attach resource-bound Basic auth. Four explicit static files and two high-entropy, time-swept staging filename forms remain available through the legacy root paths; new clients use /v1/devices/{device_id}/artifacts/{artifact_path}.",
     "resourcePaths": "Several shipped console paths contain verbs; replacements are breaking and are deferred to a future major version.",
     "pagination": "Devices and audit expose their established paging shapes. Other v1 collections are assignment-bounded or compatibility whole collections and do not claim pagination.",
@@ -3560,42 +3560,371 @@
         ],
         "responses": {
           "200": {
-            "description": "Read image job response",
+            "description": "Current publish phase and, after the durable publish, the Cisco Bulk Hash reconciliation result",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "ConsoleImagesJobsJobIdResponse",
-                  "type": "object",
-                  "properties": {
-                    "id": {
-                      "type": "string"
+                  "oneOf": [
+                    {
+                      "title": "ConsoleImagesJobsJobIdResponsePublishing",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "publishing"
+                        },
+                        "image_id": {
+                          "type": "null"
+                        },
+                        "finished_at": {
+                          "type": "null"
+                        },
+                        "verification": {
+                          "type": "null"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "state": {
-                      "type": "string"
+                    {
+                      "title": "ConsoleImagesJobsJobIdResponseVerifying",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "verifying"
+                        },
+                        "image_id": {
+                          "type": "string"
+                        },
+                        "finished_at": {
+                          "type": "null"
+                        },
+                        "verification": {
+                          "title": "ConsoleImagesJobsJobIdResponseVerificationRunning",
+                          "type": "object",
+                          "properties": {
+                            "outcome": {
+                              "type": "string",
+                              "const": "running"
+                            },
+                            "image_state": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "enum": [
+                                "verified",
+                                "mismatch",
+                                "not_in_feed",
+                                null
+                              ]
+                            }
+                          },
+                          "required": [
+                            "outcome",
+                            "image_state"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "filename": {
-                      "type": "string"
+                    {
+                      "title": "ConsoleImagesJobsJobIdResponseDone",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "done"
+                        },
+                        "image_id": {
+                          "type": "string"
+                        },
+                        "finished_at": {
+                          "type": "integer"
+                        },
+                        "verification": {
+                          "oneOf": [
+                            {
+                              "title": "ConsoleImagesJobsJobIdResponseVerificationSuccess",
+                              "type": "object",
+                              "properties": {
+                                "outcome": {
+                                  "type": "string",
+                                  "const": "ok"
+                                },
+                                "image_state": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "enum": [
+                                    "verified",
+                                    "mismatch",
+                                    "not_in_feed",
+                                    null
+                                  ]
+                                },
+                                "matched": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                },
+                                "mismatched": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                },
+                                "not_in_feed": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "outcome",
+                                "image_state",
+                                "matched",
+                                "mismatched",
+                                "not_in_feed"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "title": "ConsoleImagesJobsJobIdResponseVerificationFailure",
+                              "type": "object",
+                              "properties": {
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "fail",
+                                    "already_running"
+                                  ]
+                                },
+                                "image_state": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "enum": [
+                                    "verified",
+                                    "mismatch",
+                                    "not_in_feed",
+                                    null
+                                  ]
+                                },
+                                "detail": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "outcome",
+                                "image_state",
+                                "detail"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "image_id": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
+                    {
+                      "title": "ConsoleImagesJobsJobIdResponseError",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "error"
+                        },
+                        "image_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "finished_at": {
+                          "type": "integer"
+                        },
+                        "verification": {
+                          "type": "null"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
+                    }
+                  ]
+                },
+                "examples": {
+                  "publishing": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "publishing",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": null,
+                      "started_at": 1788470400,
+                      "finished_at": null,
+                      "verification": null
                     }
                   },
-                  "required": [
-                    "id",
-                    "state",
-                    "filename",
-                    "image_id"
-                  ],
-                  "additionalProperties": true
-                },
-                "example": {
-                  "id": "job-01",
-                  "state": "done",
-                  "filename": "image.bin",
-                  "image_id": null
+                  "verifying": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "verifying",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": null,
+                      "verification": {
+                        "outcome": "running",
+                        "image_state": null
+                      }
+                    }
+                  },
+                  "verified": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "done",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": 1788470412,
+                      "verification": {
+                        "outcome": "ok",
+                        "image_state": "verified",
+                        "matched": 1,
+                        "mismatched": 0,
+                        "not_in_feed": 0
+                      }
+                    }
+                  },
+                  "verificationFailed": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "done",
+                      "filename": "image.bin",
+                      "message": "published, but Cisco hash verification did not complete",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": 1788470412,
+                      "verification": {
+                        "outcome": "fail",
+                        "image_state": null,
+                        "detail": "feed unavailable"
+                      }
+                    }
+                  },
+                  "publishFailed": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "error",
+                      "filename": "image.bin",
+                      "message": "publish failed",
+                      "image_id": null,
+                      "started_at": 1788470400,
+                      "finished_at": 1788470401,
+                      "verification": null
+                    }
+                  }
                 }
               }
             }
@@ -16533,7 +16862,13 @@
                       "type": "object",
                       "properties": {
                         "state": {
-                          "type": "string"
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "unknown",
+                            "stale"
+                          ]
                         },
                         "reference_fingerprint": {
                           "type": [
@@ -16551,18 +16886,83 @@
                                 "type": "string"
                               },
                               "state": {
+                                "type": "string",
+                                "enum": [
+                                  "ok",
+                                  "absent",
+                                  "unknown",
+                                  "stale"
+                                ]
+                              },
+                              "fingerprint": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Legacy field, null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
+                              },
+                              "built_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "description": "Artifact file modification time as Unix seconds; the legacy field name does not attest the original package build time."
+                              },
+                              "detail": {
+                                "type": "string"
+                              },
+                              "remedy": {
+                                "type": "string"
+                              },
+                              "provenance": {
+                                "title": "ConsoleSettingsSetupStatusResponsePackagesItemsItemProvenance",
+                                "type": [
+                                  "object",
+                                  "null"
+                                ],
+                                "properties": {
+                                  "canonical_index_digest": {
+                                    "type": "string"
+                                  },
+                                  "canonical_archive_sha256": {
+                                    "type": "string"
+                                  },
+                                  "canonical_source_sha256": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "canonical_index_digest",
+                                  "canonical_archive_sha256",
+                                  "canonical_source_sha256"
+                                ],
+                                "additionalProperties": true
+                              },
+                              "reason": {
                                 "type": "string"
                               }
                             },
                             "required": [
                               "name",
-                              "state"
+                              "state",
+                              "fingerprint",
+                              "built_at",
+                              "remedy",
+                              "provenance"
                             ],
-                            "additionalProperties": true
+                            "additionalProperties": false
                           }
                         },
                         "remedy": {
                           "type": "string"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "served-cert-unavailable",
+                            "distributed-cert-unavailable",
+                            "served-vs-distributed-mismatch"
+                          ]
                         }
                       },
                       "required": [
@@ -16610,10 +17010,19 @@
                     "items": [
                       {
                         "name": "iris-amd64.tar",
-                        "state": "ok"
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/provision-iox-packages.sh",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
                       }
                     ],
-                    "remedy": "Rebuild stale device packages"
+                    "remedy": "tools/provision-iox-packages.sh"
                   },
                   "image_verification": {
                     "state": "ok"
@@ -24940,42 +25349,371 @@
         ],
         "responses": {
           "200": {
-            "description": "Read image job response",
+            "description": "Current publish phase and, after the durable publish, the Cisco Bulk Hash reconciliation result",
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "ManagementImagesJobsJobIdResponse",
-                  "type": "object",
-                  "properties": {
-                    "id": {
-                      "type": "string"
+                  "oneOf": [
+                    {
+                      "title": "ManagementImagesJobsJobIdResponsePublishing",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "publishing"
+                        },
+                        "image_id": {
+                          "type": "null"
+                        },
+                        "finished_at": {
+                          "type": "null"
+                        },
+                        "verification": {
+                          "type": "null"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "state": {
-                      "type": "string"
+                    {
+                      "title": "ManagementImagesJobsJobIdResponseVerifying",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "verifying"
+                        },
+                        "image_id": {
+                          "type": "string"
+                        },
+                        "finished_at": {
+                          "type": "null"
+                        },
+                        "verification": {
+                          "title": "ManagementImagesJobsJobIdResponseVerificationRunning",
+                          "type": "object",
+                          "properties": {
+                            "outcome": {
+                              "type": "string",
+                              "const": "running"
+                            },
+                            "image_state": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "enum": [
+                                "verified",
+                                "mismatch",
+                                "not_in_feed",
+                                null
+                              ]
+                            }
+                          },
+                          "required": [
+                            "outcome",
+                            "image_state"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "filename": {
-                      "type": "string"
+                    {
+                      "title": "ManagementImagesJobsJobIdResponseDone",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "done"
+                        },
+                        "image_id": {
+                          "type": "string"
+                        },
+                        "finished_at": {
+                          "type": "integer"
+                        },
+                        "verification": {
+                          "oneOf": [
+                            {
+                              "title": "ManagementImagesJobsJobIdResponseVerificationSuccess",
+                              "type": "object",
+                              "properties": {
+                                "outcome": {
+                                  "type": "string",
+                                  "const": "ok"
+                                },
+                                "image_state": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "enum": [
+                                    "verified",
+                                    "mismatch",
+                                    "not_in_feed",
+                                    null
+                                  ]
+                                },
+                                "matched": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                },
+                                "mismatched": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                },
+                                "not_in_feed": {
+                                  "type": [
+                                    "integer",
+                                    "null"
+                                  ],
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "outcome",
+                                "image_state",
+                                "matched",
+                                "mismatched",
+                                "not_in_feed"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "title": "ManagementImagesJobsJobIdResponseVerificationFailure",
+                              "type": "object",
+                              "properties": {
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "fail",
+                                    "already_running"
+                                  ]
+                                },
+                                "image_state": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ],
+                                  "enum": [
+                                    "verified",
+                                    "mismatch",
+                                    "not_in_feed",
+                                    null
+                                  ]
+                                },
+                                "detail": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "outcome",
+                                "image_state",
+                                "detail"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
                     },
-                    "image_id": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
+                    {
+                      "title": "ManagementImagesJobsJobIdResponseError",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "filename": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "integer"
+                        },
+                        "state": {
+                          "type": "string",
+                          "const": "error"
+                        },
+                        "image_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "finished_at": {
+                          "type": "integer"
+                        },
+                        "verification": {
+                          "type": "null"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "state",
+                        "filename",
+                        "message",
+                        "image_id",
+                        "started_at",
+                        "finished_at",
+                        "verification"
+                      ],
+                      "additionalProperties": true
+                    }
+                  ]
+                },
+                "examples": {
+                  "publishing": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "publishing",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": null,
+                      "started_at": 1788470400,
+                      "finished_at": null,
+                      "verification": null
                     }
                   },
-                  "required": [
-                    "id",
-                    "state",
-                    "filename",
-                    "image_id"
-                  ],
-                  "additionalProperties": true
-                },
-                "example": {
-                  "id": "job-01",
-                  "state": "done",
-                  "filename": "image.bin",
-                  "image_id": null
+                  "verifying": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "verifying",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": null,
+                      "verification": {
+                        "outcome": "running",
+                        "image_state": null
+                      }
+                    }
+                  },
+                  "verified": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "done",
+                      "filename": "image.bin",
+                      "message": "",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": 1788470412,
+                      "verification": {
+                        "outcome": "ok",
+                        "image_state": "verified",
+                        "matched": 1,
+                        "mismatched": 0,
+                        "not_in_feed": 0
+                      }
+                    }
+                  },
+                  "verificationFailed": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "done",
+                      "filename": "image.bin",
+                      "message": "published, but Cisco hash verification did not complete",
+                      "image_id": "image-01",
+                      "started_at": 1788470400,
+                      "finished_at": 1788470412,
+                      "verification": {
+                        "outcome": "fail",
+                        "image_state": null,
+                        "detail": "feed unavailable"
+                      }
+                    }
+                  },
+                  "publishFailed": {
+                    "value": {
+                      "id": "job-01",
+                      "state": "error",
+                      "filename": "image.bin",
+                      "message": "publish failed",
+                      "image_id": null,
+                      "started_at": 1788470400,
+                      "finished_at": 1788470401,
+                      "verification": null
+                    }
+                  }
                 }
               }
             }
@@ -35965,7 +36703,13 @@
                       "type": "object",
                       "properties": {
                         "state": {
-                          "type": "string"
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "unknown",
+                            "stale"
+                          ]
                         },
                         "reference_fingerprint": {
                           "type": [
@@ -35983,18 +36727,83 @@
                                 "type": "string"
                               },
                               "state": {
+                                "type": "string",
+                                "enum": [
+                                  "ok",
+                                  "absent",
+                                  "unknown",
+                                  "stale"
+                                ]
+                              },
+                              "fingerprint": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Legacy field, null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
+                              },
+                              "built_at": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "description": "Artifact file modification time as Unix seconds; the legacy field name does not attest the original package build time."
+                              },
+                              "detail": {
+                                "type": "string"
+                              },
+                              "remedy": {
+                                "type": "string"
+                              },
+                              "provenance": {
+                                "title": "ManagementSettingsSetupStatusResponsePackagesItemsItemProvenance",
+                                "type": [
+                                  "object",
+                                  "null"
+                                ],
+                                "properties": {
+                                  "canonical_index_digest": {
+                                    "type": "string"
+                                  },
+                                  "canonical_archive_sha256": {
+                                    "type": "string"
+                                  },
+                                  "canonical_source_sha256": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "canonical_index_digest",
+                                  "canonical_archive_sha256",
+                                  "canonical_source_sha256"
+                                ],
+                                "additionalProperties": true
+                              },
+                              "reason": {
                                 "type": "string"
                               }
                             },
                             "required": [
                               "name",
-                              "state"
+                              "state",
+                              "fingerprint",
+                              "built_at",
+                              "remedy",
+                              "provenance"
                             ],
-                            "additionalProperties": true
+                            "additionalProperties": false
                           }
                         },
                         "remedy": {
                           "type": "string"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "enum": [
+                            "served-cert-unavailable",
+                            "distributed-cert-unavailable",
+                            "served-vs-distributed-mismatch"
+                          ]
                         }
                       },
                       "required": [
@@ -36042,10 +36851,19 @@
                     "items": [
                       {
                         "name": "iris-amd64.tar",
-                        "state": "ok"
+                        "state": "ok",
+                        "fingerprint": null,
+                        "built_at": 1788470400,
+                        "detail": "Package bytes match build provenance",
+                        "remedy": "tools/provision-iox-packages.sh",
+                        "provenance": {
+                          "canonical_index_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                          "canonical_archive_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                          "canonical_source_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+                        }
                       }
                     ],
-                    "remedy": "Rebuild stale device packages"
+                    "remedy": "tools/provision-iox-packages.sh"
                   },
                   "image_verification": {
                     "state": "ok"
@@ -42439,7 +43257,7 @@
       "get": {
         "operationId": "tracker_get_announce",
         "summary": "Announce peer",
-        "description": "Announce peer. Bearer Authorization is preferred and disables fallback. Query credentials remain only for unchanged Guest Shell aria2 bundles; the v1 BEP transport, bencoded errors, and HTTP listener are protocol compatibility exceptions.",
+        "description": "Announce peer. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.",
         "tags": [
           "tracker"
         ],
@@ -42447,8 +43265,8 @@
         "x-iris-security": "announceBearerOrLegacyQuery",
         "servers": [
           {
-            "url": "http://iris.example:6969",
-            "description": "BEP tracker v1 compatibility listener"
+            "url": "https://iris.example:6969",
+            "description": "TLS BEP tracker v1 listener"
           }
         ],
         "security": [
@@ -42681,7 +43499,7 @@
       "get": {
         "operationId": "tracker_get_scrape",
         "summary": "Scrape torrent",
-        "description": "Scrape torrent. Bearer Authorization is preferred and disables fallback. Query credentials remain only for unchanged Guest Shell aria2 bundles; the v1 BEP transport, bencoded errors, and HTTP listener are protocol compatibility exceptions. A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. Seeder service and time-bounded unattributed legacy principals retain compatibility-wide visibility.",
+        "description": "Scrape torrent. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception. A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. Seeder service and time-bounded unattributed legacy principals retain compatibility-wide visibility.",
         "tags": [
           "tracker"
         ],
@@ -42689,8 +43507,8 @@
         "x-iris-security": "announceBearerOrLegacyQuery",
         "servers": [
           {
-            "url": "http://iris.example:6969",
-            "description": "BEP tracker v1 compatibility listener"
+            "url": "https://iris.example:6969",
+            "description": "TLS BEP tracker v1 listener"
           }
         ],
         "security": [

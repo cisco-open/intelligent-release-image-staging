@@ -18,16 +18,37 @@ write_seeder_secrets() {
     > "$1"
 }
 
+write_tracker_ca() {
+  mkdir -p "$1/tls"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'test-only' \
+    '-----END CERTIFICATE-----' > "$1/tls/crt.pem"
+}
+
+write_test_torrent() {
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$1" <<'PY'
+import sys
+import bencode
+with open(sys.argv[1], "wb") as stream:
+    stream.write(bencode.encode({
+        b"announce": b"https://10.0.0.5:6969/announce",
+        b"info": {b"length": 0, b"name": b"ie3x00.bin",
+                 b"piece length": 16384, b"pieces": b""},
+    }))
+PY
+}
+
 @test "seed-launch builds the expected aria2c command line" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_tracker_ca "$tmp/config"
   write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
+      IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -eq 0 ] || return 1
@@ -41,6 +62,8 @@ write_seeder_secrets() {
   [ "$(stat -c %a "$tmp/state/seeder.aria2.conf")" = "600" ] || return 1
   [[ "$output" == *"--enable-dht=false"* ]] || return 1
   [[ "$output" == *"--enable-peer-exchange=false"* ]] || return 1
+  [[ "$output" == *"--ca-certificate=$tmp/config/tls/crt.pem"* ]] || return 1
+  [[ "$output" == *"--check-certificate=true"* ]] || return 1
   [[ "$output" == *"--seed-ratio=0.0"* ]] || return 1
   [[ "$output" == *"--dir=$tmp/images"* ]]
 }
@@ -49,11 +72,13 @@ write_seeder_secrets() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   # NO rpc-secret file written — the file is absent
+  write_tracker_ca "$tmp/config"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
+      IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -ne 0 ] || return 1
@@ -66,11 +91,13 @@ write_seeder_secrets() {
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   # Empty rpc-secret file
   printf '' > "$tmp/config/rpc-secret"
+  write_tracker_ca "$tmp/config"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
+      IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -ne 0 ] || return 1
@@ -78,19 +105,39 @@ write_seeder_secrets() {
   rm -rf "$tmp"
 }
 
+@test "seed-launch refuses to start without the pinned tracker CA" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
+  echo "secretval" > "$tmp/config/rpc-secret"
+  write_seeder_secrets "$tmp/state/secrets.json"
+  printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+
+  run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
+      IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
+      IRIS_HOST_IP=10.0.0.5 \
+      bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
+
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"tracker CA missing"* ]] || return 1
+  [[ "$output" != *"--enable-rpc=true"* ]] || return 1
+  rm -rf "$tmp"
+}
+
 @test "seed-launch seeds an image in a model subdir with the correct per-torrent dir" {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images/IE3400" "$tmp/run"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_tracker_ca "$tmp/config"
   write_seeder_secrets "$tmp/run/secrets.json"
-  : > "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent"
+  write_test_torrent "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent"
   printf '{"images":{"ie3x00-universalk9.17.18.03":{"filename":"ie3x00.bin"}}}' > "$tmp/state/catalog.json"
   : > "$tmp/images/IE3400/ie3x00.bin"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"; chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IRIS_RUN="$tmp/run" IMAGES_DIR="$tmp/images/iosxe/c9300" IMAGES_ROOT="$tmp/images" \
-      ARIA2="$tmp/aria2c-stub" \
+      ARIA2="$tmp/aria2c-stub" IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -eq 0 ] || return 1
@@ -100,6 +147,13 @@ write_seeder_secrets() {
   # not the global --dir (which would error "Failed to open file").
   grep -q -- "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent" "$tmp/run/seeder.input" || return 1
   grep -q -- "dir=$tmp/images/IE3400" "$tmp/run/seeder.input" || return 1
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$tmp/state/torrents/ie3x00-universalk9.17.18.03.torrent" <<'PY' || return 1
+import sys
+import bencode
+with open(sys.argv[1], "rb") as stream:
+    assert bencode.decode(stream.read())[b"announce"] == \
+        b"https://10.0.0.5:6969/announce"
+PY
   rm -rf "$tmp"
 }
 
@@ -119,12 +173,14 @@ write_seeder_secrets() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_tracker_ca "$tmp/config"
   write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
+      IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -eq 0 ] || return 1
@@ -142,13 +198,14 @@ write_seeder_secrets() {
   tmp="$(mktemp -d)"
   mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images"
   echo "secretval" > "$tmp/config/rpc-secret"
+  write_tracker_ca "$tmp/config"
   write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
-      SEED_MAX_CONCURRENT=7 \
+      SEED_MAX_CONCURRENT=7 IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -eq 0 ] || return 1

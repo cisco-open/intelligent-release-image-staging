@@ -9,28 +9,27 @@ setup() {
   STUB="$BATS_TEST_TMPDIR/bin"
   ARTIFACTS="$BATS_TEST_TMPDIR/artifacts"
   mkdir -p "$STUB" "$ARTIFACTS"
+  export OPENSSL_LOG="$BATS_TEST_TMPDIR/openssl.log"
+  : > "$OPENSSL_LOG"
 
   cat > "$STUB/openssl" <<'STUB'
 #!/usr/bin/env bash
-# notBefore is the certificate's own creation time -- the honest baseline for
-# XR RPM freshness, since the pem file's mtime only tracks the last time the
-# copy was staged. Default is far in the past so the common case is "the RPM
-# was built after the cert existed".
-for a in "$@"; do
-  if [ "$a" = -startdate ]; then
-    printf 'notBefore=%s\n' "${FAKE_CERT_NOTBEFORE:-Jan  1 00:00:00 2020 GMT}"
-    exit 0
-  fi
-done
+printf '%s\n' "$*" >> "$OPENSSL_LOG"
 if [ "$1" = s_client ]; then
-  printf 'served\n'
+  printf '%s\n' "${FAKE_SERVED_CERT:-served}"
 elif [ "${2:-}" = -outform ]; then
   cat
 else
-  case "$(cat "${3:?missing certificate path}")" in
+  input=""
+  previous=""
+  for value in "$@"; do
+    if [ "$previous" = -in ]; then input="$value"; break; fi
+    previous="$value"
+  done
+  case "$(cat "$input")" in
     *served*) fp=SERVED ;;
     *distributed*) fp=DISTRIBUTED ;;
-    *) fp=PACKAGE ;;
+    *) fp=OTHER ;;
   esac
   printf 'sha256 Fingerprint=%s\n' "$fp"
 fi
@@ -42,232 +41,147 @@ STUB
 case "$1" in
   inspect) exit 0 ;;
   cp) printf '%s\n' "${FAKE_DISTRIBUTED_CERT:-served}" > "$3" ;;
-  exec) printf '%s' "${FAKE_CERT_EPOCH:-}" ;;
   *) exit 1 ;;
 esac
 STUB
   chmod +x "$STUB/docker"
 }
 
-@test "served and distributed certificate mismatch is failing drift" {
-  PATH="$STUB:$PATH" FAKE_DISTRIBUTED_CERT=distributed \
-    CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    run bash "$CHECK" --rebuild
+_make_package() {
+  local name="$1" kind="$2" platform="$3" path sha
+  path="$ARTIFACTS/$name"
+  printf 'final wrapper bytes for %s\n' "$name" > "$path"
+  sha="$(sha256sum "$path" | awk '{print $1}')"
+  cat > "$path.manifest" <<EOF
+format=iris-device-wrapper-v1
+wrapper_kind=$kind
+wrapper_file=$name
+wrapper_sha256=$sha
+platform=$platform
+canonical_index_digest=sha256:1111111111111111111111111111111111111111111111111111111111111111
+canonical_archive_sha256=2222222222222222222222222222222222222222222222222222222222222222
+canonical_source_sha256=3333333333333333333333333333333333333333333333333333333333333333
+EOF
+}
 
-  [[ "$output" == *"MISMATCH"* ]] || return 1
-  [[ "$output" == *"Package rebuilding cannot repair"* ]] || return 1
-  [[ "$output" != *">> rebuilding all IOx packages"* ]] || return 1
+_make_required_packages() {
+  _make_package iris-amd64.tar iox linux/amd64
+  _make_package iris-arm64.tar iox linux/arm64
+}
+
+_run_check() {
+  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
+    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK" "$@"
+}
+
+@test "served and distributed certificate mismatch fails without rebuilding packages" {
+  _make_required_packages
+  FAKE_DISTRIBUTED_CERT=distributed _run_check --rebuild
+
+  [[ "$output" == *"MISMATCH"* ]]
+  [[ "$output" == *"Package rebuilding cannot repair"* ]]
+  [[ "$output" != *">> rebuilding"* ]]
   [ "$status" -eq 1 ]
 }
 
-@test "present package without a pinned certificate is stale" {
-  : > "$ARTIFACTS/iris-amd64.tar"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
-    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK"
+@test "readable IOx wrappers with matching provenance are ready" {
+  _make_required_packages
+  _run_check
 
-  [[ "$output" == *"NO PINNED CERT FOUND"* ]] || return 1
-  [[ "$output" == *"STALE: iris-amd64.tar"* ]] || return 1
+  [[ "$output" == *"iris-amd64.tar"*"READY"* ]]
+  [[ "$output" == *"iris-arm64.tar"*"READY"* ]]
+  [[ "$output" == *"iris-xr.rpm        absent"* ]]
+  [[ "$output" == *"match their provenance manifests"* ]]
+  [[ "$output" != *"pin the live catalog certificate"* ]]
+  [ "$status" -eq 0 ]
+}
+
+@test "certificate replacement does not stale deployment-neutral packages" {
+  _make_required_packages
+  FAKE_SERVED_CERT=rotated FAKE_DISTRIBUTED_CERT=rotated _run_check
+
+  [[ "$output" == *"iris-amd64.tar"*"READY"* ]]
+  [[ "$output" == *"iris-arm64.tar"*"READY"* ]]
+  [[ "$output" != *"STALE"* ]]
+  [ "$status" -eq 0 ]
+}
+
+@test "a missing provenance sidecar is unknown, never ready" {
+  _make_required_packages
+  rm "$ARTIFACTS/iris-arm64.tar.manifest"
+  _run_check
+
+  [[ "$output" == *"iris-arm64.tar"*"UNKNOWN (provenance-absent)"* ]]
+  [[ "$output" == *"NOT READY: iris-arm64.tar"* ]]
   [ "$status" -eq 1 ]
 }
 
-# ---------------------------------------------------------------------------
-# XR RPM row (server/setup_status.py's _xr_package_item honesty model,
-# mirrored here): no unpacker for the RPM's own shape, so it is never said
-# to "pin" a certificate the way the tar rows are -- only its build time is
-# compared against the live catalog certificate's own mtime, and every
-# printed state says plainly that contents were not inspected.
-# ---------------------------------------------------------------------------
+@test "wrapper bytes changed after provenance are stale" {
+  _make_required_packages
+  printf 'later mutation\n' >> "$ARTIFACTS/iris-amd64.tar"
+  _run_check
 
-@test "absent XR RPM is a neutral row, not a failure" {
-  # Both IOx tars are staged so this run is about the XR RPM: an absent
-  # tar is no longer swept into the verified summary (it inspects
-  # nothing), which would otherwise mask what this test asserts.
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" "served"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
-    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK"
-
-  [[ "$output" == *"iris-xr.rpm        absent"* ]] || return 1
-  [[ "$output" == *"no XR RPM is staged"* ]] || return 1
-  [ "$status" -eq 0 ]
-}
-
-@test "XR RPM built after the live certificate is OK by mtime, contents not inspected" {
-  # Both IOx tars are staged so this run is about the XR RPM: an absent
-  # tar is no longer swept into the verified summary (it inspects
-  # nothing), which would otherwise mask what this test asserts.
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" "served"
-  : > "$ARTIFACTS/iris-xr.rpm"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" run bash "$CHECK"
-
-  [[ "$output" == *"OK-BY-MTIME (built after the certificate was created; contents not inspected)"* ]] || return 1
-  [[ "$output" == *"verified: the XR RPM was built after that certificate -- by build time only, contents not inspected."* ]] || return 1
-  [ "$status" -eq 0 ]
-}
-
-@test "XR RPM built before the live certificate is stale by mtime, with the build-xr-package remedy" {
-  : > "$ARTIFACTS/iris-xr.rpm"
-  # a cert CREATED far in the future guarantees the RPM (just created) reads
-  # as built BEFORE it, regardless of the exact instant this test runs.
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2035 GMT" run bash "$CHECK"
-
-  [[ "$output" == *"STALE-BY-MTIME (built before the certificate was created; contents not inspected)"* ]] || return 1
-  [[ "$output" == *"STALE (by mtime): iris-xr.rpm"* ]] || return 1
-  [[ "$output" == *"Fix: tools/build-xr-package.sh --out artifacts/"* ]] || return 1
+  [[ "$output" == *"iris-amd64.tar"*"STALE (wrapper-digest-mismatch)"* ]]
+  [[ "$output" == *"contents or validate a native package signature"* ]]
   [ "$status" -eq 1 ]
 }
 
-# The false positive reported by the operator on 2026-08-31. The certificate was
-# created long BEFORE this RPM was built, so the RPM is provably good -- but
-# /srv/artifacts/iris-catalog.pem is a STAGED COPY that a later bring-up
-# re-wrote, putting its mtime after the RPM's. Baselining on that mtime reported
-# "Needs rebuild" for an RPM built eleven minutes AFTER the very certificate it
-# was accused of predating. Only the certificate's own notBefore is immune: no
-# re-copy can move it.
-@test "a re-staged catalog pem does not make a good XR RPM look stale" {
-  # Both IOx tars are staged so this run is about the XR RPM: an absent
-  # tar is no longer swept into the verified summary (it inspects
-  # nothing), which would otherwise mask what this test asserts.
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" "served"
-  : > "$ARTIFACTS/iris-xr.rpm"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_EPOCH=4102444800 FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" \
-    run bash "$CHECK"
+@test "XR uses the same provenance contract and no certificate-age heuristic" {
+  _make_required_packages
+  _make_package iris-xr.rpm xr-appmgr linux/amd64
+  touch -t 200001010000 "$ARTIFACTS/iris-xr.rpm"
+  _run_check
 
-  [[ "$output" == *"OK-BY-MTIME"* ]] || return 1
-  [[ "$output" != *"STALE-BY-MTIME"* ]] || return 1
-  [[ "$output" != *"Needs rebuild"* ]] || return 1
+  [[ "$output" == *"iris-xr.rpm"*"READY"* ]]
+  ! grep -q -- '-startdate' "$OPENSSL_LOG"
+  [[ "$output" != *"MTIME"* ]]
   [ "$status" -eq 0 ]
 }
 
-@test "XR RPM freshness never overclaims: the summary names tars and the RPM separately" {
-  # Both IOx tars are staged so this run is about the XR RPM: an absent
-  # tar is no longer swept into the verified summary (it inspects
-  # nothing), which would otherwise mask what this test asserts.
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" "served"
-  : > "$ARTIFACTS/iris-xr.rpm"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    FAKE_CERT_NOTBEFORE="Jan  1 00:00:00 2020 GMT" run bash "$CHECK"
+@test "an absent required IOx wrapper is not reported as verified" {
+  _run_check
 
-  # the old blanket claim ("all served packages pin the live catalog
-  # certificate") must be gone -- an RPM checked by mtime only was never
-  # verified to PIN anything, and the new summary must not say it was.
-  if printf '%s\n' "$output" | grep -q 'all served packages pin the live catalog certificate'; then
-    return 1
-  fi
-  [[ "$output" == *"IOx tars pin the live catalog certificate"* ]] || return 1
-  [[ "$output" == *"by build time only, contents not inspected"* ]] || return 1
-  [ "$status" -eq 0 ]
-}
-
-# ---------------------------------------------------------------------------
-# IOx package layouts as device/iox/build.sh REALLY produces them (review
-# finding IRIS-12-001): artifacts.tar.gz holds package.yaml + a classic
-# docker-archive rootfs.tar with the cert baked in a layer, and -- since the
-# probe member's restoration -- a top-level iris-catalog.pem next to them.
-# The "present package without a pinned certificate" case above uses an
-# empty file; these use the real shapes.
-# ---------------------------------------------------------------------------
-
-# $1 = output path, $2 = pem text baked in the layer, $3 = probe-member pem
-# text ("" = no probe member, the 2026-09-02..restoration build shape)
-_make_built_package() {
-  python3 - "$1" "$2" "$3" <<'PY'
-import hashlib, io, json, sys, tarfile
-out, baked, probe = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
-def tar_bytes(members):
-    b = io.BytesIO()
-    with tarfile.open(fileobj=b, mode="w") as t:
-        for n, d in members:
-            ti = tarfile.TarInfo(n); ti.size = len(d); t.addfile(ti, io.BytesIO(d))
-    return b.getvalue()
-sha = lambda b: hashlib.sha256(b).hexdigest()
-base = tar_bytes([("etc/os-release", b"ID=debian\n")])
-top = tar_bytes([("opt/iris/iris-catalog.pem", baked)])
-cfg = json.dumps({"rootfs": {"diff_ids": ["sha256:" + sha(base), "sha256:" + sha(top)]}}).encode()
-manifest = json.dumps([{"Config": sha(cfg) + ".json", "RepoTags": ["iris-iox:arm64"],
-                        "Layers": [sha(base) + ".tar", sha(top) + ".tar"]}]).encode()
-rb = io.BytesIO()
-with tarfile.open(fileobj=rb, mode="w") as t:
-    for n, d in [("manifest.json", manifest), ("repositories", b"{}"), (sha(cfg) + ".json", cfg),
-                 (sha(base) + ".tar", base), (sha(top) + ".tar", top)]:
-        ti = tarfile.TarInfo(n); ti.size = len(d); t.addfile(ti, io.BytesIO(d))
-    for dig in (sha(base), sha(top)):
-        ti = tarfile.TarInfo("legacy-" + dig[:12] + "/layer.tar"); ti.type = tarfile.SYMTYPE
-        ti.linkname = "../" + dig + ".tar"; t.addfile(ti)
-rootfs = rb.getvalue()
-members = [("package.yaml", b"descriptor-schema-version: '2.8'\n"), ("rootfs.tar", rootfs)]
-if probe:
-    members.append(("iris-catalog.pem", probe))
-ab = io.BytesIO()
-with tarfile.open(fileobj=ab, mode="w:gz") as t:
-    for n, d in members:
-        ti = tarfile.TarInfo(n); ti.size = len(d); t.addfile(ti, io.BytesIO(d))
-art = ab.getvalue()
-with tarfile.open(out, "w") as t:
-    for n, d in [("package.yaml", b"descriptor-schema-version: '2.8'\n"), ("artifacts.tar.gz", art)]:
-        ti = tarfile.TarInfo(n); ti.size = len(d); t.addfile(ti, io.BytesIO(d))
-PY
-}
-
-@test "a package carrying build.sh's top-level probe member pinning the live cert is OK" {
-  # Both tars are staged because the summary this asserts says "both IOx
-  # tars": with only one present the claim was true of nothing, which is the
-  # absent-is-not-verified defect this file now also covers below.
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" "served"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
-    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK"
-
-  [[ "$output" == *"iris-arm64.tar"*"OK"* ]] || return 1
-  [[ "$output" != *"NO PINNED CERT FOUND"* ]] || return 1
-  [[ "$output" == *"verified: both IOx tars pin the live catalog certificate"* ]] || return 1
-  [ "$status" -eq 0 ]
-}
-
-@test "a package built without the probe member is read from its layer, not reported as unpinned" {
-  # the 2026-09-02..restoration build shape: cert only inside rootfs.tar's
-  # layer. It used to print NO PINNED CERT FOUND -> STALE on every fresh
-  # build, and --rebuild could never converge.
-  # amd64 staged normally so the run is about the layer fallback, not about a
-  # missing package (an absent tar is now correctly not "verified").
-  _make_built_package "$ARTIFACTS/iris-amd64.tar" "served" "served"
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "served" ""
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
-    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK"
-
-  [[ "$output" != *"NO PINNED CERT FOUND"* ]] || return 1
-  [[ "$output" == *"iris-arm64.tar"*"OK"* ]] || return 1
-  [ "$status" -eq 0 ]
-}
-
-@test "a package whose probe member pins a different cert is STALE with the pinned fingerprint named" {
-  _make_built_package "$ARTIFACTS/iris-arm64.tar" "rotated-away" "rotated-away"
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
-    ARTIFACTS_DIR="$ARTIFACTS" run bash "$CHECK"
-
-  [[ "$output" == *"STALE -> pins PACKAGE"* ]] || return 1
-  [[ "$output" == *"STALE: iris-arm64.tar"* ]] || return 1
+  [[ "$output" == *"NOT READY: iris-amd64.tar iris-arm64.tar"* ]]
+  [[ "$output" != *"required package bytes are readable"* ]]
   [ "$status" -eq 1 ]
 }
 
-@test "an absent IOx package is never reported as verified" {
-  # A missing package was not added to STALE, so a run with neither tar staged
-  # printed "verified: both IOx tars pin the live catalog certificate (contents
-  # inspected)" and exited 0 having inspected nothing -- a green answer that
-  # means the opposite of what it says, on the check an operator runs before a
-  # rollout. ARTIFACTS here is empty of tars.
-  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 ARTIFACTS_DIR="$ARTIFACTS" \
-    run bash "$CHECK"
+@test "rebuild repairs the explicit relative artifact directory being checked" {
+  _make_required_packages
+  export READY_PACKAGES="$BATS_TEST_TMPDIR/ready-packages"
+  export BUILD_LOG="$BATS_TEST_TMPDIR/build.log"
+  mkdir -p "$READY_PACKAGES"
+  cp "$ARTIFACTS/iris-arm64.tar" "$ARTIFACTS/iris-arm64.tar.manifest" "$READY_PACKAGES/"
+  rm "$ARTIFACTS/iris-arm64.tar" "$ARTIFACTS/iris-arm64.tar.manifest"
 
-  [[ "$output" == *"NOT STAGED"* ]] || return 1
-  [[ "$output" == *"iris-amd64.tar"* ]] || return 1
-  [[ "$output" == *"iris-arm64.tar"* ]] || return 1
-  [[ "$output" != *"verified: both IOx tars"* ]] || return 1
-  [ "$status" -eq 1 ]
+  local repo="$BATS_TEST_TMPDIR/repo"
+  mkdir -p "$repo/tools" "$repo/server"
+  cp "$CHECK" "$repo/tools/check-package-freshness.sh"
+  cp "$BATS_TEST_DIRNAME/../setup_status.py" "$repo/server/setup_status.py"
+  cat > "$repo/tools/provision-iox-packages.sh" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${IRIS_ARTIFACTS_HOST_DIR:-unset}" > "$BUILD_LOG"
+[ -n "${IRIS_ARTIFACTS_HOST_DIR:-}" ] || exit 3
+cp "$READY_PACKAGES/iris-arm64.tar" "$READY_PACKAGES/iris-arm64.tar.manifest" \
+  "$IRIS_ARTIFACTS_HOST_DIR/"
+STUB
+  chmod +x "$repo/tools/provision-iox-packages.sh" "$repo/tools/check-package-freshness.sh"
+  CHECK="$repo/tools/check-package-freshness.sh"
+  cd "$BATS_TEST_TMPDIR"
+  PATH="$STUB:$PATH" CATALOG_HOSTPORT=127.0.0.1:8443 \
+    ARTIFACTS_DIR=artifacts run bash "$CHECK" --rebuild
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BUILD_LOG")" = "$ARTIFACTS" ]
+  [[ "$output" == *">> re-checking"* ]]
+  [[ "$output" == *"required package bytes are readable"* ]]
+}
+
+@test "checker has valid shell syntax and documents its only option" {
+  run bash -n "$CHECK"
+  [ "$status" -eq 0 ]
+  run bash "$CHECK" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--rebuild"* ]]
 }

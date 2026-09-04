@@ -73,20 +73,18 @@ setup() { BUILD="$BATS_TEST_DIRNAME/../build.sh"; }
   [ "$status" -ne 0 ]
 }
 
-@test "build.sh packages the descriptor, rootfs.tar and the pinned-cert probe member, never the docker build context" {
+@test "build.sh packages only the descriptor and deployment-neutral rootfs" {
   # `ioxclient package` tars its whole working directory into artifacts.tar.gz.
   # Packaging the build context shipped a second aria2c, the agent sources and
   # the Dockerfile as ~3.3 MB of dead weight in every IOx tar (measured
   # 2026-09-02), so the packaging step runs in a directory that holds exactly
-  # package.yaml + rootfs.tar + iris-catalog.pem. The pem (a few KB) is the
-  # PINNED-CERT PROBE MEMBER both freshness readers depend on (IRIS-12-001);
-  # it was dropped with the rest and every fresh package then read as STALE.
+  # package.yaml + rootfs.tar. Deployment trust is supplied at runtime.
   run grep -F 'mv "$CTX/rootfs.tar" "$PKG/rootfs.tar"' "$BUILD"
   [ "$status" -eq 0 ]
   run grep -F 'cp "$PACKAGE_DESCRIPTOR" "$PKG/package.yaml"' "$BUILD"
   [ "$status" -eq 0 ]
-  run grep -F 'cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"' "$BUILD"
-  [ "$status" -eq 0 ]
+  run grep -F 'iris-catalog.pem' "$BUILD"
+  [ "$status" -ne 0 ]
   run grep -F '( cd "$PKG" && "$IOXCLIENT" package . )' "$BUILD"
   [ "$status" -eq 0 ]
   run grep -F '( cd "$CTX" && "$IOXCLIENT" package . )' "$BUILD"
@@ -112,7 +110,6 @@ done
 archive="$TEST_ROOT/canonical.oci.tar"
 printf 'oci\n' > "$archive"
 printf '%s\n' "$archive" > "$ctx/iris-device-oci-path"
-printf '%s\n' 'public cert' > "$ctx/iris-catalog.pem"
 cat > "$ctx/iris-device-oci.manifest" <<EOF
 format=iris-device-oci-v1
 source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

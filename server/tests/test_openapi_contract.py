@@ -228,6 +228,10 @@ def test_tracker_documents_preferred_bearer_and_guest_shell_query_fallback():
     doc = _load()
     for path in ("/announce", "/scrape"):
         op = doc["paths"][path]["get"]
+        assert op["servers"] == [{
+            "url": "https://iris.example:6969",
+            "description": "TLS BEP tracker v1 listener",
+        }]
         assert op["x-iris-security"] == "announceBearerOrLegacyQuery"
         assert op["security"][0] == {"announceBearer": []}
         query = {p["name"]: p for p in op["parameters"]
@@ -244,6 +248,8 @@ def test_tracker_documents_preferred_bearer_and_guest_shell_query_fallback():
     assert "uploaded" not in announce
     assert "downloaded" not in announce
     assert "403" in doc["paths"]["/announce"]["get"]["responses"]
+    assert "HTTPS-only" in doc["x-iris-retained-v1-exceptions"][
+        "trackerTransport"]
 
 
 def test_settings_and_optional_success_shapes_match_runtime():
@@ -300,6 +306,20 @@ def test_settings_and_optional_success_shapes_match_runtime():
         fingerprint = setup["schema"]["properties"]["packages"][
             "properties"]["reference_fingerprint"]
         assert fingerprint["type"] == ["string", "null"]
+        package_item = setup["schema"]["properties"]["packages"][
+            "properties"]["items"]["items"]
+        assert package_item["properties"]["state"]["enum"] == [
+            "ok", "absent", "unknown", "stale"]
+        assert set(package_item["required"]) == {
+            "name", "state", "fingerprint", "built_at", "remedy",
+            "provenance"}
+        assert package_item["properties"]["built_at"]["type"] == [
+            "integer", "null"]
+        assert package_item["properties"]["reason"]["type"] == "string"
+        assert package_item["properties"]["provenance"]["type"] == [
+            "object", "null"]
+        assert setup["example"]["packages"]["items"][0]["remedy"] == \
+            "tools/provision-iox-packages.sh"
 
         for suffix in ("/images/{image_id}/release-quarantine",
                        "/telemetry/stream", "/settings/ca-trust",
@@ -435,3 +455,54 @@ def test_external_and_internal_console_routes_are_paired():
         target = api_routes.console_to_management(route.method, route.path)
         assert target is not None
         assert api_routes.match("management", route.method, target) is not None
+
+
+def test_image_publish_job_contract_covers_every_runtime_phase_shape():
+    doc = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        media = doc["paths"][prefix + "/images/jobs/{job_id}"]["get"][
+            "responses"]["200"]["content"]["application/json"]
+        examples = {name: wrapped["value"]
+                    for name, wrapped in media["examples"].items()}
+        assert set(examples) == {
+            "publishing", "verifying", "verified", "verificationFailed",
+            "publishFailed"}
+        assert examples["publishing"]["verification"] is None
+        assert examples["publishing"]["finished_at"] is None
+        assert examples["verifying"]["verification"] == {
+            "outcome": "running", "image_state": None}
+        assert examples["verified"]["verification"] == {
+            "outcome": "ok", "image_state": "verified", "matched": 1,
+            "mismatched": 0, "not_in_feed": 0}
+        assert examples["verificationFailed"]["verification"] == {
+            "outcome": "fail", "image_state": None,
+            "detail": "feed unavailable"}
+        assert examples["publishFailed"]["state"] == "error"
+        assert examples["publishFailed"]["verification"] is None
+
+        variants = media["schema"]["oneOf"]
+        by_state = {variant["properties"]["state"]["const"]: variant
+                    for variant in variants}
+        assert set(by_state) == {"publishing", "verifying", "done", "error"}
+        required = {"id", "state", "filename", "message", "image_id",
+                    "started_at", "finished_at", "verification"}
+        assert all(set(variant["required"]) == required
+                   for variant in variants)
+        assert by_state["publishing"]["properties"]["verification"] == {
+            "type": "null"}
+        running = by_state["verifying"]["properties"]["verification"]
+        assert set(running["required"]) == {"outcome", "image_state"}
+        assert "matched" not in running["properties"]
+        terminal = by_state["done"]["properties"]["verification"]["oneOf"]
+        ok = next(value for value in terminal
+                  if value.get("properties", {}).get("outcome", {}).get(
+                      "const") == "ok")
+        failed = next(value for value in terminal
+                      if value.get("properties", {}).get("outcome", {}).get(
+                          "enum") == ["fail", "already_running"])
+        assert set(ok["required"]) == {
+            "outcome", "image_state", "matched", "mismatched",
+            "not_in_feed"}
+        assert set(failed["required"]) == {
+            "outcome", "image_state", "detail"}
+        assert "matched" not in failed["properties"]

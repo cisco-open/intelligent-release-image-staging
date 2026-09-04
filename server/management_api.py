@@ -4669,7 +4669,6 @@ def main():
         event = kw.pop("event")
         audit.append_event(audit_path, event, **kw)
 
-    images = gui_images.ImageService(state_dir, images_dir, audit_fn=_bg_audit)
     fleet = gui_fleet.FleetStore(state_dir)
     creds = gui_creds.CredentialStore(secrets_path, recipients_csv=recipients,
                                       secrets_enc=secrets_enc)
@@ -4685,6 +4684,16 @@ def main():
         state_dir, audit_path=audit_path,
         seeder_remove_fn=publish_mod.remove_torrent_rpc,
         seeder_add_fn=publish_mod.resume_torrent_rpc)
+    # A Console publish does not become terminal until Cisco Bulk Hash
+    # reconciliation has covered the newly catalogued image. Use the fully
+    # wired CatalogStore above (not ImageService's lightweight write store),
+    # so a mismatch also unassigns/quarantines and stops the origin seeder.
+    # wait=True guarantees a publish that lands during another refresh gets a
+    # fresh pass after that run instead of being omitted from its old snapshot.
+    images = gui_images.ImageService(
+        state_dir, images_dir, audit_fn=_bg_audit,
+        verification_fn=lambda _entry: bulkhash_refresh.run_refresh(
+            "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True))
     record_store = deployment_records.DeploymentRecordStore(state_dir)
     record_store.recover_interrupted()
     onboard = gui_onboard.OnboardService(

@@ -62,15 +62,20 @@ ready for device testing until the packages in use have been rebuilt:
 ```bash
 docker compose -f server/docker-compose.yml up -d --build
 tools/provision-iox-packages.sh
-CATALOG_PEM=<live-certificate-only-pem> \
-  tools/build-xr-package.sh --out artifacts/
+tools/build-xr-package.sh --out artifacts/
 tools/check-package-freshness.sh
 ```
 
-The freshness command detects certificate drift, not source drift: it inspects
-the IOx certificate pins and uses a build-time proxy for the XR RPM. A green
-result cannot prove that a package contains the current agent. Rebuild after
-any shared-agent change and redeploy each affected device.
+The IOx and XR wrappers are deployment-neutral: no server certificate enters
+these build commands. Each builder publishes an adjacent provenance manifest
+that binds the wrapper SHA-256 and platform to the canonical multi-platform OCI
+index, archive, and source digests. Console package readiness verifies that
+binding; it does not compare the package with the current checkout or validate
+a native signature. Rebuild after any shared-agent change and redeploy each
+affected device. Certificate rotation instead requires re-onboarding devices to deliver
+the new runtime trust anchor; it does not require rebuilding these packages.
+The final check also verifies that the live and distributed runtime
+certificates agree; it never compares certificate age with a package.
 
 `tools/build-device-image.sh`, `device/iox/build.sh`, `tools/build-xr-package.sh` and
 `tools/make-agent-bundle.sh` each bake in `device/agent`,

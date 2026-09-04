@@ -136,6 +136,7 @@ device_ssh_pass = test
 EOF
   run _run_bounded 12 env PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
       IRIS_DEVICE_PLATFORM=iox IRIS_CONTAINER_TESTING=1 \
+      IRIS_CATALOG_CA="$REPO/server/certs/cisco_bulkhash_verify.pem" \
       IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$TMP/stage" IRIS_TICK_SECONDS=1 \
       IRIS_STARTUP_JITTER=0 \
       bash "$DEVICE/container/entrypoint.sh"
@@ -157,6 +158,7 @@ target_fs = harddisk:
 EOF
   run _run_bounded 12 env PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
       IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
+      IRIS_CATALOG_CA="$REPO/server/certs/cisco_bulkhash_verify.pem" \
       IRIS_TEST_SKIP_MOUNT_CHECK=1 IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$TMP/stage" \
       IRIS_TICK_SECONDS=1 IRIS_STARTUP_JITTER=0 \
       bash "$DEVICE/container/entrypoint.sh"

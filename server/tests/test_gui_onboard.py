@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 
 import catalog as catalog_mod
+import gui_fleet
 import deployment_records
 import gui_onboard
 import pytest
@@ -41,6 +42,11 @@ class _CredsSH(_Creds):
         _Creds.__init__(self, profs)
         self._sh = stage_host
     def stage_host_secrets(self): return self._sh
+
+
+class _CorruptFleet:
+    def get_device(self, _device_id):
+        raise gui_fleet.FleetStateError("corrupt fleet shard")
 
 
 def _wait(svc, job_id, timeout=3.0):
@@ -97,6 +103,13 @@ def _svc(run_fn, stage_host=None, **kw):
         fleet, creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="10.9.9.9",
         run_fn=run_fn, **kw)
+
+
+def test_forget_host_key_returns_error_when_fleet_shard_is_corrupt():
+    svc = _svc(lambda *_args, **_kwargs: 0)
+    svc.fleet = _CorruptFleet()
+
+    assert svc.forget_host_key("d1") == (False, "fleet state unavailable")
 
 
 def test_onboard_assembles_env_and_streams(tmp_path):
@@ -311,6 +324,16 @@ def test_build_env_honors_iris_artifacts_dir_env(monkeypatch):
     _dev, env = svc._build_env("d1")
     assert env["IRIS_STAGE_LOCAL"] == "1"
     assert env["IRIS_ARTIFACTS_DIR"] == "/custom/artifacts"
+
+
+def test_build_env_uses_service_artifact_and_certificate_paths(monkeypatch):
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", "/old/artifacts")
+    monkeypatch.setenv("IRIS_CATALOG_CA_FILE", "/old/iris-catalog.pem")
+    svc = _svc(lambda p, e, on: 0, artifacts_dir="/current/artifacts")
+    _dev, env = svc._build_env("d1", mint=False)
+    assert env["IRIS_ARTIFACTS_DIR"] == "/current/artifacts"
+    assert env["IRIS_CRT_FILE"] == "/fake/crt.pem"
+    assert "IRIS_CATALOG_CA_FILE" not in env
 
 
 def test_build_env_raises_without_management_type():

@@ -68,6 +68,58 @@ _xr() {
   [ ! -e "$CONF" ]
 }
 
+@test "container refuses a missing or malformed tracker certificate before launch" {
+  missing="$BATS_TEST_TMPDIR/missing.pem"
+  run env -i PATH="$PATH" PYTHONPATH="$DEVICE/agent" \
+    IRIS_CONTAINER_TESTING=1 IRIS_DEVICE_PLATFORM=iox \
+    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" \
+    IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
+    IRIS_DEVICE_ID=device-1 IRIS_DEVICE_SSH_HOST=192.0.2.2 \
+    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test \
+    IRIS_CATALOG_CA="$missing" bash "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"catalog_ca is not a readable certificate file"* ]]
+
+  printf '%s\n' 'not a certificate' > "$BATS_TEST_TMPDIR/bad.pem"
+  CONF="$BATS_TEST_TMPDIR/bad-agent.conf"
+  run env -i PATH="$PATH" PYTHONPATH="$DEVICE/agent" \
+    IRIS_CONTAINER_TESTING=1 IRIS_DEVICE_PLATFORM=iox \
+    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" \
+    IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
+    IRIS_DEVICE_ID=device-1 IRIS_DEVICE_SSH_HOST=192.0.2.2 \
+    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test \
+    IRIS_CATALOG_CA="$BATS_TEST_TMPDIR/bad.pem" bash "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"catalog_ca is not a valid certificate bundle"* ]]
+}
+
+@test "runtime-delivered catalog certificate path is platform-derived" {
+  run _iox
+  [ -f "$CONF" ]
+  grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
+
+  rm -f "$CONF"
+  run _xr
+  [ -f "$CONF" ]
+  grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
+}
+
+@test "production IOx requires CAF app-data and refuses a catalog path override" {
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
+    IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \
+    IRIS_DEVICE_ID=device-1 IRIS_DEVICE_SSH_HOST=192.0.2.2 \
+    IRIS_DEVICE_SSH_USER=test IRIS_DEVICE_SSH_PASS=test \
+    bash "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CAF_APP_APPDATA_DIR is required"* ]]
+
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
+    CAF_APP_APPDATA_DIR=/data/appdata IRIS_CATALOG_CA=/tmp/redirected.pem \
+    bash "$ENTRYPOINT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS_CATALOG_CA is test-only"* ]]
+}
+
 @test "IOx gets its profile and retains a validated explicit target override" {
   run _iox IRIS_TARGET_FS=sdflash:
   [ -f "$CONF" ]

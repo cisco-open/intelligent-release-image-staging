@@ -2342,7 +2342,7 @@ def test_device_gets_token_free_torrent_for_header_announce_auth(tmp_path):
             {"X-IRIS-Tracker-Auth": "bearer"})
         assert status == 200
         meta = bencode.decode(body)
-        assert meta[b"announce"] == b"http://10.0.0.1:6969/announce"
+        assert meta[b"announce"] == b"https://10.0.0.1:6969/announce"
         assert b"ANNTOKEN" not in body
         assert b"announce-list" not in meta
         # info hash unchanged vs canonical
@@ -2379,7 +2379,7 @@ def test_device_gets_legacy_query_torrent_without_opt_in_header(tmp_path):
         assert status == 200
         meta = bencode.decode(body)
         assert meta[b"announce"] == (
-            b"http://10.0.0.1:6969/announce?announce_token=ANNTOKEN")
+            b"https://10.0.0.1:6969/announce?announce_token=ANNTOKEN")
         assert headers.get("Vary") == (
             "Authorization, X-IRIS-Tracker-Auth")
     finally:

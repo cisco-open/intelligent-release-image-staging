@@ -15,10 +15,13 @@ This is the ONLY supported way to rotate the seeder announce credential
    revoked or past ``secrets_store.SEEDER_PREV_TTL``, keep the current record as
    a *previous* valid for that bounded window, and mint a fresh current. Durable
    persist happens BEFORE any canonical torrent mutation (via ``persist``).
-3. For each seeder torrent, prepare a raw-span-verified canonical replacement
-   whose outer announce is token-free and whose ``info`` byte span is SHA-1
-   identical to the old canonical (via torrent_personalize). The re-add gives
-   aria2 the rotated credential as an Authorization header.
+3. Refresh aria2's process-wide Authorization header to the durably persisted
+   current credential (the shipped client gives that option precedence over a
+   per-download header). For each seeder torrent, prepare a raw-span-verified
+   canonical replacement whose outer announce is token-free and whose ``info``
+   byte span is SHA-1 identical to the old canonical (via
+   torrent_personalize). Every re-add also receives the current credential as a
+   per-download header.
 4. Serially force-remove then re-add each torrent to the live seeder, updating
    the manifest phase per torrent.
 
@@ -26,9 +29,10 @@ Failure handling (spec §6):
 - Remove failure/uncertain result -> restore the EXACT old canonical bytes,
   enter hard no-go, and do not re-add because aria2 may still hold the old
   torrent; explicit repair is required.
-- New-add failure -> restore the EXACT old canonical bytes and attempt the old
-  add (rollback).
-- If the old re-add ALSO fails -> a hard no-go: restore the EXACT old canonical
+- New-add failure -> restore the EXACT old canonical bytes for that torrent and
+  every earlier applied torrent, then re-add all old bytes with the current
+  credential (rollback).
+- If the old-byte re-add ALSO fails -> a hard no-go: restore the EXACT canonical
   bytes for EVERY previously applied torrent too and attempt to re-add each of
   them, abort all remaining torrents, leave maintenance frozen, preserve old
   bytes + manifest, return a hard no-go, and NEVER claim the image remains
@@ -55,18 +59,18 @@ import argparse
 import base64
 import collections
 import hashlib
-import ipaddress
 import json
 import math
 import os
 import secrets
 import sys
 import tempfile
-from urllib.parse import urlsplit, urlunsplit
+import time
 
 import secretfs
 import secrets_store
 import telemetry
+import tracker_announce
 import torrent_personalize
 
 SEEDER_PREV_CAP = 2
@@ -89,8 +93,8 @@ TorrentTarget = collections.namedtuple(
 
 RotationDeps = collections.namedtuple(
     "RotationDeps",
-    ["persist", "seeder_remove", "seeder_add", "swarm_probe",
-     "manifest_write", "now"])
+    ["persist", "seeder_remove", "seeder_add", "seeder_set_credential",
+     "swarm_probe", "manifest_write", "now"])
 
 RotationResult = collections.namedtuple(
     "RotationResult",
@@ -140,9 +144,16 @@ def rotate_announce(store, now):
     an old previous (P1) first, or wait for it to expire, so a credential a
     device still relies on is never silently dropped."""
     seeder = store.setdefault("seeder", {})
+    if not isinstance(seeder, dict):
+        raise RotationError("invalid seeder credential state")
     prev = seeder.get("announce_token_previous")
-    if not isinstance(prev, list):
+    if "announce_token_previous" not in seeder:
         prev = []
+    elif not isinstance(prev, list) or any(
+            not isinstance(record, dict) for record in prev):
+        # Never turn corrupt overlap state into an empty list and durably
+        # persist over credentials an operator may still need for recovery.
+        raise RotationError("invalid previous seeder credential state")
     seeder["announce_token_previous"] = prev
     # Retire first, then count: the cap bounds LIVE credentials, so an expired
     # previous never blocks a rotation it has no business blocking.
@@ -155,6 +166,8 @@ def rotate_announce(store, now):
             "(revoke one first)" % len(valid_prev))
 
     current = seeder.get("announce_token")
+    if current is not None and not isinstance(current, dict):
+        raise RotationError("invalid current seeder credential state")
     if isinstance(current, dict):
         record = dict(current)
         record["rotated_at"] = int(now)
@@ -244,6 +257,16 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
     manifest["phase"] = "secret_rotated"
     deps.manifest_write(manifest_path, manifest)
 
+    # aria2 gives a process-wide `header` precedence over an addTorrent-local
+    # header. seed-launch installs the then-current bearer globally, so merely
+    # passing the freshly rotated value to addTorrent would still announce with
+    # the retired startup value. Replace the global option after durable secret
+    # persistence and before any live/canonical torrent mutation. The JSON-RPC
+    # caller is bounded by its transport timeout in production.
+    deps.seeder_set_credential(new_current)
+    manifest["phase"] = "seeder_credential_updated"
+    deps.manifest_write(manifest_path, manifest)
+
     new_url = _announce_url(tracker_announce_base, new_current)
 
     # Track torrents whose NEW bytes were successfully applied to the live
@@ -298,17 +321,23 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
         try:
             _mark(manifest, idx, "adding_new")
             deps.manifest_write(manifest_path, manifest)
-            live_gid = deps.seeder_add(new_bytes, target.image_dir)
+            live_gid = deps.seeder_add(new_bytes, target.image_dir,
+                                       new_current)
             if not live_gid:
                 raise RuntimeError("aria2 add returned no gid")
         except Exception:
-            # New-add failure: restore EXACT old bytes and attempt old add.
+            # New-add failure: restore EXACT old bytes and attempt an old-byte
+            # add with the current bearer.
             _atomic_write_bytes(target.path, old_bytes)
             _mark(manifest, idx, "rolled_back")
             manifest["phase"] = "rolling_back"
             deps.manifest_write(manifest_path, manifest)
             try:
-                restored_gid = deps.seeder_add(old_bytes, target.image_dir)
+                # The secret-store rotation is durable and is deliberately not
+                # rolled back. Old torrent bytes therefore still need the NEW
+                # current bearer when they are restored to aria2.
+                restored_gid = deps.seeder_add(old_bytes, target.image_dir,
+                                               new_current)
                 if not restored_gid:
                     raise RuntimeError("aria2 rollback add returned no gid")
                 manifest["torrents"][idx]["restored_gid"] = str(restored_gid)
@@ -318,16 +347,20 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
                 # previously applied torrents too, attempt to re-add them, abort
                 # remaining, freeze maintenance, never claim served.
                 _mark(manifest, idx, "double_failure")
-                # This torrent's old re-add failed -> record it as affected with
-                # repair still required.
+                # This torrent's old-byte re-add failed -> record it as
+                # affected with repair still required.
                 this_failed = [(idx, target, old_bytes)]
                 return _hard_no_go(
                     manifest, manifest_path, applied, new_current, deps,
                     also=this_failed, this_readd_failed=True)
-            # Rollback succeeded for this torrent -> stop (rotation not applied).
-            manifest["phase"] = "rolled_back"
-            deps.manifest_write(manifest_path, manifest)
-            return RotationResult(True, False, False, False, new_current)
+            # Rollback succeeded for this torrent, but an earlier torrent may
+            # already have new canonical bytes and a new live GID. Restore all
+            # of those too before claiming the rotation rolled back cleanly.
+            return _hard_no_go(
+                manifest, manifest_path, applied, new_current, deps,
+                also=[(idx, target, old_bytes)],
+                failure_class="new_add_failed",
+                permit_clean_rollback=True)
 
         _mark(manifest, idx, "applied")
         applied.append((idx, target, old_bytes, live_gid))
@@ -360,7 +393,8 @@ def rotate_seeder_announce(secrets_path, manifest_path, torrents,
 
 
 def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
-                also=None, this_readd_failed=False, failure_class="double_failure"):
+                also=None, this_readd_failed=False,
+                failure_class="double_failure", permit_clean_rollback=False):
     """Enter the hard no-go state: restore EXACT old canonical bytes for every
     previously applied torrent, attempt to re-add each restored torrent, abort
     remaining torrents, freeze maintenance, preserve the manifest, and never
@@ -370,9 +404,10 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
     restored on disk); it is reported as affected with ``restore_readd_ok`` set
     from ``this_readd_failed`` and its re-add is NOT retried here.
 
-    Returns a hard-no-go ``RotationResult`` whose ``affected`` lists every
-    disturbed torrent and whether its restore re-add succeeded — any ``False``
-    means serving repair is still required for that torrent."""
+    With ``permit_clean_rollback``, a complete restoration returns an ordinary
+    rolled-back result. Otherwise returns a hard-no-go ``RotationResult`` whose
+    ``affected`` lists every disturbed torrent and whether its restore re-add
+    succeeded — any ``False`` means serving repair is still required."""
     affected = []
     # Restore + re-add each previously applied torrent, newest first is fine;
     # order does not matter for correctness, only that ALL are restored.
@@ -382,7 +417,10 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
         readd_ok = True
         try:
             deps.seeder_remove(live_gid)
-            restored_gid = deps.seeder_add(old_bytes, target.image_dir)
+            # Canonical bytes roll back; the durably persisted credential does
+            # not. Re-add with the current bearer, never the retired one.
+            restored_gid = deps.seeder_add(old_bytes, target.image_dir,
+                                           new_current)
             if not restored_gid:
                 raise RuntimeError("aria2 restore add returned no gid")
             manifest["torrents"][idx]["restored_gid"] = str(restored_gid)
@@ -396,6 +434,16 @@ def _hard_no_go(manifest, manifest_path, applied, new_current, deps,
     for idx, target, _old in (also or []):
         affected.append({"image_id": target.image_id, "gid": target.gid,
                          "restore_readd_ok": not this_readd_failed})
+
+    if permit_clean_rollback and affected and all(
+            item["restore_readd_ok"] for item in affected):
+        manifest["phase"] = "rolled_back"
+        manifest["maintenance_frozen"] = False
+        manifest["served_claimed"] = False
+        manifest["affected"] = affected
+        deps.manifest_write(manifest_path, manifest)
+        return RotationResult(True, False, False, False, new_current,
+                              affected)
 
     manifest["phase"] = ("hard_no_go" if failure_class == "remove_failed"
                          else "double_failure")
@@ -505,13 +553,16 @@ _SWARM_RETRIES = 120         # x 1s cadence ~= 120s
 def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
                     manifest_write=None, now=None, age_bin=None,
                     swarm_sender=None, swarm_sleep=None, swarm_timeout=2.0,
-                    swarm_retries=_SWARM_RETRIES):
+                    swarm_retries=_SWARM_RETRIES,
+                    seeder_set_credential=None):
     """Assemble ``RotationDeps`` for the operational path with a durable-first
     persist and the canonical loopback ``/swarm`` probe. Its proof is bound to
     exact info hashes and the post-rotation observation boundary.
     ``swarm_sender`` is an injectable transport seam for tests; it cannot
     bypass the typed predicate enforced by :func:`make_swarm_probe`."""
     import time
+    if not callable(seeder_set_credential):
+        raise TypeError("seeder credential updater is required")
     def swarm_probe(expected_info_hashes, not_before):
         return make_swarm_probe(
             expected_info_hashes, not_before=not_before, sender=swarm_sender,
@@ -522,6 +573,7 @@ def production_deps(seeder_remove, seeder_add, recipients_csv, enc_path,
         persist=durable_persist(recipients_csv, enc_path, age_bin=age_bin),
         seeder_remove=seeder_remove,
         seeder_add=seeder_add,
+        seeder_set_credential=seeder_set_credential,
         swarm_probe=swarm_probe,
         manifest_write=manifest_write or _atomic_write_json,
         # Keep sub-second precision: rotation verification requires each
@@ -679,37 +731,8 @@ def _http_swarm_sender(url, timeout):
 # ---------------------------------------------------------------------------
 
 def _tracker_announce_base(env):
-    """Return the token-free HTTP announce base without ever echoing it."""
-    value = env.get("IRIS_TRACKER_ANNOUNCE")
-    if not value:
-        host = env.get("IRIS_HOST_IP")
-        if not host:
-            raise ValueError("tracker announce base unavailable")
-        value = "http://%s:%s/announce" % (
-            host, env.get("IRIS_TRACKER_PORT") or "6969")
-    parsed = urlsplit(value)
-    if (parsed.scheme != "http" or not parsed.netloc or parsed.query
-            or parsed.fragment):
-        raise ValueError("invalid tracker announce base")
-    # Any IPv4 the operator routes is acceptable -- fleets are not always on
-    # RFC1918/RFC6598, and refusing public space made rotation impossible for
-    # them. What is still refused is an address that cannot serve as an announce
-    # endpoint at all: this base is handed to every peer as the tracker to dial,
-    # so loopback, link-local, unspecified and multicast are nonsense there.
-    #
-    # NOTE: the announce credential rides this URL over HTTP, so on a routable
-    # address it crosses the network in cleartext. That is a deployment choice
-    # about where the management network sits, not something this check makes
-    # safe -- see docs/zensical/security.md.
-    try:
-        addr = ipaddress.ip_address(parsed.hostname)
-    except ValueError:
-        raise ValueError("tracker announce base is not a usable IPv4 endpoint")
-    if (addr.version != 4 or addr.is_loopback or addr.is_link_local
-            or addr.is_unspecified or addr.is_multicast or addr.is_reserved):
-        raise ValueError("tracker announce base is not a usable IPv4 endpoint")
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/announce",
-                       "", ""))
+    """Return the strict token-free HTTPS announce base without echoing it."""
+    return tracker_announce.resolve(env)
 
 
 def _image_dir(entry, env):
@@ -815,12 +838,57 @@ def _seeder_rpc_ops(rpc):
         except Exception:
             pass
 
-    def add(torrent_bytes, image_dir):
+    def add(torrent_bytes, image_dir, announce_token):
+        header = _announce_authorization_header(announce_token)
         return rpc("aria2.addTorrent", [base64.b64encode(torrent_bytes).decode(),
                                          [], {"dir": image_dir,
                                               "seed-ratio": "0",
-                                              "bt-seed-unverified": "true"}])
-    return remove, add
+                                              "bt-seed-unverified": "true",
+                                              "header": [header]}])
+
+    def set_credential(announce_token):
+        header = _announce_authorization_header(announce_token)
+        result = rpc("aria2.changeGlobalOption", [{"header": [header]}])
+        if result != "OK":
+            raise RuntimeError("aria2 global credential update failed")
+        return result
+
+    return remove, add, set_credential
+
+
+def _announce_authorization_header(announce_token):
+    """Build aria2's per-download tracker header without accepting injection.
+
+    Values minted by IRIS are printable hex. The slightly broader printable
+    ASCII check preserves compatibility with an existing valid store while
+    rejecting whitespace/control characters that could create another header.
+    Error text is fixed and never contains the credential.
+    """
+    if (not isinstance(announce_token, str) or not announce_token
+            or any(ord(ch) < 0x21 or ord(ch) > 0x7e
+                   for ch in announce_token)):
+        raise ValueError("current seeder announce credential unavailable")
+    return "Authorization: Bearer " + announce_token
+
+
+def _current_announce_token(secrets_path, now=None):
+    """Load the current valid seeder bearer for an explicit recovery re-add."""
+    try:
+        with secrets_store.store_lock(secrets_path):
+            store = secrets_store.load(secrets_path)
+            record = store.get("seeder", {}).get("announce_token")
+            if (not isinstance(record, dict)
+                    or not secrets_store.valid(
+                        record, time.time() if now is None else now, 0)):
+                raise ValueError
+            value = record.get("value")
+            _announce_authorization_header(value)
+            return value
+    except Exception:
+        # A corrupt store may carry arbitrary content; never include the
+        # underlying exception or record value in operator-visible output.
+        raise ValueError(
+            "current seeder announce credential unavailable") from None
 
 
 def _contained_path(path, parent):
@@ -857,12 +925,18 @@ def _recovery_image_dirs(rows, state, env):
     return image_dirs
 
 
-def recover_rotation(manifest_path, state, rpc):
+def recover_rotation(manifest_path, state, rpc, announce_token):
     """Restore exact pre-rotation torrent bytes and reconcile aria2.
 
     Evidence is retained and maintenance remains frozen. Invalid/tampered
     manifests are rejected before any filesystem or RPC mutation.
     """
+    # Validate the in-memory credential before any filesystem or RPC mutation.
+    # Recovery restores canonical bytes, not the pre-rotation secret record, so
+    # every re-add must authenticate with the current persisted bearer.
+    _announce_authorization_header(announce_token)
+    _remove, add, set_credential = _seeder_rpc_ops(rpc)
+
     with open(manifest_path) as f:
         manifest = json.load(f)
     rows = manifest.get("torrents") if isinstance(manifest, dict) else None
@@ -900,6 +974,10 @@ def recover_rotation(manifest_path, state, rpc):
         validated.append((row, canonical, old_bytes, info_hash.lower(), image_dir))
 
     try:
+        # Shipped aria2 prefers the process-wide header over addTorrent's local
+        # option. Refresh it before touching a live download; the secret store
+        # remains authoritative and recovery never reinstates the retired one.
+        set_credential(announce_token)
         checkpoint = os.path.join(state, "identity-compatible-ready")
         if os.path.exists(checkpoint):
             os.remove(checkpoint)
@@ -916,10 +994,7 @@ def recover_rotation(manifest_path, state, rpc):
                     rpc("aria2.removeDownloadResult", [gid])
                 except Exception:
                     pass
-            gid = rpc("aria2.addTorrent", [
-                base64.b64encode(old_bytes).decode(), [],
-                {"dir": image_dir, "seed-ratio": "0",
-                 "bt-seed-unverified": "true"}])
+            gid = add(old_bytes, image_dir, announce_token)
             if not gid:
                 raise RuntimeError("aria2 restore returned no gid")
             status = rpc("aria2.tellStatus", [gid, ["gid", "infoHash"]])
@@ -995,7 +1070,9 @@ def main(argv=None):
         rpc = telemetry.make_jsonrpc_caller(
             os.environ.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL), rpc_secret)
         if args.recover:
-            recovered = recover_rotation(manifest, args.state, rpc)
+            current_token = _current_announce_token(args.secrets)
+            recovered = recover_rotation(manifest, args.state, rpc,
+                                         current_token)
             if recovered:
                 print("rotate-seeder-announce: recovered; maintenance remains frozen; "
                       "manifest preserved", file=sys.stderr)
@@ -1015,8 +1092,10 @@ def main(argv=None):
                   "release): %s" % (len(skipped), ", ".join(skipped)),
                   file=sys.stderr)
         tracker_base = _tracker_announce_base(os.environ)
-        remove, add = _seeder_rpc_ops(rpc)
-        deps = production_deps(remove, add, recipients, enc_path)
+        remove, add, set_credential = _seeder_rpc_ops(rpc)
+        deps = production_deps(
+            remove, add, recipients, enc_path,
+            seeder_set_credential=set_credential)
         result = rotate_seeder_announce(args.secrets, manifest, targets,
                                         tracker_base, deps)
     except Exception as exc:

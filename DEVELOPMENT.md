@@ -89,16 +89,21 @@ docker compose -f server/docker-compose.yml up -d --build
 
 # prebuilt packages; run explicitly
 tools/provision-iox-packages.sh
-CATALOG_PEM=<live-certificate-only-pem> \
-  tools/build-xr-package.sh --out artifacts/
+tools/build-xr-package.sh --out artifacts/
 tools/check-package-freshness.sh
 ```
 
-`tools/check-package-freshness.sh` detects certificate drift. It inspects the
-certificate inside the IOx tars and compares the XR RPM's build time with the
-certificate's `notBefore`; it does **not** prove that any package contains the
-current source. For an agent-code release, rebuild rather than relying on a
-green freshness report, then redeploy affected devices.
+The IOx and XR wrappers are deployment-neutral and do not take a server
+certificate at build time. Their adjacent provenance manifests bind each
+wrapper's SHA-256 and platform to the canonical multi-platform OCI image and
+source digests. The readiness check verifies that binding; it does not compare
+the package with the current checkout or validate a native signature. For an
+agent-code release, rebuild every family and redeploy affected devices. A
+server-certificate rotation needs device
+re-onboarding so the current trust anchor is delivered at runtime, but no
+package rebuild. The final check also compares the live certificate with the
+public copy distributed during onboarding; it never compares certificate age
+with a package.
 
 ## Commit message format
 

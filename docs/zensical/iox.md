@@ -37,14 +37,23 @@ credential in an artifact URL.
 | `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
-| `device/iox/rebake_iris_tar.py` | Updates an existing IOx package's content. |
+| `device/iox/rebake_iris_tar.py` | Legacy content rewriter for unsigned IOx packages; refuses signed packages. |
 
 ## Runtime behavior
 
 The IOx agent follows the same catalog and staging model as the Guest Shell
 agent. It downloads resumable swarm data under the CAF persistent directory
-(`/iox_data/iris` on the validated Catalyst 9300 runtime). The hand-off of the verified
-scratch file to IOS depends on the platform:
+(`/iox_data/iris` on the validated Catalyst 9300 runtime).
+
+The IOx package contains no deployment certificate. On every onboarding,
+`device/iox/install.sh` validates the current public certificate from the
+served artifacts directory, pushes it with the package, and uses IOS-XE's
+`app-hosting data` channel to place it in the app's application-data directory
+after installation and before activation. The entrypoint requires and validates
+that runtime-delivered certificate before it starts either the catalog client
+or the aria2 tracker client.
+
+The hand-off of the verified scratch file to IOS depends on the platform:
 
 - **Catalyst 9300 (share mount)**: onboarding bind-mounts the app-hosting SSD share —
   `usbflash1:iox_host_data_share`, host-side `/vol/usb1/iox_host_data_share` —
@@ -134,24 +143,25 @@ selected platform back to the canonical index/archive/source digests.
 
 ```bash
 # Docker image only
-CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
+device/iox/build.sh --image-only
 
 # Docker image plus Cisco iris-arm64.tar package (requires ioxclient)
-CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+device/iox/build.sh device/iox/out
 
 # x86_64 Catalyst package
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
-  CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+  device/iox/build.sh device/iox/out
 ```
 
-`CATALOG_PEM` must be the certificate block **only** — the public cert IRIS
-hands to devices, never the server's combined cert+key file (`IRIS_CERT`).
-The build refuses a file carrying a private-key block, and only CERTIFICATE
-blocks reach the image. The same cert-only bytes are packaged a second time
-as a top-level `iris-catalog.pem` inside `artifacts.tar.gz`: that is the
-pinned-cert probe member `tools/check-package-freshness.sh` and the console's
-Setup "device packages" card read, so a served package can be checked
-against the live certificate without unpacking its image.
+The build deliberately accepts no `CATALOG_PEM`, `CATALOG_PEM_URL`, or
+certificate fingerprint input. The canonical OCI image and the native IOx/XR
+wrappers contain no deployment-specific trust material, so one signed package
+can be used across deployments. The current public certificate remains a
+required onboarding input and never includes the server's private key.
+
+Rebuild the canonical image and every native wrapper after a change to source
+included in the shared device image. Certificate rotation alone is not a
+package source change and does not require a rebuild.
 
 The common device-image builder and `device/iox/build.sh` never download
 `aria2c`. The binary is a handed-in
@@ -192,30 +202,51 @@ On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
 `tools/ioxclient.sha256` and refusing a mismatch or an unrecorded version
 (`IOXCLIENT_SKIP_VERIFY=1` is the explicit one-off escape hatch, which prints
 the sha256 to record); that binary is git-ignored and not embedded in the
-repository or seed-server image. The helper retrieves the live catalog
-certificate from the running `iris` container, builds a package that pins it,
-and places the result in `/srv/artifacts`. When the served host directory is not
-writable by the invoking user — the normal case, since the server runs as uid
-10001 and its artifacts directory is owned by that uid — the helper places the
-package with `docker cp` rather than requiring a host ownership change. On an
-amd64 server, the arm64 build registers Docker's ARM64 emulation handler when
-it is missing, using the audited `tonistiigi/binfmt` image digest supplied via
-the required `BINFMT_IMAGE_DIGEST` environment variable; with the digest unset
-the build fails closed rather than pull an unpinned image.
+repository or seed-server image. The helper does not retrieve a catalog
+certificate for the build. It builds the deployment-neutral package and places
+it with its provenance manifest in `/srv/artifacts`. When the served host
+directory is not writable by the invoking user — the normal case, since the
+server runs as uid 10001 and its artifacts directory is owned by that uid —
+the helper places both files with `docker cp` rather than requiring a host
+ownership change. On an amd64 server, the arm64 build registers Docker's ARM64
+emulation handler when it is missing, using the audited `tonistiigi/binfmt`
+image digest supplied via the required `BINFMT_IMAGE_DIGEST` environment
+variable; with the digest unset the build fails closed rather than pull an
+unpinned image. The helper only builds and places artifacts; it never contacts
+or changes a device.
 
-Rebuild both packages after rotating the server certificate, because each
-package contains the pinned catalog certificate. The helper only builds and
-places artifacts; it never contacts or changes a device.
+After a server certificate rotation, re-onboard each deployed IOx app so the
+installer delivers the current public certificate as application data. The
+package itself remains valid and does not need rebuilding.
 
-To check whether a served package is already stale — including after a
-catalog certificate change nobody triggered locally, such as a rebuilt server
-or a fresh volume — run the read-only `tools/check-package-freshness.sh`
-(`--rebuild` fixes what it finds), or check the console's Settings → Setup
-page, which surfaces the same drift per package. See
+Check served package readiness with `tools/check-package-freshness.sh`, or in
+the Console's Settings → Device packages page backed by the setup-status API.
+A ready package has readable wrapper bytes matching its adjacent
+canonical-image provenance; this does not inspect package contents, validate a
+native signature, or compare the package against certificate age. The same
+status separately verifies that the certificate served by the live catalog
+matches the public copy available to onboarding.
+See
 [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 ## Artifact handling
 
-`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong under
-`artifacts/` for serving. The server container serves them but does not rebuild
-or mutate them automatically.
+`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong
+under `artifacts/` for serving. Keep each adjacent `.manifest` with its package;
+the readiness check binds the served bytes to that provenance. The server
+container serves them but does not rebuild or mutate them automatically.
+
+Treat a signed wrapper as immutable. If native signing changes the wrapper
+bytes, publish the signed output with a manifest recording that output's
+SHA-256 while retaining its canonical image provenance. A manifest for the
+unsigned input will correctly report a digest mismatch beside the signed
+output. This manifest is a readiness check, not a signature or an attestation
+from the signer; native signature verification remains the platform's job.
+The IOx installer keeps app-hosting verification enabled when the tar carries
+signature metadata.
+
+`device/iox/rebake_iris_tar.py` is only for legacy unsigned packages. It refuses
+to rewrite a package containing `package.sign` or `package.cert`, including
+inside nested archives. For a source change, rebuild from source and obtain a
+new signature. For a certificate change, re-onboard using the existing package
+so the installer replaces only the runtime trust file.

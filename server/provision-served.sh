@@ -67,7 +67,12 @@ fi
 # config volume, no decrypt needed). Refresh every start so a rotated cert
 # propagates to what onboarding serves.
 if [ -f "$CRT" ]; then
+  # Public certificate only: keep it host-readable so direct CLI onboarding
+  # can deliver artifacts/iris-catalog.pem even when the container's private
+  # umask is 077. The corresponding key remains only
+  # in encrypted config/tmpfs and is never copied here.
   cp "$CRT" "$ART/.iris-catalog.pem.tmp" \
+    && chmod 0644 "$ART/.iris-catalog.pem.tmp" \
     && stage_atomic "$ART/.iris-catalog.pem.tmp" iris-catalog.pem
   echo "provision-served: staged iris-catalog.pem (server cert)"
 else

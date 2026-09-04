@@ -632,7 +632,15 @@ def _json_success_example(route):
         "/images/upload/{filename}": {"job_id": "job-01"},
         "/images/jobs/{job_id}": {"id": "job-01", "state": "done",
                                         "filename": "image.bin",
-                                        "image_id": None},
+                                        "image_id": "image-01",
+                                        "message": "",
+                                        "finished_at": 1788470412,
+                                        "verification": {
+                                            "outcome": "ok",
+                                            "image_state": "verified",
+                                            "matched": 1,
+                                            "mismatched": 0,
+                                            "not_in_feed": 0}},
         "/images/{image_id}": {"deleted": True, "warnings": []},
         "/images/{image_id}/release-quarantine": {
             "released": True, "override": False, "state": "verified",
@@ -741,8 +749,19 @@ def _json_success_example(route):
             "packages": {"state": "ok",
                          "reference_fingerprint": "00:" * 31 + "00",
                          "items": [{"name": "iris-amd64.tar",
-                                    "state": "ok"}],
-                         "remedy": "Rebuild stale device packages"},
+                                    "state": "ok",
+                                    "fingerprint": None,
+                                    "built_at": 1788470400,
+                                    "detail": "Package bytes match build provenance",
+                                    "remedy": "tools/provision-iox-packages.sh",
+                                    "provenance": {
+                                        "canonical_index_digest":
+                                            "sha256:" + "00" * 32,
+                                        "canonical_archive_sha256":
+                                            "11" * 32,
+                                        "canonical_source_sha256":
+                                            "22" * 32}}],
+                         "remedy": "tools/provision-iox-packages.sh"},
             "image_verification": {"state": "ok"}},
         "/settings/image-verification": {
             "mode": "daily", "hour_utc": 3,
@@ -923,6 +942,130 @@ def _success(route):
                 "examples": {
                     "configured": {"value": configured},
                     "firstRun": {"value": initial}}}}}
+    if suffix == "/images/jobs/{job_id}":
+        # Publish jobs deliberately expose the durable publish and the
+        # follow-on Cisco hash reconciliation as separate phases.  A schema
+        # inferred from only the terminal success example is too narrow: the
+        # same polling endpoint also returns nullable fields while publishing,
+        # a compact running-verification object, and terminal publish or
+        # verification failures.  Keep those wire shapes explicit here.
+        title = _operation_name(route, suffix) + "Response"
+        image_state = {
+            "type": ["string", "null"],
+            "enum": ["verified", "mismatch", "not_in_feed", None],
+        }
+        verification_ok = {
+            "title": title + "VerificationSuccess",
+            "type": "object",
+            "properties": {
+                "outcome": {"type": "string", "const": "ok"},
+                "image_state": image_state,
+                "matched": {"type": ["integer", "null"], "minimum": 0},
+                "mismatched": {"type": ["integer", "null"], "minimum": 0},
+                "not_in_feed": {"type": ["integer", "null"], "minimum": 0},
+            },
+            "required": ["outcome", "image_state", "matched",
+                         "mismatched", "not_in_feed"],
+            "additionalProperties": False,
+        }
+        verification_failure = {
+            "title": title + "VerificationFailure",
+            "type": "object",
+            "properties": {
+                "outcome": {"type": "string",
+                            "enum": ["fail", "already_running"]},
+                "image_state": image_state,
+                "detail": {"type": "string"},
+            },
+            "required": ["outcome", "image_state", "detail"],
+            "additionalProperties": False,
+        }
+        verification_running = {
+            "title": title + "VerificationRunning",
+            "type": "object",
+            "properties": {
+                "outcome": {"type": "string", "const": "running"},
+                "image_state": image_state,
+            },
+            "required": ["outcome", "image_state"],
+            "additionalProperties": False,
+        }
+        common = {
+            "id": {"type": "string"},
+            "filename": {"type": "string"},
+            "message": {"type": "string"},
+            "started_at": {"type": "integer"},
+        }
+        required = ["id", "state", "filename", "message", "image_id",
+                    "started_at", "finished_at", "verification"]
+
+        def phase_schema(name, state, image_id, finished_at, verification):
+            properties = dict(common)
+            properties.update({
+                "state": {"type": "string", "const": state},
+                "image_id": image_id,
+                "finished_at": finished_at,
+                "verification": verification,
+            })
+            return {
+                "title": title + name,
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": True,
+            }
+
+        nullable_string = {"type": ["string", "null"]}
+        null_only = {"type": "null"}
+        publishing_schema = phase_schema(
+            "Publishing", "publishing", null_only, null_only, null_only)
+        verifying_schema = phase_schema(
+            "Verifying", "verifying", {"type": "string"}, null_only,
+            verification_running)
+        done_schema = phase_schema(
+            "Done", "done", {"type": "string"}, {"type": "integer"},
+            {"oneOf": [verification_ok, verification_failure, null_only]})
+        error_schema = phase_schema(
+            "Error", "error", nullable_string, {"type": "integer"},
+            null_only)
+
+        publishing = {
+            "id": "job-01", "state": "publishing", "filename": "image.bin",
+            "message": "", "image_id": None, "started_at": 1788470400,
+            "finished_at": None, "verification": None,
+        }
+        verifying = dict(
+            publishing, state="verifying", image_id="image-01",
+            verification={"outcome": "running", "image_state": None})
+        verified = dict(
+            verifying, state="done", finished_at=1788470412,
+            verification={"outcome": "ok", "image_state": "verified",
+                          "matched": 1, "mismatched": 0,
+                          "not_in_feed": 0})
+        verification_failed = dict(
+            verified,
+            message="published, but Cisco hash verification did not complete",
+            verification={"outcome": "fail", "image_state": None,
+                          "detail": "feed unavailable"})
+        publish_failed = dict(
+            publishing, state="error", message="publish failed",
+            finished_at=1788470401)
+        return "200", {
+            "description": (
+                "Current publish phase and, after the durable publish, the "
+                "Cisco Bulk Hash reconciliation result"),
+            "content": {"application/json": {
+                "schema": {"oneOf": [publishing_schema, verifying_schema,
+                                     done_schema, error_schema]},
+                "examples": {
+                    "publishing": {"value": publishing},
+                    "verifying": {"value": verifying},
+                    "verified": {"value": verified},
+                    "verificationFailed": {"value": verification_failed},
+                    "publishFailed": {"value": publish_failed},
+                },
+            }},
+        }
     if suffix == "/swarm":
         normal = _json_success_example(route)
         paged = dict(normal, peers_total=1, peers_offset=0, peers_limit=100)
@@ -1025,6 +1168,28 @@ def _success(route):
         packages = schema["properties"]["packages"]
         packages["properties"]["reference_fingerprint"] = {
             "type": ["string", "null"]}
+        packages["properties"]["state"]["enum"] = [
+            "ok", "absent", "unknown", "stale"]
+        packages["properties"]["reason"] = {
+            "type": "string", "enum": [
+                "served-cert-unavailable", "distributed-cert-unavailable",
+                "served-vs-distributed-mismatch"]}
+        item = packages["properties"]["items"]["items"]
+        item["properties"]["state"]["enum"] = [
+            "ok", "absent", "unknown", "stale"]
+        item["properties"]["built_at"]["type"] = ["integer", "null"]
+        item["properties"]["built_at"]["description"] = (
+            "Artifact file modification time as Unix seconds; the legacy "
+            "field name does not attest the original package build time.")
+        item["properties"]["fingerprint"]["description"] = (
+            "Legacy field, null for deployment-neutral packages; runtime "
+            "trust is reported by packages.reference_fingerprint.")
+        item["properties"]["provenance"]["type"] = ["object", "null"]
+        item["properties"]["reason"] = {"type": "string"}
+        item["required"] = [
+            "name", "state", "fingerprint", "built_at", "remedy",
+            "provenance"]
+        item["additionalProperties"] = False
     elif suffix == "/settings/telemetry-destination" and \
             "endpoint" in schema["properties"]:
         schema["properties"]["endpoint"]["format"] = "uri"
@@ -1257,7 +1422,7 @@ def _service_server(service):
         "console": {"url": "https://iris.example", "description": "Operator console BFF"},
         "management": {"url": "https://iris-server:9443", "description": "Internal management API"},
         "catalog": {"url": "https://iris.example:8443", "description": "Device catalog"},
-        "tracker": {"url": "http://iris.example:6969", "description": "BEP tracker v1 compatibility listener"},
+        "tracker": {"url": "https://iris.example:6969", "description": "TLS BEP tracker v1 listener"},
         "artifact": {"url": "https://iris.example:8000", "description": "Artifact service"},
         "telemetry": {"url": "https://iris.example:9101", "description": "TLS telemetry listener"},
     }[service]
@@ -1354,7 +1519,7 @@ def _description(route):
         else:
             notes.append("HTTP Basic username is device_id and password is that same device's current/overlap catalog token; authentication precedes path translation and existence checks.")
     elif route.service == "tracker":
-        notes.append("Bearer Authorization is preferred and disables fallback. Query credentials remain only for unchanged Guest Shell aria2 bundles; the v1 BEP transport, bencoded errors, and HTTP listener are protocol compatibility exceptions.")
+        notes.append("The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.")
         if route.path == "/scrape":
             notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. Seeder service and time-bounded unattributed legacy principals retain compatibility-wide visibility.")
     path_exception = _resource_path_exception(route)
@@ -1403,7 +1568,7 @@ def build_document():
         "x-iris-retained-v1-exceptions": {
             "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
             "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
-            "trackerTransport": "Port 6969 remains HTTP for existing BEP/embedded clients. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for unchanged Guest Shell bundles and are never logged. TLS conversion requires coordinated device trust deployment.",
+            "trackerTransport": "Port 6969 is HTTPS-only and uses the server certificate already pinned by device agents. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for Guest Shell compatibility, are protected by TLS, and are never logged.",
             "guestShellArtifacts": "Unchanged IOS Guest Shell copy HTTPS cannot attach resource-bound Basic auth. Four explicit static files and two high-entropy, time-swept staging filename forms remain available through the legacy root paths; new clients use /v1/devices/{device_id}/artifacts/{artifact_path}.",
             "resourcePaths": "Several shipped console paths contain verbs; replacements are breaking and are deferred to a future major version.",
             "pagination": "Devices and audit expose their established paging shapes. Other v1 collections are assignment-bounded or compatibility whole collections and do not claim pagination.",

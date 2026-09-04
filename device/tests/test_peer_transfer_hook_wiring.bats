@@ -46,6 +46,7 @@ run_start_aria2c() {
     ARIA2="'"$TMPD"'/bin/aria2c-stub"
     RPC_PORT=6800; MAX_PEERS=10; MAX_CONCURRENT=100; STAGE_DIR="'"$TMPD"'/stage"
     ARIA2_CONF="'"$TMPD"'/aria2.conf"
+    TRACKER_CA="'"$TMPD"'/stage/iris-catalog.pem"
     HOOK="'"$1"'"
     eval "$(awk "/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/" "'"$ENTRYPOINT"'")"
     ARIA2_PID=""; ARIA2_START=""
@@ -83,6 +84,8 @@ run_start_aria2c() {
   [[ "$out" == *"--enable-dht=false"* ]] || return 1
   [[ "$out" == *"--bt-seed-unverified=true"* ]] || return 1
   [[ "$out" == *"--conf-path=$TMPD/aria2.conf"* ]] || return 1
+  [[ "$out" == *"--ca-certificate=$TMPD/stage/iris-catalog.pem"* ]] || return 1
+  [[ "$out" == *"--check-certificate=true"* ]] || return 1
   [[ "$out" != *"supervisorsecret"* ]] || return 1
   grep -qx 'rpc-secret=supervisorsecret' "$TMPD/aria2.conf" || return 1
   [[ "$out" == *"--dir=$TMPD/stage"* ]]

@@ -155,13 +155,19 @@ _run_builder() {
 
 @test "a verified deliverable is accepted and staged (arm64, checksum matches)" {
   _build_stub_setup
+  cat > "$BIN/docker" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+  chmod +x "$BIN/docker"
   run _run_builder
-  # Both staging passes succeed and the run fails at the next independent
-  # input (the pinned certificate), before Docker can run.
+  # Both staging passes succeed and the run reaches the next independent
+  # prerequisite. No deployment certificate is a build input.
   [ "$status" -ne 0 ]
   [[ "$output" != *"CHECKSUM MISMATCH"* ]]
   [[ "$output" != *"no checksum-pinned aria2c"* ]]
-  [[ "$output" == *"CATALOG_PEM_URL"* ]]
+  [[ "$output" == *"docker buildx is required"* ]]
+  [[ "$output" != *"CATALOG_PEM"* ]]
 }
 
 @test "bundle-reused aria2c is also checksum-verified (mismatch fails closed, arm64)" {

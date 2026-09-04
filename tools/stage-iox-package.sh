@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Build the per-deployment IRIS IOx package and PLACE it in the artifacts dir
+# Build the deployment-neutral IRIS IOx package and PLACE it in the artifacts dir
 # so Console onboarding can serve it. This is a SERVER/HOST-side helper only:
 # it builds a tar and copies it into the artifacts directory. It NEVER installs,
 # activates, reloads, or otherwise touches a device (stage-only invariant).
@@ -19,8 +19,7 @@
 #                           host bind mount ${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}
 #                           relative to server/ (i.e. <repo>/artifacts).
 #
-# All the cert/fingerprint inputs build.sh needs (CATALOG_PEM or
-# CATALOG_PEM_URL + CATALOG_PEM_FINGERPRINT, IOXCLIENT) pass through the env.
+# IOXCLIENT passes through the environment.
 # BINFMT_IMAGE_DIGEST is required only when arm64 emulation must be installed;
 # set it to the audited sha256 digest for tonistiigi/binfmt (without an image tag).
 set -euo pipefail
@@ -100,45 +99,43 @@ if [ ! -d "$ARTIFACTS_DIR" ] || [ ! -w "$ARTIFACTS_DIR" ]; then
     exit 1
   fi
 fi
-CATALOG_PEM_TMP=""
-if [ -z "${CATALOG_PEM:-}" ] && [ -z "${CATALOG_PEM_URL:-}" ]; then
-  if docker inspect "$IRIS_CONTAINER" >/dev/null 2>&1; then
-    CATALOG_PEM_TMP="$(mktemp)"
-    CATALOG_PEM="$CATALOG_PEM_TMP"
-    docker cp "$IRIS_CONTAINER:/srv/artifacts/iris-catalog.pem" "$CATALOG_PEM_TMP"
-  else
-    echo "!! set CATALOG_PEM (path to the server cert) or CATALOG_PEM_URL +" >&2
-    echo "   CATALOG_PEM_FINGERPRINT so build.sh can bake the pinned catalog cert" >&2
-    exit 1
-  fi
-fi
 if [ ! -x "$IOXCLIENT" ]; then
   "$REPO/tools/get-ioxclient.sh" "$(dirname "$IOXCLIENT")"
 fi
 
 echo ">> building IOx package (arch=$ARCH -> $PKG_NAME)"
 BUILD_OUT="$(mktemp -d)"
-trap 'rm -rf "$BUILD_OUT" "$CATALOG_PEM_TMP"' EXIT
-CATALOG_PEM="$CATALOG_PEM" IOX_ARCH="$ARCH" PACKAGE_NAME="$PKG_NAME" IOXCLIENT="$IOXCLIENT" \
+trap 'rm -rf "$BUILD_OUT"' EXIT
+IOX_ARCH="$ARCH" PACKAGE_NAME="$PKG_NAME" IOXCLIENT="$IOXCLIENT" \
   bash "$BUILD" "$BUILD_OUT"
 
 SRC="$BUILD_OUT/$PKG_NAME"
-[ -f "$SRC" ] || { echo "!! build did not produce $SRC" >&2; exit 1; }
+MANIFEST_SRC="$SRC.manifest"
+[ -f "$SRC" ] && [ -f "$MANIFEST_SRC" ] \
+  || { echo "!! build did not produce $SRC and its provenance manifest" >&2; exit 1; }
 
 if [ "$PLACE_WITH_DOCKER" -eq 1 ]; then
   # Same atomic discipline as the host branch below: a device fetching the
   # package mid-copy must read the old file or the new one, never a torn one.
   docker cp "$SRC" "$IRIS_CONTAINER:/srv/artifacts/.$PKG_NAME.tmp"
+  docker cp "$MANIFEST_SRC" "$IRIS_CONTAINER:/srv/artifacts/.$PKG_NAME.manifest.tmp"
+  docker exec "$IRIS_CONTAINER" rm -f "/srv/artifacts/$PKG_NAME.manifest"
   docker exec "$IRIS_CONTAINER" mv -f "/srv/artifacts/.$PKG_NAME.tmp" "/srv/artifacts/$PKG_NAME"
+  docker exec "$IRIS_CONTAINER" mv -f "/srv/artifacts/.$PKG_NAME.manifest.tmp" "/srv/artifacts/$PKG_NAME.manifest"
   echo ">> staged $PKG_NAME -> $IRIS_CONTAINER:/srv/artifacts/$PKG_NAME"
-  docker exec "$IRIS_CONTAINER" ls -la "/srv/artifacts/$PKG_NAME"
+  docker exec "$IRIS_CONTAINER" ls -la "/srv/artifacts/$PKG_NAME" "/srv/artifacts/$PKG_NAME.manifest"
 else
   # Atomic-friendly placement: copy to a temp name in the destination dir, then
   # rename into the served path (mirrors provision-served.sh staging discipline).
   DEST="$ARTIFACTS_DIR/$PKG_NAME"
   TMP_DEST="$ARTIFACTS_DIR/.$PKG_NAME.tmp"
+  MANIFEST_DEST="$DEST.manifest"
+  MANIFEST_TMP_DEST="$ARTIFACTS_DIR/.$PKG_NAME.manifest.tmp"
   cp "$SRC" "$TMP_DEST"
+  cp "$MANIFEST_SRC" "$MANIFEST_TMP_DEST"
+  rm -f "$MANIFEST_DEST"
   mv -f "$TMP_DEST" "$DEST"
+  mv -f "$MANIFEST_TMP_DEST" "$MANIFEST_DEST"
   echo ">> staged $PKG_NAME -> $DEST"
-  ls -la "$DEST"
+  ls -la "$DEST" "$MANIFEST_DEST"
 fi

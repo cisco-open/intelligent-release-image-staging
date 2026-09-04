@@ -361,3 +361,6 @@ Back up the PVC and the age identity together, plus both operator-managed token
 pairs and both TLS identities. Changing the server external IP requires
 coordinated device trust and torrent announce updates; changing only the
 Service address leaves the existing certificate and announce URLs stale.
+The tracker listener on TCP 6969 is HTTPS and terminates TLS in the server pod
+with that same device-pinned certificate; the LoadBalancer is layer 4 and must
+not terminate or replace it.

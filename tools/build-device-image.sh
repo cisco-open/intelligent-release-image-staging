@@ -36,7 +36,6 @@ done
 # into a supposedly source-exact build context. Wrappers always pass a private
 # mktemp directory; direct callers get the same clean-context guarantee.
 for owned in agent agent_bin Dockerfile entrypoint.sh reconcile.sh \
-  iris-catalog.pem iris-catalog.pem.cert-only \
   iris-device-oci-path iris-device-oci.manifest; do
   { [ ! -e "$CONTEXT_DIR/$owned" ] && [ ! -L "$CONTEXT_DIR/$owned" ]; } || {
     echo "!! context contains pre-existing builder-owned path: $CONTEXT_DIR/$owned" >&2
@@ -108,35 +107,9 @@ for tuple in "amd64:x86_64:iris-agent.tgz" "arm64:aarch64:iris-agent-arm.tgz"; d
   chmod +x "$dest"
 done
 
-if [ -n "${CATALOG_PEM:-}" ]; then
-  cp "$CATALOG_PEM" "$CONTEXT_DIR/iris-catalog.pem"
-else
-  : "${CATALOG_PEM_URL:?set CATALOG_PEM_URL or provide CATALOG_PEM}"
-  : "${CATALOG_PEM_FINGERPRINT:?set CATALOG_PEM_FINGERPRINT for fetched catalog cert}"
-  curl -fsS --insecure "$CATALOG_PEM_URL" -o "$CONTEXT_DIR/iris-catalog.pem"
-  got="$(openssl x509 -noout -fingerprint -sha256 -in "$CONTEXT_DIR/iris-catalog.pem" \
-    | sed 's/.*Fingerprint=//' | tr -d ' \r' | tr '[:lower:]' '[:upper:]')"
-  want="$(printf '%s' "$CATALOG_PEM_FINGERPRINT" \
-    | sed 's/^[Ss][Hh][Aa]256[: ]*[Ff][Ii][Nn][Gg][Ee][Rr][Pp][Rr][Ii][Nn][Tt]=//; s/^[Ss][Hh][Aa]256://' \
-    | tr -d ' \r' | tr '[:lower:]' '[:upper:]')"
-  [ "$got" = "$want" ] || { echo "!! catalog cert fingerprint mismatch" >&2; exit 1; }
-fi
-grep -q 'BEGIN CERTIFICATE' "$CONTEXT_DIR/iris-catalog.pem" \
-  || { echo "!! bad cert: no certificate block found" >&2; exit 1; }
-if grep -q 'BEGIN.*PRIVATE KEY' "$CONTEXT_DIR/iris-catalog.pem"; then
-  echo "!! CATALOG_PEM contains a PRIVATE KEY block -- refusing to build" >&2
-  echo "   extract only the public certificate, for example: openssl x509 -in $(basename "${CATALOG_PEM:-input.pem}") -out iris-catalog.pem" >&2
-  exit 1
-fi
-sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
-  "$CONTEXT_DIR/iris-catalog.pem" > "$CONTEXT_DIR/iris-catalog.pem.cert-only"
-mv "$CONTEXT_DIR/iris-catalog.pem.cert-only" "$CONTEXT_DIR/iris-catalog.pem"
-grep -q 'BEGIN CERTIFICATE' "$CONTEXT_DIR/iris-catalog.pem" \
-  || { echo "!! cert normalization produced no certificate" >&2; exit 1; }
-
 SOURCE_SHA256="$(cd "$CONTEXT_DIR" && {
   find agent agent_bin -type f -print
-  printf '%s\n' Dockerfile entrypoint.sh reconcile.sh iris-catalog.pem
+  printf '%s\n' Dockerfile entrypoint.sh reconcile.sh
 } | LC_ALL=C sort | while read -r path; do
   printf '%s  %s\n' "$(sha256sum "$path" | awk '{print $1}')" "$path"
 done | sha256sum | awk '{print $1}')"

@@ -121,6 +121,102 @@ def test_start_publish_runs_and_completes(tmp_path):
     assert calls["tracker_url"] == "http://t:6969/announce?key=k"
 
 
+def test_start_publish_exposes_verification_phase_and_result(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_publish(image_path, store, tracker_url, **kw):
+        entry = {"id": "img1", "filename": "img.bin", "size": 5,
+                 "sha256": "ab" * 32, "sha512": "cd" * 64,
+                 "info_hash_hex": "ef" * 20, "published_at": 1}
+        store.save_image(entry)
+        return entry
+
+    def verify(entry):
+        assert entry["id"] == "img1"
+        entered.set()
+        assert release.wait(timeout=3)
+        svc._store().apply_hash_verification(
+            {"img1": {"state": "verified", "feed_sha512": "cd" * 64,
+                      "publish_date": "2026-09-04", "deferral": False}},
+            source="manual", now=1001)
+        return {"outcome": "ok", "matched": 1, "mismatched": 0,
+                "not_in_feed": 0}
+
+    svc = gui_images.ImageService(
+        str(tmp_path / "state"), str(tmp_path / "imgs"),
+        tracker_url_fn=lambda: "http://t:6969/announce?key=k",
+        publish_fn=fake_publish, verification_fn=verify)
+    p = svc.image_path("img.bin")
+    open(p, "wb").close()
+    job_id = svc.start_publish(p)
+    assert entered.wait(timeout=3)
+    running = svc.get_job(job_id)
+    assert running["state"] == "verifying"
+    assert running["image_id"] == "img1"
+    assert running["verification"] == {"outcome": "running",
+                                        "image_state": None}
+    assert running["finished_at"] is None
+
+    release.set()
+    done = _wait_job(svc, job_id)
+    assert done["state"] == "done"
+    assert done["verification"] == {
+        "outcome": "ok", "image_state": "verified", "matched": 1,
+        "mismatched": 0, "not_in_feed": 0}
+
+
+def test_verification_failure_does_not_falsely_report_publish_failure(tmp_path):
+    def fake_publish(image_path, store, tracker_url, **kw):
+        entry = {"id": "img1", "filename": "img.bin", "size": 5,
+                 "sha256": "ab" * 32, "sha512": "cd" * 64,
+                 "info_hash_hex": "ef" * 20, "published_at": 1}
+        store.save_image(entry)
+        return entry
+
+    svc = gui_images.ImageService(
+        str(tmp_path / "state"), str(tmp_path / "imgs"),
+        tracker_url_fn=lambda: "http://t:6969/announce?key=k",
+        publish_fn=fake_publish,
+        verification_fn=lambda _entry: {
+            "outcome": "fail", "detail": "feed unavailable",
+            "matched": None, "mismatched": None, "not_in_feed": None})
+    p = svc.image_path("img.bin")
+    open(p, "wb").close()
+    job = _wait_job(svc, svc.start_publish(p))
+
+    # Publishing is durable even though its follow-on verification failed.
+    # Keep that distinction explicit while surfacing the integrity failure.
+    assert job["state"] == "done"
+    assert job["image_id"] == "img1"
+    assert job["verification"] == {
+        "outcome": "fail", "image_state": None,
+        "detail": "feed unavailable"}
+    assert job["message"] == (
+        "published, but Cisco hash verification did not complete: "
+        "feed unavailable")
+    assert svc.get_image("img1") is not None
+
+
+def test_publish_failure_never_starts_verification(tmp_path):
+    calls = []
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("publish failed")
+
+    svc = gui_images.ImageService(
+        str(tmp_path / "state"), str(tmp_path / "imgs"),
+        tracker_url_fn=lambda: "http://t:6969/announce?key=k",
+        publish_fn=boom,
+        verification_fn=lambda entry: calls.append(entry))
+    p = svc.image_path("img.bin")
+    open(p, "wb").close()
+    job = _wait_job(svc, svc.start_publish(p))
+    assert job["state"] == "error"
+    assert job["verification"] is None
+    assert calls == []
+
+
 def test_start_publish_error_when_no_tracker_url(tmp_path):
     def fake_publish(*a, **k):
         raise AssertionError("must not be called without a tracker url")
@@ -487,7 +583,7 @@ def test_publish_records_the_source_directory(tmp_path):
     img.write_bytes(b"bytes")
     store = gui_images.ImageService(str(tmp_path / "state"),
                                     str(tmp_path / "imgs"))._store()
-    entry = publish.publish(str(img), store, "http://t:6969/announce?key=k",
+    entry = publish.publish(str(img), store, "https://10.0.0.5:6969/announce",
                             seeder=lambda b, d: seeded.setdefault("dir", d))
     assert entry["source_dir"] == str(root)
     assert store.get_image(entry["id"])["source_dir"] == str(root)

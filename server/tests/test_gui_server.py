@@ -160,6 +160,27 @@ def test_import_from_disk_panel_wired():
     assert "refreshImages(); refreshImportable();" in js
 
 
+def test_publish_jobs_surface_automatic_hash_verification():
+    """Both disk imports and uploads show the new verifying phase and verdict."""
+    js = _webroot("app.js")
+    result = js.split("function publishedJobText(job) {", 1)[1].split(
+        "\n  function pollJob", 1)[0]
+    assert "job.verification" in result
+    assert "verified against Cisco Bulk Hash" in result
+    assert "Cisco hash mismatch — quarantined" in result
+    assert "not found in Cisco Bulk Hash feed" in result
+    assert "Cisco hash verification incomplete" in result
+    disk_poll = js.split("function pollJob(jobId) {", 1)[1].split(
+        "\n  // Images already on disk", 1)[0]
+    assert "j.state === 'verifying'" in disk_poll
+    assert "checking Cisco Bulk Hash" in disk_poll
+    upload_poll = js.split("function pollUploadJob(jobId, ui) {", 1)[1].split(
+        "\n  function upload(file)", 1)[0]
+    assert "j.state === 'verifying'" in upload_poll
+    assert "ui.verifying()" in upload_poll
+    assert "ui.done(publishedJobText(j))" in upload_poll
+
+
 def test_bulk_row_actions_wired():
     """Adopt/delete selected and a bulk credential assign, with a confirmation
     on the destructive delete. Per-row action links were removed by the
@@ -565,6 +586,29 @@ def test_settings_uses_sidebar_feature_submenus():
     # the router owns sub-page selection: #settings/<sub> deep-links resolve
     assert "showSettingsSub(" in js
     assert "settings-submenu" in js
+
+
+def test_device_packages_have_a_persistent_settings_view():
+    """Package readiness remains inspectable after first-run setup closes."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'href="#settings/packages"' in html
+    assert 'id="nav-settings-packages"' in html
+    assert 'id="settings-pane-packages" hidden' in html
+    assert 'id="device-packages-table"' in html
+    assert 'id="device-packages-recheck"' in html
+    assert "SETTINGS_SUBS.push('packages')" in js
+    assert "if (sub === 'packages') refreshDevicePackages();" in js
+    refresh = js.split("async function refreshDevicePackages() {", 1)[1].split(
+        "\n  document.getElementById('device-packages-recheck')", 1)[0]
+    assert "'/api/v1/settings/setup-status'" in refresh
+    assert "renderPackageStatus(s.packages" in refresh
+    # Setup, wizard and the operational view all use one row/remedy renderer.
+    assert js.count("renderPackageStatus(") >= 5
+    assert "if (i.state !== 'ok' && i.remedy" in js
+    assert "i.detail || i.reason || ''" in js
+    assert "deployment-neutral" in html
+    assert "pins this server's certificate when they are built" not in html
 
 
 def test_read_version_env_handling(monkeypatch):
@@ -7465,7 +7509,23 @@ def test_agent_install_rename_and_inventory_only_label():
     assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
     assert "'Agent install updated for '" in js
     assert "'Agent install update failed: '" in js
-    assert "['Agent install', esc(res.platform" in js
+    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+
+
+def test_agent_install_labels_name_the_runtime_not_router_networking():
+    """The `router` recipe runs Guest Shell; VPG is a management choice."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    label_fn = js.split("function agentInstallLabel(platform) {", 1)[1].split(
+        "\n  }", 1)[0]
+    label_map = js.split("var AGENT_INSTALL_LABELS = {", 1)[1].split("\n  };", 1)[0]
+    assert "router: 'Guest Shell'" in label_map
+    assert "AGENT_INSTALL_LABELS[platform]" in label_fn
+    assert "var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;" in js
+    assert "Router (VPG)" not in html + js
+    assert "Router (Guest Shell via VirtualPortGroup)" not in html + js
+    assert '<option value="router">Guest Shell</option>' in html
+    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
 
 
 def test_add_device_form_model_field_precedes_agent_install_select():
@@ -8253,7 +8313,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     harmless extra prompt, not a special case to detect."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
     assert "!imgIds.length" in bulk_handler
     assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
         in bulk_handler
@@ -8277,8 +8337,8 @@ def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
-    assert "Selected devices have differing assignments" in bulk_handler
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
+    assert "Some selected devices are missing assignments present on others" in bulk_handler
     assert "sets.some(" in bulk_handler
     # the picker itself resets any stale note on every open, so a note left
     # over from one bulk pick never bleeds into the next (bulk or per-row)
@@ -8294,24 +8354,28 @@ def test_bulk_picker_warns_when_the_sets_merely_overlap():
     got no note and no confirm -- the picker looked complete, Apply posted [A]
     to both, and dev1 lost B with nothing said.
 
-    The rule belongs on the SETS, not their intersection: Apply writes one set
-    to every selected device, so any selection whose assignments are not all
-    identical can drop an image the operator never saw. Both the note and a
-    confirm on Apply now read one shared derivation of that, so they cannot
-    drift into two different rules. Identical sets -- every device unassigned
-    included -- stay a plain, unconfirmed apply."""
+    The pre-picker note belongs on the SETS, not their intersection.  The
+    confirmation, however, belongs on the proposed RESULT: [A,B] + [A] -> [A]
+    removes B and must warn, while [A] + [] -> [A] only adds A and must not
+    claim that the operator is assigning different images. Identical sets --
+    every device unassigned included -- stay a plain, unconfirmed apply."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
     assert "setsDiffer" in bulk_handler
     # the gate is no longer the emptiness of the intersection
     assert "!intersection.length &&" not in bulk_handler, \
         "the note still fires only on an EMPTY intersection"
     assert "if (setsDiffer) {" in bulk_handler
-    # Apply confirms before it replaces differing sets, and cancelling that
-    # confirm releases the shared selected-action lock like every other one.
-    guard = bulk_handler.split("} else if (setsDiffer &&", 1)
-    assert len(guard) == 2, "Apply does not confirm when the sets differ"
+    # Apply confirms only when the checked result omits an existing image, and
+    # cancelling that confirm releases the shared selected-action lock like
+    # every other one. A mixed [A] + [] start followed by [A] is additive and
+    # therefore does not produce a false destructive-change warning.
+    assert "removesAssignment" in bulk_handler
+    derivation = bulk_handler.split("var removesAssignment", 1)[1][:350]
+    assert "sets.some(" in derivation and "imgIds.indexOf(id) === -1" in derivation
+    guard = bulk_handler.split("} else if (removesAssignment &&", 1)
+    assert len(guard) == 2, "Apply does not confirm before removing an assignment"
     assert "confirm(" in guard[1][:200]
     assert "setBulkBusy(false)" in guard[1][:900]
 
@@ -8385,7 +8449,8 @@ def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
     assert "expect[id] = current" in row
     assert "expect: expect" in row
     bulk = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3600]
+        "getElementById('assign-images-selected').addEventListener", 1)[1].split(
+            "getElementById('apply-cred-selected').addEventListener", 1)[0]
     assert "expect[id] = sets[i]" in bulk
     assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
     # device ids are operator-chosen strings, so these maps have no prototype

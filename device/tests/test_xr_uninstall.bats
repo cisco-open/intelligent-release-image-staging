@@ -14,7 +14,7 @@
 # a topical one -- session 1/2 ("setup": early probe, unconditional-but-
 # adjudicated deactivate -- NOTHING destructive to the package or files
 # rides this login) and session 2/2 ("sweep+verify": the destructive
-# commands -- source uninstall, delete the RPM, empty-then-delete the work
+# commands -- source uninstall, delete the RPM and runtime certificate, empty-then-delete the work
 # dir -- PLUS the sidecar sweep (three unconditional harddisk: root globs),
 # PLUS the final three-way verify). Session 2 is composed and sent ONLY when
 # session 1's paired adjudication did NOT conclude the app is a confirmed
@@ -77,10 +77,11 @@ setup() {
   [[ "$output" != *"appmgr package uninstall package"* ]]
 }
 
-@test "dry-run removes the RPM and empties-then-removes the work dir, via native delete /noprompt" {
+@test "dry-run removes the RPM, runtime certificate, and work dir via native delete /noprompt" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/iris-catalog.pem"* ]] || return 1
   [[ "$output" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
   [[ "$output" == *"delete /noprompt harddisk:/iris-work"* ]]
 }
@@ -208,7 +209,9 @@ setup() {
   # router's VirtualPortGroup/NAT can be).
   for line in "show appmgr application-table" "no appmgr application iris" \
               "appmgr package uninstall source iris-xr" \
-              "delete /noprompt harddisk:/iris-xr.rpm" "delete /noprompt harddisk:/iris-work"; do
+              "delete /noprompt harddisk:/iris-xr.rpm" \
+              "delete /noprompt harddisk:/iris-catalog.pem" \
+              "delete /noprompt harddisk:/iris-work"; do
     [[ "$plain" == *"$line"* ]] || return 1
     [[ "$forced" == *"$line"* ]] || return 1
   done
@@ -784,6 +787,7 @@ _xr_call_body() {
   second_call="$(_xr_call_body 2)"
   [[ "$second_call" == *"appmgr package uninstall source iris-xr"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/iris-catalog.pem"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-work"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
@@ -1023,7 +1027,7 @@ _xr_call_body() {
 # same blob and returned the next TYPED line as the "section" ($FILES became
 # the literal string `dir harddisk:`), every residue check read no-match as
 # nothing-there, and the run exited 0 announcing a clean teardown with all
-# seven destructive commands already sent.
+# eight destructive commands already sent.
 #
 # The premise is not exotic. Since the markers became `!` comments they emit no
 # output of their own, so a marker only ever reaches the transcript via the pty
@@ -1203,6 +1207,15 @@ _xr_call_body() {
     12345 -rw-------. 1 root root 1024 Aug 27 12:00 iris-xr.rpm" run _xr_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"iris-xr.rpm"* ]]
+}
+
+@test "live: fails when the runtime catalog certificate is still listed on harddisk:" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-r--r--. 1 root root 1024 Sep 04 12:00 iris-catalog.pem" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"iris-catalog.pem"* ]]
 }
 
 @test "live: verify fails closed when a marker section never comes back" {

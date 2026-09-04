@@ -16,8 +16,9 @@
 # scp PUSH of the pre-built iris-xr.rpm straight to /harddisk:/, from a local
 # file this script reads directly (no PKI trustpoint dance, no `copy https:`
 # -- those are IOS-XE machinery this platform simply does not need. Catalog
-# TLS is verified INSIDE the container, against the cert baked into the
-# image; see device/container/Dockerfile). This script is the console-drivable
+# TLS is verified INSIDE the container against the current public certificate
+# this installer places on harddisk: beside the RPM.  The canonical image is
+# therefore deployment-neutral and can remain signed. This script is the console-drivable
 # shape: DEVICE_IP/CATALOG_URL/CATALOG_TOKEN/DEVICE_ID/DEVICE_USER/DEVICE_PASS
 # are the fields the onboarding service supplies. The split console/server
 # deployment passes a host-mounted local artifacts directory explicitly;
@@ -36,6 +37,7 @@
 # Optional env (defaults):
 #   APPID=iris  SOURCE_NAME=iris-xr
 #   IRIS_ARTIFACTS_DIR=<repo>/artifacts  XR_RPM_FILE=$IRIS_ARTIFACTS_DIR/iris-xr.rpm
+#   IRIS_CRT_FILE=$IRIS_ARTIFACTS_DIR/iris-catalog.pem (public server cert)
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
 #     it for a larger assigned image set; one proven full image is 1.8GB)
 #   IRIS_TELEMETRY=on  IRIS_TELEMETRY_STREAM=off
@@ -66,6 +68,7 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 
 IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 XR_RPM_FILE="${XR_RPM_FILE:-$IRIS_ARTIFACTS_DIR/iris-xr.rpm}"
+CATALOG_CA_FILE="${IRIS_CATALOG_CA_FILE:-${IRIS_CRT_FILE:-$IRIS_ARTIFACTS_DIR/iris-catalog.pem}}"
 # One proven full image is 1.8GB (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md
 # section 1.4); 2 GiB is a same-order-of-magnitude floor for a single image.
 # Raise it explicitly for a multi-image assignment.
@@ -171,6 +174,23 @@ _uint_between ACTIVATE_TIMEOUT "$ACTIVATE_TIMEOUT" 1 86400
 _uint_between ACTIVATE_POLL "$ACTIVATE_POLL" 1 3600
 case "$XR_RPM_FILE" in /*) ;; *) echo "ERROR: XR_RPM_FILE must be an absolute path" >&2; exit 2 ;; esac
 case "$XR_RPM_FILE" in *$'\n'*|*$'\r'*) echo "ERROR: XR_RPM_FILE must be a single line" >&2; exit 2 ;; esac
+case "$CATALOG_CA_FILE" in /*) ;; *) echo "ERROR: IRIS_CRT_FILE/IRIS_CATALOG_CA_FILE must be an absolute path" >&2; exit 2 ;; esac
+case "$CATALOG_CA_FILE" in *$'\n'*|*$'\r'*) echo "ERROR: catalog certificate path must be a single line" >&2; exit 2 ;; esac
+
+validate_public_cert() {
+  [ -r "$1" ] || {
+    echo "ERROR: catalog certificate is not readable: $1" >&2
+    return 1
+  }
+  if grep -Eq 'BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY' "$1"; then
+    echo "ERROR: catalog certificate file contains a private key; provide only the public certificate" >&2
+    return 1
+  fi
+  openssl x509 -in "$1" -noout >/dev/null 2>&1 || {
+    echo "ERROR: catalog certificate is not a valid PEM certificate: $1" >&2
+    return 1
+  }
+}
 
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER}"; : "${DEVICE_PASS:?set DEVICE_PASS}"
@@ -180,6 +200,7 @@ if [ "$DRY" -eq 0 ]; then
     echo "ERROR: XR_RPM_FILE=$XR_RPM_FILE is not readable (build it with tools/build-xr-package.sh)" >&2
     exit 1
   }
+  validate_public_cert "$CATALOG_CA_FILE" || exit 1
 fi
 
 # docker-run-opts: the exact hardware-proven base ("-td --net=host -v
@@ -230,7 +251,7 @@ activate_line_redacted() {
 
 if [ "$DRY" -eq 1 ]; then
   echo "===== [1/5] preflight on \$DEVICE_IP: show version MUST classify IOS-XR; harddisk: free >= $XR_MIN_FREE_BYTES bytes ====="
-  echo "===== [2/5] scp push $XR_RPM_FILE -> \${DEVICE_USER}@\$DEVICE_IP:/harddisk:/$SOURCE_NAME.rpm ====="
+  echo "===== [2/5] scp push $XR_RPM_FILE and the current public catalog certificate -> harddisk: ====="
   echo "===== [3/5] register: appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm; verify show appmgr source-table lists $SOURCE_NAME ====="
   echo "===== [4/5] activate (config; every commit guarded by lab/xr-run.sh's show-configuration-failed/abort recovery) ====="
   echo "configure"
@@ -294,7 +315,7 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
   exit 1
 fi
 
-echo "[2/5] scp push $XR_RPM_FILE -> harddisk: (hardware-proven inbound-scp path)"
+echo "[2/5] scp push $XR_RPM_FILE and current catalog certificate -> harddisk: (hardware-proven inbound-scp path)"
 # The router's identity is verified with the same policy the transport uses
 # (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
 # host merely answering at the address.
@@ -304,9 +325,13 @@ iris_ssh_policy "$DEVICE_IP" || exit 1
 scp_rc=0
 SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
       "$XR_RPM_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
+if [ "$scp_rc" -eq 0 ]; then
+  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+        "$CATALOG_CA_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-catalog.pem" || scp_rc=$?
+fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: scp of $XR_RPM_FILE to $DEVICE_IP:/harddisk:/$SOURCE_NAME.rpm failed" >&2
+  echo "ERROR: scp of the XR package/catalog certificate to $DEVICE_IP:harddisk: failed" >&2
   exit 1
 fi
 
@@ -347,4 +372,5 @@ fi
 
 echo "done. '$APPID' is Up. It downloads $DEVICE_ID's assigned image straight to harddisk:"
 echo "      through the /hostmount bind mount (write-through, no placement step) and seeds it"
+echo "      with catalog/tracker TLS pinned to harddisk:/iris-catalog.pem."
 echo "      to the swarm. Watch:  printf 'dir harddisk:\\n' | lab/xr-run.sh $DEVICE_IP"

@@ -39,6 +39,10 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
+Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
+interface of a multi-homed host. Choose the intended IRIS-facing address and
+restrict its TCP 8080 firewall rule to trusted operator sources.
+
 ## Give the runtime user the host paths
 
 Every service in the container runs as the fixed uid/gid `10001` with all Linux
@@ -97,9 +101,10 @@ add a break-glass recipient later, run
 `IRIS_AGE_RECIPIENTS=<primary>,<break-glass> iris-bootstrap --rekey`, which
 re-encrypts the existing store without touching any token, key, or the pinned
 certificate. `--force --yes` is disaster recovery only: it mints new secrets and
-a new certificate, so every onboarded device must be re-onboarded and every
-prebuilt package rebuilt. Both recipients on the first bootstrap avoids all of
-this.
+a new certificate, so every onboarded device must be re-onboarded with the new
+runtime trust anchor. The deployment-neutral IOx and XR packages can be reused
+unless their agent source also changed. Both recipients on the first bootstrap
+avoids all of this.
 The server container exposes the tracker, catalog, artifact server, seeder data
 port, and telemetry endpoints. The separate state-free Console publishes 8080
 and reaches the server's internal 9443 management API with a file-mounted,
@@ -109,7 +114,9 @@ at rest; the Console does not mount that volume.
 
 `start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
 container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
-`iris-amd64.tar` for Catalyst 9300 IOx, both pinned to the current server certificate.
+`iris-amd64.tar` for Catalyst 9300 IOx, both as deployment-neutral wrappers of
+the same canonical device image. Onboarding supplies the current public server
+certificate separately as IOx application data.
 
 !!! warning "The arm64 package needs ARM64 emulation"
     That step builds arm64 first. On an amd64 host with no ARM64 binfmt handler
@@ -121,8 +128,10 @@ container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
     bring-up, or — if you only deploy Guest Shell C9300s and no IE-3x00 — skip
     the IOx packages entirely and stage the amd64 one on its own later with
     `tools/stage-iox-package.sh --arch amd64`. Verify what was actually built
-    with `tools/check-package-freshness.sh`, or the console's Settings › Setup
-    *Device packages* card.
+    with `tools/check-package-freshness.sh` or the console's **Settings › Device
+    packages** view. Both check each wrapper against its adjacent
+    canonical-image provenance manifest and separately check the runtime
+    certificate that onboarding distributes.
 
 ## Create the console admin
 
@@ -134,8 +143,10 @@ permanently ends that special behavior.
 
 !!! warning "Complete the first-run claim on a trusted network"
     Whoever reaches a brand-new Console first can claim the administrator
-    account. Keep port 8080 restricted to a trusted management network and
-    complete this step immediately after deployment.
+    account. The Compose host binding excludes other host interfaces, but does
+    not authenticate callers that can reach `IRIS_HOST_IP`. Keep port 8080
+    restricted to a trusted management network and complete this step
+    immediately after deployment.
 
 Or set the admin account from the container instead:
 

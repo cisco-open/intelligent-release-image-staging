@@ -8,7 +8,7 @@
 # Findings addressed:
 #   #1 (CRITICAL)  install.sh run-opts must pass IRIS_DEVICE_SSH_HOST / IRIS_DEVICE_SSH_USER
 #   #2 (IMPORTANT) entrypoint.sh supervisor must restart a crashed aria2c
-#   #3 (IMPORTANT) build.sh must NOT fetch the pinned cert with `curl -sk` (-k flag)
+#   #3 (IMPORTANT) the canonical build must be deployment-neutral
 #   #4 (RE-VERIFY) secret-rotation ordering in entrypoint.sh — verdict documented below
 
 # ---------------------------------------------------------------------------
@@ -190,100 +190,18 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 }
 
 # ---------------------------------------------------------------------------
-# Finding #3 — build.sh must NOT fetch the pinned cert with -k (TLS disabled)
+# Finding #3 / #136 — catalog trust is runtime material, never a build input
 # ---------------------------------------------------------------------------
 
-@test "build.sh cert fetch does not use curl -sk (combined silent+insecure short flag)" {
-  # The original bug was `curl -sk` — the combined short flag that silently
-  # disables TLS verification with no indication of why.  The fix may use
-  # `--insecure` (long form, explicit) paired with fingerprint verification,
-  # which makes the self-signed-server workaround visible and auditable.
-  # We reject the combined -sk / -ks / -Sk etc. short-flag form; the explicit
-  # --insecure long form is permitted only when fingerprint verification is
-  # also present in the file.
-  if grep -n 'curl ' "$BUILD" | grep -qE '\-[a-zA-Z]*k[a-zA-Z]'; then
-    echo "Found curl with combined -k short flag in build.sh (use --insecure instead):"
-    grep -n 'curl ' "$BUILD" | grep -E '\-[a-zA-Z]*k[a-zA-Z]'
-    return 1
-  fi
-  # If --insecure is used, fingerprint verification must also be present.
-  if grep -n 'curl ' "$BUILD" | grep -q '\-\-insecure'; then
-    grep -q 'CATALOG_PEM_FINGERPRINT\|openssl x509.*fingerprint' "$BUILD" \
-      || { echo "curl --insecure present without fingerprint verification"; return 1; }
-  fi
-}
-
-@test "build.sh verifies fetched cert fingerprint before accepting it" {
-  # After dropping -k the build must validate the downloaded cert against a
-  # known fingerprint (via CATALOG_PEM_FINGERPRINT + openssl x509 comparison).
-  grep -q 'CATALOG_PEM_FINGERPRINT' "$BUILD"
-  grep -q 'openssl x509.*fingerprint\|fingerprint.*openssl x509' "$BUILD"
-}
-
-# ---------------------------------------------------------------------------
-# Finding #2 (R5) — build.sh fingerprint normalization
-#   openssl emits "SHA256 Fingerprint=AA:BB:..."
-#   documented / operator-supplied format is "SHA256:AA:BB:..."
-#   Both must compare equal after normalization.
-# ---------------------------------------------------------------------------
-
-@test "build.sh fingerprint check passes when CATALOG_PEM_FINGERPRINT uses documented SHA256:xx:yy format" {
-  # Generate a real self-signed cert and verify the documented format is accepted.
-  # This test extracts build.sh's actual normalization logic (the 'got' + 'want'
-  # sed/tr pipeline) so it would catch a regression in the real script.
-  TMPD="$(mktemp -d)"
-  trap 'rm -rf "$TMPD"' EXIT
-  openssl req -x509 -newkey rsa:2048 -keyout "$TMPD/key.pem" -out "$TMPD/cert.pem" \
-    -days 1 -nodes -subj "/CN=test" 2>/dev/null
-
-  # Derive the documented operator format from openssl's output:
-  # openssl -> "AA:BB:..." ; documented -> "SHA256:AA:BB:..."
-  BARE_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$TMPD/cert.pem" \
-             | sed 's/.*Fingerprint=//' | tr -d ' \r')"
-  DOCUMENTED_FP="SHA256:${BARE_FP}"
-
-  # Run build.sh's exact extraction+normalization block from the script source.
-  # Grep out the two pipeline lines from build.sh and evaluate them with our cert.
-  GOT_PIPELINE="$(grep -A2 'got=.*openssl x509.*fingerprint' "$BUILD" | head -3)"
-  WANT_PIPELINE="$(grep -A3 'want=.*CATALOG_PEM_FINGERPRINT' "$BUILD" | head -4)"
-
-  run bash -c "
-    CATALOG_PEM_FINGERPRINT='${DOCUMENTED_FP}'
-    got=\"\$(openssl x509 -noout -fingerprint -sha256 -in '${TMPD}/cert.pem' \
-           | sed 's/.*Fingerprint=//' | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    want=\"\$(echo \"\$CATALOG_PEM_FINGERPRINT\" \
-          | sed 's/^[Ss][Hh][Aa]256[: ]*[Ff][Ii][Nn][Gg][Ee][Rr][Pp][Rr][Ii][Nn][Tt]=//
-                 s/^[Ss][Hh][Aa]256://' \
-          | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    [ \"\$got\" = \"\$want\" ]
-  "
-  [ "$status" -eq 0 ]
-}
-
-@test "build.sh fingerprint check fails on a deliberate mismatch" {
-  TMPD2="$(mktemp -d)"
-  trap 'rm -rf "$TMPD2"' EXIT
-  openssl req -x509 -newkey rsa:2048 -keyout "$TMPD2/key.pem" -out "$TMPD2/cert.pem" \
-    -days 1 -nodes -subj "/CN=test2" 2>/dev/null
-
-  # Use the actual normalization from build.sh; a wrong fingerprint must exit 1.
-  run bash -c "
-    CATALOG_PEM_FINGERPRINT='SHA256:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'
-    got=\"\$(openssl x509 -noout -fingerprint -sha256 -in '${TMPD2}/cert.pem' \
-           | sed 's/.*Fingerprint=//' | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    want=\"\$(echo \"\$CATALOG_PEM_FINGERPRINT\" \
-          | sed 's/^[Ss][Hh][Aa]256[: ]*[Ff][Ii][Nn][Gg][Ee][Rr][Pp][Rr][Ii][Nn][Tt]=//
-                 s/^[Ss][Hh][Aa]256://' \
-          | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    [ \"\$got\" = \"\$want\" ]
-  "
+@test "canonical builder has no catalog certificate fetch or fingerprint input" {
+  run grep -E 'CATALOG_PEM|iris-catalog\.pem|openssl x509.*fingerprint|curl .*insecure' "$BUILD"
   [ "$status" -ne 0 ]
 }
 
-@test "build.sh comment does not claim 'Fetch WITHOUT -k' (the cert fetch uses --insecure)" {
-  # The comment incorrectly says 'Fetch WITHOUT -k' while the code uses --insecure
-  # which IS -k. The corrected comment must not make the false claim.
-  ! grep -q 'Fetch WITHOUT -k' "$BUILD"
+@test "unified image does not copy or default a deployment certificate" {
+  dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
+  run grep -E '^COPY .*iris-catalog\.pem|IRIS_CATALOG_CA=' "$dockerfile"
+  [ "$status" -ne 0 ]
 }
 
 @test "build.sh supports arm64 and amd64 IOx images" {

@@ -26,6 +26,7 @@ import urllib.request
 import bencode
 import catalog as catalog_mod
 import secrets_store
+import tracker_announce
 import torrent_personalize
 
 _SUFFIXES = (".SPA.bin", ".bin")
@@ -84,6 +85,7 @@ def make_torrent(image_path, tracker_url, out_path):
     """Build a PRIVATE torrent whose announce URL contains no credential.
 
     A partial output file is removed on failure so nothing re-seeds it."""
+    tracker_url = tracker_announce.validate(tracker_url)
     if os.path.exists(out_path):
         os.remove(out_path)
     try:
@@ -126,17 +128,11 @@ def tracker_announce_base():
     """The token-free tracker announce base, derived exactly the way the
     catalog's per-device personalization and the rotation CLI derive it:
     IRIS_TRACKER_ANNOUNCE if set, else IRIS_HOST_IP + IRIS_TRACKER_PORT
-    (default 6969, the port tracker.py listens on). None when neither is
-    known. Keeping the three in step is what makes the canonical (seeder)
-    announce reach the same tracker the devices are told to announce to."""
-    base = os.environ.get("IRIS_TRACKER_ANNOUNCE")
-    if base:
-        return base
-    host_ip = os.environ.get("IRIS_HOST_IP")
-    if not host_ip:
-        return None
-    return "http://%s:%s/announce" % (
-        host_ip, os.environ.get("IRIS_TRACKER_PORT") or "6969")
+    (default 6969, the port tracker.py listens on). Missing or unsafe config
+    raises rather than falling back to plaintext. Keeping the three in step is
+    what makes the canonical (seeder) announce reach the same tracker the
+    devices are told to announce to."""
+    return tracker_announce.resolve(os.environ)
 
 
 def _with_query(base, param, value):
@@ -245,20 +241,20 @@ def resume_torrent_rpc(torrent_path, image_dir, info_hash=None,
     URL or token is ever placed in an exception."""
     with open(torrent_path, "rb") as f:
         data = f.read()
-    tracker_url = tracker_url or default_tracker_url()
-    if tracker_url:
-        synced = torrent_personalize.personalize(data, tracker_url)
-        if synced != data:
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(torrent_path) or ".",
-                                       prefix=".resync-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(synced)
-                os.replace(tmp, torrent_path)
-            except Exception:
-                _unlink_quiet(tmp)
-                raise
-            data = synced
+    tracker_url = tracker_announce.validate(
+        tracker_url or default_tracker_url())
+    synced = torrent_personalize.personalize(data, tracker_url)
+    if synced != data:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(torrent_path) or ".",
+                                   prefix=".resync-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(synced)
+            os.replace(tmp, torrent_path)
+        except Exception:
+            _unlink_quiet(tmp)
+            raise
+        data = synced
     info_hash = info_hash or torrent_info_hash(torrent_path)
     rpc_url, rpc_secret = _rpc_endpoint(rpc_url, rpc_secret)
     if _active_gid(rpc_url, rpc_secret, info_hash) is not None:
@@ -331,11 +327,13 @@ def main(argv=None):
     ap.add_argument("--tracker-url", default=os.environ.get(
         "IRIS_TRACKER_URL"))
     args = ap.parse_args(argv)
-    if not args.tracker_url:
-        args.tracker_url = default_tracker_url()
-    if not args.tracker_url:
+    try:
+        args.tracker_url = tracker_announce.validate(args.tracker_url) \
+            if args.tracker_url else default_tracker_url()
+    except ValueError:
         print("error: can't determine the tracker URL — set IRIS_HOST_IP (docker "
-              "compose does this) or pass --tracker-url", file=sys.stderr)
+              "compose does this) or pass a token-free HTTPS --tracker-url",
+              file=sys.stderr)
         return 2
     if shutil.which("mktorrent") is None:
         print("error: mktorrent not installed (apt install mktorrent)",

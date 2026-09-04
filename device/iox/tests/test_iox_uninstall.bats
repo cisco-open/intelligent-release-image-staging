@@ -57,9 +57,10 @@ setup() {
   [[ "$output" == *$'no crypto pki trustpoint IRIS\nyes'* ]]
 }
 
-@test "dry-run deletes the staged app package" {
+@test "dry-run deletes the staged app package and runtime certificate source" {
   run bash "$UNINSTALL" --dry-run
-  [[ "$output" == *"delete flash:iris-arm64.tar"* ]]
+  [[ "$output" == *"delete flash:iris-arm64.tar"* ]] && \
+  [[ "$output" == *"delete /force flash:iris-catalog.pem"* ]]
 }
 
 @test "dry-run leaves generic config and the sdflash image in place" {

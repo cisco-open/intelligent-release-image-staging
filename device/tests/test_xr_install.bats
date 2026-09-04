@@ -94,6 +94,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
+  [[ "$output" == *"current public catalog certificate -> harddisk:"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -185,18 +186,29 @@ EOF
   [[ "$output" == *"tools/build-xr-package.sh"* ]]
 }
 
+@test "real install requires a valid public catalog certificate before touching the device" {
+  rpm="$BATS_TEST_TMPDIR/iris-xr.rpm"
+  cert="$BATS_TEST_TMPDIR/not-a-cert.pem"
+  printf '%s\n' rpm > "$rpm"
+  printf '%s\n' 'not a certificate' > "$cert"
+  run env DEVICE_USER=admin DEVICE_PASS=pw XR_RPM_FILE="$rpm" \
+    IRIS_CRT_FILE="$cert" bash "$INSTALL"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid PEM certificate"* ]]
+  [[ "$output" != *"[1/5]"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # The commit-failure guard: every commit this script sends must ride
 # lab/xr-run.sh (which appends the show-configuration-failed/abort recovery),
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the installer opens no SSH session of its own other than the rpm scp push" {
-  # 'sshpass' appears exactly once in the source -- the scp push in step
-  # [2/5]. Every other device interaction goes through RUN(), which wraps
-  # lab/xr-run.sh.
+@test "the installer opens no SSH session of its own other than the two scp pushes" {
+  # One push carries the RPM and one carries the runtime certificate. Every
+  # other device interaction goes through RUN(), which wraps lab/xr-run.sh.
   count="$(grep -c 'sshpass' "$INSTALL")"
-  [ "$count" -eq 1 ]
+  [ "$count" -eq 2 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
 
@@ -281,11 +293,16 @@ STUB
 
   RPMFILE="$BATS_TEST_TMPDIR/iris-xr.rpm"
   echo "fake rpm bytes" > "$RPMFILE"
+  CRTFILE="$BATS_TEST_TMPDIR/iris-catalog.pem"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$BATS_TEST_TMPDIR/catalog.key" -out "$CRTFILE" \
+    -days 1 -subj '/CN=iris-test' >/dev/null 2>&1
 }
 
 _xr_install_run_live() {
   env PATH="$STUBDIR/bin:$PATH" DEVICE_USER=admin DEVICE_PASS=pw \
-    XR_RPM_FILE="$RPMFILE" ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-30}" \
+    XR_RPM_FILE="$RPMFILE" IRIS_CRT_FILE="$CRTFILE" \
+    ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-30}" \
     ACTIVATE_POLL="${ACTIVATE_POLL:-1}" \
     bash "$STUBDIR/device/xr-install.sh"
 }
@@ -295,6 +312,17 @@ _xr_install_run_live() {
   run _xr_install_run_live
   [ "$status" -eq 0 ]
   [[ "$output" == *"'iris' is Up"* ]]
+}
+
+@test "live: pushes the current certificate to the fixed harddisk path before activation" {
+  _xr_install_stub_setup
+  run _xr_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  grep -q "${CRTFILE} admin@192.0.2.10:/harddisk:/iris-catalog.pem" "$FAKE_COMMAND_LOG"
+  cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$cert_line" ] && [ -n "$activate_line" ]
+  [ "$cert_line" -lt "$activate_line" ]
 }
 
 @test "live: parses the running version out of its own preflight show version" {

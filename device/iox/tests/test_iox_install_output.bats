@@ -227,12 +227,25 @@ EOF
   [[ "$output" != *"literal-secret"* ]]
 }
 
-@test "IOx install retries app-hosting verification disable until it succeeds" {
+@test "IOx install selects verification from package signing markers" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  run grep -F 'app-hosting verification disable' "$install"
+  run grep -F 'verification_action=disable' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'disabled successfully' "$install"
+  run grep -F 'verification_action=enable' "$install"
   [ "$status" -eq 0 ]
+  run grep -F 'package.sign' "$install"
+  [ "$status" -eq 0 ]
+  run grep -F 'package.cert' "$install"
+  [ "$status" -eq 0 ]
+}
+
+@test "IOx install delivers the public certificate through application data before activation" {
+  install="$BATS_TEST_DIRNAME/../install.sh"
+  data_line="$(grep -n 'app-hosting data appid %s copy' "$install" | head -1 | cut -d: -f1)"
+  activate_line="$(grep -n '^activate_out=' "$install" | head -1 | cut -d: -f1)"
+  [ -n "$data_line" ] && [ -n "$activate_line" ]
+  [ "$data_line" -lt "$activate_line" ]
+  grep -q 'Successfully copied file' "$install"
 }
 
 # --- operator-facing PREREQ checks (2026-08-20 incident: an IE-3400 lost `ip
@@ -334,6 +347,11 @@ case "$cmds" in
     ;;
 esac
 case "$cmds" in
+  *"app-hosting verification enable"*)
+    echo "App hosting verification enabled successfully"
+    ;;
+esac
+case "$cmds" in
   *"show app-hosting list"*)
     echo "App id                                   State"
     echo "---------------------------------------------------------"
@@ -357,6 +375,11 @@ case "$cmds" in
     ;;
 esac
 case "$cmds" in
+  *"app-hosting data appid iris copy"*)
+    echo "Successfully copied file /flash/iris-catalog.pem to iris as iris-catalog.pem"
+    ;;
+esac
+case "$cmds" in
   *"app-hosting activate appid"*)
     # The second line is deliberately one the success-path grep filter drops,
     # so a test can tell an unfiltered dump from a filtered one.
@@ -377,9 +400,14 @@ exit 0
 STUB
   chmod +x "$STUBDIR/bin/sshpass"
   ln -s "$BATS_TEST_DIRNAME/../install.sh" "$STUBDIR/device/iox/install.sh"
-  printf 'fake package\n' > "$STUBDIR/artifacts/iris-arm64.tar"
+  mkdir -p "$BATS_TEST_TMPDIR/package"
+  printf '%s\n' 'descriptor-schema-version: "2.7"' > "$BATS_TEST_TMPDIR/package/package.yaml"
+  tar -cf "$STUBDIR/artifacts/iris-arm64.tar" \
+    -C "$BATS_TEST_TMPDIR/package" package.yaml
   CRTFILE="$BATS_TEST_TMPDIR/crt.pem"
-  echo "-----BEGIN CERTIFICATE-----fake-----END CERTIFICATE-----" > "$CRTFILE"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$BATS_TEST_TMPDIR/catalog.key" -out "$CRTFILE" \
+    -days 1 -subj '/CN=iris-test' >/dev/null 2>&1
   export PATH="$STUBDIR/bin:$PATH"
   export IRIS_ARTIFACTS_DIR="$STUBDIR/artifacts"
   export DEVICE_USER=test DEVICE_PASS=test
@@ -420,6 +448,31 @@ _iox_env() {
     DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 \
     GUEST_IP=192.0.2.10 IRIS_CRT_FILE="$CRTFILE" MODEL=IE-3400-8T2S \
     EXPECTED_DEVICE_IDENTITY=FOC1234TEST "$@"
+}
+
+@test "unsigned package disables verification while signed package enables it" {
+  _iox_stub_setup
+  run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SIGNATURE POLICY (unsigned)"* ]]
+
+  printf '%s\n' signature > "$BATS_TEST_TMPDIR/package/package.sign"
+  tar -cf "$STUBDIR/artifacts/iris-arm64.tar" \
+    -C "$BATS_TEST_TMPDIR/package" package.yaml package.sign
+  run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"SIGNATURE POLICY (signed)"* ]]
+}
+
+@test "invalid catalog certificate is rejected before device teardown" {
+  _iox_stub_setup
+  command_log="$BATS_TEST_TMPDIR/cert-failure-commands.log"
+  : > "$command_log"
+  printf '%s\n' 'not a certificate' > "$CRTFILE"
+  run _iox_env FAKE_COMMAND_LOG="$command_log" bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid PEM certificate"* ]]
+  [ ! -s "$command_log" ]
 }
 
 @test "ip routing missing: real run exits non-zero with the PREREQ line" {

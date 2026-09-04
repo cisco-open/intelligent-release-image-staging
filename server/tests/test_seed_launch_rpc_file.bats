@@ -11,17 +11,19 @@ write_seeder_secrets() {
 
 @test "seed-launch reads the rpc-secret from IRIS_RPC_SECRET_FILE (tmpfs)" {
   tmp="$(mktemp -d)"
-  mkdir -p "$tmp/state/torrents" "$tmp/config" "$tmp/log" "$tmp/images" "$tmp/run"
+  mkdir -p "$tmp/state/torrents" "$tmp/config/tls" "$tmp/log" "$tmp/images" "$tmp/run"
   echo "tmpfssecret" > "$tmp/run/rpc-secret"
   # an old plaintext on the volume must NOT be used when the env var is set
   echo "stalesecret" > "$tmp/config/rpc-secret"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'test-only' \
+    '-----END CERTIFICATE-----' > "$tmp/config/tls/crt.pem"
   write_seeder_secrets "$tmp/state/secrets.json"
   printf '#!/usr/bin/env bash\necho "$@"\n' > "$tmp/aria2c-stub"
   chmod +x "$tmp/aria2c-stub"
 
   run env IRIS_STATE="$tmp/state" IRIS_CONFIG="$tmp/config" IRIS_LOG="$tmp/log" \
       IMAGES_DIR="$tmp/images" ARIA2="$tmp/aria2c-stub" \
-      IRIS_RPC_SECRET_FILE="$tmp/run/rpc-secret" \
+      IRIS_RPC_SECRET_FILE="$tmp/run/rpc-secret" IRIS_HOST_IP=10.0.0.5 \
       bash "$BATS_TEST_DIRNAME/../seed-launch.sh"
 
   [ "$status" -eq 0 ]

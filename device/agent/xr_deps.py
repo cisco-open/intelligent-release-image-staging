@@ -343,7 +343,8 @@ def build_deps(cfg, conf_path, state_path=None):
                               "params": params}).encode()
         req = urllib.request.Request(rpc, data=payload,
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10).read()
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return iris_agent._aria_add_result(response.read())
 
     def aria_remove(filename):
         for gid, names in iris_agent._aria_downloads(_rpc):

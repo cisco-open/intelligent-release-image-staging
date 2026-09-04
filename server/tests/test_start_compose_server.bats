@@ -7,8 +7,8 @@
 # The bring-up must talk to the container ITS OWN compose project started, not
 # to whatever container happens to be called "iris" on the host (issue #26).
 # On a host already running a live IRIS the literal name made the health poll
-# report the live server's health and the XR RPM freshness check compare
-# against the live server's catalog certificate.
+# report the live server's health. Package readiness is now local provenance
+# verification and never reads deployment TLS material from a container.
 
 setup() {
   REPO="$BATS_TEST_TMPDIR/repo"
@@ -17,6 +17,7 @@ setup() {
   mkdir -p "$REPO/tools" "$REPO/server" "$REPO/artifacts" "$STUB"
 
   cp "$BATS_TEST_DIRNAME/../../tools/start-compose-server.sh" "$REPO/tools/"
+  cp "$BATS_TEST_DIRNAME/../setup_status.py" "$REPO/server/"
   chmod +x "$REPO/tools/start-compose-server.sh"
   : > "$REPO/server/docker-compose.yml"
   # present so the script reaches the XR freshness block below it
@@ -43,14 +44,12 @@ run_bringup() {
   PATH="$STUB:$PATH" run bash "$REPO/tools/start-compose-server.sh"
 }
 
-@test "health poll and cert read target the compose-resolved container, not the literal 'iris'" {
+@test "health poll targets the compose-resolved container, not the literal 'iris'" {
   run_bringup
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 
   grep -q '^inspect|-f|{{.State.Health.Status}}|c0ffeecafe01|$' "$DOCKER_LOG" || {
     echo "docker inspect did not target the compose-resolved container:"; cat "$DOCKER_LOG"; return 1; }
-  grep -q '^exec|c0ffeecafe01|openssl|' "$DOCKER_LOG" || {
-    echo "docker exec did not target the compose-resolved container:"; cat "$DOCKER_LOG"; return 1; }
   # the literal name must never be used as a container argument
   grep -qE '^(inspect|exec)\|.*\|iris\|' "$DOCKER_LOG" && {
     echo "the literal 'iris' container was still addressed:"; cat "$DOCKER_LOG"; return 1; }
@@ -62,7 +61,7 @@ run_bringup() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q '^inspect|-f|{{.State.Health.Status}}|iris-dev|$' "$DOCKER_LOG" || {
     echo "$(cat "$DOCKER_LOG")"; return 1; }
-  grep -q '^exec|iris-dev|openssl|' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; return 1; }
+  ! grep -q '^exec|' "$DOCKER_LOG"
 }
 
 @test "an unresolvable container fails loudly instead of poking another project's" {

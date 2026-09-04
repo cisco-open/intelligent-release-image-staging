@@ -33,10 +33,10 @@ run; the Console has no UI for it.
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
 | 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, assignment, enrollment-token refresh, heartbeats, and reports. |
-| 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTP | Private BitTorrent announces. IOx/XR use a bearer header; unchanged Guest Shell bundles retain their existing personalized query credential. Neither is logged. |
+| 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTPS | Private BitTorrent announces. IOx/XR use a bearer header; Guest Shell retains its personalized query credential inside TLS. All agents and the origin seeder pin the server certificate; neither credential form is logged. |
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
-| 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. The host port can be changed with `IRIS_GUI_PUBLISH`. |
+| 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. Compose publishes it only on `IRIS_HOST_IP`; the host port can be changed with `IRIS_GUI_PUBLISH`. |
 | 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTPS | Anonymous, non-disclosing `/healthz` and `/readyz`; authenticated optional `/metrics`. Swarm data is reserved for the authenticated management API. |
 | 9443 | TCP | Console -> server tier | Authenticated HTTPS | Internal management API. Never publish this port on the host or public LoadBalancer. |
 | 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before the final IOS placement copy on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
@@ -84,6 +84,12 @@ All ports below are **TCP**.
 | Server tier or manual installer host -> devices during onboarding | TCP | 22 |
 | Devices <-> devices | TCP | 6881-6999 in both directions |
 
+Compose's host binding prevents the Console from also appearing on every other
+host interface, but it is not an access-control list: restrict TCP 8080 on
+`IRIS_HOST_IP` to trusted operator sources, especially until the first admin is
+created. Kubernetes operators must apply the equivalent restriction to the
+Console LoadBalancer.
+
 !!! note "IRIS uses no UDP"
     Every listener above is TCP. The UDP parts of BitTorrent are switched off on
     every launch path — DHT, peer exchange, and local peer discovery are all
@@ -102,9 +108,10 @@ The collector is external to IRIS and is not published by the Compose stack.
   is no UDP tracker or DHT firewall requirement; tracker discovery is TCP 6969.
 - The origin seeder is pinned to TCP 6881. Devices choose an available listen
   port in the 6881-6999 range and announce it to peers.
-- Catalog (8443), artifacts (8000), Console (8080), telemetry (9101), and
-  internal management (9443) use HTTPS. Tracker (6969) remains HTTP for BEP
-  client compatibility.
+- Tracker (6969), catalog (8443), artifacts (8000), Console (8080), telemetry
+  (9101), and internal management (9443) use HTTPS. The only retained HTTP
+  listener is aria2 JSON-RPC on loopback inside each container or Guest Shell;
+  it is never host-published.
 - Kubernetes publishes server ports 6969, 8443, 8000, 6881, and 9101 through
   one LoadBalancer and Console port 8080 through another. Port 9443 is a
   separate ClusterIP Service selected by ingress policy. Preserve device source

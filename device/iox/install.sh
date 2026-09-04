@@ -15,8 +15,9 @@
 # sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
 # ONLY; never install/activate/reload the IOS image.
 #
-# Idempotent: re-running tears down any existing iris app and redeploys (cert
-# rotation, fresh package, fresh token) — safe to run repeatedly.
+# Idempotent: re-running tears down any existing iris app and redeploys (fresh
+# runtime certificate, package, and token) — safe to run repeatedly.  The
+# certificate is application data, not part of the signed package.
 #
 # Required env:
 #   DEVICE_IP VLAN SVI_IP SVI_MASK GUEST_IP CATALOG_TOKEN DEVICE_ID STAGE_HOST
@@ -26,6 +27,7 @@
 #   CATALOG_URL=https://STAGE_HOST:8443  APP_INTF=AppGigabitEthernet1/1
 #   GW_IP=$SVI_IP  CPU=400  MEM=768  DISK=2048  PKG=iris-arm64.tar  PKG_FS=flash:
 #   DEVICE_SSH_USER=dnac  TARGET_FS=sdflash:  IRIS_TELEMETRY=on
+#   IRIS_CRT_FILE=$IRIS_ARTIFACTS_DIR/iris-catalog.pem (the public server cert)
 #   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/container/entrypoint.sh);
 #     off by default for flash write endurance. Forwarded verbatim as an
 #     -e run-opts value so the container actually sees an operator's opt-in --
@@ -274,6 +276,54 @@ RUN() { "$HERE/../../lab/device-run.sh" "$DEVICE_IP"; }   # IOS cmds on stdin
 # device. Console onboarding mounts the served artifact directory locally.
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/../.." && pwd)/artifacts}"
 PKG_FILE="${IRIS_IOX_PACKAGE_FILE:-$ART/$PKG}"
+CATALOG_CA_FILE="${IRIS_CATALOG_CA_FILE:-${IRIS_CRT_FILE:-$ART/iris-catalog.pem}}"
+CATALOG_CA_REMOTE="iris-catalog.pem"
+
+case "$CATALOG_CA_FILE" in
+  /*) ;;
+  *) echo "ERROR: IRIS_CRT_FILE/IRIS_CATALOG_CA_FILE must be an absolute path" >&2; exit 2 ;;
+esac
+case "$CATALOG_CA_FILE" in *$'\n'*|*$'\r'*)
+  echo "ERROR: catalog certificate path must be a single line" >&2; exit 2 ;;
+esac
+
+validate_public_cert() {
+  [ -r "$1" ] || {
+    echo "ERROR: catalog certificate is not readable: $1" >&2
+    return 1
+  }
+  if grep -Eq 'BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY' "$1"; then
+    echo "ERROR: catalog certificate file contains a private key; provide only the public certificate" >&2
+    return 1
+  fi
+  openssl x509 -in "$1" -noout >/dev/null 2>&1 || {
+    echo "ERROR: catalog certificate is not a valid PEM certificate: $1" >&2
+    return 1
+  }
+}
+
+classify_package_signature() {
+  # Inspect member names only; never extract an untrusted package.  Either
+  # Cisco signing marker is sufficient to keep platform verification enabled.
+  python3 - "$1" <<'PY'
+import pathlib
+import sys
+import tarfile
+
+try:
+    with tarfile.open(sys.argv[1], "r:*") as package:
+        basenames = {pathlib.PurePosixPath(member.name).name
+                     for member in package.getmembers()}
+except (OSError, tarfile.TarError) as exc:
+    print(f"ERROR: invalid IOx package: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+markers = basenames.intersection({"package.sign", "package.cert"})
+print("signed" if markers else "unsigned")
+PY
+}
+
+PACKAGE_SIGNATURE_MODE="not-inspected"
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER for the authenticated SCP push}"
   : "${DEVICE_PASS:?set DEVICE_PASS for the authenticated SCP push}"
@@ -292,6 +342,10 @@ if [ "$DRY" -eq 0 ]; then
     echo "ERROR: IOx package is not readable: $PKG_FILE" >&2
     exit 1
   fi
+  validate_public_cert "$CATALOG_CA_FILE" || exit 1
+  PACKAGE_SIGNATURE_MODE="$(classify_package_signature "$PKG_FILE")" || exit 1
+elif [ -r "$PKG_FILE" ]; then
+  PACKAGE_SIGNATURE_MODE="$(classify_package_signature "$PKG_FILE")" || exit 1
 fi
 
 # A deployment record binds this deployment to one physical device and
@@ -466,7 +520,9 @@ if [ "$DRY" -eq 1 ]; then
   fi
   echo "===== INSTALL PUSH (host -> device over authenticated SCP) ====="
   printf 'scp -O <artifacts>/%s %s@%s:%s%s\n' "$PKG" '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$PKG"
-  echo "===== app-hosting install -> activate -> start appid $APPID, then persist ====="
+  printf 'scp -O <public-certificate> %s@%s:%s%s\n' '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$CATALOG_CA_REMOTE"
+  echo "===== SIGNATURE POLICY ($PACKAGE_SIGNATURE_MODE): signed packages keep verification enabled; unsigned packages disable it ====="
+  echo "===== app-hosting install -> application-data certificate copy -> activate -> start appid $APPID, then persist ====="
   if [ "$MANAGEMENT_TYPE" = "inband" ]; then
     echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
   fi
@@ -546,25 +602,34 @@ wait_iox_ready 180 || {
   exit 1
 }
 
-echo "[3/9] disable app-hosting signature verification (EXEC; required for the unsigned agent app on SSD-backed IOx)"
+if [ "$PACKAGE_SIGNATURE_MODE" = signed ]; then
+  verification_action=enable
+  verification_description="signed package: keep app-hosting signature verification enabled"
+else
+  verification_action=disable
+  verification_description="unsigned local package: disable app-hosting signature verification"
+fi
+echo "[3/9] $verification_description"
 # Even after `show iox` reports CAF/Dockerd Running, the app-hosting EXEC layer
 # can still answer "The process for the command is not responding or is
 # otherwise unavailable" for a few more seconds. Retry until it reports success
 # so a not-yet-ready box doesn't leave verification enabled and fail the install.
 vok=0
 for _ in $(seq 1 24); do
-  vout="$(printf 'app-hosting verification disable\n' | RUN 2>/dev/null || true)"
-  case "$vout" in
-    *"disabled successfully"*|*"already disabled"*|*"verification is disabled"*)
-      vok=1; echo "  app signature verification disabled"; break ;;
+  vout="$(printf 'app-hosting verification %s\n' "$verification_action" | RUN 2>/dev/null || true)"
+  case "$verification_action:$vout" in
+    disable:*"disabled successfully"*|disable:*"already disabled"*|disable:*"verification is disabled"*)
+      vok=1; echo "  app signature verification disabled for unsigned package"; break ;;
+    enable:*"enabled successfully"*|enable:*"already enabled"*|enable:*"verification is enabled"*)
+      vok=1; echo "  app signature verification enabled for signed package"; break ;;
   esac
   sleep 5
 done
-[ "$vok" -eq 1 ] || { echo "  ERROR: could not disable app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
+[ "$vok" -eq 1 ] || { echo "  ERROR: could not $verification_action app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
 
 echo "[4/9] package transport uses authenticated SCP (no IOS HTTP credential or trustpoint required)"
 
-echo "[5/9] local package preflight passed"
+echo "[5/9] local package and public-certificate preflight passed ($PACKAGE_SIGNATURE_MODE package)"
 
 scp_device() {
   # IOS-XE HTTP Basic requires URL credentials or persistent global client
@@ -582,14 +647,18 @@ scp_device() {
   return "$rc"
 }
 
-echo "[6/9] push $PKG -> ${PKG_FS} over authenticated SCP (retry x3)"
-printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
+echo "[6/9] push $PKG and current catalog certificate -> ${PKG_FS} over authenticated SCP (retry x3)"
+printf 'delete /force %s%s\ndelete /force %s%s\n' \
+  "$PKG_FS" "$PKG" "$PKG_FS" "$CATALOG_CA_REMOTE" | RUN >/dev/null 2>&1 || true
 ok=0
 for a in 1 2 3; do
-  if scp_device "$PKG_FILE" "${PKG_FS}${PKG}"; then ok=1; break; fi
+  if scp_device "$PKG_FILE" "${PKG_FS}${PKG}" \
+     && scp_device "$CATALOG_CA_FILE" "${PKG_FS}${CATALOG_CA_REMOTE}"; then
+    ok=1; break
+  fi
   echo "    SCP attempt $a/3 failed; retrying"; sleep 8
 done
-[ "$ok" -eq 1 ] || { echo "  ERROR: SCP push of $PKG failed after 3 attempts" >&2; exit 1; }
+[ "$ok" -eq 1 ] || { echo "  ERROR: SCP push of package/certificate failed after 3 attempts" >&2; exit 1; }
 
 echo "[7/9] configure app-hosting appid $APPID + install/activate/start"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null
@@ -607,6 +676,18 @@ wait_state DEPLOYED "$INSTALL_TIMEOUT" || {
   exit 1
 }
 sleep 8                                       # let the install op fully settle
+data_out="$(printf 'app-hosting data appid %s copy %s%s %s\n' \
+  "$APPID" "$PKG_FS" "$CATALOG_CA_REMOTE" "$CATALOG_CA_REMOTE" | RUN 2>&1 || true)"
+case "$data_out" in
+  *"Successfully copied file"*)
+    echo "  current catalog certificate delivered to IOx application data" ;;
+  *)
+    echo "  ERROR: could not deliver the catalog certificate to IOx application data." >&2
+    echo "         Full IOS response to 'app-hosting data appid $APPID copy':" >&2
+    printf '%s\n' "$data_out" >&2
+    echo "         The app remains DEPLOYED and has not been activated; correct the application-data copy problem and retry." >&2
+    exit 1 ;;
+esac
 activate_out="$(printf 'app-hosting activate appid %s\n' "$APPID" | RUN 2>&1 || true)"
 printf '%s\n' "$activate_out" | grep -E 'Activating|Failed to activate|%IOX|%APP' || true
 wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {

@@ -37,6 +37,7 @@ import keyed_state
 import live_samples
 import secretfs
 import secrets_store
+import tracker_announce
 import torrent_personalize
 import transfer_lifecycle
 import api_problem
@@ -1979,20 +1980,14 @@ class Catalog:
             "catalog", secrets_store.build_catalog_auth_index)
 
     def _announce_base_url(self):
-        """Return the tracker announce base URL (no query), or None.
+        """Return the validated HTTPS tracker announce base URL (no query).
 
         Credentials are supplied to aria2 out-of-band as an Authorization
         header; they never appear in the torrent's announce URL. The base is
         taken from IRIS_TRACKER_ANNOUNCE if set, else derived from
-        IRIS_HOST_IP + the tracker announce port."""
-        base = os.environ.get("IRIS_TRACKER_ANNOUNCE")
-        if base:
-            return base
-        host_ip = os.environ.get("IRIS_HOST_IP")
-        if not host_ip:
-            return None
-        port = os.environ.get("IRIS_TRACKER_PORT", "6969")
-        return "http://%s:%s/announce" % (host_ip, port)
+        IRIS_HOST_IP + the tracker announce port. Missing or unsafe config
+        raises rather than falling back to plaintext."""
+        return tracker_announce.resolve(os.environ)
 
     def _personalized_torrent(self, image_id, announce_value,
                               tracker_auth="legacy-query"):

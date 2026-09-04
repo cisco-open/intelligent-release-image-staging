@@ -198,6 +198,16 @@
     if (ids && ids.length) return ids;
     return d.assigned_image_id ? [d.assigned_image_id] : [];
   }
+  // `router` is an install recipe/wire value, not an agent runtime. C8000V
+  // selected through that recipe runs the same Guest Shell agent as the
+  // `guestshell` value; VPG/routed/NAT belongs to Management type instead.
+  var AGENT_INSTALL_LABELS = {
+    guestshell: 'Guest Shell', iox: 'IOx', router: 'Guest Shell',
+    'xr-appmgr': 'XR appmgr container'
+  };
+  function agentInstallLabel(platform) {
+    return AGENT_INSTALL_LABELS[platform] || platform || '—';
+  }
   // Whether *d*'s device has staged image *iid*: membership in the
   // heartbeat's staged_image_ids when the agent reports it directly (Task
   // 3), else the legacy current_image_id/stage_state=='ready' pair for an
@@ -893,6 +903,25 @@
   document.getElementById('ii-release-override').addEventListener('click', function () {
     attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value);
   });
+  function publishedJobText(job) {
+    var text = 'Published ' + (job.image_id || '');
+    var verification = job.verification;
+    if (!verification) return text + ' ✓';
+    if (verification.outcome !== 'ok') {
+      return text + '; Cisco hash verification incomplete: ' +
+        (verification.detail || 'unknown failure');
+    }
+    if (verification.image_state === 'verified') {
+      return text + ' · verified against Cisco Bulk Hash ✓';
+    }
+    if (verification.image_state === 'mismatch') {
+      return text + ' · Cisco hash mismatch — quarantined';
+    }
+    if (verification.image_state === 'not_in_feed') {
+      return text + ' · not found in Cisco Bulk Hash feed';
+    }
+    return text + ' · Cisco hash verdict unavailable';
+  }
   function pollJob(jobId) {
     var gen = ++imageJobGen;
     function next() { setTimeout(poll, 1000); }
@@ -903,8 +932,9 @@
         if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
         var j = await r.json();
         if (gen !== imageJobGen) return;
-        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
+        if (j.state === 'done') { statusEl.textContent = publishedJobText(j); refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
         else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; refreshImportable().catch(function () {}); }
+        else if (j.state === 'verifying') { statusEl.textContent = 'Published ' + (j.image_id || j.filename) + '; checking Cisco Bulk Hash…'; next(); }
         else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
       } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
     }
@@ -989,6 +1019,10 @@
         rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
         state.textContent = 'publishing…';
       },
+      verifying: function () {
+        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
+        state.textContent = 'checking Cisco Bulk Hash…';
+      },
       done: function (text) {
         rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
         state.textContent = text;
@@ -1015,12 +1049,15 @@
         }
         var j = await r.json();
         if (j.state === 'done') {
-          ui.done('published ' + (j.image_id || '') + ' ✓');
+          ui.done(publishedJobText(j));
           refreshImages().catch(function () {}); refreshImportable().catch(function () {});
         } else if (j.state === 'error') {
           ui.error('publish failed: ' + j.message);
           refreshImportable().catch(function () {});
-        } else { next(); }
+        } else {
+          if (j.state === 'verifying') ui.verifying();
+          next();
+        }
       } catch (e) { next(); }
     }
     poll();
@@ -1347,11 +1384,9 @@
       var credAttrs = credListOk ? '' :
         ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
       var platVal = d.platform || '';
-      var platSel = [
-        ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx'],
-        ['router', 'Router (VPG)'], ['xr-appmgr', 'XR appmgr container']
-      ].map(function (o) {
-        return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+      var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map(function (key) {
+        var label = key ? agentInstallLabel(key) : '— auto —';
+        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') + '>' + esc(label) + '</option>';
       }).join('');
       var status = deviceStatusHtml(d, devNow);
       var managementType = d.management_type || 'legacy';
@@ -1509,7 +1544,7 @@
     pairs.push(
       ['Swarm port', '<span class="machine">' + esc(res.swarm_port || '—') + '</span>'],
       ['Model', esc(res.model || '—')],
-      ['Agent install', esc(res.platform || '—')],
+      ['Agent install', esc(agentInstallLabel(res.platform))],
       ['Device identity', '<span class="machine">' + esc(res.device_identity || '—') + '</span>']
     );
     return pairs.map(function (kv) {
@@ -2831,6 +2866,13 @@
     openImagePicker(intersection, function (imgIds) {
       var claimed = claimSelection();
       if (!claimed) return;
+      // A mixed starting point is not itself destructive.  For example,
+      // [A] + [] -> [A] only gives the second device the same assignment.
+      // Warn only when the proposed result actually removes an image from at
+      // least one selected device.
+      var removesAssignment = sets.some(function (s) {
+        return s.some(function (id) { return imgIds.indexOf(id) === -1; });
+      });
       // An empty pick from the bulk path is one accidental Apply away from
       // wiping every selected device's assignment (an empty intersection
       // opens the picker with nothing pre-checked) -- confirm before it posts.
@@ -2838,9 +2880,9 @@
         if (!confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
           setBulkBusy(false); return;
         }
-      } else if (setsDiffer &&
-          !confirm('The selected devices have differing image assignments.\n\n' +
-                   'Applying replaces every selected device\'s set with the ' +
+      } else if (removesAssignment &&
+          !confirm('This change removes one or more existing image assignments.\n\n' +
+                   'Applying gives every selected device the same set of ' +
                    imgIds.length + ' checked image(s). Any image a device has ' +
                    'that is not checked here is dropped from it.\n\nProceed?')) {
         setBulkBusy(false); return;
@@ -2854,8 +2896,9 @@
     if (setsDiffer) {
       var note = document.getElementById('img-picker-note');
       if (note) {
-        note.textContent = 'Selected devices have differing assignments; '
-          + 'applying replaces them all.';
+        note.textContent = 'Some selected devices are missing assignments present on others. '
+          + 'Apply gives every selected device the same checked set; you will be asked '
+          + 'before any existing assignment is removed.';
         note.hidden = false;
       }
     }
@@ -2944,9 +2987,7 @@
   // types -- the same model-aware guardrail server-side validation enforces
   // (gui_fleet.validate_record / gui_onboard.install_options_for), surfaced
   // before submit instead of as a rejection after it.
-  var INSTALL_OPTION_LABELS = { guestshell: 'Guest Shell', iox: 'IOx',
-                                router: 'Router (Guest Shell via VirtualPortGroup)',
-                                'xr-appmgr': 'XR appmgr container' };
+  var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;
   // Offered when the model is blank or unrecognized -- i.e. when nobody has
   // established what the hardware is. 'xr-appmgr' is deliberately NOT in
   // that permissive set: validate_record refuses it without an IOS-XR model,
@@ -3453,7 +3494,10 @@
       'will not resolve this.',
     'distributed-cert-unavailable':
       'The copy of the certificate handed to devices could not be read, ' +
-      'so package state cannot be confirmed.'
+      'so onboarding readiness cannot be confirmed.',
+    'served-cert-unavailable':
+      'The certificate used by this server could not be read, so ' +
+      'onboarding readiness cannot be confirmed.'
   };
 
   function setupPkgRemedyText(pkg) {
@@ -3461,17 +3505,18 @@
     var parts = [];
     var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
     if (reasonText) parts.push(reasonText);
-    // The rebuild remedy is per stale ITEM, never a single card-wide
-    // command -- the IOx tars and the IOS-XR RPM (iris-xr.rpm, Wave C) are
-    // rebuilt by two DIFFERENT scripts, so a cert rotation that stales both
-    // families needs BOTH commands named, not just whichever one
-    // pkg.remedy used to hardcode. Never fires for a served-vs-distributed
-    // mismatch, where rebuilding would not fix anything regardless of
-    // which item looks stale.
+    // Each non-ready package names its own build command: IOx and IOS-XR
+    // use different wrappers. Certificate rotation does not stale packages;
+    // a served/distributed certificate mismatch needs separate repair.
     if (pkg.reason !== 'served-vs-distributed-mismatch') {
       var remedies = [];
       (pkg.items || []).forEach(function (i) {
-        if (i.state === 'stale' && i.remedy && remedies.indexOf(i.remedy) === -1) {
+        // Every non-ready item carries an actionable host-side command.  In
+        // particular, a missing/invalid provenance sidecar is reported as
+        // "unknown", not "absent" or "stale"; hiding its remedy would leave
+        // the operator with a diagnosis but no way to repair it.
+        if (i.state !== 'ok' && i.remedy &&
+            remedies.indexOf(i.remedy) === -1) {
           remedies.push(i.remedy);
         }
       });
@@ -3506,6 +3551,23 @@
     document.querySelector('#setup-pkg-table tbody').innerHTML = '';
     document.getElementById('setup-pkg-remedy').textContent = '';
     document.getElementById('setup-iv-chip').innerHTML = setupChip('unknown');
+  }
+
+  function renderPackageStatus(pkg, chipId, tableId, remedyId) {
+    var chip = document.getElementById(chipId);
+    var table = document.querySelector('#' + tableId + ' tbody');
+    var remedy = document.getElementById(remedyId);
+    if (chip) chip.innerHTML = setupChip(pkg ? pkg.state : 'unknown');
+    if (table) {
+      table.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
+        var when = i.built_at ? new Date(i.built_at * 1000).toLocaleString() : '—';
+        var evidence = i.detail || i.reason || '';
+        return '<tr><td class="muted machine">' + esc(i.name || '') + '</td><td>' +
+          setupChip(i.state) + '</td><td class="muted">' + esc(when) +
+          '</td><td class="muted">' + esc(evidence) + '</td></tr>';
+      }).join('');
+    }
+    if (remedy) remedy.textContent = pkg ? setupPkgRemedyText(pkg) : '';
   }
 
   // Items that are recommended rather than required to finish onboarding a
@@ -3682,21 +3744,7 @@
   }
 
   function renderWizardPackages(pkg) {
-    var body = document.querySelector('#wz-pkg-table tbody');
-    if (!body) return;
-    body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
-      // i.detail (iris-xr.rpm, Wave C): this module cannot pin the RPM's
-      // baked certificate the way it pins the IOx tars' (see
-      // setup_status._xr_package_item), so its row says plainly what was
-      // and was not verified rather than showing a bare ok/stale chip that
-      // would look like the same guarantee. Empty for the tar rows, which
-      // need no such caveat.
-      return '<tr><td class="machine">' + esc(i.name || '') + '</td><td>' +
-        setupChip(i.state) + '</td><td class="muted">built ' +
-        esc(i.built_at || 'unknown') + '</td><td class="muted">' +
-        esc(i.detail || '') + '</td></tr>';
-    }).join('');
-    document.getElementById('wz-pkg-remedy').textContent = setupPkgRemedyText(pkg || {});
+    renderPackageStatus(pkg, 'wz-pkg-chip', 'wz-pkg-table', 'wz-pkg-remedy');
   }
 
   async function refreshSetupWizard() {
@@ -3793,23 +3841,33 @@
       setupItemChipHTML('telemetry', s.telemetry.state, null);
     document.getElementById('setup-td-note').textContent =
       setupTelemetryNote(s.telemetry);
-    document.getElementById('setup-pkg-chip').innerHTML =
-      setupChip(s.packages.state);
-    document.querySelector('#setup-pkg-table tbody').innerHTML =
-      s.packages.items.map(function (i) {
-        var when = i.built_at
-          ? new Date(i.built_at * 1000).toLocaleString() : '—';
-        // i.detail: see the matching comment in renderWizardPackages.
-        return '<tr><td class="muted machine">' + esc(i.name) + '</td><td>' +
-               setupChip(i.state) + '</td><td class="muted">built ' +
-               esc(when) + '</td><td class="muted">' + esc(i.detail || '') +
-               '</td></tr>';
-      }).join('');
-    document.getElementById('setup-pkg-remedy').textContent =
-      setupPkgRemedyText(s.packages);
+    renderPackageStatus(s.packages, 'setup-pkg-chip', 'setup-pkg-table',
+      'setup-pkg-remedy');
     document.getElementById('setup-iv-chip').innerHTML =
       setupItemChipHTML('image_verification', s.image_verification.state, ivConfigured);
   }
+
+  async function refreshDevicePackages() {
+    var msg = document.getElementById('device-packages-msg');
+    try {
+      var r = await fetch('/api/v1/settings/setup-status');
+      if (!r.ok) throw new Error('status ' + r.status);
+      var s = await r.json();
+      renderPackageStatus(s.packages, 'device-packages-chip',
+        'device-packages-table', 'device-packages-remedy');
+      if (msg) msg.textContent = '';
+    } catch (e) {
+      renderPackageStatus(null, 'device-packages-chip',
+        'device-packages-table', 'device-packages-remedy');
+      if (msg) msg.textContent = 'Package state cannot be determined.';
+    }
+  }
+
+  document.getElementById('device-packages-recheck').addEventListener('click', function () {
+    var msg = document.getElementById('device-packages-msg');
+    if (msg) msg.textContent = 'Re-checking…';
+    refreshDevicePackages();
+  });
 
   async function refreshSettings() {
     var r = await fetch('/api/v1/settings'); if (!r.ok) return;
@@ -4505,6 +4563,8 @@
   // The setup pane rides the same pane/nav id pattern; appended for the
   // same reason (keeps the original trio a literal for the source guard).
   SETTINGS_SUBS.push('setup');
+  // Device packages stay available after first-run setup is dismissed.
+  SETTINGS_SUBS.push('packages');
   // The Image verification (KGV / Cisco Bulk Hash reconciler) pane rides the
   // same pane/nav id pattern; appended for the same reason.
   SETTINGS_SUBS.push('bulkhash');
@@ -4520,6 +4580,7 @@
     // Same reclaim, but a move rather than a re-mount -- see
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
+    if (sub === 'packages') refreshDevicePackages();
     refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):

@@ -131,9 +131,11 @@ the XR profile rejects IOx SSH/share variables and never creates an SSH
 dependency. BusyBox supplies `ps`, `top`, `free`, and `kill` on both
 architectures, preserving the field-diagnostics decision.
 
-Guest Shell is not packaged from this image. Its existing agent bundle,
-bootstrap/EEM launcher, and installer remain a separate, unchanged delivery
-path.
+Guest Shell is not packaged from this image. Its agent bundle, bootstrap/EEM
+launcher, and installer remain a separate delivery path. Every platform still
+pins the current public server certificate at runtime, but the unified
+container does not carry it: IOx onboarding uses application data and XR
+onboarding places it on the router's `harddisk:` mount.
 
 Build only the canonical image when iterating locally. `--image-only` is not
 architecture-selected: every run builds or verifies one OCI archive containing
@@ -142,25 +144,23 @@ both `linux/amd64` and `linux/arm64`, by default
 `.oci.tar.manifest`:
 
 ```bash
-CATALOG_PEM=/path/to/iris-catalog.pem \
-  device/iox/build.sh --image-only
+device/iox/build.sh --image-only
 ```
 
 Build the Cisco IOx package directly when `ioxclient` is available:
 
 ```bash
-CATALOG_PEM=/path/to/iris-catalog.pem \
 device/iox/build.sh device/iox/out
 
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
-  CATALOG_PEM=/path/to/iris-catalog.pem \
   device/iox/build.sh device/iox/out
 ```
 
 For the normal Compose workflow, run `tools/provision-iox-packages.sh` after
 the server becomes healthy. It obtains the pinned Cisco `ioxclient` tool on the
-Linux server when needed, uses the running server certificate, and places both
-architecture-specific packages in served artifacts. Use
+Linux server when needed and places both deployment-neutral,
+architecture-specific packages and their provenance manifests in served
+artifacts. Use
 `tools/stage-iox-package.sh --arch arm64` or `--arch amd64` only when rebuilding
 one package. Building the arm64 package on an amd64 host needs Docker's arm64
 emulation; if it is not already enabled, `stage-iox-package.sh` requires
@@ -171,8 +171,8 @@ fails closed without it.
 
 The canonical OCI is measured per platform as compressed layer bytes and
 uncompressed rootfs bytes; those are the only comparable values until native
-IOx/RPM wrappers are actually built. A 2026-09-04 source-exact build from this
-tree, using the current lab's public catalog TLS leaf, measured:
+IOx/RPM wrappers are actually built. A recorded 2026-09-04 measurement of the
+certificate-bearing predecessor to the deployment-neutral image found:
 
 | Platform/object | Compressed layer bytes | Uncompressed layer bytes | Previous separate-image unpacked bytes | Unpacked delta |
 | --- | ---: | ---: | ---: | ---: |
@@ -190,19 +190,22 @@ The architecture manifests are
 `sha256:6b2fbf2b1ca7f2101ce631fce72dabfc54f009a3c7941561d4a4c7a541174efc`
 (amd64) and
 `sha256:bb07a2c94c1ba45311847fbae9d981bb7f8e223e85a1e922f9068b2010c7d635`
-(arm64). This is measurement evidence, not a release artifact: a release build
-that embeds another deployment's pinned catalog CA necessarily has different
-digests. Native wrapper size is deliberately not inferred from the earlier
-Debian packages because no native wrapper was built in this measurement.
+(arm64). These values are scale evidence, not the current release identity:
+removing the embedded PEM changes the exact byte counts and digests slightly.
+Use the current build's adjacent `.manifest` as the authority. Unlike that
+historical image, the deployment-neutral build does not acquire different
+digests merely because a deployment uses another server certificate. Native
+wrapper size is deliberately not inferred from the earlier Debian packages
+because no native wrapper was built in this measurement.
 
 The large IOx reduction comes from converging on the already-qualified Alpine
 runtime instead of carrying the former Debian userland. The modest increase
 against the former XR image is the shared OpenSSH/`sshpass` closure required by
 IOx. Both manifests retain BusyBox `ps`, `top`, `free`, and `kill`, the static
-architecture-matched `aria2c`, pinned certificate, full agent source set, and
-reconcile/supervision paths. Splitting the tiny platform-only Python modules
-would save at most tens of kilobytes and would defeat the one-content audit
-boundary, so it remains rejected.
+architecture-matched `aria2c`, full agent source set, runtime certificate
+validation, and reconcile/supervision paths. Splitting the tiny platform-only
+Python modules would save at most tens of kilobytes and would defeat the
+one-content audit boundary, so it remains rejected.
 
 These comparison values are the last verified separate images, after the
 field-diagnostics decision restored `procps` to IOx and after the last agent
@@ -220,9 +223,9 @@ also excluded.
 `aria2c` is handed in, never downloaded: the build takes each architecture
 from an explicit `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` override, a matching local agent bundle, or the handed-in
 `deliverables/aria2c-<arch>` binary, verifying it against
-`tools/aria2c.sha256` and failing closed on a mismatch. The catalog certificate must either be supplied
-locally or fetched with an explicitly supplied SHA-256 certificate
-fingerprint.
+`tools/aria2c.sha256` and failing closed on a mismatch. The builder accepts no
+catalog-certificate input; onboarding supplies the current public certificate
+without changing the canonical image or its wrappers.
 
 The sidecar records `index_digest`, `archive_sha256`, `source_sha256`, and the
 two platforms. A matching archive is reused; a pre-existing archive whose
@@ -236,13 +239,17 @@ new bytes. Each IOx tar and XR RPM follows the same fail-closed publication
 order with an adjacent `.manifest` that binds its `wrapper_sha256` and selected
 platform to those three canonical digests.
 
+Package status calls a wrapper ready only when its readable bytes match that
+adjacent provenance manifest. It does not infer readiness from certificate
+age, inspect package contents, or validate a native package signature.
+
 The installer passes all environment-specific values at deployment time. No
 lab address is baked in:
 
 | Variable | Purpose |
 | --- | --- |
 | `IRIS_DEVICE_PLATFORM` | Required exact profile selector: `iox` or `xr-appmgr`; missing/unknown values stop before writes. |
-| `IRIS_CATALOG_URL` | Reachable HTTPS catalog URL covered by the pinned certificate. |
+| `IRIS_CATALOG_URL` | Reachable HTTPS catalog URL covered by the runtime-delivered certificate. |
 | `IRIS_CATALOG_TOKEN` | Per-device enrollment token. |
 | `IRIS_DEVICE_ID` | Catalog identity for the device. |
 | `IRIS_DEVICE_SSH_HOST` | IOS SVI used for SSH-to-self and SCP. |
@@ -277,7 +284,8 @@ Guest Shell — and `AppGigabitEthernet1/0/1`.
 - Server clustering is not implemented. Kubernetes uses one replica and one
   ReadWriteOnce PVC.
 - The server certificate is IP-pinned. Its public address must be stable, and a
-  change requires certificate rotation plus a device trust update.
+  change requires certificate rotation plus re-onboarding each deployed device
+  to update runtime trust; package rebuilding is not required.
 
 The container packaging follows Cisco's
 [IOx package descriptor](https://developer.cisco.com/docs/iox/package-descriptor/)

@@ -805,6 +805,246 @@ def test_run_refresh_concurrent_call_returns_already_running(tmp_path):
     assert settings["last_run"]["source"] == "scheduled"
 
 
+def test_run_refresh_waits_for_turn_then_takes_fresh_snapshot(tmp_path):
+    store = _store(tmp_path / "state")
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def first_fetch(url, timeout, out_path):
+        first_entered.set()
+        assert release_first.wait(timeout=5)
+        raise bulkhash.BulkHashError("first finished")
+
+    def second_fetch(url, timeout, out_path):
+        second_entered.set()
+        raise bulkhash.BulkHashError("second took its turn")
+
+    first_result = []
+    second_result = []
+    first = threading.Thread(target=lambda: first_result.append(
+        bulkhash_refresh.run_refresh(
+            "scheduled", str(tmp_path / "state"), store,
+            _fetch_fn=first_fetch)))
+    first.start()
+    assert first_entered.wait(timeout=5)
+
+    second = threading.Thread(target=lambda: second_result.append(
+        bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store,
+            _fetch_fn=second_fetch, wait=True)))
+    second.start()
+    assert not second_entered.wait(timeout=0.1)
+
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert first_result[0]["outcome"] == "fail"
+    assert second_result[0] == {
+        "outcome": "fail", "detail": "second took its turn",
+        "matched": None, "mismatched": None, "not_in_feed": None}
+    assert second_entered.is_set()
+    settings = bulkhash_refresh.read_settings(
+        bulkhash_refresh.settings_path(str(tmp_path / "state")))
+    assert settings["last_run"]["source"] == "manual"
+
+
+def _wait_for_wait_generation(after):
+    """Wait until another wait=True caller has registered with the runner."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with bulkhash_refresh._RUN_CONDITION:
+            if bulkhash_refresh._WAIT_GENERATION > after:
+                return
+        time.sleep(0.001)
+    raise AssertionError("wait=True caller did not register")
+
+
+def _not_in_feed(images):
+    return {
+        image_id: {
+            "state": bulkhash.STATE_NOT_IN_FEED,
+            "feed_sha512": None,
+            "publish_date": None,
+            "deferral": False,
+        }
+        for image_id, _filename, _size, _sha512 in images
+    }
+
+
+def test_waiting_imports_covered_by_one_snapshot_coalesce(tmp_path):
+    """Two published rows present before one snapshot need one feed run."""
+    store = _store(tmp_path / "state")
+    store.save_image(_entry("image1", "image1.bin"))
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+    fetch_calls = []
+    snapshots = []
+
+    def fetch(_url, _timeout, _out_path):
+        fetch_calls.append(True)
+        fetch_entered.set()
+        assert release_fetch.wait(timeout=5)
+
+    def reconcile(_rows, images):
+        snapshots.append(tuple(row[0] for row in images))
+        return _not_in_feed(images)
+
+    common = {
+        "_fetch_fn": fetch,
+        "_verify_fn": lambda _path, _cert: None,
+        "_parse_fn": lambda _path: {},
+        "_reconcile_fn": reconcile,
+        "wait": True,
+    }
+    results = {}
+    first = threading.Thread(target=lambda: results.__setitem__(
+        "first", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    first.start()
+    assert fetch_entered.wait(timeout=5)
+
+    # This mirrors the second publish job: the row is durable before its
+    # wait=True verification call registers, while the first feed fetch is
+    # still ahead of the catalog snapshot.
+    store.save_image(_entry("image2", "image2.bin"))
+    with bulkhash_refresh._RUN_CONDITION:
+        before = bulkhash_refresh._WAIT_GENERATION
+    second = threading.Thread(target=lambda: results.__setitem__(
+        "second", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    second.start()
+    _wait_for_wait_generation(before)
+
+    release_fetch.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(fetch_calls) == 1
+    assert snapshots == [("image1", "image2")]
+    expected = {"outcome": "ok", "matched": 0, "mismatched": 0,
+                "not_in_feed": 2}
+    assert results == {"first": expected, "second": expected}
+    assert store.get_image("image1")["hash_verification"]["state"] == \
+        "not_in_feed"
+    assert store.get_image("image2")["hash_verification"]["state"] == \
+        "not_in_feed"
+
+
+def test_image_registered_after_snapshot_forces_new_refresh(tmp_path):
+    """An older success must not claim a row absent from its snapshot."""
+    store = _store(tmp_path / "state")
+    store.save_image(_entry("image1", "image1.bin"))
+    first_snapshot = threading.Event()
+    release_first = threading.Event()
+    fetch_calls = []
+    snapshots = []
+
+    def fetch(_url, _timeout, _out_path):
+        fetch_calls.append(True)
+
+    def reconcile(_rows, images):
+        snapshot = tuple(row[0] for row in images)
+        snapshots.append(snapshot)
+        if len(snapshots) == 1:
+            first_snapshot.set()
+            assert release_first.wait(timeout=5)
+        return _not_in_feed(images)
+
+    common = {
+        "_fetch_fn": fetch,
+        "_verify_fn": lambda _path, _cert: None,
+        "_parse_fn": lambda _path: {},
+        "_reconcile_fn": reconcile,
+        "wait": True,
+    }
+    results = {}
+    first = threading.Thread(target=lambda: results.__setitem__(
+        "first", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    first.start()
+    assert first_snapshot.wait(timeout=5)
+
+    store.save_image(_entry("image2", "image2.bin"))
+    with bulkhash_refresh._RUN_CONDITION:
+        before = bulkhash_refresh._WAIT_GENERATION
+    second = threading.Thread(target=lambda: results.__setitem__(
+        "second", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    second.start()
+    _wait_for_wait_generation(before)
+
+    release_first.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(fetch_calls) == 2
+    assert snapshots == [("image1",), ("image1", "image2")]
+    assert results["first"]["not_in_feed"] == 1
+    assert results["second"]["not_in_feed"] == 2
+    assert store.get_image("image2")["hash_verification"]["state"] == \
+        "not_in_feed"
+
+
+def test_failed_snapshot_is_not_reused_by_waiting_import(tmp_path):
+    """Even a failure whose snapshot covered a waiter must be retried."""
+    store = _store(tmp_path / "state")
+    store.save_image(_entry("image1", "image1.bin"))
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+    fetch_calls = []
+    snapshots = []
+
+    def fetch(_url, _timeout, _out_path):
+        fetch_calls.append(True)
+        if len(fetch_calls) == 1:
+            fetch_entered.set()
+            assert release_fetch.wait(timeout=5)
+
+    def reconcile(_rows, images):
+        snapshots.append(tuple(row[0] for row in images))
+        if len(snapshots) == 1:
+            raise bulkhash.BulkHashError("first covered snapshot failed")
+        return _not_in_feed(images)
+
+    common = {
+        "_fetch_fn": fetch,
+        "_verify_fn": lambda _path, _cert: None,
+        "_parse_fn": lambda _path: {},
+        "_reconcile_fn": reconcile,
+        "wait": True,
+    }
+    results = {}
+    first = threading.Thread(target=lambda: results.__setitem__(
+        "first", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    first.start()
+    assert fetch_entered.wait(timeout=5)
+
+    store.save_image(_entry("image2", "image2.bin"))
+    with bulkhash_refresh._RUN_CONDITION:
+        before = bulkhash_refresh._WAIT_GENERATION
+    second = threading.Thread(target=lambda: results.__setitem__(
+        "second", bulkhash_refresh.run_refresh(
+            "manual", str(tmp_path / "state"), store, **common)))
+    second.start()
+    _wait_for_wait_generation(before)
+
+    release_fetch.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(fetch_calls) == 2
+    assert snapshots == [
+        ("image1", "image2"), ("image1", "image2")]
+    assert results["first"]["outcome"] == "fail"
+    assert results["first"]["detail"] == "first covered snapshot failed"
+    assert results["second"] == {
+        "outcome": "ok", "matched": 0, "mismatched": 0,
+        "not_in_feed": 2}
+
+
 def test_run_refresh_lock_is_released_after_completion(tmp_path):
     store = _store(tmp_path / "state")
     r1 = bulkhash_refresh.run_refresh(
