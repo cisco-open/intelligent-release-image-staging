@@ -278,6 +278,61 @@ All of these are tuning knobs, not protocol values — see [Reference →
 Device container environment variables](reference.md#device-container-environment-variables)
 for defaults and ranges.
 
+## Device-side logging (flash write endurance)
+
+Every platform stages images to `flash:` / `bootflash:` / `sdflash:` /
+`harddisk:`, and flash has finite write endurance. `aria2c`'s own log is
+chatty and continuous for the whole life of a transfer — and with
+`--seed-ratio=0.0` (the private-swarm flag every launcher sets, since a
+staged device seeds forever) a log left on never stops growing. `IRIS_LOG`
+(default `off`, all three platforms) makes that log opt-in rather than
+always-on:
+
+- **Off (the default) is genuinely no recurring flash write from this
+  source**, not a smaller or rotated file. With no `--log=` on the launch
+  line, aria2c's own daemon mode already redirects its stdio to `/dev/null`
+  (Guest Shell, via `--daemon=true`); the container supervisors
+  (`device/iox/entrypoint.sh`, `device/xr/entrypoint.sh`) already redirect
+  their tracked child's stdio to `/dev/null` unconditionally, so there is
+  nothing extra to suppress there either.
+- **On** adds `--log=<stage dir>/aria2c.log` to the launch line. Guest Shell
+  relies on the existing per-tick `rotate-logs.sh` (driven by
+  `bootstrap.sh`, see [Agent installation](#agent-installation)) to keep it
+  bounded; IOx and XR have never shipped `rotate-logs.sh` into the image (no
+  bash dependency added just for this), so their launch line instead adds
+  aria2's own `--log-max-size=50M --log-max-files=1` to bound growth.
+- **What is unaffected either way.** Turning logging off never suppresses
+  anything an operator needs to diagnose a failure in the moment: IOS
+  syslog (`emit()`, sent via `send log` on Guest Shell/IOx, or written as
+  `%IRIS-6-<MNEMONIC>` lines to the XR container's stdout that appmgr
+  captures) and the heartbeat's `stage_error` field both keep working
+  regardless. Staging, verification, and telemetry reporting are
+  unaffected. Only the continuous local `aria2c.log` file is optional.
+- **Turning it on is an explicit operator act.** On IOx/XR it is a normal
+  deploy-time `run-opts -e` Docker variable, the same mechanism as
+  `IRIS_TICK_SECONDS`. On Guest Shell, set it in the device's persisted
+  `iris-agent.conf` (see [Reference → Device agent config
+  keys](reference.md#device-agent-config-keys)) — `guestshell-start.sh`
+  itself only reads its own live process environment on every 60s EEM tick,
+  so nothing set any other way (e.g. hand-edited into the guest user's shell
+  profile) survives the next tick, let alone a reload. `bootstrap.sh` reads
+  `iris_log` out of `iris-agent.conf` (the same file the RPC secret already
+  round-trips through — issue #122) and exports it before invoking
+  `guestshell-start.sh`, so an operator can turn logging on for an
+  already-deployed device with a text edit and no reinstall: add
+  `iris_log = on` to `iris-agent.conf`, and the next EEM tick picks it up.
+  `guestshell-start.sh`'s other launch knobs, `RPC_PORT` and `MAX_PEERS`,
+  work the same way via `rpc_port`/`max_peers` in the same file — they had
+  the identical persistence gap before `IRIS_LOG` made it operator-relevant.
+  A malformed value (non-alphanumeric for `iris_log`, non-numeric or
+  out-of-range for `rpc_port`/`max_peers`) is dropped by `bootstrap.sh`
+  rather than exported, so `guestshell-start.sh`'s own built-in default
+  applies — the same fail-closed posture as the `IRIS_LOG` parsing itself.
+
+See [Reference → Device container environment
+variables](reference.md#device-container-environment-variables) for the
+exact parsing rule.
+
 ## Verification gates
 
 IRIS uses two checks because the server and device have different capabilities:

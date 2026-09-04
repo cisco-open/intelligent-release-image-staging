@@ -51,6 +51,105 @@ teardown() { rm -rf "$TMP"; }
   [ ! -f "$TMP/pkill.log" ]
 }
 
+# ---------------------------------------------------------------------------
+# Persisted aria2c launch overrides from iris-agent.conf (issue #122):
+# guestshell-start.sh only reads its own live process environment, refreshed
+# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or
+# RPC_PORT/MAX_PEERS, which had the identical gap) stick without this. These
+# tests run the REAL guestshell-start.sh (not a stub) against a stub aria2c
+# so the launch line it actually builds can be inspected end to end.
+# ---------------------------------------------------------------------------
+
+@test "bootstrap propagates iris_log=on from iris-agent.conf to aria2c's real launch line" {
+  printf 'rpc_secret = SAME\niris_log = on\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$TMP/launched.txt")" == *"--log=$STAGE/aria2c.log"* ]]
+}
+
+@test "bootstrap leaves aria2c's default OFF logging alone when iris-agent.conf has no iris_log key" {
+  printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
+}
+
+@test "bootstrap rejects a hostile iris_log value instead of exporting it, and stays off" {
+  # The value rides straight from the conf file into an exported env var,
+  # never through eval/exec, so there is no shell-injection path regardless
+  # -- but this proves it two ways: the shell metacharacters in the value
+  # never run (no $TMP/pwned file appears), and the malformed value is
+  # rejected rather than silently coerced to "on".
+  printf 'rpc_secret = SAME\niris_log = on; touch %s/pwned #\n' "$TMP" \
+    > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring invalid iris_log"* ]]
+  [ ! -f "$TMP/pwned" ]
+  [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
+}
+
+@test "bootstrap propagates rpc_port and max_peers from iris-agent.conf to aria2c's real launch line" {
+  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 25\n' > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  out="$(cat "$TMP/launched.txt")"
+  [[ "$out" == *"--rpc-listen-port=6900"* ]]
+  [[ "$out" == *"--bt-max-peers=25"* ]]
+}
+
+@test "bootstrap ignores an invalid rpc_port/max_peers in iris-agent.conf and keeps the builtin defaults" {
+  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 999999\n' \
+    > "$STAGE/iris-agent.conf"
+  printf 'SAME\n' > "$STAGE/rpc-secret"
+  cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
+  chmod +x "$STAGE/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$TMP" > "$STAGE/aria2c-stub"
+  chmod +x "$STAGE/aria2c-stub"
+  mkdir -p "$TMP/home"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      ARIA2_SRC="$STAGE/aria2c-stub" EXEC_DIR="$TMP/home" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring invalid rpc_port"* ]]
+  [[ "$output" == *"ignoring out-of-range max_peers"* ]]
+  out="$(cat "$TMP/launched.txt")"
+  [[ "$out" == *"--rpc-listen-port=6800"* ]]   # builtin default, unchanged
+  [[ "$out" == *"--bt-max-peers=10"* ]]        # builtin default, unchanged
+}
+
 @test "a failed aria2c launch is recorded but does NOT block the agent" {
   # Sibling of the 2026-08-20 incident class: bootstrap used to `exit 1` when
   # guestshell-start.sh failed, so the agent (step 5) never ran and the device

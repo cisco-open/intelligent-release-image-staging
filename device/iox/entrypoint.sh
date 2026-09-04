@@ -43,6 +43,22 @@ JITTER_PCT="${IRIS_TICK_JITTER_PCT:-10}"
 BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 TARGET_FS="${IRIS_TARGET_FS:-}"
+# Device-side logging is OFF by default: flash has finite write endurance,
+# and aria2c's log is chatty and continuous for the whole life of a transfer
+# (and, with --seed-ratio=0.0 below, a staged device seeds forever, so a log
+# left on would never stop growing). Off means genuinely no recurring flash
+# write from this source, not "a smaller file" -- start_aria2c below never
+# puts --log= on the launch line unless this is explicitly on, and stdio is
+# already redirected to /dev/null regardless (see start_aria2c). On, it is
+# bounded by aria2's own --log-max-size/--log-max-files rather than growing
+# without limit. Same fail-closed on/1/true/yes parsing
+# telemetry_report.stream_enabled() uses; anything else, including garbage,
+# stays off. This never touches error reporting: the agent's own emit()
+# (IOS syslog via `send log`, delivered over the SSH-to-self CLI transport --
+# see _emit_impl in iris_agent.py) and the heartbeat's stage_error field are
+# unaffected either way -- only the continuous aria2c.log file is optional.
+IRIS_LOG="${IRIS_LOG:-off}"
+LOG_FILE="$STAGE_DIR/aria2c.log"
 ARIA2="/opt/iris/bin/aria2c"
 AGENT="/opt/iris/agent/iris_agent.py"
 # --on-bt-download-complete: the per-peer transfer-record hook. Baked into the image by
@@ -215,6 +231,16 @@ start_aria2c() {
   # above, so reusing $@ here is safe.
   set --
   case "${HOOK:-}" in ?*) set -- "--on-bt-download-complete=$HOOK" ;; esac
+  # --log is added only when an operator explicitly opts in (IRIS_LOG=on);
+  # see the IRIS_LOG comment near the top of this file for why leaving it
+  # off the launch line entirely -- not writing a smaller/rotated file -- is
+  # what "off" means here. --log-max-size/--log-max-files bound the file
+  # once logging is on, since this platform has never shipped rotate-logs.sh
+  # (no bash dependency added just for this) and aria2 already owns the fd.
+  case "$(printf '%s' "$IRIS_LOG" | tr '[:upper:]' '[:lower:]')" in
+    on|1|true|yes)
+      set -- "$@" "--log=$LOG_FILE" --log-max-size=50M --log-max-files=1 ;;
+  esac
   # A tracked child with its stdio on /dev/null -- exactly what --daemon=true's
   # daemon(0,0) did, minus the double fork. The redirect is not optional:
   # aria2c writes a progress readout line every second, to a pipe as readily

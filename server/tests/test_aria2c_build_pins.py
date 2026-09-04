@@ -179,3 +179,34 @@ def test_every_pin_still_resolves_in_the_pinned_alpine_branch(arch):
         "indexes, so the published corresponding source cannot be rebuilt:\n  %s\n"
         "Bump the pin in the Dockerfile on purpose -- keep the =version."
         % (branch, "\n  ".join(stale)))
+
+
+def test_size_gate_reads_a_byte_count_not_filesystem_stats():
+    """The published build's size gate must actually compare a number.
+
+    `stat -f %z` is BSD/macOS for "size of this file", but on GNU coreutils
+    `-f` is --file-system: it SUCCEEDS and prints a block of filesystem stats.
+    With the BSD form tried first the `||` fallback never runs on Linux,
+    $bytes becomes multi-line text, and every `[ "$bytes" -gt ... ]` below
+    dies with "integer expression expected" -- which is not fatal inside an
+    `if`, so the gate silently passed everything, including a binary over the
+    hard-fail ceiling it exists to catch. GNU form must come first.
+    """
+    import subprocess
+    build_sh = os.path.join(HERE, "..", "..", "tools", "aria2c-build", "build.sh")
+    with open(build_sh, encoding="utf-8") as fh:
+        src = fh.read()
+    line = next((l for l in src.splitlines() if l.strip().startswith("bytes=")), None)
+    assert line, "build.sh no longer assigns bytes= for the size gate"
+    gnu, bsd = line.find("stat -c"), line.find("stat -f")
+    assert gnu != -1 and bsd != -1, "expected both stat forms with a fallback"
+    assert gnu < bsd, (
+        "BSD `stat -f %%z` is tried before GNU `stat -c %%s`, so on Linux the "
+        "size gate reads filesystem stats and never fires: %s" % line.strip())
+
+    # And prove it end to end on this host rather than trusting the ordering.
+    out = subprocess.run(["bash", "-c", line.strip() + '; printf "%s" "$bytes"'],
+                         capture_output=True, text=True,
+                         env={"ARTIFACT": build_sh, "PATH": "/usr/bin:/bin"})
+    assert out.stdout.strip().isdigit(), (
+        "the size-gate assignment did not yield a plain byte count: %r" % out.stdout)

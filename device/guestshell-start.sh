@@ -20,6 +20,20 @@ RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
 HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
 HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-transfer-hook}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
+# Device-side logging is OFF by default: flash has finite write endurance,
+# and aria2c's log is chatty and continuous for the whole life of a transfer
+# (and, with --seed-ratio=0.0 below, a staged device seeds forever, so a log
+# left on would never stop growing). Off means genuinely no recurring flash
+# write from this source, not "a smaller file" -- with no --log= on the
+# launch line below, aria2c's own daemon mode (-D/--daemon) already
+# redirects its stdout/stderr to /dev/null itself (aria2 Next 2.5.6 --help,
+# the -D entry), so nothing is opened on flash at all. Same fail-closed
+# on/1/true/yes parsing telemetry_report.stream_enabled() uses; anything
+# else, including garbage, stays off. This never touches error reporting:
+# IOS syslog (emit(), via `send log`) and the heartbeat's stage_error field
+# are unaffected either way -- only the continuous local aria2c.log file is
+# optional.
+IRIS_LOG="${IRIS_LOG:-off}"
 MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a device
 # Lift aria2's concurrency cap, which defaults to 5. A SEEDING torrent counts
 # against that cap and never completes (--seed-ratio=0.0 below means seed
@@ -90,6 +104,13 @@ if [ -n "$HOOK" ]; then
   # from launching at all -- the exact shape of the 2026-08-20 incident.
   set -- "$@" "--on-bt-download-complete=$HOOK"
 fi
+
+# --log is added only when an operator explicitly opts in (IRIS_LOG=on).
+# Left off the exec line entirely when not: see the IRIS_LOG comment above
+# for why that -- not a smaller/rotated file -- is what "off" means here.
+case "$(printf '%s' "$IRIS_LOG" | tr '[:upper:]' '[:lower:]')" in
+  on|1|true|yes) set -- "$@" "--log=$LOG" ;;
+esac
 
 # What the hook needs, handed over by inheritance through aria2c's fork rather
 # than re-read from disk. The rpc-secret FILE and the running daemon can
@@ -203,6 +224,5 @@ exec "$ARIA2" \
   --seed-ratio=0.0 \
   --file-allocation=none \
   --dir="$STAGE_DIR" \
-  --log="$LOG" \
   --log-level=warn \
   --summary-interval=0

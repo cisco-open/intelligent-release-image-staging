@@ -45,6 +45,7 @@ ENV PATH="/opt/iris/bin:${PATH}" \
     IRIS_TICK_SECONDS="60" \
     IRIS_MAX_PEERS="10" \
     IRIS_TELEMETRY="on" \
+    IRIS_LOG="off" \
     IRIS_CATALOG_CA="/opt/iris/iris-catalog.pem"
 
 WORKDIR /opt/iris

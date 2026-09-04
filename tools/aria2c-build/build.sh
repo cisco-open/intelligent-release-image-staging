@@ -122,7 +122,13 @@ cat "$OUT/verification.txt"
 
 echo
 echo "=== size gate ==="
-bytes="$(stat -f %z "$ARTIFACT" 2>/dev/null || stat -c %s "$ARTIFACT")"
+# GNU stat first, BSD/macOS second. The other order is a trap: on GNU coreutils
+# `stat -f` means --file-system, so it SUCCEEDS and prints a block of
+# filesystem stats, the `||` fallback never runs, and $bytes becomes multi-line
+# text. Every comparison below then dies with "integer expression expected",
+# which is not fatal inside an `if`, so the size gate silently passed anything
+# -- including a binary over the hard-fail ceiling it exists to catch.
+bytes="$(stat -c %s "$ARTIFACT" 2>/dev/null || stat -f %z "$ARTIFACT")"
 printf 'stripped size: %s bytes (%.2f MB)\n' "$bytes" "$(echo "scale=4; $bytes/1048576" | bc)"
 if [ "$bytes" -gt "$SIZE_HARD_FAIL" ]; then
   echo "HARD FAIL: > 15 MB"; exit 1

@@ -114,6 +114,78 @@ if [ -f "$STAGE/iris-agent.conf" ]; then
   fi
 fi
 
+# 2b. persist optional aria2c launch overrides an operator set in
+# iris-agent.conf into guestshell-start.sh's process environment (issue
+# #122). Guest Shell has no other route for these: guestshell-start.sh only
+# reads its OWN live process environment on each 60s EEM tick, so a value
+# set any other way (e.g. edited into the guest user's shell profile) is
+# lost the moment that tick's process exits, and never survives a reload at
+# all. iris-agent.conf is already the agent's persisted, reboot-durable
+# config file (rpc_secret above is synced from the very same file) and
+# agent_config.load()/write_conf() already round-trip a key they don't
+# recognize (device/agent/agent_config.py), so an operator can set
+# `iris_log = on` (or `rpc_port` / `max_peers`) there with nothing more than
+# a text edit, on an already-deployed device, with no reinstall and no
+# change to a file the agent rewrites out from under them -- the NEXT EEM
+# tick picks it up. This covers `RPC_PORT`/`MAX_PEERS` too: they had the
+# identical gap before `IRIS_LOG` made it operator-relevant.
+#
+# Read raw with sed, exactly like the rpc_secret line above -- never eval'd,
+# so there is no path from a malformed or hostile conf value to shell
+# execution -- and validated before export. An invalid value is dropped
+# (with a warning) rather than exported, so guestshell-start.sh's own
+# built-in default takes over: the same fail-closed posture IRIS_LOG already
+# documents there (garbage stays off, never on).
+conf_value() {
+  # $1 = key. Last matching line wins, matching agent_config.load()'s
+  # last-value-wins semantics for a repeated key. Never eval'd, and $1 is
+  # always one of our own literal key names below, never conf content.
+  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" \
+      "$STAGE/iris-agent.conf" 2>/dev/null | tail -n1 | tr -d '[:space:]'
+}
+
+if [ -f "$STAGE/iris-agent.conf" ]; then
+  _v="$(conf_value iris_log)"
+  if [ -n "$_v" ]; then
+    case "$_v" in
+      *[!A-Za-z0-9]*)
+        echo "IRIS-BOOTSTRAP: ignoring invalid iris_log in iris-agent.conf: $_v" >&2 ;;
+      *) export IRIS_LOG="$_v" ;;
+    esac
+  fi
+
+  _v="$(conf_value rpc_port)"
+  if [ -n "$_v" ]; then
+    case "$_v" in
+      *[!0-9]*)
+        echo "IRIS-BOOTSTRAP: ignoring invalid rpc_port in iris-agent.conf: $_v" >&2 ;;
+      *)
+        if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ]; then
+          export RPC_PORT="$_v"
+        else
+          echo "IRIS-BOOTSTRAP: ignoring out-of-range rpc_port in iris-agent.conf: $_v" >&2
+        fi
+        ;;
+    esac
+  fi
+
+  _v="$(conf_value max_peers)"
+  if [ -n "$_v" ]; then
+    case "$_v" in
+      *[!0-9]*)
+        echo "IRIS-BOOTSTRAP: ignoring invalid max_peers in iris-agent.conf: $_v" >&2 ;;
+      *)
+        if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ]; then
+          export MAX_PEERS="$_v"
+        else
+          echo "IRIS-BOOTSTRAP: ignoring out-of-range max_peers in iris-agent.conf: $_v" >&2
+        fi
+        ;;
+    esac
+  fi
+  unset _v
+fi
+
 # 3. keep the BitTorrent daemon up.
 # Delegate unconditionally: guestshell-start.sh is idempotent — it probes the
 # RPC first and exits 0 when aria2c is already SERVING. Gating this on

@@ -122,6 +122,7 @@ STUB
 set -eu
 eval "$(awk '/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/' "$1")"
 ARIA2="$2"; RPC_PORT=6800; MAX_PEERS=10; STAGE_DIR="$3"; HOOK=""
+IRIS_LOG="${IRIS_LOG:-off}"; LOG_FILE="$STAGE_DIR/aria2c.log"
 ARIA2_PID=""; ARIA2_START=""
 start_aria2c s1 >/dev/null
 i=0
@@ -147,6 +148,55 @@ HARNESS
     run grep -qx -- '--bt-seed-unverified=true' "$argv"
     [ "$status" -eq 0 ] || { echo "--bt-seed-unverified lost in $ep"; cat "$argv"; return 1; }
   done
+}
+
+# ---------------------------------------------------------------------------
+# Device-side logging is opt-in (flash write endurance)
+#
+# aria2c's log is chatty and continuous for the whole life of a transfer, and
+# with --seed-ratio=0.0 a staged device seeds forever, so a log left on never
+# stops growing. Both container supervisors already redirect the child's
+# stdio to /dev/null unconditionally (see the daemon-equivalent-stdio test
+# above), so the ONLY way either platform would write a recurring log to
+# disk is an explicit --log= on the launch line -- which must be absent by
+# default and present only when an operator opts in.
+# ---------------------------------------------------------------------------
+
+@test "device-side logging defaults OFF on both container platforms: no --log on the launch line" {
+  for ep in $ENTRYPOINTS; do
+    argv="$BATS_TEST_TMPDIR/argv-$(basename "$(dirname "$ep")").txt"
+    rm -f "$argv"
+    # IRIS_LOG deliberately unset: proves the DEFAULT, not an explicit off.
+    run _recorded_launch_argv "$ep" "$argv"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run grep -q -- '--log=' "$argv"
+    [ "$status" -ne 0 ] || { echo "$ep logs by default:"; cat "$argv"; return 1; }
+  done
+}
+
+@test "IRIS_LOG=on puts a size-bounded --log on the launch line on both platforms" {
+  for ep in $ENTRYPOINTS; do
+    argv="$BATS_TEST_TMPDIR/argv-on-$(basename "$(dirname "$ep")").txt"
+    rm -f "$argv"
+    IRIS_LOG=on run _recorded_launch_argv "$ep" "$argv"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run grep -q -- '--log=' "$argv"
+    [ "$status" -eq 0 ] || { echo "$ep: IRIS_LOG=on did not add --log:"; cat "$argv"; return 1; }
+    run grep -qx -- '--log-max-size=50M' "$argv"
+    [ "$status" -eq 0 ] || { echo "$ep: no --log-max-size bound:"; cat "$argv"; return 1; }
+    run grep -qx -- '--log-max-files=1' "$argv"
+    [ "$status" -eq 0 ] || { echo "$ep: no --log-max-files bound:"; cat "$argv"; return 1; }
+  done
+}
+
+@test "the IOx and XR aria2c launch lines stay byte-identical (including the log gating)" {
+  # Coupled invariant: both platforms share one aria2c launch shape. Compare
+  # the actual "$ARIA2" ... invocation, not the surrounding comments (which
+  # are allowed, and known, to differ in wording between the two files).
+  iox="$(sed -n '/^  "\$ARIA2" \\/,/2>&1 &$/p' "$DEVICE/iox/entrypoint.sh")"
+  xr="$(sed -n '/^  "\$ARIA2" \\/,/2>&1 &$/p' "$DEVICE/xr/entrypoint.sh")"
+  [ -n "$iox" ] || { echo "could not locate the IOx launch line"; return 1; }
+  [ "$iox" = "$xr" ] || { echo "IOx and XR launch lines diverged:"; diff <(echo "$iox") <(echo "$xr"); return 1; }
 }
 
 # ---------------------------------------------------------------------------

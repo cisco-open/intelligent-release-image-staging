@@ -40,6 +40,41 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   existence and metadata did.
 
 ### Added
+- **Device-side logging is now opt-in, and off by default, to protect flash
+  write endurance.** Every platform stages images to `flash:` /
+  `bootflash:` / `sdflash:` / `harddisk:`, and flash has a finite number of
+  write cycles; `aria2c`'s own log is chatty and continuous for the whole
+  life of a transfer, and with `--seed-ratio=0.0` a staged device seeds
+  forever, so a log left on never stopped growing. `IRIS_LOG` (default
+  `off`, same name and `on`/`1`/`true`/`yes` parsing on Guest Shell, IOx and
+  XR) now gates whether aria2c's launch line carries `--log=` at all — off
+  is genuinely no recurring flash write, not a smaller file: with no
+  `--log=`, aria2c's own daemon mode (Guest Shell) or the container
+  supervisor's own stdio redirect (IOx, XR) already sends everything to
+  `/dev/null`. Turning it on adds `--log-max-size=50M --log-max-files=1` on
+  IOx/XR (neither ships `rotate-logs.sh`) and keeps the existing
+  `rotate-logs.sh`/EEM cadence on Guest Shell. Error reporting is
+  unaffected either way: IOS syslog / the XR container's
+  `%IRIS-6-<MNEMONIC>` stdout and the heartbeat's `stage_error` field keep
+  working with logging off. See [Device agents → Device-side logging (flash
+  write
+  endurance)](docs/zensical/device-agents.md#device-side-logging-flash-write-endurance).
+- **`IRIS_LOG` (and `RPC_PORT`/`MAX_PEERS`) can now be set persistently on a
+  Guest Shell device without editing the guest user's shell profile or
+  reinstalling the agent.** `guestshell-start.sh` only reads its own live
+  process environment on each 60s EEM tick, so nothing set outside that tick
+  survived the next one, let alone a reload — on Guest Shell there was no
+  way at all to turn on device-side aria2c logging that stuck. `bootstrap.sh`
+  now reads `iris_log`, `rpc_port` and `max_peers` out of the same persisted,
+  reboot-durable `iris-agent.conf` the RPC secret already round-trips
+  through, validates each (digits in range for the two ports/counts,
+  alphanumeric only for `iris_log`; an invalid value is dropped with a
+  warning rather than exported, so aria2c's own built-in default applies),
+  and exports them into `guestshell-start.sh`'s environment before every
+  launch. An operator sets `iris_log = on` (or `rpc_port` / `max_peers`) in
+  the device's `iris-agent.conf` and the next EEM tick picks it up — no
+  redeploy. See [Device agents → Device-side logging (flash write
+  endurance)](docs/zensical/device-agents.md#device-side-logging-flash-write-endurance).
 - **The fleet and swarm console projections can be asked for a page.**
   `GET /api/devices` accepts `limit` (1–1000, clamped), `offset` and `q` — a
   case-insensitive substring over the same four fields the console's own

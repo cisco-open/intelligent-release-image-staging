@@ -405,3 +405,101 @@ CURL
   [ "$t" -gt 5 ] || { echo "probe bound is ${t}s, too short for a 5 s resolver stall"; return 1; }
   grep -q -- '--connect-timeout "\$RPC_CONNECT_TIMEOUT"' "$BATS_TEST_DIRNAME/guestshell-start.sh"
 }
+
+# ---------------------------------------------------------------------------
+# Device-side logging is opt-in (flash write endurance)
+#
+# aria2c's --log is chatty and continuous for the whole life of a transfer,
+# and with --seed-ratio=0.0 a staged device seeds forever, so a log left on
+# never stops growing. Flash has finite write endurance, so the default must
+# genuinely write nothing recurring -- not "a smaller file". Guarded here
+# because "no --log= on the launch line" is the whole mechanism: aria2c's own
+# daemon mode already redirects stdio to /dev/null with no --log given, so
+# leaving the flag off the command line is sufficient, not just a smaller
+# rotated file.
+# ---------------------------------------------------------------------------
+
+@test "device-side logging defaults OFF: no --log flag on the launch line at all" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  # IRIS_LOG deliberately unset: this proves the DEFAULT, not an explicit off.
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  out="$(cat "$tmp/launched.txt")"
+  [[ "$out" != *"--log="* ]]
+}
+
+@test "IRIS_LOG=on puts --log=<aria2c.log> on the launch line" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 IRIS_LOG=on \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  out="$(cat "$tmp/launched.txt")"
+  [[ "$out" == *"--log=$tmp/stage/aria2c.log"* ]]
+}
+
+@test "IRIS_LOG parsing accepts 1/true/yes/ON case-insensitively, and stays off for anything else" {
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  printf '#!/usr/bin/env bash\necho "$@" > "%s/launched.txt"\n' "$tmp" > "$tmp/aria2c-stub"
+  chmod +x "$tmp/aria2c-stub"
+  for v in 1 true yes ON On; do
+    rm -f "$tmp/launched.txt"
+    run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+        RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 IRIS_LOG="$v" \
+        bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+    [ "$status" -eq 0 ] || { echo "IRIS_LOG=$v failed to launch"; return 1; }
+    [[ "$(cat "$tmp/launched.txt")" == *"--log="* ]] \
+      || { echo "IRIS_LOG=$v did not enable --log"; return 1; }
+  done
+  for v in off 0 false no garbage ""; do
+    rm -f "$tmp/launched.txt"
+    run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+        RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 IRIS_LOG="$v" \
+        bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+    [ "$status" -eq 0 ] || { echo "IRIS_LOG=$v failed to launch"; return 1; }
+    [[ "$(cat "$tmp/launched.txt")" != *"--log="* ]] \
+      || { echo "IRIS_LOG=$v unexpectedly enabled --log"; return 1; }
+  done
+}
+
+@test "logging off means rotate-logs.sh has nothing to trim (no aria2c.log ever created)" {
+  # End-to-end proof that OFF is genuinely no recurring flash write, not just
+  # a launch-line detail: a stub that mimics aria2c's OWN behavior (only
+  # creates the log file when given a --log= argument, same as the real
+  # binary) never creates aria2c.log by default, so bootstrap.sh's per-tick
+  # rotate-logs.sh call (device/bootstrap.sh step 4) is a no-op every tick.
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/stage" "$tmp/home"
+  echo "rpcsecret" > "$tmp/stage/rpc-secret"
+  cat > "$tmp/aria2c-stub" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in --log=*) : > "${a#--log=}" ;; esac
+done
+STUB
+  chmod +x "$tmp/aria2c-stub"
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$tmp/stage/aria2c.log" ]
+  # sanity: the SAME stub does create it when the operator opts in, so the
+  # negative assertion above is proving something the stub can actually show
+  run env STAGE_DIR="$tmp/stage" EXEC_DIR="$tmp/home" ARIA2_SRC="$tmp/aria2c-stub" \
+      RPC_SECRET_FILE="$tmp/stage/rpc-secret" SKIP_RPC_PROBE=1 IRIS_LOG=on \
+      bash "$BATS_TEST_DIRNAME/guestshell-start.sh"
+  [ "$status" -eq 0 ]
+  [ -e "$tmp/stage/aria2c.log" ]
+}
