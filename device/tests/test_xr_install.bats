@@ -94,13 +94,11 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
-  [[ "$output" == *"current public catalog certificate -> harddisk:"* ]]
+  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
   # XR commit IS the persisted state -- there is no running/startup split.
-  # (The dry-run header explicitly SAYS so, in prose, which is why this
-  # checks for the bare COMMAND line rather than the substring anywhere.)
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   if printf '%s\n' "$output" | grep -qE '^copy running-config startup-config$'; then
@@ -311,7 +309,7 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"'iris' is Up"* ]]
+  [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
 }
 
 @test "live: pushes the current certificate to the fixed harddisk path before activation" {
@@ -397,7 +395,7 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   FAKE_APP_UP_AFTER=3 ACTIVATE_TIMEOUT=30 ACTIVATE_POLL=1 run _xr_install_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"'iris' is Up"* ]]
+  [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
 }
 
 @test "live: the RPM scp verifies the router's host key (never /dev/null known_hosts)" {

@@ -280,7 +280,7 @@ def _query_parameters(route):
             "peer": ({"type": "string", "enum": [
                 "quarantined", "not-quarantined"]}, "not-quarantined"),
             "status": ({"type": "string", "enum": [
-                "onboarding", "undeploying", "waiting-heartbeat",
+                "onboarding", "undeploying", "waiting-heartbeat", "waiting-staging",
                 "onboard-failed", "undeploy-failed", "deployed",
                 "placement-failed", "image-failed", "copying", "staging",
                 "unassigned", "enrolled", "not-enrolled", "offline",
@@ -404,13 +404,13 @@ def _query_parameters(route):
              "schema": {"type": "string", "writeOnly": True}},
             {"name": "key", "in": "query", "required": False,
              "deprecated": True,
-             "description": "Older Guest Shell/aria2 credential spelling; accepted only when Authorization is absent.",
+             "description": "Query credential accepted only when Authorization is absent.",
              "schema": {"type": "string", "writeOnly": True}},
         ])
     if route.service == "catalog" and path.startswith("/v1/torrents/"):
         params.append({
             "name": "X-IRIS-Tracker-Auth", "in": "header", "required": False,
-            "description": "Set exactly to bearer by unified IOx/XR agents for a token-free announce URL. Omit for unchanged Guest Shell query-auth torrents.",
+            "description": "Set exactly to bearer by unified IOx/XR agents for a token-free announce URL. Omit for Guest Shell query-auth torrents.",
             "schema": {"type": "string", "const": "bearer"},
             "example": "bearer",
         })
@@ -906,10 +906,15 @@ def _success(route):
                        "content": {"text/html": _media(
                            {"type": "string"}, "<!doctype html>...")}}
     if path.endswith("/stream") and "/jobs/" in path:
-        return "200", {"description": "Server-sent job events",
+        return "200", {"description": (
+            "Job log lines as unnamed text data events, with keepalive comments. "
+            "An end event carries done, error, cancelled, idle, or unknown. "
+            "Each connection replays the retained lines from the start; "
+            "Last-Event-ID is not supported."),
                        "content": {"text/event-stream": _media(
                            {"type": "string"},
-                           "event: progress\\ndata: {}\\n\\n")}}
+                           "data: onboard complete: 192.0.2.10\n\n"
+                           "event: end\ndata: done\n\n")}}
     if path.endswith("/deploy-logs/{filename}"):
         return "200", {"description": "Deployment log text",
                        "content": {"text/plain": _media(
@@ -1179,10 +1184,10 @@ def _success(route):
             "ok", "absent", "unknown", "stale"]
         item["properties"]["built_at"]["type"] = ["integer", "null"]
         item["properties"]["built_at"]["description"] = (
-            "Artifact file modification time as Unix seconds; the legacy "
+            "Artifact file modification time as Unix seconds; the "
             "field name does not attest the original package build time.")
         item["properties"]["fingerprint"]["description"] = (
-            "Legacy field, null for deployment-neutral packages; runtime "
+            "Null for deployment-neutral packages; runtime "
             "trust is reported by packages.reference_fingerprint.")
         item["properties"]["provenance"]["type"] = ["object", "null"]
         item["properties"]["reason"] = {"type": "string"}
@@ -1270,7 +1275,7 @@ def _operation(route):
             "parameter": "legacy_artifact",
             "entropyBits": 128,
             "timeBounded": True,
-            "compatibility": "unchanged Guest Shell copy HTTPS",
+            "compatibility": "Guest Shell copy HTTPS",
         }
     path_exception = _resource_path_exception(route)
     if path_exception is not None:
@@ -1419,7 +1424,7 @@ def _error_statuses(route):
 
 def _service_server(service):
     return {
-        "console": {"url": "https://iris.example", "description": "Operator console BFF"},
+        "console": {"url": "https://iris.example:8080", "description": "Operator Console; replace with the configured public origin"},
         "management": {"url": "https://iris-server:9443", "description": "Internal management API"},
         "catalog": {"url": "https://iris.example:8443", "description": "Device catalog"},
         "tracker": {"url": "https://iris.example:6969", "description": "TLS BEP tracker v1 listener"},
@@ -1513,15 +1518,22 @@ def _description(route):
         notes.append("The device bearer is resource-bound. Image collections, items and torrents expose only that device's current assignment.")
     elif route.service == "artifact":
         if route.security == "guestShellAnonymousStatic":
-            notes.append("Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.")
+            notes.append("Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.")
         elif route.security == "legacyGuestShell":
-            notes.append("Deliberate Guest Shell path-capability compatibility exception: IOS copy HTTPS cannot attach Basic credentials. Staging filenames are 128-bit time-bounded capabilities. New clients must use the resource-bound versioned API.")
+            notes.append("Guest Shell uses IOS copy HTTPS with staging filenames that are 128-bit time-bounded capabilities. Explicit artifact API clients use resource-bound Basic authentication.")
         else:
             notes.append("HTTP Basic username is device_id and password is that same device's current/overlap catalog token; authentication precedes path translation and existence checks.")
     elif route.service == "tracker":
-        notes.append("The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.")
+        notes.append("The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Guest Shell aria2 uses query credentials protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.")
         if route.path == "/scrape":
-            notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. Seeder service and time-bounded unattributed legacy principals retain compatibility-wide visibility.")
+            notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. The seeder service and authenticated unattributed principals can scrape all torrents.")
+    suffix = _resource_suffix(route)
+    if suffix == "/install-options":
+        notes.append("The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.")
+    elif suffix == "/devices" and route.method == "GET":
+        notes.append("Status filter keys remain stable: deployed displays as Staged, placement-failed as Staging failed, and waiting-staging means an assigned device has not reported work on the current set. Current per-image errors take precedence over earlier staged flags.")
+    elif suffix == "/swarm":
+        notes.append("Image rows include image_id when the torrent hash maps to one catalog image. Observations and reports carry image_id when known; match it before attributing measurements. Tracker seeder role does not establish device staging completion, and ambiguous peer rates remain unavailable.")
     path_exception = _resource_path_exception(route)
     if path_exception is not None:
         notes.append(path_exception + ".")
@@ -1555,7 +1567,7 @@ def build_document():
         "info": {
             "title": "IRIS HTTP API",
             "version": "1",
-            "description": "Canonical contract for the browser console BFF, internal management tier, device catalog, tracker, telemetry and artifact services. Outside the explicitly marked Guest Shell static/path-capability compatibility surface, only /healthz and /readyz are anonymous.",
+            "description": "Canonical contract for the browser console BFF, internal management tier, device catalog, tracker, telemetry and artifact services. Guest Shell static files and staging path capabilities have dedicated access rules; other anonymous routes are limited to /healthz and /readyz.",
         },
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "tags": [{"name": name} for name in
@@ -1568,13 +1580,13 @@ def build_document():
         "x-iris-retained-v1-exceptions": {
             "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
             "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
-            "trackerTransport": "Port 6969 is HTTPS-only and uses the server certificate already pinned by device agents. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for Guest Shell compatibility, are protected by TLS, and are never logged.",
-            "guestShellArtifacts": "Unchanged IOS Guest Shell copy HTTPS cannot attach resource-bound Basic auth. Four explicit static files and two high-entropy, time-swept staging filename forms remain available through the legacy root paths; new clients use /v1/devices/{device_id}/artifacts/{artifact_path}.",
-            "resourcePaths": "Several shipped console paths contain verbs; replacements are breaking and are deferred to a future major version.",
-            "pagination": "Devices and audit expose their established paging shapes. Other v1 collections are assignment-bounded or compatibility whole collections and do not claim pagination.",
-            "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment retains expect_image_ids because the semantic set is the conflict response and the sharded store has no public scalar revision.",
-            "statusCodes": "Legacy upsert/job operations retain established 200 response shapes; changing them to 201/202 would break the shipped console and is deferred to a major version. Related mature handler operations declare an explicit bounded shared error envelope rather than an unbounded default; conditional branches may expose only a subset.",
-            "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Async job state is authoritative after process restart.",
+            "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
+            "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses four static files and two high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
+            "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
+            "pagination": "Devices and audit expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+            "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
+            "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
+            "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying.",
         },
         "paths": paths,
         "components": {
@@ -1599,10 +1611,10 @@ def build_document():
                                    "bearerFormat": "device announce token"},
                 "legacyAnnounceToken": {"type": "apiKey", "in": "query",
                                          "name": "announce_token",
-                                         "description": "Deprecated Guest Shell-only announce credential"},
+                                         "description": "Guest Shell announce query credential"},
                 "legacyTrackerKey": {"type": "apiKey", "in": "query",
                                       "name": "key",
-                                      "description": "Deprecated older Guest Shell/aria2 credential spelling"},
+                                      "description": "Alternate query credential accepted when Authorization is absent"},
                 "observabilityBearer": {"type": "http", "scheme": "bearer",
                                         "bearerFormat": "scoped observability token"},
                 "artifactBasic": {"type": "http", "scheme": "basic",

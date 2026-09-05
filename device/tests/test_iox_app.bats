@@ -227,7 +227,7 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 # IRIS-12-005 -- values that ride inside the quoted run-opts lines are
 # validated before anything touches the device (the XR installer already did
 # this; the IOx one pasted them blind, IOS dropped the malformed line, and
-# the app died on its entrypoint's required-env guard AFTER [1/9] had torn
+# the app died on its entrypoint's required-env guard AFTER [2/7] had torn
 # down the working app).
 # ---------------------------------------------------------------------------
 
@@ -298,10 +298,10 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 }
 
 @test "install.sh's quoting guard runs before the first device session" {
-  # structural: the guard precedes the [1/9] teardown AND the identity probe
+  # structural: the guard precedes the [2/7] teardown AND the identity probe
   guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"
   probe="$(grep -n "printf 'show version" "$INSTALL" | head -1 | cut -d: -f1)"
-  step1="$(grep -n '\[1/9\] teardown' "$INSTALL" | head -1 | cut -d: -f1)"
+  step1="$(grep -n '\[2/7\] remove existing app' "$INSTALL" | head -1 | cut -d: -f1)"
   [ -n "$guard" ] && [ -n "$probe" ] && [ -n "$step1" ]
   [ "$guard" -lt "$probe" ] && [ "$guard" -lt "$step1" ]
 }

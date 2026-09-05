@@ -1547,6 +1547,18 @@ class Telemetry:
         policy = self._policy_snapshot()
         enforcement = self._enforcement_snapshot()
         derived_denied = _derived_denied_ids(enforcement)
+        # Filenames are presentation, not image identity. Preserve the catalog
+        # id so a map can scope device observations to the selected torrent.
+        # An absent or ambiguous mapping leaves legacy snapshots unchanged.
+        try:
+            catalog_images = self._images_info() if self._images_info else {}
+        except Exception:
+            catalog_images = {}
+        image_ids = {}
+        if isinstance(catalog_images, dict):
+            for image_id, entry in catalog_images.items():
+                if isinstance(entry, dict) and entry.get("info_hash_hex"):
+                    image_ids.setdefault(str(entry["info_hash_hex"]), []).append(image_id)
 
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
@@ -1554,6 +1566,14 @@ class Telemetry:
             up_now = self._peer_up.get(info_hash, {}) \
                 if (self._torrent_observed_at and
                     now - self._torrent_observed_at <= 2 * self.interval) else {}
+            ip_claims, endpoint_claims = {}, {}
+            for peer in peers:
+                ip = peer["ip"]
+                endpoint = (ip, peer["port"])
+                ip_claims[ip] = ip_claims.get(ip, 0) + 1
+                endpoint_claims[endpoint] = endpoint_claims.get(endpoint, 0) + 1
+            ambiguous_ips = {ip for ip, count in ip_claims.items() if count > 1}
+            ambiguous_endpoints = {ep for ep, count in endpoint_claims.items() if count > 1}
             out = []
             for p in peers:
                 ptype = p.get("principal_type")
@@ -1567,15 +1587,19 @@ class Telemetry:
                 out.append(_peer_row(
                     p, total, up_now, devices_by_id, report_by_device,
                     live_by_device, policy, enforcement, derived_denied, now,
-                    self._torrent_observed_at))
-            images.append({
+                    self._torrent_observed_at, ambiguous_ips, ambiguous_endpoints))
+            image = {
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
                 "total_bytes": total,
                 "seeders": sum(1 for p in peers if p["is_seeder"]),
                 "leechers": sum(1 for p in peers if not p["is_seeder"]),
                 "peers": out,
-            })
+            }
+            matching_ids = image_ids.get(str(info_hash), [])
+            if len(matching_ids) == 1:
+                image["image_id"] = matching_ids[0]
+            images.append(image)
         return {
             "now": now,
             "server": self._server_source(now),
@@ -1936,7 +1960,7 @@ def _read_reports(state_dir):
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,
               live_by_device, policy, enforcement, derived_denied, now,
-              server_observed_at=None):
+              server_observed_at=None, ambiguous_ips=(), ambiguous_endpoints=()):
     """One canonical peer row (spec §10.3), source-grouped. All device
     attribution joins on the authenticated device principal id, never on the
     source IP."""
@@ -1985,13 +2009,15 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
     # port it announced to the tracker. Matching on (ip, port) alone therefore
     # drops the rate for every incoming connection — i.e. every normal transfer.
     # Prefer the exact endpoint; fall back to the address when it is
-    # unambiguous. When one address really does carry several connections, sum
-    # them but SAY SO, so the row is never a silent merge.
+    # unambiguous. When one participant carries several connections, sum them
+    # but SAY SO. An IP shared by several tracker participants cannot identify which
+    # participant received the measured bytes, even if there is only one
+    # current connection. Never copy that address aggregate onto every device.
     endpoint = (p["ip"], p["port"])
     measured, same_ip = None, None
-    if endpoint in up_now:
+    if endpoint in up_now and endpoint not in ambiguous_endpoints:
         measured = up_now[endpoint]
-    else:
+    elif p["ip"] not in ambiguous_ips:
         same_ip = [bps for (ip_, _port), bps in up_now.items()
                    if ip_ == p["ip"]]
         if len(same_ip) == 1:
@@ -2083,6 +2109,8 @@ def _device_observation(entry, now):
     out = {"schema": schema, "obs_state": obs_state,
            "observed_at": entry.get("observed_at"),
            "valid": valid, "stale": not valid, "age_s": age_s}
+    if isinstance(entry.get("image_id"), str) and entry["image_id"]:
+        out["image_id"] = entry["image_id"]
 
     if not valid:
         # Stale / withdrawn: retained context only; omit all fresh counters.
@@ -2208,12 +2236,15 @@ def _report_summary(ring):
         return None
     schema = rep.get("schema")
     is_v2 = schema == "v2" or rep.get("v") == 2 or "report_id" in rep
+    image_scope = ({"image_id": rep["image_id"]}
+                   if isinstance(rep.get("image_id"), str) and rep["image_id"] else {})
     if is_v2:
         sha = rep.get("content_sha256")
         sha = sha if isinstance(sha, dict) else {}
         ios = rep.get("ios_copy_verify")
         ios = ios if isinstance(ios, dict) else {}
         return {
+            **image_scope,
             "schema": "v2",
             "report_id": rep.get("report_id"),
             "event": rep.get("event"),
@@ -2226,6 +2257,7 @@ def _report_summary(ring):
     link = rep.get("link")
     link = link if isinstance(link, dict) else {}
     return {
+        **image_scope,
         "schema": "v1",
         "event": rep.get("event"),
         "tier": link.get("tier"),

@@ -39,6 +39,7 @@ nav = [
     { "Operations" = "operations.md" },
     { "Observability" = "observability.md" },
     { "Telemetry Export" = "telemetry-export.md" },
+    { "Splunk Setup" = "splunk.md" },
   ] },
   { "Reference and development" = [
     { "Reference" = "reference.md" },

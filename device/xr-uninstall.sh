@@ -273,24 +273,17 @@ EOF
 
 if [ "$DRY" -eq 1 ]; then
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== FORCE: reclaiming only IRIS-marked artifacts (no deployment record) ====="
-    echo "  The app named '$APPID', the source named '$SOURCE_NAME', and the"
-    echo "  iris-work/ dir -- the same set a record-driven undeploy removes, since"
-    echo "  XR activation (--net=host only) never creates anything else IRIS"
-    echo "  would need a deployment record to prove ownership of."
+    echo "FORCE: no deployment record; remove IRIS app, source and files only"
   fi
-  echo "===== composite session 1/2 (setup): probe, deactivate -- NOTHING destructive ====="
-  echo "===== [1/5] deactivate: probe app-table first; unconditional no appmgr application $APPID / commit ====="
+  echo "session 1/2: deactivate app"
+  echo "[1/5] deactivate app: $APPID"
   setup_request
-  echo "  (already absent before deactivate: benign idempotent-skip; still active and rejected: fail-closed, refuse to continue -- session 2 is never composed or sent in that case)"
-  echo "===== composite session 2/2 (sweep+verify): composed ONLY when session 1 did not conclude real failure ====="
-  echo "===== [2/5] appmgr package uninstall source $SOURCE_NAME (Cisco 8000 form) ====="
-  echo "===== [3/5] remove IRIS files under harddisk: (native XR delete /noprompt, never run -- proven clean return) ====="
-  echo "===== [4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root -- three unconditional glob deletes, no listing needed ====="
-  echo "===== [5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains (dir harddisk:) ====="
+  echo "session 2/2: continue after deactivation succeeds"
+  echo "[2/5] remove package: $SOURCE_NAME"
+  echo "[3/5] remove IRIS files"
+  echo "[4/5] remove torrent sidecars"
+  echo "[5/5] verify cleanup"
   sweep_verify_request 1
-  echo "===== NOT DONE: no 'copy running-config startup-config' -- XR commit IS the persisted state ====="
-  echo "===== LEFT IN PLACE: any operator-staged image already on harddisk: ====="
   exit 0
 fi
 
@@ -510,7 +503,7 @@ section_has_device_output() {
 }
 
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: reclaiming only IRIS-marked artifacts on $DEVICE_IP (no deployment record) ====="
+  echo "FORCE: no deployment record; remove IRIS app, source and files only"
   echo "  Removing: app '$APPID', source '$SOURCE_NAME', $RPM_PATH, $WORK_DIR_PATH."
 fi
 
@@ -557,7 +550,7 @@ if xr_command_rejected "$APPS_BEFORE"; then
 fi
 # Transport succeeded and the probe section's integrity is verified -- only
 # now is it honest to announce this step at all.
-echo "[1/5] deactivate: no appmgr application $APPID on $DEVICE_IP"
+echo "[1/5] deactivate app: $APPID"
 PRESENT_BEFORE=0
 table_contains "$APPS_BEFORE" "$APPID" && PRESENT_BEFORE=1
 
@@ -605,7 +598,7 @@ if xr_command_rejected "$RECHECK"; then
   exit 1
 fi
 if [ "$PRESENT_BEFORE" -eq 0 ]; then
-  echo "  $APPID already deactivated/absent; skipping"
+  echo "app already absent: $APPID"
 elif xr_command_rejected "$DEACT"; then
   echo "ERROR: refusing to continue teardown while application $APPID is still active on $DEVICE_IP" >&2
   exit 1
@@ -621,10 +614,10 @@ fi
 # is safe to compose, destructive commands included. No sidecar listing to
 # carry forward (fix-wave rewrite): sweep_verify_request()'s glob deletes
 # need nothing from session 1.
-echo "[2/5] appmgr package uninstall source $SOURCE_NAME"
-echo "[3/5] remove IRIS files under harddisk: (native XR delete /noprompt)"
-echo "[4/5] sweep leftover IRIS sidecars (*.torrent, *.aria2, *.peers.json) at harddisk: root"
-echo "[5/5] verify no '$APPID' app, '$SOURCE_NAME' source, IRIS file, or sidecar remains"
+echo "[2/5] remove package: $SOURCE_NAME"
+echo "[3/5] remove IRIS files"
+echo "[4/5] remove torrent sidecars"
+echo "[5/5] verify cleanup"
 
 # Same honesty contract as session 1/2's probe: capture the transport's own
 # exit status instead of discarding it (a wedged/failed session, incl. rc
@@ -713,8 +706,6 @@ if files_line_match "$FILES" '(^|[[:space:]])iris-work$'; then
   fi
   if workdir_has_entries "$WORKDIR"; then
     forbidden="${forbidden}${forbidden:+, }$WORK_DIR_PATH"
-  else
-    echo "note: empty iris-work directory left behind (XR CLI has no prompt-free directory removal); contents removed"
   fi
 fi
 if files_line_match "$FILES" '\.torrent$'; then
@@ -731,4 +722,4 @@ if [ -n "$forbidden" ]; then
   echo "ERROR: artifacts still present after undeploy: $forbidden" >&2
   exit 1
 fi
-echo "undeploy complete: $DEVICE_IP is clean (any operator-staged image on harddisk: was left in place)"
+echo "undeploy complete: $DEVICE_IP"

@@ -176,10 +176,11 @@
     ['onboarding', 'Onboarding'],
     ['undeploying', 'Undeploying'],
     ['waiting-heartbeat', 'Waiting for heartbeat'],
+    ['waiting-staging', 'Waiting for staging'],
     ['onboard-failed', 'Onboard failed'],
     ['undeploy-failed', 'Undeploy failed'],
     ['deployed', 'Staged'],
-    ['placement-failed', 'Placement failed'],
+    ['placement-failed', 'Staging failed'],
     ['image-failed', 'Image(s) failed'],
     ['copying', 'Copying to IOS storage'],
     ['staging', 'Staging (other)'],
@@ -213,6 +214,7 @@
   // 3), else the legacy current_image_id/stage_state=='ready' pair for an
   // agent that predates the field. Mirrors the server's _row_has_staged.
   function rowHasStaged(d, iid) {
+    if ((d.errored_image_ids || []).indexOf(iid) !== -1) return false;
     var sids = d.staged_image_ids;
     if (sids != null) return sids.indexOf(iid) !== -1;
     return d.stage_state === 'ready' && d.current_image_id === iid;
@@ -268,22 +270,21 @@
                       ' image(s) failed',
                cls: 'badge badge-fail', detail: d.stage_error };
     }
-    if (d.stage_error) {
-      return { key: 'placement-failed', label: 'placement failed',
-               cls: 'badge badge-fail', detail: d.stage_error };
+    if (d.stage_error || d.stage_state === 'error' || d.stage_state === 'copy_failed') {
+      return { key: 'placement-failed', label: 'staging failed',
+               cls: 'badge badge-fail', detail: d.stage_error || d.stage_state };
     }
     if (d.stage_state === 'transferring_to_ios') {
       return { key: 'copying', label: 'copying to ' + (d.target_fs || 'IOS storage'),
                cls: 'badge badge-running' };
     }
-    // A legacy single-image agent reports this literal stage_state (it is
-    // absent from catalog.py's _V2_STAGE_STATES, so no current agent sends
-    // it). It used to fall through to the catch-all below, which rendered the
-    // raw word under the PROGRESS level -- an idle device dressed as one mid
-    // transfer, and selectable only via "Staging (other)" along with every
-    // other raw state.
-    if (d.stage_state === 'unassigned') {
-      return { key: 'unassigned', label: 'unassigned', cls: 'muted' };
+    // Policy changes are visible before the next agent tick. An idle/ready
+    // heartbeat for the previous assignment is no evidence that the new one
+    // has started, and a cleared assignment must not turn "ready" into work.
+    if (d.stage_state === 'unassigned' || d.stage_state === 'ready') {
+      return assignedIds.length
+        ? { key: 'waiting-staging', label: 'waiting for staging', cls: 'badge badge-queued' }
+        : { key: 'unassigned', label: 'unassigned', cls: 'muted' };
     }
     if (d.stage_state) {
       return { key: 'staging', label: d.stage_state, cls: 'badge badge-running' };
@@ -323,7 +324,7 @@
   var STATUS_LEVELS = {
     onboarding: 'progress', undeploying: 'progress',
     copying: 'progress', staging: 'progress',
-    'waiting-heartbeat': 'info',
+    'waiting-heartbeat': 'info', 'waiting-staging': 'info',
     'onboard-failed': 'negative', 'undeploy-failed': 'negative',
     'placement-failed': 'negative',
     deployed: 'positive', enrolled: 'positive',
@@ -1552,11 +1553,11 @@
     }).join('');
   }
   // One row per assigned image: id + state, resolved from the per-image
-  // MEMBERSHIP the agent reports -- staged_image_ids first, then
-  // errored_image_ids -- which is exactly how the Swarm Map's own image list
+  // MEMBERSHIP the agent reports. A current error overrides retained staged
+  // membership, which is exactly how the Swarm Map's own image list
   // resolves it, so two views of one heartbeat cannot disagree about an image.
   //
-  // current_image_id is deliberately NOT consulted here. It is the wire-compat
+  // For a set, current_image_id is deliberately NOT an activity pointer. It is the wire-compat
   // identity pointer: the FIRST image of the set that produced heartbeat data
   // this tick, which is typically one already staged -- not the one in flight.
   // Reading it as "the image currently transferring" is what left a failed
@@ -1584,8 +1585,14 @@
         state = 'ready';
       } else if (errored.indexOf(iid) !== -1) {
         state = 'error';
+      } else if (!d.last_seen || !d.stage_state ||
+                 d.stage_state === 'ready' || d.stage_state === 'unassigned') {
+        state = 'pending';
       } else if (!perImage) {
-        state = (d.stage_state || 'staging') + (d.stage_error ? ' — ' + d.stage_error : '');
+        // A legacy heartbeat describes its named image only. A new policy
+        // can already name another image while that heartbeat is retained.
+        state = d.current_image_id && d.current_image_id !== iid ? 'pending' :
+          d.stage_state + (d.stage_error ? ' — ' + d.stage_error : '');
       } else {
         // neither staged nor errored this tick: genuinely still in flight
         state = 'staging';
@@ -1627,7 +1634,7 @@
     var st = deviceStatus(d, devNow);
     var transferring, staged;
     if (st.key === 'placement-failed') {
-      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'placement failed') };
+      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'staging failed') };
       staged = 'na';
     } else if (st.key === 'image-failed') {
       var ratio = imageFailedRatio(d);
@@ -1816,16 +1823,16 @@
     // Tracks whether the job is still parked in the queue: log lines only
     // exist once a job runs, so the first streamed message means it started.
     var isQueued = !!queued;
-    if (queued) append('(queued — waiting for a free install slot; the log streams once it starts)');
+    if (queued) append('Queued: waiting for an available slot.');
     var es = new EventSource('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
     entry.es = es;
     es.onmessage = function (e) { isQueued = false; append(e.data); };
     es.addEventListener('end', function (e) {
       // "idle": the server closed a stream with no progress for its idle
       // budget; the job itself may still be running -- reopen to continue.
-      append(e.data === 'idle'
-        ? '— stream closed: no progress for a while; the job may still be running, reopen the log to continue —'
-        : '— ' + e.data + ' —'); flush();
+      if (e.data === 'idle') append('Log paused. Reopen it to follow the job.');
+      else if (e.data !== 'done') append('Job ' + e.data + '.');
+      flush();
       es.close(); entry.es = null; abortBtn.hidden = true;
       refreshDevices().catch(function () {});
     });
@@ -2952,131 +2959,81 @@
   function updateDeviceFields() {
     var managementType = document.getElementById('df-management-type').value;
     var router = managementType === 'router-routed' || managementType === 'router-nat';
-    // xr-host runs the appmgr container on the router's own network stack:
-    // no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Those last
-    // three used to be visible for every management type -- the core bug this
-    // hides.
-    var xrHost = managementType === 'xr-host';
-    document.getElementById('df-vlan').hidden = router || xrHost;
+    var switchNetwork = managementType === 'routed' || managementType === 'inband';
+    var appNetwork = switchNetwork || router;
+    // Only the operator's management type controls network-field visibility.
+    // XR host and an unchosen management type need no app-network fields.
+    document.getElementById('df-vlan').hidden = !switchNetwork;
     document.getElementById('df-svi').hidden = managementType !== 'routed';
     document.getElementById('df-vpg').hidden = !router;
     document.getElementById('df-nat-interface').hidden = managementType !== 'router-nat';
-    document.getElementById('df-guest').hidden = xrHost;
-    document.getElementById('df-mask').hidden = xrHost;
-    document.getElementById('df-gateway').hidden = xrHost;
-    var platform = document.getElementById('df-platform');
-    if (router && !platform.value) platform.value = 'router';
-    if (!router && platform.value === 'router') platform.value = '';
-    if (xrHost && !platform.value) platform.value = 'xr-appmgr';
-    if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';
+    document.getElementById('df-guest').hidden = !appNetwork;
+    document.getElementById('df-mask').hidden = !appNetwork;
+    document.getElementById('df-gateway').hidden = !appNetwork;
   }
-  document.getElementById('df-management-type').addEventListener('change', updateDeviceFields);
-  // xr-host <-> xr-appmgr is mutually required server-side, so picking the
-  // agent install directly should carry the operator into xr-host too --
-  // the same auto-select the model-driven path below performs, just from
-  // the other field. Never fight an operator already on xr-host.
-  document.getElementById('df-platform').addEventListener('change', function () {
-    if (this.value !== 'xr-appmgr') return;
-    var mgmtTypeSel = document.getElementById('df-management-type');
-    if (mgmtTypeSel.value === 'xr-host') return;
-    mgmtTypeSel.value = 'xr-host';
+  document.getElementById('df-management-type').addEventListener('change', function () {
     updateDeviceFields();
+    return refreshInstallOptions();
   });
-  // Agent-install options depend on the model, so df-model sits ahead of
-  // df-platform in the form and this repaints the select as the operator
-  // types -- the same model-aware guardrail server-side validation enforces
-  // (gui_fleet.validate_record / gui_onboard.install_options_for), surfaced
-  // before submit instead of as a rejection after it.
+  // Management type bounds the install choices. Model compatibility can
+  // narrow them, but neither the model nor the installer changes that type.
   var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;
-  // Offered when the model is blank or unrecognized -- i.e. when nobody has
-  // established what the hardware is. 'xr-appmgr' is deliberately NOT in
-  // that permissive set: validate_record refuses it without an IOS-XR model,
-  // so offering it here would only produce a rejection after submit. It
-  // appears the moment the model says IOS-XR, from the fetched options below.
-  var AUTO_INSTALL_OPTIONS = ['guestshell', 'iox', 'router'];
-  var FULL_INSTALL_OPTIONS_HTML = '<option value="" disabled selected>Choose an agent install</option>' +
-    AUTO_INSTALL_OPTIONS.map(function (k) {
-      return '<option value="' + esc(k) + '">' + esc(INSTALL_OPTION_LABELS[k]) + '</option>';
-    }).join('');
+  function managementInstallOptions(managementType) {
+    if (managementType === 'xr-host') return ['xr-appmgr'];
+    if (managementType === 'router-routed' || managementType === 'router-nat') return ['router'];
+    if (managementType === 'routed' || managementType === 'inband') return ['guestshell', 'iox'];
+    return [];
+  }
   var installOptionsGen = 0;
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
+    var managementType = document.getElementById('df-management-type').value;
     var platform = document.getElementById('df-platform');
-    var mgmtTypeSel = document.getElementById('df-management-type');
+    var hint = document.getElementById('df-platform-hint');
+    var allowed = managementInstallOptions(managementType);
     var gen = ++installOptionsGen;
-    // The install-options answer for an IOS-XR-shaped model is exactly
-    // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
-    // returns just that -- so ANY other repaint of the platform select
-    // (blank model, a server/network error, a null or empty answer, or a
-    // real answer that isn't that exact singleton) must exit an
-    // auto-entered xr-host management type. Left stuck on xr-host, the
-    // addressing fields stay hidden for a non-XR device with no visible
-    // cause and the platform select no longer even offers xr-appmgr to
-    // undo it with. Every one of those paths below calls this helper.
-    function exitXrHostIfStale() {
-      if (mgmtTypeSel.value === 'xr-host') {
-        mgmtTypeSel.value = '';
-        updateDeviceFields();
-      }
-    }
-    if (!model) {
-      platform.disabled = false;
-      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-      exitXrHostIfStale();
-      return;
-    }
-    try {
-      var r = await fetch('/api/v1/install-options?model=' + encodeURIComponent(model));
-      if (gen !== installOptionsGen) return;   // a newer keystroke superseded this fetch
-      if (!r.ok) {
-        // Restore to permissive default on server error: a valid choice must not
-        // be locked out by a transient failure. The server-side validate_record
-        // guard still refuses impossible platform+model combinations.
-        platform.disabled = false;
-        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-        exitXrHostIfStale();
-        return;
-      }
-      var options = (await r.json()).options;
-      if (options === null) {
-        platform.disabled = false;
-        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-        exitXrHostIfStale();
-        return;
-      }
-      if (options.length === 0) {
-        // No family answers this today: every model the server has an
-        // opinion about can run something (IOS-XR included, since the appmgr
-        // container agent shipped). Kept as an honest dead end rather than a
-        // silent fall-through to the permissive list.
-        platform.innerHTML = '<option value="">No agent install available for this model</option>';
-        platform.disabled = true;
-        exitXrHostIfStale();
-        return;
-      }
+    function renderOptions(modelOptions, message) {
+      var options = allowed.filter(function (option) {
+        return modelOptions === null || modelOptions.indexOf(option) !== -1;
+      });
       var kept = platform.value;
-      platform.disabled = false;
+      platform.disabled = options.length === 0;
+      hint.textContent = message || '';
+      if (!allowed.length) {
+        platform.innerHTML = '<option value="">Choose a management type first</option>';
+        return;
+      }
+      if (!options.length) {
+        platform.innerHTML = '<option value="">No compatible agent install</option>';
+        hint.textContent = 'This model and management type have no compatible agent install. Check either value.';
+        return;
+      }
       platform.innerHTML = '<option value="" disabled selected>Choose an agent install</option>' +
-        options.map(function (o) {
-          return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
+        options.map(function (option) {
+          return '<option value="' + esc(option) + '">' + esc(INSTALL_OPTION_LABELS[option]) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
-      // Drive the management type auto-select off the server answer instead of
-      // re-implementing the model regex here.
-      if (options.length === 1 && options[0] === 'xr-appmgr') {
-        if (mgmtTypeSel.value !== 'xr-host') {
-          mgmtTypeSel.value = 'xr-host';
-          updateDeviceFields();
-        }
-      } else {
-        exitXrHostIfStale();
-      }
+      // XR host and router management explicitly identify their installer.
+      // A model match alone never selects an installer for a switch.
+      else if (allowed.length === 1) platform.value = options[0];
+    }
+    renderOptions(null);
+    if (!model || !allowed.length) return;
+    try {
+      var r = await fetch('/api/v1/install-options?model=' + encodeURIComponent(model));
+      if (gen !== installOptionsGen) return;
+      if (!r.ok) throw new Error('Install options unavailable');
+      var options = (await r.json()).options;
+      // JSON parsing can yield too: a newer model/type may already be shown.
+      if (gen !== installOptionsGen) return;
+      if (options !== null && !Array.isArray(options)) throw new Error('Invalid install options');
+      renderOptions(options, options === null
+        ? 'Unrecognized model. Confirm agent support before onboarding.' : '');
     } catch (e) {
-      // Network failure or JSON parse error: restore permissive defaults so
-      // a transient blip never locks out a valid platform choice.
-      platform.disabled = false;
-      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-      exitXrHostIfStale();
+      if (gen !== installOptionsGen) return;
+      // Keep the chosen management type and its valid install choices. The
+      // backend still validates model compatibility when the device is saved.
+      renderOptions(null, 'Model compatibility could not be checked. It will be validated when saved.');
     }
   }
   document.getElementById('df-model').addEventListener('input', refreshInstallOptions);
@@ -3096,17 +3053,18 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
-    // No automatic answer: the agent install is always chosen explicitly.
+    var managementType = document.getElementById('df-management-type').value;
+    if (!managementType) { derr.textContent = 'Choose a management type for this device.'; return; }
+    // The management type or explicit install choice identifies the installer.
     // Letting this through blank handed the decision to a model guess, which
     // is how an IOS-XR router was sent down an install its hardware cannot run.
     var platformSel = document.getElementById('df-platform');
     if (!platformSel.value) {
       derr.textContent = platformSel.disabled
-        ? 'No agent install is available for this model.'
+        ? document.getElementById('df-platform-hint').textContent
         : 'Choose an agent install for this device.';
       return;
     }
-    var managementType = document.getElementById('df-management-type').value;
     var vlan = document.getElementById('df-vlan').value.trim();
     var mask = document.getElementById('df-mask').value.trim();
     var body = {

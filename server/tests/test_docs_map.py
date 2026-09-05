@@ -189,12 +189,18 @@ def test_docs_state_enforcement_status_is_count_only():
     _require("security.md", ["not address-free"])
 
 
-def test_docs_state_announce_credential_travels_over_http():
-    """The announce credential rides an HTTP URL, so it crosses the network in
-    cleartext. The base may be any routable IPv4 -- nothing enforces a private
-    one -- so the docs must state the exposure rather than imply a guarantee
-    the code does not make."""
-    _require("security.md", ["cleartext"])
+def test_docs_state_announce_credential_travels_over_pinned_https():
+    """All tracker credentials cross pinned HTTPS; IOx/XR use a header,
+    while Guest Shell's query credential remains inside the TLS connection."""
+    page = _page("security.md")
+    transport = page.split("### Tracker transport security", 1)[1].split(
+        "### Peer policy failure posture", 1)[0]
+    for contract in ("**HTTPS-only**", "public certificate as their CA",
+                     "certificate verification enabled",
+                     "Authorization: Bearer",
+                     "TLS encrypts the complete request"):
+        assert contract in transport, \
+            "security.md tracker transport omits: %s" % contract
 
 
 def test_docs_state_previous_announce_token_is_bounded():
@@ -203,12 +209,13 @@ def test_docs_state_previous_announce_token_is_bounded():
     """Both credentials stay valid for a bounded overlap, after which the old
     one expires on its own. There is still no shipped revoke command, so the
     docs must not tell an operator to retire one by hand."""
-    _require("security.md", ["no shipped command", "bounded overlap"])
+    _require("security.md", ["bounded overlap", "enforced automatically",
+                             "operator command for revoking a previous credential"])
 
 
 def test_docs_state_stage_only_invariant():
     """Images are staged and verified, never installed, activated or reloaded."""
-    _require("security.md", ["No install", "No reload", "No boot mutation"])
+    _require("security.md", ["No operating-system install", "No reload", "No boot mutation"])
 
 
 def test_docs_state_policy_outbox_backlog():
@@ -220,7 +227,7 @@ def test_docs_state_policy_outbox_backlog():
 def test_docs_state_pending_endpoint_retry():
     """An endpoint write that fails is queued and retried; the device
     participates meanwhile but the reported status degrades."""
-    _require("operations.md", ["peer-endpoints.json"])
+    _require("operations.md", ["peer-endpoints.d/", "queued in memory", "retried"])
 
 
 def test_docs_state_device_retirement_retention():
@@ -241,9 +248,10 @@ def test_docs_state_rotation_proof_is_loopback_swarm():
     _require("operations.md", ["/swarm", "service:seeder"])
 
 
-def test_docs_state_v1_event_ids_are_stamped_at_ingest():
-    """v1 telemetry has no device-supplied id; the server stamps it on receipt."""
-    _require("observability.md", ["stamped at ingest"])
+def test_docs_state_report_identity_survives_retries():
+    """A report keeps its device identity through retries and export."""
+    _require("observability.md", ["`report_id`", "frozen", "retry", "`event.id`",
+                                  "deduplication"])
 
 
 def test_docs_state_legacy_participants_are_visible_but_unjoinable():

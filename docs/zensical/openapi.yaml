@@ -3,7 +3,7 @@
   "info": {
     "title": "IRIS HTTP API",
     "version": "1",
-    "description": "Canonical contract for the browser console BFF, internal management tier, device catalog, tracker, telemetry and artifact services. Outside the explicitly marked Guest Shell static/path-capability compatibility surface, only /healthz and /readyz are anonymous."
+    "description": "Canonical contract for the browser console BFF, internal management tier, device catalog, tracker, telemetry and artifact services. Guest Shell static files and staging path capabilities have dedicated access rules; other anonymous routes are limited to /healthz and /readyz."
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "tags": [
@@ -34,13 +34,13 @@
   "x-iris-retained-v1-exceptions": {
     "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
     "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
-    "trackerTransport": "Port 6969 is HTTPS-only and uses the server certificate already pinned by device agents. Bearer Authorization is preferred for unified IOx/XR agents; query credentials remain only for Guest Shell compatibility, are protected by TLS, and are never logged.",
-    "guestShellArtifacts": "Unchanged IOS Guest Shell copy HTTPS cannot attach resource-bound Basic auth. Four explicit static files and two high-entropy, time-swept staging filename forms remain available through the legacy root paths; new clients use /v1/devices/{device_id}/artifacts/{artifact_path}.",
-    "resourcePaths": "Several shipped console paths contain verbs; replacements are breaking and are deferred to a future major version.",
-    "pagination": "Devices and audit expose their established paging shapes. Other v1 collections are assignment-bounded or compatibility whole collections and do not claim pagination.",
-    "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment retains expect_image_ids because the semantic set is the conflict response and the sharded store has no public scalar revision.",
-    "statusCodes": "Legacy upsert/job operations retain established 200 response shapes; changing them to 201/202 would break the shipped console and is deferred to a major version. Related mature handler operations declare an explicit bounded shared error envelope rather than an unbounded default; conditional branches may expose only a subset.",
-    "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Async job state is authoritative after process restart."
+    "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
+    "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses four static files and two high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
+    "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
+    "pagination": "Devices and audit expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+    "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
+    "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
+    "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying."
   },
   "paths": {
     "/api/v1/peer-policy": {
@@ -55,8 +55,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -365,8 +365,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -754,8 +754,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -1045,8 +1045,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -1347,8 +1347,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -1572,8 +1572,8 @@
         "x-iris-security": "consolePassword",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -1862,8 +1862,8 @@
         "x-iris-security": "setupGrant",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -2124,8 +2124,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -2403,8 +2403,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -2655,8 +2655,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -2910,8 +2910,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -3230,8 +3230,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -3536,8 +3536,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -4115,8 +4115,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -4417,8 +4417,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -4752,8 +4752,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -5101,8 +5101,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -5439,7 +5439,7 @@
       "get": {
         "operationId": "console_get_api_v1_devices",
         "summary": "List devices",
-        "description": "List devices. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "List devices. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Status filter keys remain stable: deployed displays as Staged, placement-failed as Staging failed, and waiting-staging means an assigned device has not reported work on the current set. Current per-image errors take precedence over earlier staged flags.",
         "tags": [
           "console"
         ],
@@ -5447,8 +5447,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -5575,6 +5575,7 @@
                 "onboarding",
                 "undeploying",
                 "waiting-heartbeat",
+                "waiting-staging",
                 "onboard-failed",
                 "undeploy-failed",
                 "deployed",
@@ -5858,8 +5859,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -5987,6 +5988,7 @@
                 "onboarding",
                 "undeploying",
                 "waiting-heartbeat",
+                "waiting-staging",
                 "onboard-failed",
                 "undeploy-failed",
                 "deployed",
@@ -6332,8 +6334,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -6665,8 +6667,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -6873,8 +6875,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -7081,8 +7083,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -7373,8 +7375,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -7685,8 +7687,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -7970,8 +7972,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -8430,8 +8432,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -8688,8 +8690,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -9036,8 +9038,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -9335,8 +9337,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -9634,8 +9636,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -9930,8 +9932,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -10286,8 +10288,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -10617,8 +10619,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -10950,8 +10952,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -11271,7 +11273,7 @@
       "get": {
         "operationId": "console_get_api_v1_install_options",
         "summary": "List install options",
-        "description": "List install options. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "List install options. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.",
         "tags": [
           "console"
         ],
@@ -11279,8 +11281,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -11519,8 +11521,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -11764,8 +11766,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -12096,8 +12098,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -12371,8 +12373,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -12623,8 +12625,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -12865,8 +12867,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -12889,13 +12891,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Server-sent job events",
+            "description": "Job log lines as unnamed text data events, with keepalive comments. An end event carries done, error, cancelled, idle, or unknown. Each connection replays the retained lines from the start; Last-Event-ID is not supported.",
             "content": {
               "text/event-stream": {
                 "schema": {
                   "type": "string"
                 },
-                "example": "event: progress\\ndata: {}\\n\\n"
+                "example": "data: onboard complete: 192.0.2.10\n\nevent: end\ndata: done\n\n"
               }
             }
           },
@@ -13085,8 +13087,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -13395,8 +13397,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -13686,8 +13688,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -13981,8 +13983,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -14277,8 +14279,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -14497,8 +14499,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -14776,7 +14778,7 @@
       "get": {
         "operationId": "console_get_api_v1_swarm",
         "summary": "Read swarm state",
-        "description": "Read swarm state. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "Read swarm state. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Image rows include image_id when the torrent hash maps to one catalog image. Observations and reports carry image_id when known; match it before attributing measurements. Tracker seeder role does not establish device staging completion, and ambiguous peer rates remain unavailable.",
         "tags": [
           "console"
         ],
@@ -14784,8 +14786,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -15371,8 +15373,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -15648,8 +15650,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -15948,8 +15950,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -16219,8 +16221,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -16523,8 +16525,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -16803,8 +16805,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -16899,14 +16901,14 @@
                                   "string",
                                   "null"
                                 ],
-                                "description": "Legacy field, null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
+                                "description": "Null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
                               },
                               "built_at": {
                                 "type": [
                                   "integer",
                                   "null"
                                 ],
-                                "description": "Artifact file modification time as Unix seconds; the legacy field name does not attest the original package build time."
+                                "description": "Artifact file modification time as Unix seconds; the field name does not attest the original package build time."
                               },
                               "detail": {
                                 "type": "string"
@@ -17217,8 +17219,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -17507,8 +17509,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -17877,8 +17879,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -18210,8 +18212,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -18493,8 +18495,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -18805,8 +18807,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -19043,8 +19045,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -19378,8 +19380,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -19671,8 +19673,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -19917,8 +19919,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -20247,8 +20249,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -20530,8 +20532,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -20890,8 +20892,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -21210,8 +21212,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -21538,8 +21540,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -21813,8 +21815,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -22066,8 +22068,8 @@
         "x-iris-security": "consoleSession",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           }
         ],
         "security": [
@@ -22274,8 +22276,8 @@
         "x-iris-security": "none",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           },
           {
             "url": "https://iris.example:9101",
@@ -22325,8 +22327,8 @@
         "x-iris-security": "none",
         "servers": [
           {
-            "url": "https://iris.example",
-            "description": "Operator console BFF"
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
           },
           {
             "url": "https://iris.example:9101",
@@ -27034,7 +27036,7 @@
       "get": {
         "operationId": "management_get_internal_v1_devices",
         "summary": "List devices",
-        "description": "List devices. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential.",
+        "description": "List devices. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Status filter keys remain stable: deployed displays as Staged, placement-failed as Staging failed, and waiting-staging means an assigned device has not reported work on the current set. Current per-image errors take precedence over earlier staged flags.",
         "tags": [
           "management"
         ],
@@ -27171,6 +27173,7 @@
                 "onboarding",
                 "undeploying",
                 "waiting-heartbeat",
+                "waiting-staging",
                 "onboard-failed",
                 "undeploy-failed",
                 "deployed",
@@ -27533,6 +27536,7 @@
                 "onboarding",
                 "undeploying",
                 "waiting-heartbeat",
+                "waiting-staging",
                 "onboard-failed",
                 "undeploy-failed",
                 "deployed",
@@ -32118,7 +32122,7 @@
       "get": {
         "operationId": "management_get_internal_v1_install_options",
         "summary": "List install options",
-        "description": "List install options. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential.",
+        "description": "List install options. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.",
         "tags": [
           "management"
         ],
@@ -33399,13 +33403,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Server-sent job events",
+            "description": "Job log lines as unnamed text data events, with keepalive comments. An end event carries done, error, cancelled, idle, or unknown. Each connection replays the retained lines from the start; Last-Event-ID is not supported.",
             "content": {
               "text/event-stream": {
                 "schema": {
                   "type": "string"
                 },
-                "example": "event: progress\\ndata: {}\\n\\n"
+                "example": "data: onboard complete: 192.0.2.10\n\nevent: end\ndata: done\n\n"
               }
             }
           },
@@ -34897,7 +34901,7 @@
       "get": {
         "operationId": "management_get_internal_v1_swarm",
         "summary": "Read swarm state",
-        "description": "Read swarm state. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential.",
+        "description": "Read swarm state. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Image rows include image_id when the torrent hash maps to one catalog image. Observations and reports carry image_id when known; match it before attributing measurements. Tracker seeder role does not establish device staging completion, and ambiguous peer rates remain unavailable.",
         "tags": [
           "management"
         ],
@@ -36740,14 +36744,14 @@
                                   "string",
                                   "null"
                                 ],
-                                "description": "Legacy field, null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
+                                "description": "Null for deployment-neutral packages; runtime trust is reported by packages.reference_fingerprint."
                               },
                               "built_at": {
                                 "type": [
                                   "integer",
                                   "null"
                                 ],
-                                "description": "Artifact file modification time as Unix seconds; the legacy field name does not attest the original package build time."
+                                "description": "Artifact file modification time as Unix seconds; the field name does not attest the original package build time."
                               },
                               "detail": {
                                 "type": "string"
@@ -42052,7 +42056,7 @@
             "name": "X-IRIS-Tracker-Auth",
             "in": "header",
             "required": false,
-            "description": "Set exactly to bearer by unified IOx/XR agents for a token-free announce URL. Omit for unchanged Guest Shell query-auth torrents.",
+            "description": "Set exactly to bearer by unified IOx/XR agents for a token-free announce URL. Omit for Guest Shell query-auth torrents.",
             "schema": {
               "type": "string",
               "const": "bearer"
@@ -43257,7 +43261,7 @@
       "get": {
         "operationId": "tracker_get_announce",
         "summary": "Announce peer",
-        "description": "Announce peer. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.",
+        "description": "Announce peer. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Guest Shell aria2 uses query credentials protected by TLS; BEP-compatible bencoded errors are the sole response-format exception.",
         "tags": [
           "tracker"
         ],
@@ -43392,7 +43396,7 @@
             "in": "query",
             "required": false,
             "deprecated": true,
-            "description": "Older Guest Shell/aria2 credential spelling; accepted only when Authorization is absent.",
+            "description": "Query credential accepted only when Authorization is absent.",
             "schema": {
               "type": "string",
               "writeOnly": true
@@ -43499,7 +43503,7 @@
       "get": {
         "operationId": "tracker_get_scrape",
         "summary": "Scrape torrent",
-        "description": "Scrape torrent. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Query credentials remain only for Guest Shell aria2 compatibility and are protected by TLS; BEP-compatible bencoded errors are the sole response-format exception. A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. Seeder service and time-bounded unattributed legacy principals retain compatibility-wide visibility.",
+        "description": "Scrape torrent. The tracker is HTTPS-only and uses the same certificate pinned by device agents. Bearer Authorization is preferred and disables fallback. Guest Shell aria2 uses query credentials protected by TLS; BEP-compatible bencoded errors are the sole response-format exception. A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. The seeder service and authenticated unattributed principals can scrape all torrents.",
         "tags": [
           "tracker"
         ],
@@ -43550,7 +43554,7 @@
             "in": "query",
             "required": false,
             "deprecated": true,
-            "description": "Older Guest Shell/aria2 credential spelling; accepted only when Authorization is absent.",
+            "description": "Query credential accepted only when Authorization is absent.",
             "schema": {
               "type": "string",
               "writeOnly": true
@@ -43741,7 +43745,7 @@
       "get": {
         "operationId": "telemetry_get_swarm",
         "summary": "Read swarm state",
-        "description": "Read swarm state.",
+        "description": "Read swarm state. Image rows include image_id when the torrent hash maps to one catalog image. Observations and reports carry image_id when known; match it before attributing measurements. Tracker seeder role does not establish device staging completion, and ambiguous peer rates remain unavailable.",
         "tags": [
           "telemetry"
         ],
@@ -44526,7 +44530,7 @@
       "get": {
         "operationId": "artifact_get_bootstrap_sh",
         "summary": "Download Guest Shell bootstrap",
-        "description": "Download Guest Shell bootstrap. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Download Guest Shell bootstrap. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44608,7 +44612,7 @@
       "head": {
         "operationId": "artifact_head_bootstrap_sh",
         "summary": "Inspect Guest Shell bootstrap",
-        "description": "Inspect Guest Shell bootstrap. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Inspect Guest Shell bootstrap. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44683,7 +44687,7 @@
       "get": {
         "operationId": "artifact_get_iris_agent_tgz",
         "summary": "Download x86 Guest Shell agent",
-        "description": "Download x86 Guest Shell agent. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Download x86 Guest Shell agent. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44765,7 +44769,7 @@
       "head": {
         "operationId": "artifact_head_iris_agent_tgz",
         "summary": "Inspect x86 Guest Shell agent",
-        "description": "Inspect x86 Guest Shell agent. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Inspect x86 Guest Shell agent. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44840,7 +44844,7 @@
       "get": {
         "operationId": "artifact_get_iris_agent_arm_tgz",
         "summary": "Download ARM Guest Shell agent",
-        "description": "Download ARM Guest Shell agent. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Download ARM Guest Shell agent. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44922,7 +44926,7 @@
       "head": {
         "operationId": "artifact_head_iris_agent_arm_tgz",
         "summary": "Inspect ARM Guest Shell agent",
-        "description": "Inspect ARM Guest Shell agent. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Inspect ARM Guest Shell agent. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -44997,7 +45001,7 @@
       "get": {
         "operationId": "artifact_get_iris_catalog_pem",
         "summary": "Download Guest Shell catalog CA",
-        "description": "Download Guest Shell catalog CA. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Download Guest Shell catalog CA. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -45079,7 +45083,7 @@
       "head": {
         "operationId": "artifact_head_iris_catalog_pem",
         "summary": "Inspect Guest Shell catalog CA",
-        "description": "Inspect Guest Shell catalog CA. Deliberate anonymous Guest Shell compatibility exception for an exact static allowlist containing no credentials; arbitrary files remain unreachable.",
+        "description": "Inspect Guest Shell catalog CA. Guest Shell can fetch an exact static allowlist containing no credentials anonymously; arbitrary files are unreachable.",
         "tags": [
           "artifact"
         ],
@@ -45154,7 +45158,7 @@
       "get": {
         "operationId": "artifact_get_staging_legacy_artifact",
         "summary": "Download Guest Shell enrollment capability",
-        "description": "Download Guest Shell enrollment capability. Deliberate Guest Shell path-capability compatibility exception: IOS copy HTTPS cannot attach Basic credentials. Staging filenames are 128-bit time-bounded capabilities. New clients must use the resource-bound versioned API.",
+        "description": "Download Guest Shell enrollment capability. Guest Shell uses IOS copy HTTPS with staging filenames that are 128-bit time-bounded capabilities. Explicit artifact API clients use resource-bound Basic authentication.",
         "tags": [
           "artifact"
         ],
@@ -45281,13 +45285,13 @@
           "parameter": "legacy_artifact",
           "entropyBits": 128,
           "timeBounded": true,
-          "compatibility": "unchanged Guest Shell copy HTTPS"
+          "compatibility": "Guest Shell copy HTTPS"
         }
       },
       "head": {
         "operationId": "artifact_head_staging_legacy_artifact",
         "summary": "Inspect Guest Shell enrollment capability",
-        "description": "Inspect Guest Shell enrollment capability. Deliberate Guest Shell path-capability compatibility exception: IOS copy HTTPS cannot attach Basic credentials. Staging filenames are 128-bit time-bounded capabilities. New clients must use the resource-bound versioned API.",
+        "description": "Inspect Guest Shell enrollment capability. Guest Shell uses IOS copy HTTPS with staging filenames that are 128-bit time-bounded capabilities. Explicit artifact API clients use resource-bound Basic authentication.",
         "tags": [
           "artifact"
         ],
@@ -45405,7 +45409,7 @@
           "parameter": "legacy_artifact",
           "entropyBits": 128,
           "timeBounded": true,
-          "compatibility": "unchanged Guest Shell copy HTTPS"
+          "compatibility": "Guest Shell copy HTTPS"
         }
       }
     }
@@ -45455,13 +45459,13 @@
         "type": "apiKey",
         "in": "query",
         "name": "announce_token",
-        "description": "Deprecated Guest Shell-only announce credential"
+        "description": "Guest Shell announce query credential"
       },
       "legacyTrackerKey": {
         "type": "apiKey",
         "in": "query",
         "name": "key",
-        "description": "Deprecated older Guest Shell/aria2 credential spelling"
+        "description": "Alternate query credential accepted when Authorization is absent"
       },
       "observabilityBearer": {
         "type": "http",

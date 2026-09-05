@@ -1425,8 +1425,7 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     every agent that predates the fields)."""
     live = [t for t in ticks if t.hb is not None]
     if not live:
-        # Every image bailed before its heartbeat (a rejected catalog filename
-        # is the only such path). Say nothing, exactly as before.
+        # Defensive: a future path may return without a heartbeat payload.
         return None
     if len(ids) == 1:
         return _send_heartbeat(deps, sid, live[0].build())
@@ -1441,13 +1440,8 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
               if t.hb is not None and t.stage_state in _SET_STAGE_STATES]
     hb = live[0].build(staged_image_ids=staged, errored_image_ids=errored)
     seen = [t.stage_state for t in live]
-    # Identity is NOT forced to ids[0]: it comes from live[0], the first image
-    # that actually produced heartbeat data this tick, whose payload this is.
-    # Overriding it filed live[0]'s observation, target_fs and free-byte
-    # reading under a DIFFERENT image's id whenever the first image bailed
-    # before reporting (a rejected catalog filename). For a healthy set — and
-    # for every one-image set, which returns above — live[0] IS ids[0], so the
-    # compat pointer is unchanged.
+    # Keep the identity of the image that produced this payload: forcing a
+    # different id would mislabel its observation and filesystem reading.
     #
     # `staged` is read from STATE, so it still counts an image that was staged
     # on an earlier tick but FAILED on this one (the catalog dropped it, flash
@@ -1503,10 +1497,25 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
-    image = deps.catalog.get_image(img_id)
+    try:
+        image = deps.catalog.get_image(img_id)
+    except Exception as e:
+        # One image's lookup must not discard siblings' completed work or
+        # suppress the whole device heartbeat. Exception text may contain an
+        # authenticated URL, so only its type belongs in the diagnostic.
+        deps.emit("IMAGE-UNAVAILABLE",
+                  "%s catalog image unavailable (%s)"
+                  % (img_id, type(e).__name__))
+        tick.heartbeat({"id": img_id}, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="catalog image unavailable; retrying",
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
+        return "image-unavailable"
     if image is None:
         deps.emit("ERROR", "assigned image %s not in catalog" % img_id)
-        tick.heartbeat(None, deps, "error",
+        tick.heartbeat({"id": img_id}, deps, "error",
                        target_fs=cfg.get("target_fs"),
                        tele_on=tele_on, stream_on=stream_on,
                        stage_error="assigned image %s not in catalog"
@@ -1521,6 +1530,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.emit("ERROR",
                   "rejected catalog filename (must match %s): %r"
                   % (_FILENAME_RE.pattern, fname))
+        tick.heartbeat({"id": img_id}, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="catalog image filename is invalid",
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
         return "bad-filename"
 
     stage = os.path.join(stage_dir, fname)
@@ -1685,6 +1700,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                   "under the new plan)"
                                   % (image["filename"], img_id))
                     deps.remove_stage(stage)
+                    tick.heartbeat(
+                        image, deps, "error",
+                        target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+                        tele_on=tele_on, stream_on=stream_on,
+                        stage_error="image SHA-256 verification failed; retrying download",
+                        observation=_not_active_observation(tele_on, time.time()))
                     return "bad-sha"
             # The observation phase stays 'steady' whatever the report does:
             # aria2 is seeding here, not downloading, and _build_observation
@@ -2226,6 +2247,15 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.remove_stage(os.path.join(stage_dir, img_id + ".torrent"))
         state[img_id].pop("torrent_id", None)
         state[img_id].pop("torrent_auth_format", None)
+        # Verification failed on this tick, so publish that decision now.
+        # Omitting the heartbeat retained the previous device status and made
+        # set aggregation silently drop this image's failure.
+        tick.heartbeat(
+            image, deps, "error",
+            target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+            tele_on=tele_on, stream_on=stream_on,
+            stage_error="image SHA-256 verification failed; retrying download",
+            observation=_not_active_observation(tele_on, time.time()))
         return "bad-sha"
 
     # need to download — media-aware flash pre-check + mode-gated reclaim.
@@ -2438,6 +2468,19 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            observation=rpc_obs,
                            stage_error="aria2c RPC unreachable: %s" % e)
             return "aria2-down"
+        except RuntimeError as e:
+            # addTorrent can answer HTTP 200 with a JSON-RPC error or no GID.
+            # _aria_add_result rejects that response: report this image's
+            # failure without losing the tick or completed sibling work.
+            # Arbitrary RPC diagnostics may contain credentials.
+            deps.emit("ARIA2-DOWN", "%s download could not start (%s)"
+                      % (image["filename"], type(e).__name__))
+            tick.heartbeat(
+                image, deps, "error", target_fs=state.get("stage_fs"),
+                tele_on=tele_on, stream_on=stream_on,
+                stage_error="aria2c could not start the download; retrying",
+                observation=_not_active_observation(tele_on, time.time()))
+            return "aria2-down"
         if resume_untracked:
             deps.emit("STAGING",
                       "%s aria2 lost track of an in-progress download "
@@ -2543,6 +2586,10 @@ def run_once(cfg, deps, state):
     # filename whitelist and still ahead of every deps.aria_add().
     plans = policy.get("plans")
     plan_rows = plans if isinstance(plans, dict) else {}
+    # Reconcile even an empty set: clearing the final assignment must stop
+    # and park its torrents under the same ownership rules as any other
+    # unassign, before reporting that the device is idle.
+    _reconcile_set(deps, state, ids, stage_dir)
     if not ids:
         # Still heartbeat: an unassigned device must register (devices.json,
         # swarm map, telemetry posture) or console onboarding can never see
@@ -2554,10 +2601,6 @@ def run_once(cfg, deps, state):
                                    observation=_not_active_observation(
                                        tele_on, time.time())))
         return "no-assignment"
-
-    # Settle what the set means for what is already on the device — park what
-    # left it, un-park what came back — BEFORE staging anything.
-    _reconcile_set(deps, state, ids, stage_dir)
 
     ticks = []
     statuses = []

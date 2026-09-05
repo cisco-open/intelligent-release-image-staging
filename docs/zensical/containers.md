@@ -6,11 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Container deployments
 
-IRIS ships separate server and Console tiers plus one multi-architecture device
-container built around the same catalog and private-swarm protocol. The server
-coordinates and originates content; the Console is a state-free browser-facing
-gateway; each agent consumes an assignment, verifies the synchronized image,
-and writes it to platform storage without installing or activating it.
+IRIS builds three images: the server, the Console, and one device image for IOx
+and IOS-XR. The device image contains the shared agent in `device/agent/` and
+selects its platform adapter at runtime. Guest Shell receives that same agent
+as a bundle. Agents stage images on device storage; they never install or
+activate the staged operating-system image.
 
 | Role | Image architecture | Durable storage | Deployment target |
 | --- | --- | --- | --- |
@@ -36,14 +36,14 @@ flowchart LR
     Scratch --> XR["XR: verified /hostmount is harddisk:"]
 ```
 
-The final copy deliberately crosses back into IOS. The CAF persistent disk is
+On IOx, final placement crosses back into IOS-XE. The CAF persistent disk is
 available to the application (for example, as `/iox_data` on Catalyst 9300), but it is
 not an IOS filesystem root. The agent uses that disk for resumable swarm data,
 then hands the completed file to IOS for the final plain copy, attested by
 the agent afterward against the catalog's exact byte size — the file was
-already verified by sha256 against the catalog before the placement copy; the
-catalog can separately verify authenticity against Cisco's signed Bulk Hash
-feed, and a mismatch quarantines the image. On Catalyst 9300
+already checked against the catalog SHA-256 before the placement copy. The
+server separately checks image authenticity against Cisco's signed Bulk Hash
+feed when verification is run; a mismatch quarantines the image. On Catalyst 9300
 the app-hosting SSD share
 (`usbflash1:iox_host_data_share`) is bind-mounted into the container, so the
 hand-off is a disk-speed write followed by an IOS-internal copy onto
@@ -58,7 +58,17 @@ it forwards allowlisted operations to the server's internal `/internal/v1`
 management API over authenticated, CA-pinned HTTPS. Devices do not use that
 management API: they continue to call the device catalog and tracker directly.
 
-## Seed-server image
+Compose assigns both server containers private IP addresses on its network.
+The Console resolves `iris` through Docker DNS and calls port 9443 there.
+Published host ports connect browsers and devices to the right container; no
+separate LAN IP is needed for either service. IOx and Guest Shell still need
+an app address, supplied through routed, inband, or router networking. XR uses
+the router's host network and does not take a separate app address. See
+[Network ports and flows](network-ports.md).
+
+<span id="seed-server-image"></span>
+
+## Server and Console images
 
 `aria2c` is handed in, not downloaded or built — run `tools/get-aria2c.sh amd64`
 first, or the Dockerfile's `COPY bin/aria2c` step fails. Then build from the
@@ -70,6 +80,9 @@ tools/get-aria2c.sh amd64
 docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t iris:latest .
+docker build --pull --platform linux/amd64 \
+  -f server/Dockerfile.console \
+  -t iris-console:latest .
 ```
 
 `--pull` re-resolves the `python:3.12-slim-trixie` base tag instead of reusing
@@ -81,8 +94,11 @@ The image exposes the device-facing services, includes a Docker health check
 that probes `/readyz` (so a container whose catalog, artifact, or internal
 management listener died does not report `healthy`), and keeps aria2 RPC on
 loopback only. The separate Console image exposes only 8080 and has its own
-local health/readiness checks; Console readiness deliberately does not depend
-on the server being ready, avoiding a cold-start dependency cycle.
+local health/readiness checks. Once running, Console readiness checks its own
+files and listener, not server availability. Compose starts it after the server
+is healthy because its initial browser certificate comes from the management
+API. Kubernetes provides an independent default Console certificate, allowing
+that pod to start while the server is unavailable.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which
@@ -103,11 +119,9 @@ read-only. See [Server](server.md#publishing-images).
 Every seed-server service runs as the fixed uid and gid `10001`, and Compose
 drops all capabilities. The age identity file, the served artifacts directory,
 and the host tree behind `IRIS_IMAGE_ROOT` must be accessible to that uid; the
-identity file must remain mode 600 or 400. A
-deployment upgraded from a root-runtime release
-needs a one-time migration of its named volumes. Both procedures live in
-[Runtime identity](server.md#runtime-identity), with the migration command in
-[Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
+identity file must remain mode 600 or 400. Named volumes must be writable by
+uid 10001. See [Runtime identity](server.md#runtime-identity) and
+[Volume permissions](server.md#volume-permissions).
 
 Deployment records persist under `IRIS_STATE` on the `iris-state` volume, so
 undeploy-from-record and restart recovery behave identically to the Kubernetes
@@ -129,11 +143,11 @@ values fail closed rather than guessing where a multi-gigabyte image belongs.
 The image contains OpenSSH and `sshpass` because the IOx profile requires them;
 the XR profile rejects IOx SSH/share variables and never creates an SSH
 dependency. BusyBox supplies `ps`, `top`, `free`, and `kill` on both
-architectures, preserving the field-diagnostics decision.
+architectures for diagnostics.
 
-Guest Shell is not packaged from this image. Its agent bundle, bootstrap/EEM
-launcher, and installer remain a separate delivery path. Every platform still
-pins the current public server certificate at runtime, but the unified
+Guest Shell uses the same Python agent sources, packaged with its own
+bootstrap/EEM launcher and installer rather than this container image. Every
+platform pins the current public server certificate at runtime, but the unified
 container does not carry it: IOx onboarding uses application data and XR
 onboarding places it on the router's `harddisk:` mount.
 
@@ -156,6 +170,12 @@ IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
   device/iox/build.sh device/iox/out
 ```
 
+Build the IOS-XR wrapper from the same canonical image:
+
+```bash
+tools/build-xr-package.sh --out artifacts/
+```
+
 For the normal Compose workflow, run `tools/provision-iox-packages.sh` after
 the server becomes healthy. It obtains the pinned Cisco `ioxclient` tool on the
 Linux server when needed and places both deployment-neutral,
@@ -169,60 +189,21 @@ fails closed without it.
 
 ### Package footprint
 
-The canonical OCI is measured per platform as compressed layer bytes and
-uncompressed rootfs bytes; those are the only comparable values until native
-IOx/RPM wrappers are actually built. A recorded 2026-09-04 measurement of the
-certificate-bearing predecessor to the deployment-neutral image found:
+Measure the canonical OCI per platform using compressed layer bytes and
+uncompressed rootfs bytes. Use the current archive and adjacent manifest for
+its identity, and measure the IOx tars and XR RPM separately because their
+native envelopes differ. Guest Shell bundles and staged IOS images are
+separate artifacts.
 
-| Platform/object | Compressed layer bytes | Uncompressed layer bytes | Previous separate-image unpacked bytes | Unpacked delta |
-| --- | ---: | ---: | ---: | ---: |
-| `linux/amd64` unified (IOx comparison) | 27,907,984 | 74,469,376 | 159,014,912 | -84,545,536 (-53.2%) |
-| `linux/amd64` unified (XR comparison) | 27,907,984 | 74,469,376 | 70,798,336 | +3,671,040 (+5.2%) |
-| `linux/arm64` unified (IOx comparison) | 28,957,268 | 78,494,720 | 185,548,800 | -107,054,080 (-57.7%) |
-
-The whole two-platform OCI archive is 56,904,192 bytes. Its measured identity
-is index `sha256:4331b1e68eb3be4266fcccf2ff80e0cf9eaba11a9bd1db5cbe8e5063265dc5a5`,
-archive SHA-256
-`56f538b73ca9d471d8b7e13269db0451faeb2c267aa72d2d049dd39ea3d7a27f`,
-and source SHA-256
-`44b4ea29cfbe2557423a90fade833a669972f668be2e5f16deb2bcd61cea7cc4`.
-The architecture manifests are
-`sha256:6b2fbf2b1ca7f2101ce631fce72dabfc54f009a3c7941561d4a4c7a541174efc`
-(amd64) and
-`sha256:bb07a2c94c1ba45311847fbae9d981bb7f8e223e85a1e922f9068b2010c7d635`
-(arm64). These values are scale evidence, not the current release identity:
-removing the embedded PEM changes the exact byte counts and digests slightly.
-Use the current build's adjacent `.manifest` as the authority. Unlike that
-historical image, the deployment-neutral build does not acquire different
-digests merely because a deployment uses another server certificate. Native
-wrapper size is deliberately not inferred from the earlier Debian packages
-because no native wrapper was built in this measurement.
-
-The large IOx reduction comes from converging on the already-qualified Alpine
-runtime instead of carrying the former Debian userland. The modest increase
-against the former XR image is the shared OpenSSH/`sshpass` closure required by
-IOx. Both manifests retain BusyBox `ps`, `top`, `free`, and `kill`, the static
-architecture-matched `aria2c`, full agent source set, runtime certificate
-validation, and reconcile/supervision paths. Splitting the tiny platform-only
-Python modules would save at most tens of kilobytes and would defeat the
-one-content audit boundary, so it remains rejected.
-
-These comparison values are the last verified separate images, after the
-field-diagnostics decision restored `procps` to IOx and after the last agent
-source refresh. The earlier slimming experiment recorded 157,999,616
-(amd64 IOx), 183,948,288 (arm64 IOx), and 70,754,304 (XR) bytes before those
-two follow-up changes; mixing those intermediate numbers into this table would
-understate the IOx baseline by 1,015,296/1,600,512 bytes and the XR baseline by
-44,032 bytes.
-
-Guest Shell remains a separate, unchanged bundle/runtime and is not included
-in the canonical image measurements. The IOx descriptor's `memory: 768` and
-`disk: 2048` values are runtime quotas, not package size; staged IOS images are
-also excluded.
+The shared Alpine runtime includes OpenSSH and `sshpass` for IOx, diagnostic
+tools, the agent sources, and architecture-matched `aria2c`. The IOx
+descriptor's `memory: 768` and `disk: 2048` values are runtime quotas in MB,
+not package sizes.
 
 `aria2c` is handed in, never downloaded: the build takes each architecture
-from an explicit `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` override, a matching local agent bundle, or the handed-in
-`deliverables/aria2c-<arch>` binary, verifying it against
+from an explicit `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` override, a matching
+local agent bundle, or the handed-in `deliverables/aria2c-x86_64` or
+`deliverables/aria2c-aarch64` binary, verifying it against
 `tools/aria2c.sha256` and failing closed on a mismatch. The builder accepts no
 catalog-certificate input; onboarding supplies the current public certificate
 without changing the canonical image or its wrappers.
@@ -240,11 +221,13 @@ order with an adjacent `.manifest` that binds its `wrapper_sha256` and selected
 platform to those three canonical digests.
 
 Package status calls a wrapper ready only when its readable bytes match that
-adjacent provenance manifest. It does not infer readiness from certificate
-age, inspect package contents, or validate a native package signature.
+adjacent provenance manifest. It does not compare against newer source, inspect
+package contents, or validate a native package signature. After a shared-agent
+change, rebuild the server/Guest Shell bundle, both IOx tars, and XR RPM before
+rollout. See [Embedded agent packages](development.md#embedded-agent-packages).
 
-The installer passes all environment-specific values at deployment time. No
-lab address is baked in:
+The installer passes all environment-specific values at deployment time. The
+image contains no lab address:
 
 | Variable | Purpose |
 | --- | --- |

@@ -174,7 +174,7 @@ def test_missing_assigned_image_heartbeats_error():
     assert ("ERROR", "assigned image gone1 not in catalog") in emitted
     assert len(cat.heartbeats) == 1
     hb = cat.heartbeats[0]
-    assert hb["current_image_id"] is None
+    assert hb["current_image_id"] == "gone1"
     assert hb["stage_state"] == "error"
     assert "gone1" in hb["stage_error"]
 

@@ -195,7 +195,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin. Lab reference: origin 4618.5 MiB, peers 1877.5 MiB of 6496.0 MiB.",
+      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -281,7 +281,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. Lab reference: 28.9% fleet-wide, but per device it ranged 18.7% to 55.9% — a fleet average is not a per-device truth (see the per-device table).",
+      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. A fleet average does not describe each device; see the per-device table.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2592,7 +2592,7 @@
       "id": 32,
       "type": "table",
       "title": "Peer share of delivery, per device (derived, %)",
-      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'. Lab reference range 18.7%-55.9%.",
+      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Mixed --"

@@ -26,11 +26,11 @@ The artifact operation requires valid HTTP Basic device credentials.
 
 ## artifact-forbidden
 
-Access to the requested legacy staging artifact is forbidden.
+Access to the requested staging artifact is forbidden.
 
 ## artifact-not-found
 
-The requested legacy staging artifact does not exist.
+The requested staging artifact does not exist.
 
 ## artifact-request-failed
 

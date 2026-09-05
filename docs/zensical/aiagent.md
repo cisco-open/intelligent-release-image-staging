@@ -50,21 +50,20 @@ knowing them in advance saves a stalled PoC:
 | You see | Why | What to set |
 | --- | --- | --- |
 | The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
-| A device refuses the SSH connection, naming legacy algorithms | Old SHA-1 key exchange and `ssh-rsa` host keys are no longer offered by default | `IRIS_SSH_LEGACY=1`, only for devices too old to offer anything current |
-| A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm which, then remove that host's entry from the known-hosts file under the IRIS state directory |
-| Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS no longer applies a routing protocol to the interfaces it creates unless asked | `SVI_IGP=isis` when the fabric runs IS-IS; leave unset otherwise |
+| A device refuses the SSH connection, naming unsupported algorithms | SHA-1 key exchange and `ssh-rsa` host keys require explicit opt-in | `IRIS_SSH_LEGACY=1`, only when the device cannot offer stronger algorithms |
+| A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm the device's identity, then use **Forget SSH host key** in its Console drawer before onboarding again |
+| Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS applies a routing protocol only when configured | Set the device's `svi_igp=isis` when the fabric runs IS-IS; leave blank to use the server's `SVI_IGP` default |
 | IOx package staging aborts asking for an image digest | The cross-architecture emulation helper runs privileged, so it is pinned by digest rather than a moving tag | `BINFMT_IMAGE_DIGEST` to the audited digest, or preconfigure emulation on the host |
 
-Set the host-side ones in `server/.env`, which Compose passes through.
+Set `IRIS_GUI_ALLOW_PLAINTEXT`, `IRIS_SSH_LEGACY`, and `SVI_IGP` in
+`server/.env`. Export `BINFMT_IMAGE_DIGEST` in the Docker host's shell before
+running the package helper; it is a build setting, not a Compose service setting.
 
 ## Assistant operating rules
 
-Pick a deliberately economical assistant. This sequence is prescriptive
-enough that a mid-tier, cost-efficient model — one that can follow a
-document, run commands, and ask a question when unsure — completes it well;
-a frontier-class model adds cost, not correctness, to a guided PoC. Save
-the expensive tier for the moments that go off-script: an error this guide
-does not cover, or a decision with real blast radius.
+Use an assistant that can read the repository, run the documented commands,
+and report failures accurately. Review its device targets and results as you
+would for a manual deployment.
 
 Give the assistant the following requirements when it helps operate a PoC:
 
@@ -115,30 +114,29 @@ At the end of every step, state the next action required from me.
    minutes. Creating the administrator permanently ends this special behavior;
    the pair is then checked only against the stored administrator credentials
    and normally fails. The next sign-in opens
-   the first-run setup wizard at `#setup`, a Magnetic Stepper with a step
-   panel on the left and each step's own controls on the right: telemetry
-   destination, device packages, and image verification — the Cisco source
-   check against the published Known Good Values feed, configured inline
-   (daily-schedule enable, refresh now, and the offline feed-file import for
-   air-gapped servers) rather than a link out to Settings. Enable it before
-   trusting staged images (see [Validation](validation.md)). Any step can be
-   skipped and resumed later — a banner keeps offering the unfinished ones,
-   and Settings › Setup reports all four states, including a schedule that is
-   configured but has not yet produced a successful run. The device-packages
-   step is the same check as step 6 below; it cannot be completed from the
-   console, because the console container has no Docker socket.
+   the first-run setup wizard at `#setup` for telemetry, device packages, and
+   image verification against Cisco's Known Good Values feed. Configure the
+   verification schedule, run a refresh, or import a feed file for an offline
+   deployment. Skipped steps can be resumed under **Settings → Setup**; a
+   configured schedule is separate from a successful verification run.
+   See [Validation](validation.md). Build device packages on the Docker host
+   as described in step 6, then use **Re-check** in the Console to update
+   their setup status.
 4. **Publish an image.** Upload through the Console, import a file that is
    already on the server from the Console **Import from disk** panel, or use
    `iris-publish` from inside the server container. Publishing creates catalog
    and torrent metadata; it does not change any device.
-5. **Add devices.** Use the Console Devices page or its example CSV. Set each
-   model when known and choose the agent install explicitly. Choose **Guest
+5. **Add devices.** Use the Console Devices page or its example CSV. Choose the
+   management type to set which network fields appear, then the agent install.
+   Model is optional free text; a recognized model narrows installer choices
+   without changing the management type. Choose **Guest
    Shell** for the standard C9300 path or a Catalyst 8000 (C8xxx, IOS-XE) router
    VPG deployment, **IOx** for a supported IOx device, or **XR appmgr container** for a
    Cisco 8000 series (IOS-XR) router. CSV/API platform values remain
    `guestshell`, `router`, `iox`, and `xr-appmgr`, respectively. `xr-appmgr` rows
-   use management type `xr-host` and app addressing instead of VLAN/SVI fields;
-   see [Management type](management-type.md) for the full column matrix.
+   use management type `xr-host` and the router's own network; leave app,
+   VLAN/SVI, VPG, and NAT fields empty. See [Management type](management-type.md)
+   for the full column matrix.
 6. **Confirm device packages are ready.** The server bring-up step stages arm64
    `iris-arm64.tar` for IE-3400 and amd64 `iris-amd64.tar` for Catalyst 9300 IOx. A Catalyst 9300
    IOx deployment also requires a USB SSD and the Catalyst 9300 app-hosting interface.
@@ -165,14 +163,19 @@ At the end of every step, state the next action required from me.
    `tools/check-package-freshness.sh` provides the same checks from the Docker
    host; a green result does not compare the package with the current checkout
    or confirm that an already-deployed device was upgraded. Keep native signed
-   wrappers unchanged: the legacy IOx rebake helper refuses packages containing
+   wrappers unchanged: the IOx rebake helper refuses packages containing
    signature metadata. See [Artifact handling](iox.md#artifact-handling) for
    publishing signed output with its matching provenance manifest.
+   If an existing canonical OCI archive has older source at the same version,
+   use a new `IRIS_DEVICE_IMAGE_OCI` output path for both wrapper builds or
+   explicitly rebuild it with `IRIS_FORCE_DEVICE_IMAGE_BUILD=1`. See
+   [Embedded agent packages](development.md#embedded-agent-packages).
 7. **Onboard devices.** Start one-click onboarding from the Console and watch
    each job to completion. A Catalyst 9300 can use either Guest Shell or IOx; an
    explicit IOx choice with an unknown model fails before it touches the device.
-   A successful lifecycle persists its configuration with `copy running-config
-   startup-config`; a failed or partial lifecycle is not saved.
+   IOS-XE installers save successful configuration changes with
+   `copy running-config startup-config`; they do not save a failed or partial
+   lifecycle. XR uses appmgr instead of IOS-XE configuration commands.
 8. **Assign and observe.** Assign the published image, then use the Swarm and
    Monitoring areas to verify downloading, verification, staging, and seeding.
    For the proof-of-value figure, show how the bytes actually travelled — and
@@ -188,9 +191,13 @@ At the end of every step, state the next action required from me.
 
 ## Reset or redeploy an existing PoC
 
-To rerun the sequence on a host that already carries a deployment — a fresh
-demo, a new operator walkthrough, or picking up a newer build — reset to a
-first-run slate instead of deploying over live state:
+For a routine upgrade, retain the existing state and rebuild the server and
+Console. Rebuild device packages if their source changed, then follow
+[Redeploying agents](operations.md#redeploying-agents-after-an-artifact-rebuild).
+
+Use the reset below only when you intend to discard the existing deployment
+and repeat first-run setup. Undeploy agents while their deployment records and
+credentials are still available, then back up the stopped server:
 
 1. Sync the newer source tree into the Compose project directory if this reset
    accompanies an upgrade, preserving the host's `server/.env` and any local
@@ -238,7 +245,7 @@ first-run slate instead of deploying over live state:
 Adding a recovery recipient does **not** need any of this. `iris-bootstrap
 --add-recipient` and `--rekey` re-encrypt the existing state in place, keeping
 every device credential, the admin account and the pinned certificate.
-`--force` is the one that regenerates them all, and it now refuses to run
+`--force` is the one that regenerates them all, and it refuses to run
 without `--yes` and names what it would destroy first.
 
 The reset erases fleet rows, catalog entries and verification verdicts, the
@@ -246,10 +253,12 @@ image-verification schedule, deployment records, settings, credential
 profiles, and the audit log (all captured in the backup). Devices themselves
 are not touched, but agents deployed before the reset are **orphaned by it**:
 they pinned the old server certificate and their enrollment tokens died with
-the state, so they cannot reconnect on their own. Re-onboard each device —
-onboarding reinstalls the agent against the new certificate. (Restoring the
-old TLS material from the backup is the only way to revive existing agents
-without re-onboarding; that trades away the clean-slate certificate.)
+the state, so they cannot reconnect on their own. If agents were not undeployed
+before the reset, remove their old IRIS footprint using the documented
+recovery procedure before onboarding again. Onboarding refuses an existing
+footprint. Restoring the previous deployment instead requires its matching
+state and credentials as well as its TLS material; restoring only the old
+certificate does not restore enrollment tokens.
 
 ## Completion record
 

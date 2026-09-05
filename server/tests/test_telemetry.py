@@ -1059,7 +1059,7 @@ def test_swarmmap_historical_object_without_ip_is_safe():
 
 def test_swarmmap_hub_uses_observed_global_rates():
     html = _swarmmap_html()
-    body = html.split("function openHub")[1].split("async function requestPull")[0]
+    body = html.split("function hubDetails")[1].split("function openHub")[0]
     assert "g.send_bps" in body and "g.receive_bps" in body
 
 
@@ -1258,6 +1258,7 @@ def test_swarm_snapshot_joins_device_id_and_report_by_principal_id():
     # reinterpreted as v2), taken from the last ring entry.
     assert peers["10.0.0.2"]["device_id"] == "iris8kv-1"
     assert peers["10.0.0.2"]["latest_report"] == {
+        "image_id": "cat9k.bin",
         "schema": "v1", "event": "staging-complete", "tier": "good",
         "rtt_ms_median": 12, "received_at": 200.0, "ts": 100}
     assert "avg_bps" not in peers["10.0.0.2"]["latest_report"]

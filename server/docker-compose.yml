@@ -8,8 +8,8 @@
 #
 # IRIS_HOST_IP is ALWAYS the machine running docker (the devices must be able to
 # reach it). It is baked into the catalog's self-signed TLS certificate, which is
-# generated on first start — if you change it later, delete the config volume so
-# the cert regenerates.
+# generated on first start. An address change requires a certificate covering
+# the new address and updated device trust; see docs/zensical/operations.md.
 #
 # Publish an image (run inside the container; IRIS_IMAGE_ROOT is mounted at
 # /opt/images). Runtime secret paths are declared in the container environment,

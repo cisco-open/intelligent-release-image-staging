@@ -7529,24 +7529,15 @@ def test_agent_install_labels_name_the_runtime_not_router_networking():
 
 
 def test_add_device_form_model_field_precedes_agent_install_select():
-    """Agent-install options depend on the model (gui_onboard.
-    install_options_for), so the model input must render BEFORE the agent-
-    install select in the add-device form's DOM order -- app.js's
-    refreshInstallOptions reads df-model's live value to filter df-platform's
-    options as the operator types, before the field it is about to filter
-    even exists otherwise."""
+    """Model compatibility is entered before choosing an agent install."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     assert html.index('id="df-model"') < html.index('id="df-platform"')
 
 
 def test_add_device_form_filters_install_options_live_by_model():
-    """Source guard for the /api/install-options wiring: as the operator
-    types a model, the agent-install select is refetched and repainted --
-    to the one option an IOS-XR model can run, and back to the full set when
-    the model is blank or unrecognized. The select used to be DISABLED for
-    IOS-XR with "no agent install available yet"; the XR appmgr container
-    agent exists now, so that text is gone and the option is real."""
+    """Model lookup narrows the selected management type's install choices.
+    The behavior tests cover changes, failures and late lookup responses."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "getElementById('df-model').addEventListener('input'" in js
@@ -7574,84 +7565,10 @@ def test_xr_host_management_type_option_added_to_both_selects():
             'stack</option>') in df_mgmt_type
 
 
-def test_update_device_fields_hides_every_addressing_field_for_xr_host():
-    """xr-host runs the appmgr container on the router's own network stack:
-    no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Before this,
-    df-guest/df-mask/df-gateway were ALWAYS visible regardless of
-    management type -- the core UX bug this task fixes, since an operator adding
-    an XR router saw three fields that mean nothing for it. updateDeviceFields
-    must hide all seven addressing fields for xr-host and set the agent
-    install to xr-appmgr, mirroring the pre-existing router auto-set/clear
-    pattern in both directions."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    fn = js.split("function updateDeviceFields() {", 1)[1].split("\n  }", 1)[0]
-    assert "var xrHost = managementType === 'xr-host';" in fn
-    assert "df-vlan').hidden = router || xrHost;" in fn
-    assert "df-guest').hidden = xrHost;" in fn
-    assert "df-mask').hidden = xrHost;" in fn
-    assert "df-gateway').hidden = xrHost;" in fn
-    assert "if (xrHost && !platform.value) platform.value = 'xr-appmgr';" in fn
-    assert "if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';" in fn
-
-
-def test_xr_host_auto_selected_from_model_and_from_platform_pick():
-    """Two paths into xr-host without ever asking the operator to notice an
-    addressing field: (1) the model looks IOS-XR shaped, which the client
-    learns not by reimplementing the server's model regex but by reading
-    the /api/install-options answer -- an XR model gets back exactly
-    ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
-    Agent install = XR appmgr container directly. Either path auto-selects
-    df-management-type to xr-host and repaints the form, without fighting an
-    operator who is already there.
-
-    Symmetric exit: correcting the model away from an XR shape (e.g. 8201
-    -> C9300-48UXM) must reset an auto-entered xr-host management type back
-    to the unset/default option and repaint. Without this, df-guest/df-mask/
-    df-gateway stay hidden for a non-XR device with no visible cause and
-    the form cannot be completed. Scoped to the same model-driven repaint
-    -- it must not reach for any of the operator's own explicit management
-    type changes elsewhere in the form.
-
-    Regression closed here: a first pass only wired the exit into the
-    fetched-non-XR-answer branch. Every OTHER path that repaints the
-    platform select away from offering xr-appmgr -- the blank-model early
-    return, the !r.ok error path, a null options answer, the zero-options
-    dead end, and the catch block -- painted FULL_INSTALL_OPTIONS_HTML
-    (which does not even list xr-appmgr) while leaving df-management-type
-    stuck on xr-host, so the addressing fields stayed hidden with the
-    agent-install select silently offering no way back to xr-appmgr
-    either. The exit must be a single helper invoked from every one of
-    those paths, not re-implemented ad hoc per branch."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
-        "  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);", 1)[0]
-    assert "options.length === 1 && options[0] === 'xr-appmgr'" in refresh_fn
-    assert "mgmtTypeSel.value !== 'xr-host'" in refresh_fn
-    assert "mgmtTypeSel.value = 'xr-host';" in refresh_fn
-    assert "updateDeviceFields();" in refresh_fn
-    assert "function exitXrHostIfStale() {" in refresh_fn
-    helper = refresh_fn.split("function exitXrHostIfStale() {", 1)[1].split("}", 1)[0]
-    assert "mgmtTypeSel.value === 'xr-host'" in helper
-    assert "mgmtTypeSel.value = '';" in helper
-    assert "updateDeviceFields();" in helper
-    # every non-XR repaint path calls the helper -- six calls: blank model,
-    # !r.ok, options === null, options.length === 0, the fetched-non-XR
-    # answer, and the catch block
-    assert refresh_fn.count("exitXrHostIfStale();") == 6
-    blank_model_block = refresh_fn.split("if (!model) {", 1)[1].split("}", 1)[0]
-    assert "exitXrHostIfStale();" in blank_model_block, \
-        "blank-model early return must exit a stale xr-host management type too"
-    catch_block = refresh_fn.split("} catch (e) {", 1)[1]
-    assert "exitXrHostIfStale();" in catch_block
-    assert "getElementById('df-platform').addEventListener('change'" in js
-    plat_fn = js.split(
-        "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
-        "});", 1)[0]
-    assert "this.value !== 'xr-appmgr'" in plat_fn
-    assert "mgmtTypeSel.value === 'xr-host'" in plat_fn
-    assert "mgmtTypeSel.value = 'xr-host';" in plat_fn
+# Management-type visibility and model lookup behavior are exercised against
+# the shipped JavaScript in test_add_device_fields.py. The former source
+# assertions required model/platform edits to change management type, which
+# is precisely the behavior the operator now requires us to remove.
 
 
 def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
@@ -8604,8 +8521,8 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     as "B — error", with the stage_error attached to no row at all.
 
     Both now resolve membership in errored_image_ids, in the SAME precedence
-    the map uses (staged wins, then errored, then whichever image is in
-    flight), and an errored image blocks the all-green "deployed" badge and
+    the map uses (current errors override retained staged membership),
+    and an errored image blocks the all-green "deployed" badge and
     gets its own filterable state instead."""
     app_js = _webroot("app.js")
     assert "function rowErroredIds(d)" in app_js
@@ -8615,14 +8532,17 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "rowErroredIds(d)" in drawer
     assert "'error'" in drawer
-    # staged wins over errored -- the resolution order swarmmap.html uses
+    # rowHasStaged rejects a current per-image error before consulting the
+    # retained staged set, so drawer and device verdict cannot disagree.
+    staged = app_js.split("function rowHasStaged(d, iid) {", 1)[1].split("\n  }", 1)[0]
+    assert staged.index("errored_image_ids") < staged.index("staged_image_ids")
     assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
-    # ...and per-image state is never derived from the identity pointer.
+    # Multi-image state is never derived from the identity pointer.
     # current_image_id is the first image of the set that produced heartbeat
     # data this tick (typically one already STAGED), not the one in flight, so
     # reading it as "currently transferring" mislabels whichever image it
     # lands on and leaves the real failure reading "queued".
-    assert "current_image_id" not in drawer
+    assert drawer.index("!perImage") < drawer.index("d.current_image_id")
 
     body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
     body = body.split("\n  function ", 1)[0]

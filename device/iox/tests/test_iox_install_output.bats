@@ -6,9 +6,9 @@
 
 @test "install waits for IOx readiness and reports meaningful app state" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  run grep -F 'waiting for IOx app-hosting service (CAF/Dockerd)' "$install"
+  run grep -F 'waiting for IOx services' "$install"
   [ "$status" -eq 0 ]
-  run grep -F "app-hosting has not reported '\$APPID' yet" "$install"
+  run grep -F "waiting for app: \$APPID" "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -18,7 +18,7 @@
   [ "$status" -eq 0 ]
   run grep -F 'clear_partial_app_config' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'partial app-hosting configuration has been removed' "$install"
+  run grep -F 'Partial app configuration removed' "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -32,7 +32,7 @@
   install="$BATS_TEST_DIRNAME/../install.sh"
   run grep -F 'copy running-config startup-config' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'startup-config saved' "$install"
+  run grep -F 'onboard complete: $DEVICE_IP' "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -253,7 +253,7 @@ EOF
 # --- operator-facing PREREQ checks (2026-08-20 incident: an IE-3400 lost `ip
 # routing` on re-image; onboarding "succeeded" while the app's VLAN traffic had
 # no L3 path out — silent, invisible, hours to diagnose). Static assertions
-# prove the PREREQ lines and commands are present and land before step [2/9];
+# prove the PREREQ lines and commands are present and land before step [3/7];
 # the stub-backed tests below prove the pass/fail/warn behavior itself. ---
 
 @test "install checks ip routing before applying any config (PREREQ, routed only)" {
@@ -283,10 +283,10 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "PREREQ checks land before step [2/9] applies IOx networking" {
+@test "PREREQ checks land before step [3/7] applies IOx networking" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  pre_line="$(grep -n '^echo "\[pre\] prerequisite checks' "$install" | head -1 | cut -d: -f1)"
-  step2_line="$(grep -n '^echo "\[2/9\]' "$install" | head -1 | cut -d: -f1)"
+  pre_line="$(grep -n '^echo "\[1/7\] check prerequisites' "$install" | head -1 | cut -d: -f1)"
+  step2_line="$(grep -n '^echo "\[3/7\]' "$install" | head -1 | cut -d: -f1)"
   [ -n "$pre_line" ] && [ -n "$step2_line" ] && [ "$pre_line" -lt "$step2_line" ]
 }
 
@@ -475,14 +475,14 @@ _iox_env() {
   _iox_stub_setup
   run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SIGNATURE POLICY (unsigned)"* ]]
+  [[ "$output" == *"signature policy: unsigned"* ]]
 
   printf '%s\n' signature > "$BATS_TEST_TMPDIR/package/package.sign"
   tar -cf "$STUBDIR/artifacts/iris-arm64.tar" \
     -C "$BATS_TEST_TMPDIR/package" package.yaml package.sign
   run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SIGNATURE POLICY (signed)"* ]]
+  [[ "$output" == *"signature policy: signed"* ]]
 }
 
 @test "invalid catalog certificate is rejected before device teardown" {
@@ -510,7 +510,7 @@ _iox_fast_lifecycle() {
   [ "$status" -eq 0 ]
   [ "$(cat "$FAKE_LIFECYCLE_FILE")" = RUNNING ]
   [ -f "$FAKE_LIFECYCLE_FILE.ca" ]
-  [[ "$output" == *"current catalog certificate delivered"* ]]
+  [[ "$output" == *"onboard complete: 192.0.2.10"* ]]
 }
 
 @test "failed application data copy leaves the activated IRIS app unstarted" {
@@ -539,7 +539,7 @@ _iox_fast_lifecycle() {
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
 }
 
-@test "ip routing present: real run proceeds past the check to step [2/9]" {
+@test "ip routing present: real run proceeds past the check to step [3/7]" {
   _iox_stub_setup
   iox_run_with_timeout 12 env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 \
     STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 \
@@ -547,7 +547,7 @@ _iox_fast_lifecycle() {
     MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=FOC1234TEST FAKE_IP_ROUTING=yes \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "no IOx partition: real run exits non-zero with the PREREQ line" {
@@ -567,7 +567,7 @@ _iox_fast_lifecycle() {
     FAKE_CLOCK_LINE="14:23:07.512 UTC Thu Aug 20 2018" \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" == *"PREREQ WARNING: device clock is 2018"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "unparseable device clock: the optional probe must not abort the install" {
@@ -582,7 +582,7 @@ _iox_fast_lifecycle() {
     FAKE_CLOCK_LINE="% Clock is not set" \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" != *"PREREQ WARNING"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "failing PREREQ aborts before the existing app is torn down" {
@@ -653,8 +653,8 @@ _iox_fast_lifecycle() {
   [[ "$output" == *"activation is still loading the app image"* ]]
   [[ "$output" == *"Last observed state: DEPLOYED"* ]]
   # and the operator is told the retry is possible without an undeploy
-  [[ "$output" == *"LEFT IN PLACE"* ]]
-  [[ "$output" == *"resumable retry"* ]]
+  [[ "$output" == *"Activation may still be running"* ]]
+  [[ "$output" == *"retry onboarding"* ]]
 }
 
 @test "activation timeout leaves the app-hosting config on the device" {
@@ -666,7 +666,7 @@ _iox_fast_lifecycle() {
     FAKE_APP_STATE=DEPLOYED ACTIVATE_TIMEOUT=2 STATE_POLL=1 \
     bash "$STUBDIR/device/iox/install.sh"
   [ "$status" -ne 0 ]
-  # the teardown in [1/9] is expected; a SECOND removal after the activate
+  # the teardown in [2/7] is expected; a SECOND removal after the activate
   # wait is not, so count them
   run grep -c 'no app-hosting appid iris' "$COMMAND_LOG"
   [ "$status" -eq 0 ]

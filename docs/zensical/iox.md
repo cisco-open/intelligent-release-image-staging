@@ -37,7 +37,6 @@ credential in an artifact URL.
 | `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
-| `device/iox/rebake_iris_tar.py` | Legacy content rewriter for unsigned IOx packages; refuses signed packages. |
 
 ## Runtime behavior
 
@@ -122,9 +121,9 @@ An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
 does **not** need an undeploy or a forced teardown: re-run the installer, or
 press Onboard again in the console. Console preflight treats an IRIS app that
-is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry (it serves
-nothing, and the installer's own step [1/9] tears down whatever it finds),
-while an app that is `RUNNING` is a live deployment and still refuses.
+is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
+installer removes that incomplete app before retrying. An app that is
+`RUNNING` is a live deployment and requires undeploy first.
 
 ## Build modes
 
@@ -161,8 +160,11 @@ can be used across deployments. The current public certificate remains a
 required onboarding input and never includes the server's private key.
 
 Rebuild the canonical image and every native wrapper after a change to source
-included in the shared device image. Certificate rotation alone is not a
-package source change and does not require a rebuild.
+included in the shared device image. If a canonical archive already exists
+for the same `VERSION`, the builder refuses to overwrite it after a source
+change. Set `IRIS_FORCE_DEVICE_IMAGE_BUILD=1` to replace that local build, or
+set `IRIS_DEVICE_IMAGE_OCI` to a new archive path. Both wrapper builders must
+use the same archive. Certificate rotation alone does not require a rebuild.
 
 The common device-image builder and `device/iox/build.sh` never download
 `aria2c`. The binary is a handed-in
@@ -246,8 +248,6 @@ from the signer; native signature verification remains the platform's job.
 The IOx installer keeps app-hosting verification enabled when the tar carries
 signature metadata.
 
-`device/iox/rebake_iris_tar.py` is only for legacy unsigned packages. It refuses
-to rewrite a package containing `package.sign` or `package.cert`, including
-inside nested archives. For a source change, rebuild from source and obtain a
-new signature. For a certificate change, re-onboard using the existing package
-so the installer replaces only the runtime trust file.
+For a source change, rebuild the package and obtain a new signature. For a
+certificate change, re-onboard using the existing package so the installer
+replaces only the runtime trust file.

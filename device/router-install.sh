@@ -185,18 +185,20 @@ trustpoint_block() {
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== IOS CONFIG ====="; ios_config
-  echo "===== PKI TRUSTPOINT ====="; trustpoint_block
-  echo "===== AGENT CONFIG ====="; agent_conf
-  echo "===== INSTALL COPIES ====="
+  echo "===== IOS configuration ====="; ios_config
+  echo "===== Certificate trust ====="; trustpoint_block
+  echo "===== Agent configuration ====="; agent_conf
+  echo "===== Copy agent files over HTTPS ====="
   for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
               "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
               "iris-catalog.pem:iris-catalog.pem"; do
     src="${pair%%:*}"; dst="${pair##*:}"
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
   done
-  echo "===== guestshell enable ====="
-  echo "===== PERSIST: copy running-config startup-config ====="
+  echo "===== Start Guest Shell ====="
+  echo "guestshell enable"
+  echo "===== Save startup-config ====="
+  echo "copy running-config startup-config"
   exit 0
 fi
 
@@ -213,11 +215,11 @@ ssh_host() {
   return "$rc"
 }
 
-echo "[1/7] bootflash pre-check on $DEVICE_IP"
+echo "[1/6] check storage on $DEVICE_IP"
 printf 'dir bootflash: | include bytes free\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" \
   | grep -i 'bytes free' || true
 
-echo "[2/7] stage per-device agent config into artifacts/"
+echo "[2/6] prepare agent configuration"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 : "${IRIS_CRT_FILE:?set IRIS_CRT_FILE to the bare server cert crt.pem}"
 [ -r "$IRIS_CRT_FILE" ] \
@@ -248,7 +250,7 @@ fi
 existing="$(printf 'show app-hosting list\n' \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
 if [ -n "$existing" ]; then
-  echo "[3/7] destroying pre-existing guestshell (stale networking guard)"
+  echo "[3/6] remove existing Guest Shell"
   # some IOS-XE versions prompt "Undeploy Guest Shell? [y/n]" — answer it,
   # matching both uninstallers; without the y the destroy never runs and the
   # wait loop below times out with the stale guest intact
@@ -263,13 +265,13 @@ if [ -n "$existing" ]; then
   done
 fi
 
-echo "[3/7] apply IOS config ($MANAGEMENT_TYPE VirtualPortGroup)"
+echo "[3/6] configure IRIS ($MANAGEMENT_TYPE)"
 { echo "configure terminal"; ios_config; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 printf 'mkdir %s\n\n' "$IOS_ROOT" \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-echo "[4/7] guestshell enable"
+echo "[4/6] start Guest Shell"
 # Every iteration is its own login, deliberately: this is a state-gated poll,
 # and collapsing repeated observations into one session is precisely what the
 # 2026-08-29..31 fail-open wave was about (a marker proves what was typed,
@@ -294,7 +296,7 @@ for i in $(seq 1 32); do
   sleep "$backoff"
 done
 
-echo "[5/7] install trustpoint and copy agent artifacts over verified HTTPS"
+echo "[5/6] copy certificate and agent files"
 { echo "configure terminal"; trustpoint_block; echo "end"; } \
   | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
@@ -353,7 +355,7 @@ for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
     || { echo "ERROR: copy of $src failed after 3 attempts" >&2; exit 1; }
 done
 
-echo "[6/7] verify applied config and persist to startup-config"
+echo "[6/6] verify configuration and save startup-config"
 RUN="$HERE/../lab/device-run.sh"
 # One SSH login for all three read-only verify checks instead of three --
 # same consolidation as _default_router_preflight in server/gui_onboard.py.
@@ -464,4 +466,4 @@ case "$save_out" in
      printf '%s\n' "$save_out" >&2; exit 1 ;;
 esac
 
-echo "[7/7] done. The agent will stage its assigned image at bootflash: root."
+echo "onboard complete: $DEVICE_IP"

@@ -6,7 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Web Console
 
-The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes network state visible.
+The Console runs in its own container and provides the browser interface and
+operator API. It forwards authenticated requests to the server, which owns
+images, inventory, credentials, jobs, and audit records.
 
 ## First run
 
@@ -49,8 +51,8 @@ own controls on the right — which walks the other three in order:
    RPM (`iris-xr.rpm`) matches its canonical-image provenance, plus whether
    the live and distributed copies of the runtime certificate agree — see
    below.
-3. **Image verification** — the Cisco Bulk Hash source check against every
-   staged image. Configured inline: refresh now, enable the daily schedule, a
+3. **Image verification** — the Cisco Bulk Hash source check against published
+   images. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
    the offline feed-file import. These are the same controls Settings ›
    Image verification exposes — the wizard step mounts them in place rather
@@ -63,12 +65,9 @@ upcoming ones stay outline-only — and lets you open any of them directly, in
 any order.
 
 Every step can be skipped, and re-entering `#setup` resumes at the first one
-still outstanding. That is not merely a convenience: **the device-packages step
-can never be completed from the console**, because the console container has no
-Docker socket and so can inspect packages but not rebuild one. That step is
-therefore a report and a command to run on the Docker host, plus a
-**Re-check** button — not a form whose submit button would be pretending to do
-something. A wizard that insisted on completion could never be finished.
+still outstanding. The package step shows the server's inspection results and
+provides build commands to run on the Docker host. Use **Re-check** after a
+build. Neither runtime container has a Docker socket.
 
 While anything is outstanding, a banner offers the way back. It dismisses for
 the session rather than permanently, because a package that goes stale later is
@@ -107,13 +106,14 @@ from the fallback font.
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
-For IOx devices, the Devices status distinguishes `Copying to <filesystem>`
-(sentence-cased render of the underlying `copying` wire status) from the
-torrent download phase while the app transfers a completed image from its
-container storage into IOS-visible storage. A final-placement failure is
-shown as `Placement failed` (wire status `placement-failed`) with a bounded
-diagnostic beside the pill; inspect the device's `IRIS ROOTCOPY-FAIL` syslog
-entry for the full device-side detail.
+For IOx devices, **Copying to <filesystem>** means the app is copying the
+downloaded image to IOS storage. **Staging failed** reports a download,
+verification or placement error. Read the diagnostic beside the status; for
+placement failures, the device's `IRIS ROOTCOPY-FAIL` syslog entry has more detail.
+
+After a new assignment, an idle device shows **Waiting for staging** until its
+agent reports activity. **Staging now** counts devices reporting work. Current
+image errors take precedence over older staged flags in Devices and Overview.
 
 On the Images screen, every picked or dropped file gets its own upload row —
 filename, progress bar, publish state, then Cisco Bulk Hash verification —
@@ -166,16 +166,16 @@ from this screen:
   exactly one file claims the ID, then re-check the panel.
 - `not readable by the server` — fix ownership so uid 10001 can read the file and
   traverse its directory, then re-check the panel. See
-  [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
+  [Volume permissions](server.md#volume-permissions).
 
 `already published` needs nothing; the image is already in the catalog under its
 derived ID. For the exact definitions see
 [Import skip reasons](reference.md#import-skip-reasons).
 
-Ambiguity is refused rather than guessed. Reseeding prefers the catalog entry's
-recorded `source_dir`. Only for entries published before that field existed, or
-whose directory has since gone away, does it fall back to searching both image
-roots for a file with the entry's filename. The seeder runs with
+Ambiguity is refused rather than guessed at import. Startup reseeding prefers
+the catalog entry's recorded `source_dir`. If that field is absent or its
+directory is unavailable, it searches both image roots for a file with the
+entry's filename. The seeder runs with
 `bt-seed-unverified`, so a wrong directory would serve the wrong bytes under
 correct piece hashes.
 
@@ -200,10 +200,16 @@ device table shows each device's management type rather than a bare VLAN/SVI val
 - **XR host - router's own network stack** — the appmgr container runs on
   the router's own network stack; there are no app-network fields to set.
 
-A device with no management type chosen yet — imported from an older positional CSV,
-or added without picking one of the five types above — reads **Inventory only —
-management type not chosen** in that column instead. See
-[Older positional CSVs](fleet-workflows.md#inventory).
+A device without a management type reads **Inventory only — management type
+not chosen**. Choose a management type before onboarding it. See
+[Inventory](fleet-workflows.md#inventory).
+
+Management type alone controls the network fields in Add Device. Model is
+optional free text; known models narrow the **Agent install** choices without
+changing the management type. A model such as `C3650` can be saved, but that
+does not confirm hardware support. XR host selects `xr-appmgr`, router modes
+select `router`, and routed/inband modes require a compatible Guest Shell or
+IOx choice.
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
@@ -212,28 +218,28 @@ OpenTelemetry (OTLP) export.
 
 Each onboard creates a durable **deployment record** of what it applied, and **Undeploy**
 runs only from that deployment record, so editing inventory after onboarding cannot
-retarget cleanup. A device deployed before deployment records existed shows no active
-deployment record; check its row and use the toolbar's **Adopt** action (an explicit,
+retarget cleanup. If an agent is present without an active deployment record,
+check its row and use the toolbar's **Adopt** action (an explicit,
 audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
-be adopted — re-onboard instead. For preflight and deployment-record ownership see
+be adopted — force-undeploy the IRIS footprint, then onboard again. For preflight and deployment-record ownership see
 [Deployment plans and applied records](management-type.md#deployment-plans-and-applied-records).
 
 Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
 leaves the row you opened it from where it was. It opens on an **Images** table
-listing every image currently assigned to the device with its own state:
-`ready` once that image is staged and verified, `error` for an image the
-agent's last tick gave up on, and `staging` for one still in flight. That is
-the same resolution the Swarm Map's drawer uses, so the two never disagree
-about an image, and a device with any failed image reads `N of M image(s)
-failed` in the Status column rather than `Staged` (the rendered label for
-the underlying `deployed` wire status). A device staging a single image shows
-that agent's own state string instead, sentence-cased for display (for
-example the raw `downloading` or `transferring_to_ios` state renders
-`Downloading` or `Transferring_to_ios`), since a one-image heartbeat
-reports exactly one image. The reported error is one per heartbeat, for the tick
-rather than for a particular image, so a multi-image set carries it on its
-own **Last reported error** row below the images. Below that, it shows the deployment itself: the deployment record state (`active`,
+listing every image currently assigned to the device:
+
+- `ready`: staged and verified.
+- `error`: the agent reported a failure.
+- `staging`: the agent is working on the image.
+- `pending`: staging has not been reported.
+
+For a single image, the drawer shows the agent's detailed state and error.
+For multiple images, the shared error appears in **Last reported error** below
+the table. A device with failed images shows `N of M image(s) failed` in the
+Status column.
+
+Below that, it shows the deployment record state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
 `abandoned`) and record id, the
 preflight result, and the resolved configuration the onboard applied — the
@@ -250,15 +256,16 @@ and shown, never presented as this device's own history. Devices registered
 before IRIS started stamping registration time carry no stamp, and nothing is
 labelled for them.
 
-The Swarm Map's own device drawer lists images differently from the drawer
-above: its **Image staging** section is built from the device's last
-heartbeat (`staged_image_ids`, `errored_image_ids`, `current_image_id`), so it
-shows what the device last reported, not what is assigned. The Devices drawer
-above shows the full assigned set, including images still `queued` and not
-yet staged; it reads the same heartbeat fields for the states it shares, so
-an image is never `error` on one and something else on the other. A freshly assigned image therefore appears in the Devices drawer
-right away but does not show on the map until the device's next heartbeat
-reports it.
+The Swarm Map's **Image staging** section lists images from the device's last
+heartbeat. The Devices drawer lists current assignments, including pending
+ones. A new assignment can therefore appear in Devices before it appears on
+the map.
+
+Open swarm details update with the map. **Tracker role** describes torrent
+participation: a seeder may still be verifying or placing an image. **Ready**
+requires the device to report staging complete. Rates and verification results
+identify the image they describe. Measurements that cannot be tied to a
+participant are unavailable.
 
 An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
@@ -281,12 +288,12 @@ next to the filter bar and the rows on screen can never disagree about what
 generated from the same derivation the Status column renders, so every state
 a row can show can be filtered for. Each dropdown choice shows the same
 sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
-for heartbeat`, `Onboard failed`, `Undeploy failed`, `Staged`, `Placement
+for heartbeat`, `Waiting for staging`, `Onboard failed`, `Undeploy failed`, `Staged`, `Staging
 failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
 `Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
 `<option>` value, and the wire status the cell itself carries, is the
 lowercase/kebab form underneath: `onboarding`, `undeploying`,
-`waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
+`waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`,
 `placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
@@ -345,9 +352,11 @@ selected device, so an image a device has that you leave unchecked is dropped
 from it: whenever the selection's assignments are not all identical, the picker
 says so and **Apply** asks you to confirm before it posts. Applying an empty pick is a
 deliberate unassign and confirms first, whether for one device or for the
-whole selection: unchecking an image stops its torrent and frees the staging
-copy, but leaves any already-staged file on the device's boot filesystem,
-still tracked by IRIS — see
+whole selection. On the next policy poll, the agent stops an unassigned
+torrent and removes its download data. IOS-XE keeps an already placed root
+image for reuse or later guarded reclaim. IOS-XR downloads directly to the
+root, so it removes an IRIS-downloaded file but preserves an operator-adopted
+file or one whose origin is unknown. See
 [Unassigned image park](device-agents.md#unassigned-image-park) for what
 reclaims that space and when.
 
@@ -423,14 +432,13 @@ at once instead of after the next ten-second poll.
 
 ## Onboarding from the console
 
-GUI-driven onboarding uses the device's assigned credential profile to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.
+Console onboarding uses the device's assigned credential profile to run the platform installer. Credentials belong in the Console or the server secret store. Generated per-device staging files are temporary and swept after their configured age.
 
 Guest Shell onboards probe device reachability before running the installer:
 an unpingable or unreachable IP fails the job immediately with `cannot reach
-device <ip> — ping/SSH probe failed; check the device IP and credentials`,
-instead of hanging inside an opaque SSH timeout. Router and IOx onboards
-already run their own live preflight, so all three platforms now fail loud on
-an unreachable device. Every onboarding rejection — a failed preflight, a
+device <ip> — ping/SSH probe failed; check the device IP and credentials`.
+Router, IOx, and XR onboarding also check device reachability in their
+preflight. Every onboarding rejection — a failed preflight, a
 busy device, an unreachable device, a router already holding a deployment
 record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
@@ -447,6 +455,10 @@ stops the installer, with the confirmation warning that the device may be
 left partially configured (re-onboard, which is idempotent, or undeploy to
 clean up). A window opened on a queued job says so and starts streaming the
 moment the job wins a slot.
+
+Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
+Errors name the failed check and any recovery steps. Onboarding completion
+means the agent is set up; check Devices for image staging progress.
 
 ### Deployment logs
 
@@ -505,8 +517,8 @@ The Setup card links to the persistent **Settings › Device packages** page,
 where the same status remains available after the first-run flow is dismissed.
 That page re-checks all three artifacts on demand and prints the complete
 Docker-host build command for every absent, stale, or unverifiable package
-family; the Console container only inspects packages and never receives a
-Docker socket.
+family. The server inspects the artifacts and returns the results through the
+management API; neither runtime container has a Docker socket.
 
 The **device packages** status covers deployment-neutral wrappers. The two IOx
 packages (`iris-arm64.tar`, `iris-amd64.tar`) and IOS-XR RPM (`iris-xr.rpm`)

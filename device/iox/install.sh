@@ -474,11 +474,10 @@ wait_iox_ready() {  # $1=timeout_s
   local t=0
   while [ "$t" -lt "$1" ]; do
     if iox_ready; then
-      echo "    IOx app-hosting service is ready"
       return 0
     fi
     sleep 5; t=$((t + 5))
-    echo "    [$t s] waiting for IOx app-hosting service (CAF/Dockerd)"
+    echo "[$t s] waiting for IOx services"
   done
   return 1
 }
@@ -495,9 +494,9 @@ wait_state() {  # $1=target state, $2=timeout_s
     sleep "$STATE_POLL"; t=$((t + STATE_POLL)); s="$(app_state)"
     LAST_APP_STATE="$s"
     if [ -n "$s" ]; then
-      echo "    [$t s] $APPID state: $s"
+      echo "[$t s] $APPID: $s"
     else
-      echo "    [$t s] app-hosting has not reported '$APPID' yet"
+      echo "[$t s] waiting for app: $APPID"
     fi
     [ "$s" = "$1" ] && return 0
   done
@@ -510,26 +509,23 @@ clear_partial_app_config() {
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== IOS NETWORKING ($MANAGEMENT_TYPE; apply via lab/device-run.sh $DEVICE_IP) ====="
+  echo "network configuration: $MANAGEMENT_TYPE"
   ios_net
-  echo "===== APP-HOSTING appid $APPID (app SSHes to IOS at $IOS_SSH_HOST for the image copy) ====="
+  echo "app configuration: $APPID"
   appid_block_redacted
   if [ -n "$SHARE_IOS_PATH" ]; then
-    echo "===== SHARE (created on IOS before activation so the bind-mount target exists) ====="
+    echo "create shared directory"
     echo "mkdir $SHARE_IOS_PATH"
   fi
-  echo "===== INSTALL PUSH (host -> device over authenticated SCP) ====="
+  echo "upload package and certificate"
   printf 'scp -O <artifacts>/%s %s@%s:%s%s\n' "$PKG" '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$PKG"
   printf 'scp -O <public-certificate> %s@%s:%s%s\n' '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$CATALOG_CA_REMOTE"
-  echo "===== SIGNATURE POLICY ($PACKAGE_SIGNATURE_MODE): signed packages keep verification enabled; unsigned packages disable it ====="
-  echo "===== app-hosting install -> activate -> application-data certificate copy -> start appid $APPID, then persist ====="
-  if [ "$MANAGEMENT_TYPE" = "inband" ]; then
-    echo "===== LEFT UNTOUCHED (inband): existing VLAN/SVI, routes, VRF (AppGig allowed list only ever ADDs) ====="
-  fi
+  echo "signature policy: $PACKAGE_SIGNATURE_MODE (verification enabled for signed packages, disabled for unsigned)"
+  echo "install, activate, copy certificate, start and save: $APPID"
   exit 0
 fi
 
-echo "[pre] prerequisite checks (ip routing, IOx storage, device clock)"
+echo "[1/7] check prerequisites: $DEVICE_IP"
 # 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
 # reported success (app RUNNING) while the app's VLAN traffic had no L3 path out
 # of the box — a silent, invisible failure the operator burned hours chasing.
@@ -572,13 +568,13 @@ if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
   echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
 fi
 
-echo "[1/9] teardown any existing '$APPID' app (idempotent re-install)"
+echo "[2/7] remove existing app: $APPID"
 printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
   "$APPID" "$APPID" "$APPID" | RUN >/dev/null 2>&1 || true
 sleep 6
 printf 'configure terminal\nno app-hosting appid %s\nend\n' "$APPID" | RUN >/dev/null 2>&1 || true
 
-echo "[2/9] apply IOx networking ($MANAGEMENT_TYPE: IOx enable$([ "$MANAGEMENT_TYPE" = inband ] && echo ", existing VLAN preserved" || echo ", VLAN $VLAN, $APP_INTF, Vlan$VLAN SVI"))"
+echo "[3/7] configure networking: $MANAGEMENT_TYPE"
 { echo "configure terminal"; ios_net; } | RUN >/dev/null
 
 # The share dir must exist BEFORE activation binds it into the container.
@@ -595,21 +591,20 @@ if [ -n "$SHARE_IOS_PATH" ]; then
   esac
 fi
 
-echo "    waiting for IOx app-hosting services after enable"
+echo "waiting for IOx services"
 wait_iox_ready 180 || {
-  echo "  ERROR: IOx app-hosting services did not become ready within 180 seconds." >&2
-  echo "         Check 'show iox' for CAF and Dockerd status, then retry." >&2
+  echo "ERROR: IOx services not ready after 180 seconds; check 'show iox' and retry" >&2
   exit 1
 }
 
 if [ "$PACKAGE_SIGNATURE_MODE" = signed ]; then
   verification_action=enable
-  verification_description="signed package: keep app-hosting signature verification enabled"
+  verification_description="enable signature verification (signed package)"
 else
   verification_action=disable
-  verification_description="unsigned local package: disable app-hosting signature verification"
+  verification_description="disable signature verification (unsigned package)"
 fi
-echo "[3/9] $verification_description"
+echo "[4/7] $verification_description"
 # Even after `show iox` reports CAF/Dockerd Running, the app-hosting EXEC layer
 # can still answer "The process for the command is not responding or is
 # otherwise unavailable" for a few more seconds. Retry until it reports success
@@ -619,17 +614,13 @@ for _ in $(seq 1 24); do
   vout="$(printf 'app-hosting verification %s\n' "$verification_action" | RUN 2>/dev/null || true)"
   case "$verification_action:$vout" in
     disable:*"disabled successfully"*|disable:*"already disabled"*|disable:*"verification is disabled"*)
-      vok=1; echo "  app signature verification disabled for unsigned package"; break ;;
+      vok=1; break ;;
     enable:*"enabled successfully"*|enable:*"already enabled"*|enable:*"verification is enabled"*)
-      vok=1; echo "  app signature verification enabled for signed package"; break ;;
+      vok=1; break ;;
   esac
   sleep 5
 done
 [ "$vok" -eq 1 ] || { echo "  ERROR: could not $verification_action app-hosting signature verification (app-hosting not responding)" >&2; exit 1; }
-
-echo "[4/9] package transport uses authenticated SCP (no IOS HTTP credential or trustpoint required)"
-
-echo "[5/9] local package and public-certificate preflight passed ($PACKAGE_SIGNATURE_MODE package)"
 
 scp_device() {
   # IOS-XE HTTP Basic requires URL credentials or persistent global client
@@ -647,7 +638,7 @@ scp_device() {
   return "$rc"
 }
 
-echo "[6/9] push $PKG and current catalog certificate -> ${PKG_FS} over authenticated SCP (retry x3)"
+echo "[5/7] upload package and certificate"
 printf 'delete /force %s%s\ndelete /force %s%s\n' \
   "$PKG_FS" "$PKG" "$PKG_FS" "$CATALOG_CA_REMOTE" | RUN >/dev/null 2>&1 || true
 ok=0
@@ -660,7 +651,7 @@ for a in 1 2 3; do
 done
 [ "$ok" -eq 1 ] || { echo "  ERROR: SCP push of package/certificate failed after 3 attempts" >&2; exit 1; }
 
-echo "[7/9] configure app-hosting appid $APPID + install/activate/start"
+echo "[6/7] install and start app: $APPID"
 { echo "configure terminal"; appid_block; } | RUN >/dev/null
 install_out="$(printf 'app-hosting install appid %s package %s%s\n' "$APPID" "$PKG_FS" "$PKG" | RUN 2>&1 || true)"
 # RUN redacts device secrets. Print only the IOS lifecycle response, not the
@@ -671,7 +662,7 @@ wait_state DEPLOYED "$INSTALL_TIMEOUT" || {
   echo "         Last observed state: ${LAST_APP_STATE:-none reported}" >&2
   echo "         Full IOS response to 'app-hosting install appid $APPID':" >&2
   printf '%s\n' "$install_out" >&2
-  echo "         The partial app-hosting configuration has been removed; IOx/VLAN/trust setup remains for retry." >&2
+  echo "         Partial app configuration removed; retry onboarding." >&2
   clear_partial_app_config
   exit 1
 }
@@ -686,12 +677,7 @@ wait_state ACTIVATED "$ACTIVATE_TIMEOUT" || {
   # already redacted the device secrets it knows).
   echo "         Full IOS response to 'app-hosting activate appid $APPID':" >&2
   printf '%s\n' "$activate_out" >&2
-  echo "         The app-hosting configuration is LEFT IN PLACE: the activation may still be" >&2
-  echo "         in flight while the IOx runtime loads this package's layers into its image" >&2
-  echo "         cache. Check 'show app-hosting list', then simply re-run this installer --" >&2
-  echo "         it tears the app down and redeploys, and the console preflight treats a" >&2
-  echo "         DEPLOYED/ACTIVATED (never started) app as a resumable retry rather than a" >&2
-  echo "         collision. The second attempt finds the layers cached and is much faster." >&2
+  echo "         Activation may still be running. Check 'show app-hosting list', then retry onboarding." >&2
   exit 1
 }
 # CAF mounts application storage during activation. DEPLOYED rejects file
@@ -701,12 +687,12 @@ data_out="$(printf 'app-hosting data appid %s copy %s%s %s\n' \
   "$APPID" "$PKG_FS" "$CATALOG_CA_REMOTE" "$CATALOG_CA_REMOTE" | RUN 2>&1 || true)"
 case "$data_out" in
   *"Successfully copied file"*)
-    echo "  current catalog certificate delivered to IOx application data" ;;
+    : ;;
   *)
     echo "  ERROR: could not deliver the catalog certificate to IOx application data." >&2
     echo "         Full IOS response to 'app-hosting data appid $APPID copy':" >&2
     printf '%s\n' "$data_out" >&2
-    echo "         The app remains ACTIVATED and has not been started; correct the application-data copy problem and retry." >&2
+    echo "         App not started; fix certificate delivery and retry." >&2
     exit 1 ;;
 esac
 start_out="$(printf 'app-hosting start appid %s\n' "$APPID" | RUN 2>&1 || true)"
@@ -719,16 +705,13 @@ wait_state RUNNING "$START_TIMEOUT" || {
   exit 1
 }
 
-echo "[8/9] persist successful onboarding to startup-config"
+echo "[7/7] save configuration"
 save_out="$(printf 'copy running-config startup-config\n' | RUN 2>&1 || true)"
 case "$save_out" in
-  *"[OK]"*|*"bytes copied"*) echo "  startup-config saved" ;;
+  *"[OK]"*|*"bytes copied"*) : ;;
   *) echo "  ERROR: failed to save startup-config after onboarding:" >&2
      printf '%s\n' "$save_out" >&2
      exit 1 ;;
 esac
 
-echo "[9/9] $APPID RUNNING. The agent refreshes its token, downloads $DEVICE_ID's"
-echo "      assigned image over the swarm, and copies it to $TARGET_FS via a plain copy."
-echo "      Watch:  printf 'dir $TARGET_FS\\n' | lab/device-run.sh $DEVICE_IP"
-echo "      Swarm:  https://$STAGE_HOST:8080/  (Console -> Swarm tab)"
+echo "onboard complete: $DEVICE_IP"

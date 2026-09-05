@@ -26,12 +26,13 @@ mutates the running/booted software state of a device.
    - **Python 3** with **pytest** (for the Python test suite)
    - **bats** (for the shell test suite)
    - **Docker** and **Docker Compose** (for the server stack)
-3. **Run the server stack** (tracker / catalog / seeder) locally with Docker
-   Compose from the repository root. Bootstrap is needed once per fresh config
-   volume:
+3. **Run the server and Console** locally with Docker Compose from the
+   repository root. Follow [Getting started](docs/zensical/getting-started.md)
+   to configure `server/.env`, the host paths, and the age identity. Bootstrap
+   is needed once per fresh config volume:
    ```
    tools/get-aria2c.sh amd64
-   docker compose -f server/docker-compose.yml build
+   docker compose -f server/docker-compose.yml build --pull
    docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
    docker compose -f server/docker-compose.yml up
    ```
@@ -56,25 +57,18 @@ from whatever base image the host happens to have cached.
 
 ### Running a dev checkout beside a live deployment
 
-`server/docker-compose.yml` declares `name: server`, so every checkout of this
-repository resolves to the **same** Compose project and the same named volumes
-(`server_iris-state`, `server_iris-config`, `server_iris-images`). Bringing a dev
-checkout up on a host that already runs IRIS would otherwise adopt the live
-container, re-bootstrap live state with `run --rm iris iris-bootstrap`, and
-delete all three volumes on `down -v`. Give the dev stack its own project name
-and its own container name — container names are host-global:
+`server/docker-compose.yml` declares `name: server`, so checkouts target the
+same Compose project and named volumes unless configured separately. Give a
+dev stack its own `COMPOSE_PROJECT_NAME`, `IRIS_CONTAINER`, and
+`IRIS_CONSOLE_CONTAINER`, along with separate artifacts, age identity, and
+configuration. Every published host port must also avoid the live stack's
+bindings; changing `IRIS_GUI_PUBLISH` changes only the Console port.
 
-```bash
-COMPOSE_PROJECT_NAME=iris-dev IRIS_CONTAINER=iris-dev \
-  docker compose -f server/docker-compose.yml up -d
-```
-
-Put both in `server/.env` if you work in that checkout regularly.
-`IRIS_CONTAINER` is the override the helpers under `tools/` already honour, so
-it also points them at the dev container. Declaring the project name changes
-nothing for a deployment that already exists — the declared value is the same
-one the directory used to derive — so there is nothing to migrate; see
-[Compose project name](docs/zensical/server.md#compose-project-name).
+Set the overrides in the dev checkout's `server/.env` and review the complete
+Compose configuration before starting or bootstrapping it. `IRIS_CONTAINER`
+also selects the server used by the `tools/` helpers. See
+[Running a second stack](docs/zensical/server.md#running-a-second-stack-on-the-same-host)
+for the full isolation requirements.
 
 ## Embedded agent packages
 

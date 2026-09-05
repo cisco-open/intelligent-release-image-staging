@@ -16,6 +16,9 @@ single-image cases; test_single_image_set_behaves_exactly_as_before below is
 the sanity marker for the fields this feature touches."""
 
 import time as _time
+from pathlib import Path
+
+import pytest
 
 import iris_agent
 
@@ -208,6 +211,93 @@ def test_unchecked_image_is_parked_not_deleted():
     assert all("img-a.bin" not in names
                for _fs, names in rec["bundle_reclaimed"])
     assert any("img-a" in msg for msg in _emits(rec, "PARKED"))
+
+
+@pytest.mark.parametrize("image_ids", [["img-a"], ["img-a", "img-b"]])
+@pytest.mark.parametrize("platform,io_transfer,copy_in_place,target_fs,origin", [
+    ("", False, False, "flash:", "downloaded"),
+    ("", False, False, "bootflash:", "downloaded"),
+    ("iox", True, False, "sdflash:", "downloaded"),
+    ("xr-appmgr", False, True, "harddisk:", "downloaded"),
+    ("xr-appmgr", False, True, "harddisk:", "adopted"),
+    ("xr-appmgr", False, True, "harddisk:", None),
+])
+def test_clearing_all_assignments_parks_the_last_images(
+        tmp_path, image_ids, platform, io_transfer, copy_in_place, target_fs, origin):
+    """The final unchecked image has the same ownership rules as any other.
+
+    XR runs the actual sidecar sweep too: an empty keep set must still leave
+    operator-adopted and provenance-unknown root images intact.
+    """
+    cat = MultiCatalog([_img(iid) for iid in image_ids])
+    deps, rec = make_deps(cat, {})
+    cfg = dict(CFG, stage_dir=str(tmp_path), target_fs=target_fs,
+               device_platform=platform, announce_token="test-announce")
+    state = {"schema_version": iris_agent._STATE_SCHEMA, "stage_fs": target_fs}
+    for iid in image_ids:
+        (tmp_path / (iid + ".bin")).write_bytes(b"image")
+        state[iid] = {"done": True, "copied": True, "root_file": iid + ".bin"}
+        if origin is not None:
+            state[iid]["origin"] = origin
+
+    def remove_stage(path):
+        rec["removed"].append(path)
+        Path(path).unlink(missing_ok=True)
+
+    def purge(keep, ids):
+        rec["purged"].append((keep, ids))
+        if copy_in_place:
+            import xr_deps
+            xr_deps.purge_others(str(tmp_path), keep, ids)
+
+    deps = deps._replace(
+        file_size=lambda path: Path(path).stat().st_size if Path(path).exists() else None,
+        remove_stage=remove_stage, purge_others=purge,
+        io_transfer=io_transfer, copy_in_place=copy_in_place)
+    iris_agent.run_once(cfg, deps, state)
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    cat.ids = []
+    rec["aria_removed"].clear()
+    # An unrelated operator file and an IRIS sidecar verify the XR sweep's
+    # empty-set behavior independently of the state-owned park delete.
+    (tmp_path / "operator.iso").write_bytes(b"operator")
+    (tmp_path / "old.torrent").write_bytes(b"sidecar")
+    assert iris_agent.run_once(cfg, deps, state) == "no-assignment"
+    assert rec["aria_removed"] == [iid + ".bin" for iid in image_ids]
+    assert rec["purged"][-1] == ([], [])
+    for iid in image_ids:
+        assert state[iid]["parked"] is True
+        assert state[iid]["root_file"] == iid + ".bin"
+        assert (tmp_path / (iid + ".bin")).exists() is (
+            copy_in_place and origin != "downloaded")
+    assert (tmp_path / "operator.iso").read_bytes() == b"operator"
+    if copy_in_place:
+        assert not (tmp_path / "old.torrent").exists()
+    assert rec["bundle_reclaimed"] == []
+    assert "pending_root_deletes" not in state
+    assert cat.heartbeats[-1]["stage_state"] == "unassigned"
+    assert cat.heartbeats[-1]["current_image_id"] is None
+    assert cat.heartbeats[-1]["telemetry_observation"]["obs_state"] == "not_active"
+
+
+@pytest.mark.parametrize("platform,io_transfer,copy_in_place", [
+    ("", False, False), ("router", False, False),
+    ("iox", True, False), ("xr-appmgr", False, True),
+])
+def test_clearing_last_assignment_stops_an_incomplete_download(
+        platform, io_transfer, copy_in_place):
+    cat = MultiCatalog([_img("img-a")], ids=[])
+    sizes = {"/stage/img-a.bin": 3}
+    deps, rec = make_deps(cat, sizes)
+    deps = deps._replace(io_transfer=io_transfer, copy_in_place=copy_in_place)
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "img-a": {"done": False, "copied": False, "download_started": True}}
+    cfg = dict(CFG, device_platform=platform, announce_token="test-announce")
+    assert iris_agent.run_once(cfg, deps, state) == "no-assignment"
+    assert rec["aria_removed"] == ["img-a.bin"]
+    assert "/stage/img-a.bin" not in sizes
+    assert state["img-a"]["parked"] is True
+    assert not state["img-a"].get("download_started")
 
 
 # --- park on a stage==root platform (copy_in_place, e.g. XR) --------------
@@ -421,17 +511,14 @@ def test_park_interrupted_before_its_actions_is_retried_next_tick():
     sizes["/stage/img-a.bin"] = 3                  # a partial, mid-transfer
 
     # img-a drops out on the very tick the catalog goes bad: nothing can be
-    # named, so nothing is stopped or deleted, and the tick then dies on img-b.
+    # named, so nothing is stopped or deleted. img-b reports the lookup error.
     cat.ids = ["img-b"]
     cat.raises = {"img-a", "img-b"}
     rec["aria_removed"].clear()
     rec["removed"].clear()
-    try:
-        iris_agent.run_once(CFG, deps, state)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("this case needs the tick to die staging img-b")
+    assert iris_agent.run_once(CFG, deps, state) == "image-unavailable"
+    assert cat.heartbeats[-1]["stage_state"] == "error"
+    assert cat.heartbeats[-1]["current_image_id"] == "img-b"
     assert rec["aria_removed"] == [] and rec["removed"] == []   # nothing ran...
     assert "parked" not in state["img-a"]                       # ...so not parked
 
@@ -531,17 +618,134 @@ def test_heartbeat_is_not_ready_while_an_image_errors_this_tick():
     assert hb["stage_error"] == "assigned image img-b not in catalog"
 
 
-def test_heartbeat_identity_comes_from_the_image_that_produced_it():
-    # img-a bails before it reports anything (its catalog filename is
-    # rejected), so the payload — free flash, target_fs, observation — is
-    # img-b's reading of the device. The id on it must be img-b's too.
+def test_rejected_filename_reports_its_error_without_hiding_a_good_sibling():
+    # An invalid catalog filename must still produce an error heartbeat,
+    # without creating an image state record or suppressing the good sibling.
     bad = _img("img-a")
     bad["filename"] = "img a.bin"                  # space: fails the whitelist
     cat = MultiCatalog([bad, _img("img-b")], ids=["img-a", "img-b"])
     deps, rec = make_deps(cat, {"/stage/img-b.bin": 5})
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "multi:bad-filename,complete"
-    assert cat.heartbeats[-1]["current_image_id"] == "img-b"
+    hb = cat.heartbeats[-1]
+    assert hb["current_image_id"] == "img-a"
+    assert hb["stage_state"] == "error"
+    assert hb["staged_image_ids"] == ["img-b"]
+    assert hb["errored_image_ids"] == ["img-a"]
+    assert "filename" in hb["stage_error"]
+    assert "img-a" not in state
+
+
+@pytest.mark.parametrize("failed_id", ["img-a", "img-b"])
+def test_image_lookup_failure_preserves_sibling_progress(failed_id):
+    good_id = "img-b" if failed_id == "img-a" else "img-a"
+    cat = MultiCatalog([_img("img-a"), _img("img-b")])
+    cat.raises = {failed_id}
+    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5, "/stage/img-b.bin": 5})
+    state = {}
+
+    expected = ("multi:image-unavailable,complete" if failed_id == "img-a"
+                else "multi:complete,image-unavailable")
+    assert iris_agent.run_once(CFG, deps, state) == expected
+    assert state[good_id]["copied"] is True
+    assert failed_id not in state
+    assert rec["copied"] == [good_id + ".bin"]
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[-1]
+    assert hb["stage_state"] == "error"
+    assert hb["staged_image_ids"] == [good_id]
+    assert hb["errored_image_ids"] == [failed_id]
+
+    cat.raises.clear()
+    assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    assert rec["copied"].count(good_id + ".bin") == 1
+
+
+@pytest.mark.parametrize("failure", ["lookup", "filename"])
+def test_invalid_catalog_image_reports_without_creating_image_state(failure):
+    cat = MultiCatalog([_img("img-a")])
+    if failure == "lookup":
+        def unavailable(image_id):
+            raise ValueError("https://catalog/private?token=do-not-disclose")
+        cat.get_image = unavailable
+    else:
+        cat.images["img-a"]["filename"] = "../outside.bin"
+    deps, rec = make_deps(cat, {})
+    state = {}
+
+    expected = "image-unavailable" if failure == "lookup" else "bad-filename"
+    assert iris_agent.run_once(CFG, deps, state) == expected
+    assert "img-a" not in state
+    assert "image_id" not in state
+    assert rec["copied"] == []
+    assert rec["aria_added"] == []
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[-1]
+    assert hb["current_image_id"] == "img-a"
+    assert hb["stage_state"] == "error"
+    assert hb["telemetry_observation"]["obs_state"] == "not_active"
+    assert "do-not-disclose" not in repr(hb) + repr(rec["emitted"])
+
+
+def test_missing_catalog_image_keeps_its_failure_identity():
+    cat = MultiCatalog([], ids=["missing"])
+    deps, rec = make_deps(cat, {})
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "no-image"
+    assert cat.heartbeats[-1]["current_image_id"] == "missing"
+    assert cat.heartbeats[-1]["stage_state"] == "error"
+    assert "missing" not in state
+    assert rec["aria_added"] == []
+
+
+@pytest.mark.parametrize("image_ids", [
+    ["img-a"], ["img-a", "img-b"], ["img-b", "img-a"],
+])
+@pytest.mark.parametrize("reply", [
+    b'{"error":{"code":1,"message":"token=do-not-disclose"}}',
+    b'not JSON: token=do-not-disclose',
+    b'{"result":null}',
+])
+def test_rpc_rejection_reports_error_preserves_siblings_and_retries(image_ids, reply):
+    cat = MultiCatalog([_img(iid) for iid in image_ids])
+    deps, rec = make_deps(cat, {"/stage/img-b.bin": 5})
+    reject = True
+
+    def add(torrent, directory):
+        # Exercise the actual response parser: HTTP 200 does not mean that
+        # aria2 accepted addTorrent, and its error may contain credentials.
+        result = iris_agent._aria_add_result(
+            reply if reject else b'{"result":"accepted-gid"}')
+        rec["aria_added"].append((torrent, directory))
+        return result
+
+    deps = deps._replace(aria_add=add)
+    state = {}
+    statuses = ["aria2-down" if iid == "img-a" else "complete" for iid in image_ids]
+    expected = statuses[0] if len(statuses) == 1 else "multi:" + ",".join(statuses)
+    assert iris_agent.run_once(CFG, deps, state) == expected
+    assert len(cat.heartbeats) == 1
+    assert cat.heartbeats[-1]["stage_state"] == "error"
+    assert not state["img-a"].get("download_started")
+    assert rec["aria_added"] == []
+    if len(image_ids) > 1:
+        assert cat.heartbeats[-1]["staged_image_ids"] == ["img-b"]
+        assert cat.heartbeats[-1]["errored_image_ids"] == ["img-a"]
+        assert rec["copied"] == ["img-b.bin"]
+    else:
+        assert cat.heartbeats[-1]["current_image_id"] == "img-a"
+    assert "do-not-disclose" not in repr(cat.heartbeats) + repr(rec["emitted"])
+
+    reject = False
+    statuses = ["downloading" if iid == "img-a" else "complete" for iid in image_ids]
+    expected = statuses[0] if len(statuses) == 1 else "multi:" + ",".join(statuses)
+    assert iris_agent.run_once(CFG, deps, state) == expected
+    assert cat.heartbeats[-1]["stage_state"] == "staging"
+    assert cat.heartbeats[-1]["stage_error"] is None
+    assert state["img-a"]["download_started"] is True
+    assert rec["aria_added"] == [("/stage/img-a.torrent", "/stage")]
+    assert rec["copied"].count("img-b.bin") <= 1
 
 
 def test_flash_full_on_one_image_does_not_block_the_next():

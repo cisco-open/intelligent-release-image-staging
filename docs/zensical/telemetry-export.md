@@ -12,9 +12,9 @@ exposition endpoint to scrape, and an OpenTelemetry OTLP endpoint to push to.
 Everything on this page is about getting those two surfaces into Prometheus,
 Splunk, Grafana, or Loki.
 
-Telemetry is best-effort and silent. A bounded queue drops the oldest records
-when the destination is unreachable. **Export loss can never affect image
-staging.**
+Telemetry is best-effort. The bounded queue can drop records while a
+destination is unreachable; export health reports failures and queue drops.
+Image staging continues independently of telemetry export.
 
 ## The two export paths
 
@@ -44,7 +44,7 @@ point.
 | ------ | ---- | ------- |
 | `iris_origin_sent_bytes_total` | counter | Bytes the origin seeder actually uploaded for this torrent |
 | `iris_peer_attributed_bytes_total` | counter | Of those, the bytes **traced to a device** — the ledger saw the connection that carried them |
-| `iris_peer_unattributed_bytes_total` | gauge | The honest residue: **untraced** — sent for certain, recipient unknown. A gauge (despite the historical `_total` name) because tracing a device late steps it **down**; graph the value, never `rate()` it |
+| `iris_peer_unattributed_bytes_total` | gauge | The honest residue: **untraced** — sent for certain, recipient unknown. A gauge because tracing a device late steps it **down**; graph the value, never `rate()` it |
 | `iris_swarm_peers_attributed` | gauge | Peer edges the ledger currently has a nonzero traced total for — a level, not an accumulation |
 | `iris_swarm_peers_saturated` | gauge | **A 0/1 flag, not a count.** `1` means the ledger's per-torrent peer cap refused new peers, so part of the untraced residue went to peers the cap turned away rather than to connections that ended between samples |
 
@@ -69,17 +69,17 @@ because one is a level and the other is a flag.
     * **untraced** — bytes that certainly went out to somebody, recipient
       unknown.
 
-    Untraced bytes are not lost bytes and not an error: they arrived, and the
-    transfer completed. It only means nobody was watching that particular
-    connection at the moment it moved them. A shorter sampling interval leaves
-    fewer of them; nothing removes them entirely.
+    Untraced bytes are uploads counted by the origin without a sampled
+    recipient. This does not establish that the receiving device completed
+    its download, verification, or final placement. Use that device's staging
+    report for completion. A shorter sampling interval can capture more
+    connections, but cannot eliminate untraced bytes.
 
-    **The metric names are unchanged and still say `attributed`.** The traced
+    **Metric names use `attributed`.** The traced
     total is `iris_peer_attributed_bytes_total`; the untraced residue is
     `iris_peer_unattributed_bytes_total`; the traced-edge count is
     `iris_swarm_peers_attributed`. Boards and docs say *traced* / *untraced*,
-    queries say `attributed` / `unattributed` — same quantities, and existing
-    queries keep working.
+    queries use `attributed` / `unattributed` for those quantities.
 
 **OTLP logs (per-peer and per-device detail):**
 
@@ -87,17 +87,15 @@ because one is a level and the other is a flag.
 | ----------- | ------ | ------ |
 | `iris.swarm.peer_bytes` | Server-side peer ledger | Origin-side **sampled estimate** of one edge's bytes |
 | `iris.device.peer_transfer_record` | Device-side completion hook | Device-**measured exact** bytes received from one peer |
-| `iris.device.transfer.report` | Device agent (v2) | **Terminal per-device transfer report.** The record every delivery panel on both boards unwraps, via `iris.transfer.completed_content_bytes`. |
-| `iris.device.report` | Device agent | **Legacy v1** projection of the same report, carrying a deliberately reduced attribute subset. It does **not** carry `iris.transfer.completed_content_bytes`; a query written against this name gets v1 records only. |
+| `iris.device.transfer.report` | Device agent | **Terminal per-device transfer report.** The record every delivery panel on both boards unwraps, via `iris.transfer.completed_content_bytes`. |
+| `iris.device.report` | Device agent | Summary projection of the report with a reduced attribute set. Use `iris.device.transfer.report` for completed bytes and verification fields. |
 | `iris.swarm.peer_rate` | Server-side peer ledger | Sampled per-connection send rate (`iris.transfer.peer_send_bps`) |
 | `iris.tracker.peer` | Tracker | Tracker peer lifecycle (announce, join, leave) |
 | `iris.peer.policy` | Tracker | Peer-policy revision applied / enforcement outcome |
 | `iris.transfer.lifecycle` | Tracker (server-side assignment + swarm observation) | Plan lifecycle: assignment recorded, seeding confirmed |
 
-Those seven are the **complete** set of `otel.log.name` values IRIS emits
-(`server/otlp.py`). There are no `iris.swarm.start` / `.complete` / `.stop` /
-`.stale` records — a filter built on those names matches nothing, which looks
-exactly like the benign "an idle fleet produces no swarm events" case.
+These eight are the `otel.log.name` values IRIS emits. Filter and group
+records by these names to select the measurement you need.
 
 !!! danger "Never sum the two peer record names together"
     `iris.swarm.peer_bytes` and `iris.device.peer_transfer_record` describe the *same
@@ -134,15 +132,15 @@ promotion that rebuilt a lost store row — `iris.transfer.recovered_promotion`.
 Group on
 `iris.plan.id`: it is stable across both events of one plan and distinct across
 two plans for the same device and image. The full contract — what
-`seeding_started` proves, the exactly-once delivery guarantee, and what a
-missing `seeding_started` means during an agent rollout — is in
+`seeding_started` proves, how delivery and deduplication work, and what a
+missing `seeding_started` means — is in
 [Transfer lifecycle events](observability.md#transfer-lifecycle-events).
 
 !!! warning "Int64 attributes ride the wire as strings"
     Byte attributes are int64 and therefore travel as JSON **strings** in
     OTLP. A backend query that sums them must coerce first.
 
-!!! note "The lifecycle timestamps are strings already, and need no coercion"
+!!! note "Parse lifecycle timestamps as dates"
     Do not carry the caveat above over to `iris.transfer.lifecycle`.
     `iris.transfer.planned_at`, `iris.transfer.seeding_started_at`,
     `iris.transfer.checksum_verified_at`,
@@ -169,33 +167,37 @@ missing `seeding_started` means during an agent rollout — is in
 
 ## Turning export on
 
-Both lines are required — an endpoint alone is inert.
+To enable OTLP through the deployment defaults, set both values:
 
 ```bash
 # server/.env on the IRIS host
 IRIS_OBSERVABILITY=1
-IRIS_OTLP_ENDPOINT=http://203.0.113.10:4318
+IRIS_OTLP_ENDPOINT=https://collector.example.com:4318
 ```
 
 Configure the **base** endpoint only. IRIS appends `/v1/logs` and
 `/v1/metrics` itself; putting a path in the variable produces
 `/v1/logs/v1/logs`.
 
-The endpoint can also be set at runtime from the console under
-*Settings → Telemetry*, which wins over the env and applies within seconds
-with no restart. `IRIS_OBSERVABILITY` still needs a restart, because it also
-gates the `:9101/metrics` surface at startup.
+The Console's **Settings → Telemetry** can override both the endpoint and the
+OTLP enabled flag. These settings apply within seconds without a restart.
+An enabled flag and endpoint are both required. Prometheus `/metrics` is
+controlled separately by `IRIS_OBSERVABILITY` at server startup; changing it
+requires a restart.
 
-The metrics listener is never anonymous. Before enabling a Prometheus scrape,
+The `/metrics` endpoint requires authentication. Before enabling a Prometheus scrape,
 create a raw token on the IRIS host with private permissions and give Compose
 its host path. Mount the identical raw value as the collector or Prometheus
-`credentials_file` shown below:
+`credentials_file` in the [Splunk collector configuration](splunk.md#configure-the-collector):
 
 ```bash
 umask 077
+mkdir -p ~/.config/iris
 openssl rand -hex 32 > ~/.config/iris/observability-token
 export IRIS_OBSERVABILITY_TOKEN_FILE_HOST=$HOME/.config/iris/observability-token
 sudo chown 10001 "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST"
+printf 'IRIS_OBSERVABILITY_TOKEN_FILE_HOST=%s\n' \
+  "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST" >> server/.env
 ```
 
 `IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST` optionally mounts the preceding
@@ -225,8 +227,8 @@ Compose mounts that file read-only at the fixed in-container
 non-Compose integrations, but putting a bearer token in `server/.env` is not
 recommended. Header values are never logged, and IRIS refuses HTTP redirects
 so they cannot leak to a redirect target. With either form present, the OTLP
-endpoint must be HTTPS; anonymous HTTP remains available only for an isolated
-deployment that deliberately sends no credential.
+endpoint must be HTTPS. IRIS validates the collector certificate using system
+roots and the CAs installed under **Settings → TLS & trust → Trusted CAs**.
 
 !!! note "Host interpolation and container variables are different"
     `IRIS_OBSERVABILITY_TOKEN_FILE_HOST`, its optional `PREVIOUS` counterpart,
@@ -237,236 +239,17 @@ deployment that deliberately sends no credential.
 
 ## The collector
 
-### Use the contrib build
+[Splunk Setup](splunk.md) provides a complete Collector Contrib configuration
+with authenticated OTLP over HTTPS, a verified HTTPS scrape of IRIS, separate
+HEC exporters for events and metrics, and connection checks. It includes both
+feeds required by the shipped Splunk dashboard.
 
-The core `otel/opentelemetry-collector` image does **not** contain the
-`splunk_hec` exporter. Use `otel/opentelemetry-collector-contrib`. The error
-`unknown type: "splunk_hec"` at startup means the wrong image.
-
-Bind the published ports to a specific host address rather than `0.0.0.0`, and
-supply the HEC token from the container environment, never from the YAML:
-
-```yaml
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.159.0
-    environment:
-      - SPLUNK_HEC_TOKEN=${SPLUNK_HEC_TOKEN}
-    restart: unless-stopped
-    command: ["--config", "/etc/otelcol-contrib/config.yaml"]
-    volumes:
-      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    ports:
-      - "203.0.113.10:4317:4317"   # OTLP gRPC
-      - "203.0.113.10:4318:4318"   # OTLP HTTP  <- IRIS uses this one
-      - "203.0.113.10:8888:8888"   # collector's own metrics
-```
-
-Keep the file holding `SPLUNK_HEC_TOKEN` out of version control.
-
-### Ports
-
-| From | To | Port | Purpose |
-| ---- | -- | ---- | ------- |
-| IRIS server | Collector | 4318/tcp | OTLP push — required |
-| Collector | Splunk | 8088/tcp | HEC delivery — required |
-| Admin host | Collector | 8888/tcp | Collector health — optional |
-| Collector | IRIS server | 9101/tcp | Authenticated Prometheus scrape over TLS — optional |
-
-### Receivers
-
-A stock OTLP receiver accepts IRIS as-is. There is no JSON-specific setting and
-no per-sender configuration.
-
-```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
-      http:
-        endpoint: 0.0.0.0:4318
-```
-
-The `0.0.0.0` here is *inside* the container; the port binding above is what
-limits exposure.
-
-To also pull the Prometheus surface — a belt-and-braces path, so the
-underscored families survive an OTLP metric outage:
-
-```yaml
-  prometheus/iris9101:
-    config:
-      scrape_configs:
-        - job_name: iris-9101
-          scrape_interval: 15s
-          scheme: https
-          authorization:
-            type: Bearer
-            credentials_file: /etc/otelcol/secrets/iris-observability-token
-          tls_config:
-            ca_file: /etc/otelcol/secrets/iris-catalog-ca.pem
-            server_name: 203.0.113.10
-          static_configs:
-            - targets: ["203.0.113.10:9101"]
-```
-
-Mount the raw observability `current` token and catalog CA into the collector
-at the example paths (or adjust them). `server_name` must match an IP or DNS
-subject alternative name in the certificate. The listener never permits an
-anonymous metrics scrape.
-
-### Filter to IRIS only
-
-Skip this **only** on a collector dedicated to IRIS. On a shared collector,
-other tenants' data must not be shipped to your IRIS indexes.
-
-```yaml
-processors:
-  filter/iris_metrics:
-    metrics:
-      include:
-        match_type: regexp
-        metric_names:
-          - "iris[._].*"          # matches iris.transfer.* AND iris_swarm_*
-
-  filter/iris_logs:
-    logs:
-      include:
-        match_type: strict
-        resource_attributes:
-          - key: service.name
-            value: iris-tracker
-
-  batch:
-    send_batch_size: 512
-    timeout: 5s
-```
-
-* Metrics filter **by name**, because both styles exist: dotted
-  `iris.transfer.*` from the OTLP push, underscored `iris_*` from the scrape.
-  The `[._]` character class catches both.
-* Logs filter **by resource attribute** — every IRIS record carries
-  `service.name = iris-tracker`, `service.namespace = iris`, and
-  `service.version = <repo VERSION>`.
-* `batch` is not optional in practice. Without it you make one backend call per
-  record.
-
-!!! warning "Filter from day one"
-    A shared collector wired up without these filters will put other tenants'
-    series into your metric index permanently — Splunk does not retro-clean a
-    metric index easily. Add the filters before the first start, not after the
-    first surprise.
-
-Inside a pipeline, order matters: filter **first**, then batch.
-
-## Splunk: indexes, naming, and the HEC path
-
-Do the Splunk side **before** starting the collector, or the first exports
-bounce with HTTP 400 "Incorrect index".
-
-### Index and sourcetype naming
-
-The two indexes are **not** the same kind of index. Metrics sent to an event
-index are rejected — this is the single most common mistake.
-
-| Index | Splunk type | Holds | `source` | `sourcetype` |
-| ----- | ----------- | ----- | -------- | ------------ |
-| `iris_logs` | Events | Peer transfer records, per-device reports, swarm events | `iris` | `otel:logs` |
-| `iris_metrics` | **Metrics** (`datatype = metric`) | Numeric aggregate time series | `iris` | `otel:metrics` |
-
-```ini
-[iris_logs]
-coldPath = $SPLUNK_DB/iris_logs/colddb
-homePath = $SPLUNK_DB/iris_logs/db
-thawedPath = $SPLUNK_DB/iris_logs/thaweddb
-
-[iris_metrics]
-coldPath = $SPLUNK_DB/iris_metrics/colddb
-datatype = metric
-homePath = $SPLUNK_DB/iris_metrics/db
-thawedPath = $SPLUNK_DB/iris_metrics/thaweddb
-```
-
-`datatype = metric` is the line that makes it a metric index. Restart Splunk
-after editing the file by hand.
-
-### HEC token
-
-Fresh installs ship with HEC globally **disabled**, so enabling it under
-*Settings → Data inputs → HTTP Event Collector → Global Settings* (All Tokens
-enabled, SSL on, port 8088) is a required step, not a default.
-
-Create one token whose **allowed indexes list contains both** `iris_logs` and
-`iris_metrics`. If only one is allowed, the metrics exporter is rejected while
-the logs exporter keeps working — a confusing half-failure. Let the source type
-be automatic; the collector sets it per event.
-
-### HEC exporters
-
-One exporter per index, because logs and metrics go to different index types.
-
-```yaml
-exporters:
-  splunk_hec/iris_logs:
-    token: "${env:SPLUNK_HEC_TOKEN}"
-    endpoint: "https://203.0.113.20:8088/services/collector"
-    index: "iris_logs"
-    source: "iris"
-    sourcetype: "otel:logs"
-    tls:
-      insecure_skip_verify: true      # only for a self-signed HEC cert
-    retry_on_failure:
-      enabled: true
-    sending_queue:
-      enabled: true
-
-  splunk_hec/iris_metrics:
-    token: "${env:SPLUNK_HEC_TOKEN}"
-    endpoint: "https://203.0.113.20:8088/services/collector"
-    index: "iris_metrics"
-    source: "iris"
-    sourcetype: "otel:metrics"
-    tls:
-      insecure_skip_verify: true
-    retry_on_failure:
-      enabled: true
-    sending_queue:
-      enabled: true
-```
-
-* `endpoint` must be the full `https://host:8088/services/collector` path — the
-  host alone gives 404s, and HEC has SSL on by default.
-* `${env:VAR}` reads the container environment. Never inline the token.
-* `index` overrides the token's default, per exporter.
-* `insecure_skip_verify` is for a self-signed HEC certificate only. **In
-  production, install the real CA and drop the line.**
-* `retry_on_failure` and `sending_queue` ride out a backend restart instead of
-  dropping data on the floor.
-
-### Pipelines
-
-Add the IRIS pipelines **alongside** whatever the collector already runs; one
-receiver can feed any number of pipelines.
-
-```yaml
-service:
-  pipelines:
-    logs/iris_splunk:
-      receivers: [otlp]
-      processors: [filter/iris_logs, batch]
-      exporters: [splunk_hec/iris_logs]
-    metrics/iris_splunk:
-      receivers: [otlp]
-      processors: [filter/iris_metrics, batch]
-      exporters: [splunk_hec/iris_metrics]
-    metrics/iris9101:
-      receivers: [prometheus/iris9101]
-      processors: [filter/iris_metrics, batch]
-      exporters: [splunk_hec/iris_metrics]
-```
-
-A clean start logs `Everything is ready. Begin running and processing data.`
-A config error exits immediately; the first error line names the offending key.
+For another backend, retain the receivers and IRIS filters and select its
+exporter. A Grafana/Prometheus deployment needs a Prometheus-compatible output;
+a Loki deployment needs an OTLP log output. The Splunk example exports only
+to HEC. The two transports do not carry identical metric families: the
+`iris_origin_sent_bytes_total`, attribution, and swarm families come from the
+Prometheus scrape.
 
 ## Dashboards
 
@@ -491,7 +274,7 @@ origin_sent = peer_attributed + peer_unattributed
 Sourced from `iris_origin_sent_bytes_total`,
 `iris_peer_attributed_bytes_total` and `iris_peer_unattributed_bytes_total`.
 On the boards the two right-hand terms read **traced to a device** and
-**untraced** — the series behind them are still the `attributed` and
+**untraced** — the series behind them are the `attributed` and
 `unattributed` families named above. Because these are counters, the panel
 keeps its shape after the swarm goes idle.
 
@@ -538,15 +321,6 @@ quotes a number in a meeting.
 | `iris_peer_unattributed_bytes_total` (untraced bytes) | **Measured** | Both boards label it measured, and it is a real published quantity rather than an error bar. It is computed as `max(0, origin sent − traced)`, so it is arithmetic on two measurements — which is exactly why it is a gauge and never `rate()`d |
 | `iris.swarm.peer_bytes` byte values | **Derived (sampled)** | The origin-side estimate of an edge; the device transfer record is the exact form of the same bytes |
 | Offload share percentages | **Derived** | A ratio of the above |
-
-Measured lab behaviour on real hardware, for calibration: a cold four-router
-swarm staging a 928 MiB image reconciled exactly —
-origin sent 3,492,982,720 B = 3,227,913,693 B traced to devices (92.4%) +
-265,069,027 B untraced (7.6%). Device transfer records on that run showed
-**two routers took zero bytes from the origin**, and one pulled from a peer
-that was itself still downloading. An earlier seven-router run had the origin
-serve 71.1% of bytes and peers 28.9%, with per-device peer share ranging
-18.7%–55.9%.
 
 ## Known limits
 
@@ -596,7 +370,7 @@ half is empty.
 
 Work the hops cheapest first.
 
-**1. Is IRIS exporting?**
+**1. Can the IRIS telemetry listener answer?**
 
 ```bash
 curl --fail --silent --show-error \
@@ -612,9 +386,11 @@ failure.
 
 **2. Is the collector receiving and forwarding?**
 
+Run this on the collector host; its diagnostic port is bound to loopback.
+
 ```bash
-curl -s http://203.0.113.10:8888/metrics \
-  | grep -E 'otelcol_(receiver_accepted|exporter_sent|exporter_send_failed)'
+curl --fail --silent --show-error http://127.0.0.1:8888/metrics \
+  | rg 'otelcol_(receiver_accepted|exporter_sent|exporter_send_failed)'
 ```
 
 | Counter pattern | Diagnosis |
@@ -628,7 +404,7 @@ curl -s http://203.0.113.10:8888/metrics \
 
 ```
 index=iris_logs earliest=-24h | stats count by sourcetype
-index=iris_logs earliest=-24h "iris.device.peer_transfer_record" | stats count by device.id
+index=iris_logs earliest=-24h "otel.log.name"="iris.device.peer_transfer_record" | stats count by "device.id"
 ```
 
 The first query separates "no log export" (zero rows) from "no traffic" (rows
@@ -660,9 +436,9 @@ A first real chart:
 | `unknown type: "splunk_hec"` | Core collector image | Use the contrib image |
 | Collector exits naming a config key | YAML error | Read the first line of the log |
 | No data at the collector | Path in `IRIS_OTLP_ENDPOINT` | Drop the `/v1/…` suffix |
-| No data at the collector | Endpoint set, flag unset | Set `IRIS_OBSERVABILITY=1` and restart |
+| No data at the collector | Endpoint set, flag unset | Enable OTLP in Settings → Telemetry, or set `IRIS_OBSERVABILITY=1` and recreate the server |
 | HEC 400 "Incorrect index" | Index missing or not in the token's allowed list | Add both indexes to the token |
-| HEC TLS error | Self-signed certificate | Install the real CA, or set `insecure_skip_verify` for a lab |
+| HEC TLS error | Self-signed certificate | Install the issuing CA and use a name in the certificate |
 | Metrics rejected, logs fine | `iris_metrics` created as an event index | Recreate it with `datatype = metric` |
 | Other tenants' series in `iris_metrics` | Filters added after the first start | Filter from day one; a metric index does not clean easily |
 | Byte sums come out wrong by a factor | Both peer record names summed together | Query one record name per panel |

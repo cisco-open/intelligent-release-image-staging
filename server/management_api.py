@@ -475,7 +475,7 @@ def _device_filter_params(qs):
 _STATUS_LEVELS = {
     "onboarding": "progress", "undeploying": "progress",
     "copying": "progress", "staging": "progress",
-    "waiting-heartbeat": "info",
+    "waiting-heartbeat": "info", "waiting-staging": "info",
     "onboard-failed": "negative", "undeploy-failed": "negative",
     "placement-failed": "negative",
     "deployed": "positive", "enrolled": "positive",
@@ -2379,12 +2379,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return "deployed"
             if errored_ids:
                 return "image-failed"
-            if row.get("stage_error"):
+            if (row.get("stage_error")
+                    or row.get("stage_state") in ("error", "copy_failed")):
                 return "placement-failed"
             if row.get("stage_state") == "transferring_to_ios":
                 return "copying"
-            if row.get("stage_state") == "unassigned":
-                return "unassigned"
+            if row.get("stage_state") in ("unassigned", "ready"):
+                return "waiting-staging" if assigned_ids else "unassigned"
             if row.get("stage_state"):
                 return "staging"
             if last_seen and not assigned_ids:
@@ -2490,6 +2491,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             """Whether *row*'s device has staged image *iid*: the heartbeat's
             staged_image_ids set when the agent reports it directly (Task 3),
             else the legacy current_image_id/stage_state pair."""
+            if iid in (row.get("errored_image_ids") or ()):
+                return False
             sids = row.get("staged_image_ids")
             if sids is not None:
                 return iid in sids
@@ -2532,18 +2535,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                finished; errored_image_ids marks what is stuck THIS tick; an
                assigned image in neither is genuinely still in flight, so the
                set is staging iff at least one such image exists."""
+            state = row.get("stage_state")
+            # A policy update can add images before the next heartbeat. The
+            # difference between assignment and the last staged set is only
+            # outstanding work; a ready/idle heartbeat is not active staging.
+            if state in (None, "", "unassigned", "ready"):
+                return False
             sids = row.get("staged_image_ids")
             if sids is None:
                 # Tier 1: legacy single-image agent.
-                state = row.get("stage_state")
-                return state not in (None, "", "unassigned", "ready", "error")
+                return state not in ("error", "copy_failed")
             eids = row.get("errored_image_ids")
             if eids is None:
                 # Tier 2: multi-image agent that predates errored_image_ids.
-                state = row.get("stage_state")
-                if state in (None, "", "unassigned", "ready"):
-                    return False
-                if state != "error":
+                if state not in ("error", "copy_failed"):
                     return True
                 ids = self._row_assigned_ids(row)
                 if len(ids) <= 1:

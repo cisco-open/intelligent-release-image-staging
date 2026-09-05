@@ -163,15 +163,12 @@ def install_options_for(model, os_family=None):
     of what the model prefix would otherwise suggest) and never ``None``
     (which would read as "no opinion" and let validate_record wave it
     through). Widening past the 8000 series is a v2 change to this one
-    branch, not a rewrite of the guardrail. The console's model-driven
-    auto-select and its symmetric exit (app.js's refreshInstallOptions)
-    key on this answer being the exact single-element list ``["xr-appmgr"]``
-    too, so widening XR support to return anything else -- more platforms,
-    or a family beyond the 8000 series -- must update that client-side
-    coupling in lockstep.
+    branch, not a rewrite of the guardrail. The Console intersects this answer
+    with the install choices for the operator's selected management type.
+    A model answer never changes that type or its network fields.
 
     None means the model is blank or not a family this table recognizes, so no
-    guardrail applies -- the console still offers Auto, and validate_record
+    model-specific guardrail applies, and validate_record
     does not restrict the explicit platform choice for hardware this table has
     no opinion on. Otherwise, the list is every platform _MODEL_INSTALL_TABLE
     names for that family (not just its auto-resolution default -- e.g. a

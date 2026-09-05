@@ -152,28 +152,29 @@ EOF
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== [1/5] EEM applets removed FIRST (stops the 60s bootstrap timer) ====="
+  echo "===== [1/5] Remove IRIS timers ====="
   config_teardown
-  echo "===== [2/5] guestshell disable  [3/5] guestshell destroy (polled) ====="
+  echo "===== [2/5] Stop Guest Shell ====="
+  echo "guestshell disable"
+  echo "===== [3/5] Remove Guest Shell ====="
+  echo "guestshell destroy"
   if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [4/5] IRIS-named config removal (operator VLAN/SVI left in place) ====="
+    echo "===== [4/5] Remove IRIS configuration; retain unowned networking ====="
   else
-    echo "===== [4/5] config footprint removal ====="
+    echo "===== [4/5] Remove IRIS configuration ====="
   fi
   config_cleanup
-  echo "===== [5/5] delete /force /recursive $IOS_ROOT ====="
-   echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
-   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk mode (only the IRIS VLAN is removed from its allowed list in routed mode), flash-root image ====="
+  echo "===== [5/5] Remove IRIS files ====="
+  echo "delete /force /recursive $IOS_ROOT"
+  echo "===== Save startup-config ====="
+  echo "copy running-config startup-config"
   exit 0
 fi
 
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: IRIS-named footprint teardown (no deployment record) ====="
-  echo "  Removing: IRIS EEM applets, Guest Shell, $IOS_ROOT, IRISQ, and IRIS PKI."
-  echo "  Preserving: operator VLAN/SVI network configuration, because no"
-  echo "  deployment record proves IRIS created it."
+  echo "Force undeploy: remove IRIS; retain networking without an ownership record."
 else
   # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
   # Demanding one in force mode re-strands the record-less device this mode
@@ -184,7 +185,7 @@ fi
 RUN="$HERE/../lab/device-run.sh"
 EXPECTED_DEVICE_IDENTITY="${EXPECTED_DEVICE_IDENTITY:-}"
 
-echo "[pre] read-only identity probe on $DEVICE_IP"
+echo "check device identity: $DEVICE_IP"
 VERSION_OUT="$(printf 'show version\n' | "$RUN" "$DEVICE_IP")" \
   || { echo "ERROR: could not read 'show version' from $DEVICE_IP -- the device session failed; refusing to start the teardown" >&2; exit 1; }
 [ -n "$(printf '%s' "$VERSION_OUT" | tr -d '[:space:]')" ] \
@@ -205,11 +206,11 @@ if [ -n "$EXPECTED_DEVICE_IDENTITY" ]; then
   echo "  identity verified: board ID $LIVE_IDENTITY"
 fi
 
-echo "[1/5] remove EEM applets on $DEVICE_IP (stops the 60s bootstrap timer)"
+echo "[1/5] remove IRIS timers"
 { echo "configure terminal"; config_teardown; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null \
   || { echo "ERROR: the applet-removal session on $DEVICE_IP failed; refusing to continue with the timer possibly still armed" >&2; exit 1; }
 
-echo "[2/5] guestshell disable"
+echo "[2/5] stop Guest Shell"
 printf 'guestshell disable\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 st="?"
 for _ in $(seq 1 30); do
@@ -218,7 +219,7 @@ for _ in $(seq 1 30); do
 done
 echo "  state after disable: ${st:-<no app-hosting entry>}"
 
-echo "[3/5] guestshell destroy"
+echo "[3/5] remove Guest Shell"
 # The trailing 'y' answers the destroy confirmation on versions that prompt;
 # where none appears it is swallowed as a harmless '% Invalid input'.
 printf 'guestshell destroy\ny\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
@@ -233,16 +234,16 @@ fi
 echo "  guestshell destroyed"
 
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[4/5] remove IRIS-named footprint (operator VLAN/SVI preserved)"
+  echo "[4/5] remove IRIS configuration; retain unowned networking"
 else
-  echo "[4/5] remove config footprint (app-hosting block, Vlan$VLAN, IRISQ, PKI trustpoint)"
+  echo "[4/5] remove IRIS configuration"
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 
-echo "[5/5] delete $IOS_ROOT (agent, conf, bundle, staged seeding copy)"
+echo "[5/5] remove IRIS files"
 printf 'delete /force /recursive %s\n' "$IOS_ROOT" | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-echo "verify: no app-hosting entry, no leftover config lines, no guest-share"
+echo "verify removal"
 # terminal width 512 stops IOS wrapping the echoed command lines (wrap
 # fragments would false-match the artifact greps below); lines carrying the
 # prompt '#' are the command echoes themselves — excluded.
@@ -301,10 +302,10 @@ if [ -n "$left" ]; then
   printf '%s\n' "$left" >&2
   exit 1
 fi
-echo "persist cleanup to startup-config"
+echo "save startup-config"
 save_out="$(printf 'copy running-config startup-config\n' | "$RUN" "$DEVICE_IP" 2>&1 || true)"
 case "$save_out" in
-  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP is clean and persisted" ;;
+  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP" ;;
   *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
      printf '%s\n' "$save_out" >&2
      exit 1 ;;

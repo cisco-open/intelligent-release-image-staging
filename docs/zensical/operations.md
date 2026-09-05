@@ -12,8 +12,9 @@ This page collects the actions operators perform after the first deployment.
 
 | Task | Command |
 | --- | --- |
-| Start server | `docker compose -f server/docker-compose.yml up -d --build` |
-| View logs | `docker logs iris` |
+| Start server and Console | `docker compose -f server/docker-compose.yml up -d --build` |
+| View server logs | `docker logs iris` |
+| View Console logs | `docker logs iris-console` |
 | Publish image | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<path>/<image>.bin` |
 | Show images and assignments | `docker compose -f server/docker-compose.yml exec iris iris-assign` |
 | Apply assignments | `tools/apply-assignments.sh fleet/assignments.csv` |
@@ -23,12 +24,14 @@ This page collects the actions operators perform after the first deployment.
 ([Prepare devices](getting-started.md#prepare-devices)) require the running
 `iris` container by that name; set `IRIS_CONTAINER=<name>` if yours differs.
 
-For Kubernetes, the equivalent process and logs are available through the
-single deployment:
+The Console is a separate service. It reaches the server through the internal
+HTTPS management API on TCP 9443; it does not mount the server's state or image
+storage. For Kubernetes, use the corresponding deployments:
 
 ```bash
-kubectl -n iris exec deployment/iris-seed-server -- iris-assign
+kubectl -n iris exec deployment/iris-seed-server -c iris -- iris-assign
 kubectl -n iris logs deployment/iris-seed-server -c iris
+kubectl -n iris logs deployment/iris-console -c console
 ```
 
 ## Recognizing an ownership problem
@@ -39,15 +42,10 @@ file as `not readable by the server`, a secret store that worked before fails to
 decrypt, or onboarding fails while downloading the agent bundle. These are
 ownership problems, not corrupt state.
 
-Two ownership rules produce them. The host age key and the host artifacts
-directory (`IRIS_ARTIFACTS_HOST_DIR`, the repository's `artifacts/`) need their
-chown on **every** deploy — see
+The host age key and artifacts directory must be owned by uid `10001`; see
 [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
-A deployment upgraded from a root-runtime release needs a one-time volume
-migration, and because it applies per volume, any reset that removes some
-volumes while keeping others needs it again for the kept ones — see
-[Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)
-for the command to run.
+State, configuration, and uploads volumes need the same ownership. Check
+restored or manually copied files against [Volume permissions](server.md#volume-permissions).
 
 ## Unreachable devices at onboard
 
@@ -55,7 +53,7 @@ A Guest Shell onboard job probes the device before running the installer. An
 unreachable device — wrong IP, wrong credentials, no network path — fails the
 job immediately with `cannot reach device <ip> — ping/SSH probe failed; check
 the device IP and credentials` instead of silently doing nothing. Router and
-IOx onboarding already ran a live preflight and failed the same way.
+IOx onboarding also run a live preflight.
 Submit-time rejections render in the console and are audited like any other
 onboarding failure.
 
@@ -80,30 +78,21 @@ individual effects are documented in
 
 ## Onboarding at scale
 
-A batch onboard no longer blocks its HTTP request on a router's live SSH
-session. `POST /api/v1/devices/<id>/onboard` resolves the plan, checks for a
-conflicting deployment record, and returns a job id immediately; router
-preflight — the read-only collision, identity, and NAT checks in
+`POST /api/v1/devices/<id>/onboard` resolves the plan, checks for a conflicting
+deployment record, and returns a job id. Router preflight — the read-only
+collision, identity, and NAT checks in
 [Router preflight and ownership](management-type.md#router-preflight-and-ownership)
-— runs afterward, in the bounded onboarding worker pool, right before that
-job mints its enrollment token. Selecting a large batch of routers therefore
-shows queued and running progress at once instead of the page hanging while
-each router is probed in turn, and a preflight failure fails only that job,
-with its own log, rather than blocking the routers behind it in the batch.
-Every ownership, collision, identity, NAT, and Guest Shell reachability check
-still completes before any token is minted or any device configuration is
-applied — only when it runs moved.
+— runs in the onboarding worker before it mints an enrollment token or applies
+any device configuration. A preflight failure fails that job and appears in
+its log; other queued jobs can continue.
 
-Worker concurrency is bounded and configurable with `IRIS_ONBOARD_CONCURRENCY`
-(default 25); `GET /api/v1/onboard/jobs` reports the current limit as
-`max_concurrent`.
+`IRIS_ONBOARD_CONCURRENCY` limits the number of running jobs (default 25).
+`GET /api/v1/onboard/jobs` reports the limit as `max_concurrent`.
 
-The generated installers and Console recipes also cut down on device logins:
-the read-only pre-checks before an install and the verification checks after
-an install or undeploy each now run over a single device session instead of
-one login per command. State-gated poll and retry loops still use a new live
-observation per iteration; Guest Shell readiness now waits 2, 4, 6, and so on up
-to 15 seconds between observations instead of imposing a flat 15-second delay.
+The installers group read-only pre-checks and final verification into one
+device session each. State-polling loops make a fresh observation on every
+iteration. Guest Shell readiness waits 2, 4, 6, and then up to 15 seconds
+between observations.
 
 ## Peer-policy operations and their backlog
 
@@ -149,15 +138,9 @@ merely until the TTL lapses.
 
 ### How the map is stored
 
-The map is **keyed** state: `peer-endpoints.d/` holds one row per principal,
-spread over 256 shard files, rather than one `peer-endpoints.json` document.
-An announce locks, parses and rewrites only the shard its own principal lands
-in, so the cost of a device's announce does not grow with the size of the
-fleet and unrelated devices no longer serialise behind one writer. Each shard
-is written atomically (temp file + rename). An existing `peer-endpoints.json`
-from an earlier release is migrated into the shards the first time the tracker
-touches the map and is left behind, renamed to `peer-endpoints.json.migrated`,
-for reference; nothing has to be done by hand.
+The endpoint map stores one row per principal in `peer-endpoints.d/`, spread
+over 256 shard files. An announce locks, parses, and rewrites only its own
+principal's shard. Each write is atomic: a temporary file followed by a rename.
 
 The capacity of the map is the supported fleet size **plus** headroom for
 service principals, so a full fleet of devices and the `service:seeder`
@@ -241,10 +224,21 @@ operator's own decision.
 
 ## Backups
 
-Back up the Docker volumes that hold `/var/lib/iris` and `/etc/iris`, plus the offline age identity (the host key file `IRIS_AGE_KEY_FILE_HOST` points at) required to decrypt secrets, plus the `iris-images` uploads volume — console-uploaded images live there, and a restore without it loses them. Image binaries under the read-only import root and generated artifacts stay in their normal external storage path.
+Back up the server's `iris-state`, `iris-config`, and `iris-images` volumes,
+the host age identity named by `IRIS_AGE_KEY_FILE_HOST`, and image files under
+the read-only import root. Keep the matching state, configuration, and age
+identity together: a certificate alone cannot restore device credentials,
+assignments, or deployment records.
 
-For Kubernetes, snapshot the `iris-data` PVC and back up the age identity stored
-outside that PVC. Both are required for recovery.
+Also preserve the Compose `iris-tier-auth` and `iris-management-ca` volumes
+when restoring the existing Console-to-server identity. Treat the tier
+credential backup as a secret. Generated device packages and their adjacent
+manifests live in the host artifacts directory; retain them if you need to
+redeploy the same build.
+
+For Kubernetes, snapshot the `iris-data` PVC and back up the separately managed
+age identity, tier-auth Secret, and management TLS Secrets. The Console has no
+state PVC; its persistent application state is on the server.
 
 ## Audit export
 
@@ -273,13 +267,8 @@ records it in a known-hosts file under the server state directory
 changes. Verify the fingerprint out of band where the destination warrants
 it, and remove that file after an intentional host rebuild.
 
-Audit detail wording can change between releases without rewriting entries
-already on disk — `audit.jsonl` is append-only, so old lines keep their
-original text. The clearest current example is the deployment-record rename:
-the `adopt` action's detail text and the device-retirement (`device_delete`)
-detail text naming abandoned deployment records both moved to the new
-wording. A saved search over audit detail for either event should match both
-the old and the new phrasing until the old entries age out.
+Audit events are append-only. Use the structured action and device fields for
+saved searches rather than matching detail text.
 
 ## Image verification
 
@@ -376,9 +365,8 @@ inventory row, so a later inventory edit cannot retarget cleanup. An
 **inband** device's teardown removes the app footprint and every other
 IRIS-named artifact — the EEM applets, the IRISQ discriminator and its logging
 bindings, and the IRIS PKI trustpoint and HTTP-client binding — and preserves
-the operator-owned VLAN/SVI/routes/VRF. A device deployed before deployment records
-existed
-has no active deployment record and must be **adopted** (an explicit, audited, no-change
+the operator-owned VLAN/SVI/routes/VRF. An agent without an active deployment
+record must be **adopted** (an explicit, audited, no-change
 recording of ownership) before it can be undeployed, or undeployed with
 **Force** to strip only the agent footprint when there is no deployment record at all —
 see [Bulk device actions](console.md#bulk-device-actions). A Catalyst 8000
@@ -419,9 +407,8 @@ one, so it shares the same bound safely without a separate knob. Undeploy
 composes at most two bounded sessions per run — a read-only probe and
 deactivate session, then a destructive uninstall/remove/sweep/verify
 session — so a completely unresponsive router
-now holds a teardown job for at most 300 seconds (two stalled sessions) at
-the default bound, down from the roughly two-hour worst case the old
-six-to-eleven-session, 900-second-default design could reach. A deployment
+holds a teardown job for at most 300 seconds (two stalled sessions) at
+the default bound. A deployment
 with a tighter job-queue deadline can still export a lower
 `IRIS_XR_SESSION_TIMEOUT` (e.g. `60`) in the server's environment. XR's CLI
 has no prompt-free way to remove a directory, so a completed teardown may
@@ -429,22 +416,17 @@ honestly leave an empty `iris-work/` directory behind on harddisk: rather
 than failing over it — a later onboarding simply reuses that same directory
 (it only ever ensures the directory exists, never requires it be absent).
 
-If your deployment carries an `IRIS_XR_SESSION_TIMEOUT` override from an
-earlier release — 300 seconds was a common one, set back when the tracked
-default was 900 seconds and a teardown ran six to eleven sessions — it is now
-redundant, and leaving it is harmless. That override was always a *per-session*
-cap, not a total-teardown one: at 300 seconds a stalled teardown's worst case
-is 600 seconds across the two sessions the current design uses, against 300
-seconds at the tracked default. Removing it tightens the worst case back to
-the default; that edit is the operator's to make. Undeploy itself never touches a bare
-image filename and reports, in one summary line, that any operator-staged
-image was left in place. Undeploy never unassigns an image, so it never
-produces the agent's own per-file record on its own: that line — the file
-was kept, or replaced, if the catalog had republished different content
-under the same image id — only exists for an image the agent actually
-unassigned or republished while it was running. A device undeployed with
-its images still assigned leaves every image file in place with no such
-line at all; undeploy's own summary is the only confirmation there is.
+An `IRIS_XR_SESSION_TIMEOUT` override changes each session's bound, not the
+whole job's deadline. For example, 300 seconds allows up to 600 seconds across
+the two teardown sessions.
+
+Successful cleanup ends with `undeploy complete: <device-ip>` on every
+platform. XR undeploy removes the app, package, agent files, and torrent
+sidecars. It leaves image files at `harddisk:` root in place and does not
+change assignments. This differs from clearing assignments while the XR
+agent is running: the agent can remove files it recorded as downloaded by
+IRIS, while retaining adopted files and files of unknown origin. See
+[Unassigned image park](device-agents.md#unassigned-image-park).
 
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
@@ -473,7 +455,7 @@ import is audited as `image_import`, rejections included, recorded with
 A later delete of an entry published in place leaves the file on disk: the unlink
 decision comes from the entry's recorded directory, not from its filename. See
 [Catalog entry fields](reference.md#catalog-entry-fields) for the exact rule,
-including the fallback for entries published before that field existed.
+including how entries with no recorded source directory are handled.
 
 ## Artifact-server diagnostics
 
@@ -556,33 +538,35 @@ provenance evidence is missing or invalid, then rechecks. It will not rebuild
 packages to paper over a served-versus-distributed certificate failure.
 
 Package rebuilds remain mandatory after a shared agent or device-image source
-change. Build and publish both wrapper families, including their adjacent
-provenance manifests:
+change. Rebuild the server to refresh its Guest Shell bundle, then build both
+IOx wrappers and the XR wrapper with their adjacent provenance manifests:
 
 ```bash
-tools/provision-iox-packages.sh
+docker compose -f server/docker-compose.yml up -d --build
+IRIS_FORCE_DEVICE_IMAGE_BUILD=1 tools/provision-iox-packages.sh
 tools/build-xr-package.sh --out artifacts/
 tools/check-package-freshness.sh
 ```
 
+The force flag allows the local canonical archive to be replaced when source
+changed without a `VERSION` change. To retain that archive, set
+`IRIS_DEVICE_IMAGE_OCI` to a new path for both wrapper commands instead. Both
+families must package the same canonical build.
+
 Then redeploy affected devices so they actually run the new agent bytes. A
 green package row verifies the served wrapper against its manifest; it does
 not compare the package with the current checkout or confirm that an already
-deployed device was upgraded.
+deployed device runs those bytes.
 
 ## Redeploying agents after an artifact rebuild
 
-Rebuilding an XR RPM, IOx tar, or agent bundle changes what is baked inside
-it — including any script or hook filename — so a rebuild must also be
-republished, and a device must be redeployed to pick it up. Until then, an
-already-deployed agent keeps working against the current server, but any name
-it reports that the server no longer recognizes is dropped by the server's
-allow-list reconstruction rather than rejected: per-peer transfer attribution
-is simply absent from that device's report until it is redeployed, not an
-error. The agent's own persisted telemetry state can carry an old key across
-its own upgrade too, so the first report after upgrading a running agent can
-discard whatever peer data it had already measured for the transfer in
-progress — a one-time gap for that transfer, not a recurring one.
+Rebuild and publish the Guest Shell bundles, both IOx packages, and the XR
+package after changing shared agent source. Redeploy affected devices to run
+those bytes. A package rebuild does not change an already-running agent.
+
+The server accepts only report fields and peer identities it can validate.
+Unrecognized peer data is omitted from transfer attribution. Check the device's
+running agent and its package when a report lacks expected peer details.
 
 ## Rotating the seeder announce credential
 
@@ -649,87 +633,24 @@ agreement, and that the named image directory matches the current catalog —
 before any file or aria2 call. Recovery leaves maintenance frozen and keeps the
 manifest as evidence in either outcome.
 
-## Rollback after the shard migration
-
-See [Keyed per-device state](reference.md#keyed-per-device-state) for what
-the migration does. This is what to do if you roll the server back to a
-release from before it.
-
-Every whole-fleet document under `IRIS_STATE` — `devices.json`,
-`policy.json`, `pull_requests.json`, `telemetry.json`, `report_ledger.json`,
-`transfer-attestations.json`, `peer-endpoints.json`, and (issue #125)
-`fleet.json`, the operator inventory itself — is migrated into a `<name>.d/`
-shard directory the first time the running server touches that store,
-normally on the container's first restart after an upgrade past the shard
-migration. Migration is automatic, one-shot per store, and never deletes
-anything: the original document is renamed to `<name>.json.migrated` and
-left in place next to its shard directory.
-
-**A rollback to a pre-migration release refuses to start rather than run
-with an empty fleet.** Code from before the migration reads a *missing*
-`devices.json` (and the same for every other store above) as an empty store
-— no devices, no policy, no telemetry — and a rename-away is exactly what
-that code would have found once migration renamed the document to
-`.migrated`. To close that off, migration leaves a placeholder file at each
-legacy path instead of leaving nothing: deliberately not valid JSON, so it
-trips the same fail-closed check that release already has for a *corrupt*
-state file (`state file unreadable: ...` / `state file is not a JSON
-object: ...` in the server log, or `EndpointStoreError` for
-`peer-endpoints.json`, or `gui_fleet.FleetStateError` for `fleet.json`), and
-the affected requests fail instead of quietly succeeding against an empty
-fleet. The placeholder file itself is plain text — `cat` it — and names the
-exact `.migrated` file to restore.
-
-To roll back:
-
-1. Stop the server (`docker compose down`, or the equivalent for your
-   deployment).
-2. List which stores were actually migrated — only a store the new release
-   touched has one:
-   ```
-   ls <state>/*.json.migrated
-   ```
-3. For each one, restore the original document over the placeholder:
-   ```
-   mv <state>/devices.json.migrated <state>/devices.json
-   mv <state>/policy.json.migrated <state>/policy.json
-   mv <state>/pull_requests.json.migrated <state>/pull_requests.json
-   mv <state>/telemetry.json.migrated <state>/telemetry.json
-   mv <state>/report_ledger.json.migrated <state>/report_ledger.json
-   mv <state>/transfer-attestations.json.migrated <state>/transfer-attestations.json
-   mv <state>/peer-endpoints.json.migrated <state>/peer-endpoints.json
-   mv <state>/fleet.json.migrated <state>/fleet.json
-   ```
-4. Start the pre-migration release.
-
-`fleet-revision.json` is not part of this restore — it has no legacy
-document to roll back to (the pre-migration release read `revision` out of
-`fleet.json` itself). Leaving it in place is harmless: the pre-migration
-release never reads it, and the post-migration release, if you later roll
-forward again, is fine finding one either way.
-
-**What this does not recover.** The restored document is a snapshot from the
-moment of migration, not from the moment of rollback. Any write the *new*
-(sharded) release made in between — a heartbeat, a policy change, a
-telemetry report, an endpoint announce, an inventory edit — lives only in
-the `<name>.d/` shard directory, and migration never folds later shard
-writes back into `<name>.json.migrated`. A rollback shortly after the
-upgrade, before devices have reported again, loses nothing; a rollback
-after the fleet has run on the new release for a while reverts every
-migrated store to its state at migration time. The shard directories are
-left in place by this procedure — pre-migration code never reads or writes
-them — so nothing already on disk
-is destroyed, but a device's activity between migration and rollback will
-not be visible to the older release. If that gap matters for your fleet,
-back up `<state>` (see [Backups](#backups)) before rolling back, and keep it
-until you have confirmed you will not need to reconcile against it.
-
 ## Recovery checklist
 
-1. Confirm `docker ps` shows the `iris` container.
-2. Check `docker logs iris` for catalog, tracker, seeder, or secretfs errors.
-3. Confirm the device can reach ports 8443, 8000, 6969, and 6881.
-4. Confirm the published image exists under one of the two image roots — the read-only import root (`/opt/images`) or the `iris-images` uploads volume.
-5. Confirm the age key, the artifacts directory, and every kept volume are owned by uid 10001 — a `not readable by the server` image or a secrets failure after a reset is an ownership problem, not a corrupt store.
-6. Check the console audit and latest device report.
-7. Re-run the generated installer only after confirming the device inventory row is still correct.
+1. Confirm both `iris` and `iris-console` are running. In Kubernetes, check
+   both deployments.
+2. Check server logs for catalog, tracker, seeder, storage, and secret errors.
+   Check Console logs for management API connectivity or authentication errors.
+3. Confirm the Console can reach the internal server API on HTTPS TCP 9443.
+   Do not publish that port for devices or browsers.
+4. From the device's agent network, check the catalog on HTTPS TCP 8443 and
+   tracker on HTTPS TCP 6969. Check BitTorrent TCP 6881 to the server seeder
+   and TCP 6881–6999 between device peers. Guest Shell onboarding also needs
+   the artifact server on HTTPS TCP
+   8000; server-to-device onboarding uses SSH/SCP on TCP 22. IOx additionally
+   needs SSH/SCP from the app to IOS. See [Network ports](network-ports.md).
+5. Confirm the published image still exists in its recorded source directory
+   under the import root or uploads volume, and uid 10001 can read it.
+6. Confirm the server can read its age key, state, and artifacts. Check the
+   device clock and runtime certificate if catalog or tracker TLS fails.
+7. Read the device's job log, heartbeat, and per-image report. Confirm its
+   management type, installer, and addresses before retrying. A running agent
+   normally requires undeploy before Console onboarding again.

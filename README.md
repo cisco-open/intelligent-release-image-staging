@@ -1,6 +1,8 @@
 # IRIS: Intelligent Release and Image Staging
 
-IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
+IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. A server container manages the catalog, private BitTorrent tracker, and origin seeder; a separate Console container provides the browser interface. One shared agent runs in Guest Shell or in the common IOx and IOS-XR device image.
+
+The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image transfers use the private BitTorrent swarm; see [network ports and flows](docs/zensical/network-ports.md) for connectivity requirements.
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
@@ -8,7 +10,7 @@ IRIS stages Cisco images and patches across a network before an operator perform
 
 ## Documentation
 
-The detailed manual now lives in the Zensical documentation tree:
+The detailed manual lives in the Zensical documentation tree:
 
 Start at the [documentation overview](docs/zensical/index.md), or jump to a section:
 
@@ -42,6 +44,7 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 - [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
 - [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer transfer records, and the limits of each figure
+- [Splunk setup](docs/zensical/splunk.md) — collector configuration, HTTPS event ingestion, dashboards, and troubleshooting
 
 **Reference and development**
 

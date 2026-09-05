@@ -11,20 +11,45 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.05]
+
+### Documentation
+- Update both Console troubleshooting guides, the homepage, API examples,
+  and deployment docs for the shared device agent and separate server and
+  Console. Correct network, verification, package rebuild, and recovery steps.
+  Describe current behavior without historical installation or schema guidance.
+- Add a Splunk setup reference with collector configuration, HTTPS ingestion,
+  dashboard searches, and troubleshooting using deployment-neutral examples.
+
+### Console
+- Show pending assignments as **Waiting for staging**. Current image errors
+  override older ready flags in device rows and rollout counts.
+- Refresh open swarm details with the map. Keep torrent role and staging
+  status separate, and avoid duplicating rates across images or participants
+  that share an IP address.
+- Shorten onboard and undeploy logs across Guest Shell, IOx, router and XR.
+  Keep error details and remove the duplicate success footer.
+- Let management type control Add Device network fields. Model edits, failed
+  lookups and late responses no longer switch form modes. Model remains free
+  text and limits installer choices when recognized.
+- Align controls and grouped buttons in all nine operational forms, including
+  when rows wrap. Put feedback on a separate row.
+
+### Device status
+- Report verification failures, catalog lookup failures and aria2 rejections
+  on the current agent check. Other images can keep progressing.
+- Clearing the last image assignment stops its torrent using the same cleanup
+  rules as removing an image from a larger set.
+
 ### Security
 - **Signed IOx packages cannot be rewritten by the legacy rebake helper
   (#135).** It refuses `package.sign` or `package.cert` in the outer or nested
   package envelopes before producing output, preserving the signed input.
   Source changes require a new build and signature.
-- **Private tracker announces are now HTTPS-only on TCP 6969.** The tracker
-  reuses the server certificate already pinned by device agents; the origin
-  seeder, unified IOx/XR container, and Guest Shell aria2 launcher validate
-  that pin. IOx/XR bearer headers and Guest Shell's compatibility query
-  credential therefore never cross the network in plaintext. Startup safely
-  rewrites old canonical announce metadata without changing info hashes, and
-  upgraded agents refresh cached torrents while preserving payload and resume
-  state. A rejected aria2 replacement leaves the migration pending for retry.
-  Loopback-only aria2 JSON-RPC remains HTTP and is not published.
+- **Private tracker announces use HTTPS on TCP 6969.** The origin seeder,
+  IOx/XR container, and Guest Shell aria2 launcher verify the pinned server
+  certificate. TLS protects IOx/XR bearer headers and Guest Shell query
+  credentials. Aria2 JSON-RPC uses HTTP on loopback and is not published.
 - **The browser Console is now isolated from device, catalog, image, and
   credential state.** Compose and Kubernetes run it as a state-free service
   with no server data volume; its `/api/v1` gateway reaches the server's

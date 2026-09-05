@@ -66,6 +66,12 @@ tools/build-xr-package.sh --out artifacts/
 tools/check-package-freshness.sh
 ```
 
+If the existing canonical OCI archive contains older source at the same
+version, the builder refuses to replace it. For an intentional rebuild, run
+`IRIS_FORCE_DEVICE_IMAGE_BUILD=1 tools/provision-iox-packages.sh`, then build
+the XR wrapper from that updated image. To preserve the old archive, set
+`IRIS_DEVICE_IMAGE_OCI` to a new absolute output path for both wrapper builds.
+
 The IOx and XR wrappers are deployment-neutral: no server certificate enters
 these build commands. Each builder publishes an adjacent provenance manifest
 that binds the wrapper SHA-256 and platform to the canonical multi-platform OCI
@@ -77,24 +83,15 @@ the new runtime trust anchor; it does not require rebuilding these packages.
 The final check also verifies that the live and distributed runtime
 certificates agree; it never compares certificate age with a package.
 
-`tools/build-device-image.sh`, `device/iox/build.sh`, `tools/build-xr-package.sh` and
-`tools/make-agent-bundle.sh` each bake in `device/agent`,
-`device/verify_image.py` and the relevant container or installer-script tree
-exactly as they sit in the checkout the script runs from — a worktree
-that has fallen behind `main` under those paths ships an older agent with
-nothing in the built image/package saying so (issue #72, and #119 for the
-third script: this is how a stale candidate worktree made it into a
-size-measurement comparison). All three now warn on stderr when that
-checkout is behind `main` (or `origin/main`) under those paths, naming the
-missing commits; set `IRIS_REQUIRE_FRESH_AGENT=1`
-to make that finding a hard build failure instead (recommended for anything
-that builds candidate images specifically to compare against a baseline),
-and `IRIS_ALLOW_STALE_AGENT_ACK=1` to build anyway under that setting (e.g.
-deliberately reproducing an older release). The check is best-effort: it is
-silent outside a git checkout, or when neither `origin/main` nor `main` can
-be resolved, and never blocks a checkout that is already at or ahead of the
-reference branch under the checked paths. See
-`tools/agent-source-freshness.sh` for the shared implementation.
+`tools/build-device-image.sh`, `device/iox/build.sh`,
+`tools/build-xr-package.sh`, and `tools/make-agent-bundle.sh` check whether the
+checkout is missing agent or packaging commits from `origin/main` (or local
+`main`). They warn and name the missing commits. Set
+`IRIS_REQUIRE_FRESH_AGENT=1` to fail the build on that finding, or
+`IRIS_ALLOW_STALE_AGENT_ACK=1` to deliberately build an older version.
+The check has no effect outside a Git checkout or when neither reference
+branch is available. It does not fetch updates. See
+`tools/agent-source-freshness.sh`.
 
 ## Release process
 
@@ -122,6 +119,21 @@ python3 -m venv /tmp/iris-docs-venv
 ```
 
 Both commands read `zensical.toml`, so run them from the repository root rather than from `docs/`.
+
+The Console's `?` menu also links two bundled guides:
+`server/webroot/help-device.html` and `server/webroot/help-server.html`.
+Update those alongside the manual when troubleshooting steps change. They
+ship in the Console image and require a Console rebuild to appear in a
+deployment. The public homepage uses `docs/index.html` and `docs/app.js`;
+Zensical does not build either file.
+
+The API contract comes from `server/api_routes.py` and
+`server/openapi_contract.py`. After a contract change, regenerate and check it:
+
+```bash
+python3 server/openapi_contract.py > docs/zensical/openapi.yaml
+python3 -m pytest server/tests/test_openapi_contract.py -q
+```
 
 Two versions are pinned so a local build matches the published one. Change either only deliberately:
 

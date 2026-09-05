@@ -250,21 +250,27 @@ activate_line_redacted() {
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== [1/5] preflight on \$DEVICE_IP: show version MUST classify IOS-XR; harddisk: free >= $XR_MIN_FREE_BYTES bytes ====="
-  echo "===== [2/5] scp push $XR_RPM_FILE and the current public catalog certificate -> harddisk: ====="
-  echo "===== [3/5] register: appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm; verify show appmgr source-table lists $SOURCE_NAME ====="
-  echo "===== [4/5] activate (config; every commit guarded by lab/xr-run.sh's show-configuration-failed/abort recovery) ====="
+  echo "[1/5] check IOS-XR and harddisk: free space (minimum $XR_MIN_FREE_BYTES bytes)"
+  echo "show version"
+  echo "dir harddisk: | include bytes free"
+  echo "[2/5] upload package and certificate to harddisk:"
+  printf 'scp -O %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
+  printf 'scp -O <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
+  echo "[3/5] register package"
+  echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
+  echo "show appmgr source-table"
+  echo "[4/5] activate app"
   echo "configure"
   activate_line_redacted
   echo "commit"
-  echo "===== [5/5] verify show appmgr application-table shows $APPID Up (poll up to \${ACTIVATE_TIMEOUT}s / \${ACTIVATE_POLL}s) ====="
-  echo "===== NOT DONE: no 'copy running-config startup-config' -- XR commit IS the persisted state ====="
+  echo "[5/5] verify app is Up"
+  echo "show appmgr application-table"
   exit 0
 fi
 
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
-echo "[1/5] preflight on $DEVICE_IP: classify IOS-XR, check harddisk: headroom"
+echo "[1/5] check device and storage: $DEVICE_IP"
 VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
@@ -315,7 +321,7 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
   exit 1
 fi
 
-echo "[2/5] scp push $XR_RPM_FILE and current catalog certificate -> harddisk: (hardware-proven inbound-scp path)"
+echo "[2/5] upload package and certificate"
 # The router's identity is verified with the same policy the transport uses
 # (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
 # host merely answering at the address.
@@ -335,7 +341,7 @@ if [ "$scp_rc" -ne 0 ]; then
   exit 1
 fi
 
-echo "[3/5] register the package: appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
+echo "[3/5] register package: $SOURCE_NAME"
 printf 'appmgr package install rpm /harddisk:/%s.rpm\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
 SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>/dev/null || true)"
 if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
@@ -344,14 +350,14 @@ if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
   exit 1
 fi
 
-echo "[4/5] activate: appmgr application $APPID (source $SOURCE_NAME, host networking, harddisk: bind mount)"
+echo "[4/5] activate app: $APPID"
 {
   echo "configure"
   activate_line
   echo "commit"
 } | RUN >/dev/null
 
-echo "[5/5] waiting for $APPID to report Up (poll budget ${ACTIVATE_TIMEOUT}s)"
+echo "[5/5] wait for app: $APPID"
 elapsed=0
 app_up=0
 APP_OUT=""
@@ -370,7 +376,4 @@ if [ "$app_up" -ne 1 ]; then
   exit 1
 fi
 
-echo "done. '$APPID' is Up. It downloads $DEVICE_ID's assigned image straight to harddisk:"
-echo "      through the /hostmount bind mount (write-through, no placement step) and seeds it"
-echo "      with catalog/tracker TLS pinned to harddisk:/iris-catalog.pem."
-echo "      to the swarm. Watch:  printf 'dir harddisk:\\n' | lab/xr-run.sh $DEVICE_IP"
+echo "onboard complete: $DEVICE_IP"

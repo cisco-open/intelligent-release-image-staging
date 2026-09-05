@@ -47,7 +47,7 @@ flowchart TB
 | Faster network distribution | The server does not need to send every byte of a multi-gigabyte image to every device. Devices that already have pieces can help the rest of the network. |
 | Higher transfer tolerance | Downloads are piece-based and resumable. If a transfer is interrupted or one path is slow, a device can continue by fetching missing pieces from available peers and the seeder. |
 | Controlled rollout intent | The catalog tells each device which image is approved for staging. Devices that are not assigned do not stage that image. |
-| Device-side safety | Each device verifies the downloaded file's hash and confirms the final staged copy by exact byte size. IRIS stops after staging; install, activation, boot changes, and reloads remain outside IRIS. |
+| Device-side safety | Each device verifies the downloaded file's hash. IOS-XE then copies it to the target filesystem and checks its size; XR downloads directly to `harddisk:`. Install, activation, boot changes, and reloads remain outside IRIS. |
 
 !!! note "Central services still matter"
     IRIS improves image distribution, not every possible failure mode. The catalog and tracker still coordinate policy and swarm participation. The fault-tolerance benefit is in the transfer path: devices can resume piece downloads and use more than one source once the swarm has content.
@@ -78,7 +78,7 @@ sequenceDiagram
 
 ## Under the hood
 
-The public story is peer-assisted staging. The server implements that with a few focused services:
+The server and Console divide the work as follows:
 
 | Component | Responsibility |
 | --- | --- |
@@ -86,8 +86,9 @@ The public story is peer-assisted staging. The server implements that with a few
 | Tracker | Authenticates private BitTorrent announces over pinned HTTPS. |
 | Seeder | Provides the initial image pieces through `aria2c`; its JSON-RPC port stays local-only. |
 | Artifact server | Serves bootstrap scripts, catalog trust material, and agent bundles over HTTPS. |
-| Console | Browser UI for image, device, onboarding, monitoring, settings, and audit workflows. |
-| Telemetry service | Receives device reports and exposes health, swarm, and metrics surfaces. |
+| Console | Serves the browser UI and forwards API requests to the server's internal management API. |
+| Management API | Runs Console operations against server state, including image publishing and device onboarding. |
+| Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
 IOx and IOS-XR appmgr use the same multi-architecture device image and the
@@ -97,12 +98,15 @@ staging directory is created. Cisco's IOx tar and appmgr RPM remain different
 transport envelopes, but they carry the canonical image for the selected CPU
 architecture rather than separately maintained payloads.
 
+Guest Shell uses the same Python agent from a bundle. Its startup and IOS
+integration remain specific to Guest Shell.
+
 The server-side services are split across two containers. The stateful server
 tier runs the catalog, tracker, artifact server, seeder, telemetry service, and
-the authenticated management API. A separate, state-free console tier serves
+the authenticated management API. A separate Console container serves
 the browser application and forwards its allowlisted `/api/v1` requests to that
-management API over authenticated TLS. Device agents still call the catalog
-and tracker directly; unchanged Guest Shell onboarding also fetches from the
+management API over authenticated TLS. Device agents call the catalog
+and tracker directly; Guest Shell onboarding also fetches from the
 artifact listener. Devices never call the management API, and only the server
 tier mounts device, catalog, image, or encrypted configuration state.
 
@@ -110,8 +114,8 @@ Both containers run as the unprivileged user `iris`, a fixed uid/gid `10001`
 baked into their images. Every listener binds an unprivileged port, so the
 runtime drops all Linux capabilities and forbids privilege escalation. Nothing
 chowns anything at runtime, so the host paths that cross the server-container
-boundary — the age identity file, the artifacts directory, and any persistent
-volumes retained from an older root-running deployment — have to be owned by
+boundary — the age identity file, the artifacts directory, and persistent
+volumes — have to be owned by
 that uid before the stack starts.
 Fresh named volumes inherit the image's ownership when they are initialized. See
 [Runtime identity](server.md#runtime-identity).
@@ -131,7 +135,8 @@ writable uploads volume are removed from disk, so an image published in place
 from the read-only image root survives. See
 [Catalog entry fields](reference.md#catalog-entry-fields).
 
-On an IOx device, `/data/iris` is persistent application scratch rather than an
+On an IOx device, the agent uses the platform's persistent application disk as
+scratch storage rather than an
 IOS-visible image destination. The agent checks the staged file's sha256
 against the catalog's known-good value before hand-off — the catalog's
 images can separately be checked for authenticity against Cisco's signed
@@ -145,3 +150,8 @@ On IOS-XR, the appmgr container shares the router's own network stack and bind-
 mounts `/misc/disk1` as `/hostmount`; that mount is `harddisk:`. The agent
 downloads, verifies, and seeds the file at its final location, so there is no
 IOS placement copy and no app-network VLAN, SVI, VPG, or NAT configuration.
+
+Torrent completion means all pieces have arrived. The Console marks an image
+staged only after the agent reports successful verification and placement.
+Status is tracked per device and assigned image; another device starting its
+download does not change an already-staged device's status.
