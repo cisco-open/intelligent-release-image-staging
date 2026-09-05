@@ -969,8 +969,8 @@ class OnboardService:
         # for iox devices, which always run _PLATFORM_RECIPES["iox"].
         self.device_install = device_install or os.environ.get("IRIS_DEVICE_INSTALL") or os.path.join(
             self.repo_root, "device", "device-install.sh")
-        self.crt_public = crt_public or os.environ.get(
-            "IRIS_CRT_PUBLIC", "/etc/iris/tls/crt.pem")
+        self.crt_public = crt_public or os.environ.get("IRIS_CRT_PUBLIC") or os.path.join(
+            os.environ.get("IRIS_CONFIG") or "/etc/iris", "tls", "crt.pem")
         self.host_ip = host_ip if host_ip is not None else os.environ.get(
             "IRIS_HOST_IP", "")
         self.catalog_url = catalog_url or os.environ.get("IRIS_CATALOG_URL") or (
@@ -1194,6 +1194,10 @@ class OnboardService:
         # Direct CLI callers may choose a CA file, but service onboarding must
         # use the same current public certificate selected by its own config.
         env.pop("IRIS_CATALOG_CA_FILE", None)
+        # The server's IRIS_LOG is a directory. IOx/XR installers use that
+        # name for a device logging boolean, so leave their default intact.
+        # An explicit per-job device option can still override it below.
+        env.pop("IRIS_LOG", None)
         # Console-driven feature flags (e.g. the telemetry checkboxes) applied
         # last: explicit operator intent beats any inherited process env.
         if env_extra:

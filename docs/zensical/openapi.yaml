@@ -15942,7 +15942,7 @@
       "get": {
         "operationId": "console_get_api_v1_settings",
         "summary": "Read settings",
-        "description": "Read settings. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "Read settings. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. host_ip identifies the device-facing server; console_url is the configured browser origin and may use another host. gui_cert describes the certificate loaded by this Console, including an independently mounted deployment default.",
         "tags": [
           "console"
         ],
@@ -15977,6 +15977,41 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "host_ip": {
+                      "type": "string"
+                    },
+                    "console_url": {
+                      "type": "string"
+                    },
+                    "gui_cert": {
+                      "title": "ConsoleSettingsResponseGui_Cert",
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "issuer": {
+                          "type": "string"
+                        },
+                        "not_after": {
+                          "type": "string"
+                        },
+                        "fingerprint_sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "subject",
+                        "issuer",
+                        "not_after",
+                        "fingerprint_sha256"
+                      ],
+                      "additionalProperties": true
                     },
                     "telemetry_destination": {
                       "title": "ConsoleSettingsResponseTelemetry_Destination",
@@ -16017,6 +16052,9 @@
                   "required": [
                     "admin_username",
                     "trust",
+                    "host_ip",
+                    "console_url",
+                    "gui_cert",
                     "telemetry_destination"
                   ],
                   "additionalProperties": true
@@ -16024,6 +16062,15 @@
                 "example": {
                   "admin_username": "admin",
                   "trust": [],
+                  "host_ip": "192.0.2.10",
+                  "console_url": "https://console.example.com:8080",
+                  "gui_cert": {
+                    "source": "built-in",
+                    "subject": "CN=console.example.com",
+                    "issuer": "CN=IRIS CA",
+                    "not_after": "Sep 4 00:00:00 2027 GMT",
+                    "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+                  },
                   "telemetry_destination": {
                     "endpoint": null,
                     "enabled": null,
@@ -20524,7 +20571,7 @@
       "post": {
         "operationId": "console_post_api_v1_settings_gui_cert",
         "summary": "Install console certificate",
-        "description": "Install console certificate. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "Install console certificate. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Successful changes persist on the server and reload this Console before replying. applied reports the Console reload result; gui_cert describes the identity currently loaded. If applied is false, restart the Console to load the saved configuration.",
         "tags": [
           "console"
         ],
@@ -20884,7 +20931,7 @@
       "delete": {
         "operationId": "console_delete_api_v1_settings_gui_cert",
         "summary": "Remove console certificate",
-        "description": "Remove console certificate. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.",
+        "description": "Remove console certificate. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Successful changes persist on the server and reload this Console before replying. applied reports the Console reload result; gui_cert describes the identity currently loaded. If applied is false, restart the Console to load the saved configuration.",
         "tags": [
           "console"
         ],
@@ -20926,6 +20973,15 @@
                     "deleted": {
                       "type": "boolean"
                     },
+                    "applied": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
                     "gui_cert": {
                       "title": "ConsoleSettingsGuiCertResponseGui_Cert",
                       "type": "object",
@@ -20958,12 +21014,16 @@
                   },
                   "required": [
                     "deleted",
+                    "applied",
+                    "note",
                     "gui_cert"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
                   "deleted": true,
+                  "applied": true,
+                  "note": null,
                   "gui_cert": {
                     "source": "built-in",
                     "subject": "CN=iris.example",
@@ -35915,7 +35975,7 @@
       "get": {
         "operationId": "management_get_internal_v1_settings",
         "summary": "Read settings",
-        "description": "Read settings. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential.",
+        "description": "Read settings. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. host_ip identifies the device-facing server; console_url is the configured browser origin and may use another host.",
         "tags": [
           "management"
         ],
@@ -35951,6 +36011,41 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "host_ip": {
+                      "type": "string"
+                    },
+                    "console_url": {
+                      "type": "string"
+                    },
+                    "gui_cert": {
+                      "title": "ManagementSettingsResponseGui_Cert",
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "issuer": {
+                          "type": "string"
+                        },
+                        "not_after": {
+                          "type": "string"
+                        },
+                        "fingerprint_sha256": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "subject",
+                        "issuer",
+                        "not_after",
+                        "fingerprint_sha256"
+                      ],
+                      "additionalProperties": true
                     },
                     "telemetry_destination": {
                       "title": "ManagementSettingsResponseTelemetry_Destination",
@@ -35991,6 +36086,9 @@
                   "required": [
                     "admin_username",
                     "trust",
+                    "host_ip",
+                    "console_url",
+                    "gui_cert",
                     "telemetry_destination"
                   ],
                   "additionalProperties": true
@@ -35998,6 +36096,15 @@
                 "example": {
                   "admin_username": "admin",
                   "trust": [],
+                  "host_ip": "192.0.2.10",
+                  "console_url": "https://console.example.com:8080",
+                  "gui_cert": {
+                    "source": "built-in",
+                    "subject": "CN=console.example.com",
+                    "issuer": "CN=IRIS CA",
+                    "not_after": "Sep 4 00:00:00 2027 GMT",
+                    "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+                  },
                   "telemetry_destination": {
                     "endpoint": null,
                     "enabled": null,

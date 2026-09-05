@@ -110,6 +110,11 @@ and tracker directly; Guest Shell onboarding also fetches from the
 artifact listener. Devices never call the management API, and only the server
 tier mounts device, catalog, image, or encrypted configuration state.
 
+The two containers can run on the same Docker host, on separate Docker hosts,
+or in separate Kubernetes Deployments. Only the authenticated HTTPS management
+connection crosses from Console to server; storage stays with the server. See
+[Docker on separate hosts](docker-hosts.md) and [Kubernetes](kubernetes.md).
+
 Both containers run as the unprivileged user `iris`, a fixed uid/gid `10001`
 baked into their images. Every listener binds an unprivileged port, so the
 runtime drops all Linux capabilities and forbids privilege escalation. Nothing

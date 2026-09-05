@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kubernetes
 
+Docker can use the same separation on independent hosts; see
+[Docker on separate hosts](docker-hosts.md).
+
 The server and Console images run as separate Kubernetes Deployments and
 Services. The alpha manifests live under `kubernetes/` and use Kustomize; the
 server owns persistent state; the Console reaches it through authenticated
@@ -85,6 +88,60 @@ device, and monitoring source ranges at the LoadBalancer or firewall. Egress
 is unrestricted because SSH, DNS, and optional feed/telemetry destinations
 depend on the deployment.
 
+## Small lab with K3s
+
+A single amd64 Linux host can run K3s with MetalLB providing the two
+LoadBalancer addresses. Reserve two addresses on the node's layer-2 network,
+outside its DHCP pool: one for devices and one for the Console. Choose distinct
+Pod, Service, and Docker subnets that do not overlap the host or device networks.
+
+Configure K3s before starting it:
+
+```yaml
+# /etc/rancher/k3s/config.yaml
+disable:
+  - traefik
+  - servicelb
+kube-proxy-arg:
+  - proxy-mode=iptables
+  - nodeport-addresses=127.0.0.0/8
+secrets-encryption: true
+write-kubeconfig-mode: "0600"
+```
+
+IRIS uses direct TCP Services, so it needs no ingress controller. Disabling
+ServiceLB lets MetalLB handle LoadBalancer Services without occupying the
+node's host ports. Keep K3s's embedded NetworkPolicy controller enabled; do
+not set `disable-network-policy`. The NodePort setting limits NodePort access
+to loopback while clients use the LoadBalancer addresses. See
+[K3s networking services](https://docs.k3s.io/networking/networking-services)
+and [server configuration](https://docs.k3s.io/cli/server).
+
+Install a pinned MetalLB release using its
+[installation guide](https://metallb.io/installation/). Create an
+`IPAddressPool` containing the two reserved addresses and an
+`L2Advertisement` for that pool. Set `autoAssign: false` and give each IRIS
+Service explicit `metallb.io/address-pool` and `metallb.io/loadBalancerIPs`
+annotations in a Kustomize overlay. Retain `externalTrafficPolicy: Local` and
+restrict the Console's `loadBalancerSourceRanges` to operator networks. See
+[MetalLB configuration](https://metallb.io/configuration/).
+
+For local storage, create a dedicated directory owned by `10001:10001` with
+mode `0700`. Bind it through a local PersistentVolume with node affinity,
+`Retain` reclaim policy, and a storage class using `WaitForFirstConsumer`.
+Match the PVC's storage class and request to that volume. The base request is
+`50Gi`; a smaller lab overlay can use `10Gi` if its images and artifacts fit.
+A directory-backed local volume does not impose a disk quota, so check free
+space on the host. Back up its contents and the separately held age identity.
+See [Kubernetes local volumes](https://kubernetes.io/docs/concepts/storage/volumes/#local).
+
+K3s can share this host with Docker when its LoadBalancer addresses differ
+from Docker's published host address. Keep IRIS pods on the cluster network
+without `hostNetwork` or `hostPort`. Preserve Docker firewall rules and verify
+both Docker endpoints and Kubernetes source-IP handling after installation.
+Keep the management Service internal on 9443. This layout uses one node and
+local storage; it does not provide host failover.
+
 ## Unprivileged runtime
 
 Both pods run as uid/gid `10001`, drop all capabilities, disallow privilege
@@ -110,8 +167,10 @@ work around storage ownership.
 ## Secrets and storage
 
 Before applying the Kustomization, replace the address/recipient sentinels in
-`iris-seed-server.env`, configure `iris-console.env`, and set both image names
-and immutable digests in `kustomization.yaml`. Build the images from
+`iris-seed-server.env`, set its `IRIS_CONSOLE_URL` to the full external Console
+HTTPS URL, configure `iris-console.env`, and set both image names and immutable
+digests in `kustomization.yaml`. The server IP and Console URL can be different;
+Settings reports both. Build the images from
 `server/Dockerfile` and `server/Dockerfile.console` and publish them to a
 registry reachable by every node. Configure the LoadBalancers and source
 restrictions for the reserved addresses.
@@ -222,6 +281,10 @@ a valid credential file, and the presence of its management CA file, not
 server availability; the independent
 `iris-console-tls` identity lets it start while the server is cold. API
 requests arriving while server is down get a redacted 503 with `Retry-After`.
+
+After a rollout, verify an authenticated Console API request before starting
+device jobs. Allow Service routing and the server connection to settle; pod
+readiness checks the individual tier, while this confirms the complete path.
 
 The server LoadBalancer publishes 6969, 8443, 8000, 6881, and 9101; the Console
 LoadBalancer publishes 8080. Metrics export is optional, but the base Service

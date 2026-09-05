@@ -2636,14 +2636,22 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         def _settings_info(self, admin_username):
             host_ip = os.environ.get("IRIS_HOST_IP", "")
             obs = bool(os.environ.get("IRIS_OBSERVABILITY"))
-            # The console's published host port is overridable (IRIS_GUI_PUBLISH);
-            # the container always listens on 8080 internally. Prefer that env,
-            # else derive it from the operator-set IRIS_CONSOLE_URL, else 8080.
+            # The Console can have its own host and browser-facing port.
             raw = os.environ.get("IRIS_GUI_PUBLISH", "").strip()
-            if not raw:
-                tail = os.environ.get("IRIS_CONSOLE_URL", "").rstrip("/").rsplit(":", 1)[-1]
-                raw = tail if tail.isdigit() else ""
             console_port = int(raw) if raw.isdigit() else 8080
+            console_url = "https://%s:%d" % (host_ip, console_port) if host_ip else ""
+            configured_url = os.environ.get("IRIS_CONSOLE_URL", "").strip()
+            if configured_url:
+                try:
+                    parsed = urlsplit(configured_url)
+                    if (parsed.scheme == "https" and parsed.hostname and
+                            not parsed.username and not parsed.password and
+                            not parsed.query and not parsed.fragment and
+                            parsed.path in ("", "/")):
+                        console_port = parsed.port or 443
+                        console_url = configured_url.rstrip("/")
+                except ValueError:
+                    pass
             state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
             dest = telemetry_destination.read(
                 telemetry_destination.settings_path(state_dir))
@@ -2655,6 +2663,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "admin_username": admin_username,
                 "version": _read_version(),
                 "host_ip": host_ip,
+                "console_url": console_url,
                 "ports": {"tracker": 6969, "catalog": 8443, "artifacts": 8000,
                           "swarm": 9101, "console": console_port},
                 "observability": {
@@ -4568,7 +4577,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         # even keep a session in a remote browser.
         candidates = [(certfile, keyfile)]
         iris_cert = os.environ.get("IRIS_CERT", _IRIS_CERT_DEFAULT)
-        if iris_cert != certfile:
+        if management_token_file is None and iris_cert != certfile:
             candidates.append((iris_cert, None))
         for cand, cand_key in candidates:
             if not os.path.exists(cand):

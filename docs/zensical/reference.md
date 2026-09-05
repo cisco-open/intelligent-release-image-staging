@@ -56,22 +56,24 @@ Every port is TCP. IRIS opens no UDP listener.
 
 ### Required at deploy time
 
-Compose refuses to start without these; none has a default.
+The server Compose service requires these; none has a default. The standalone
+Console has its own [deployment variables](docker-hosts.md#deployment-settings).
 
 | Variable | Effect |
 | --- | --- |
-| `IRIS_HOST_IP` | Docker host address reached by devices; Compose also binds the published Console port to this address. The generated catalog certificate includes it at first start. An address change requires a planned migration of TLS trust, the origin seeder's tracker URL, existing torrent announce URLs, and deployed agent configuration. Preserve the config and state volumes, update the address-dependent material, and re-onboard affected devices. See [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages). |
+| `IRIS_HOST_IP` | Server address reached by devices; the default one-host Compose stack also binds the Console port here. The generated catalog certificate includes it at first start. An address change requires updating TLS trust, the origin seeder's tracker URL, existing torrent announce URLs, and deployed agent configuration. Preserve the config and state volumes, update the address-dependent material, and re-onboard affected devices. See [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages). |
 | `IRIS_AGE_RECIPIENTS` | Comma-separated age public keys the at-rest secret store is encrypted to: the primary key plus an offline break-glass recipient. |
 | `IRIS_AGE_KEY_FILE_HOST` | Host path of the age identity (private key), mounted as the Docker secret `iris_age_key` at `/run/secrets/iris_age_key`. |
 
 !!! important "How a variable reaches the container"
     Compose injects **only** the keys named in the `environment:` block of
-    `server/docker-compose.yml`. Exporting a variable in your shell, or adding a
+    the selected Compose files. Exporting a variable in your shell, or adding a
     line to `server/.env`, sets it for *interpolation* — Compose substitutes it
     into `"${VAR:-…}"` on the right-hand side of that block, and a variable the
-    block never names is silently dropped. Every variable in the tables below is
-    named there, so `server/.env` (or an `export`) is the supported way to set
-    any of them. A variable that is **not** in these tables — an internal tuning
+    block never names is silently dropped. Use `server/.env`, an explicit
+    `--env-file`, or an `export` for interpolation. Host paths and published
+    ports are consumed by Compose itself; runtime variables must be named in
+    the service's `environment:` block. A variable added to the code — an internal tuning
     value, or one added to the code later — needs a line added to the
     `environment:` block before it has any effect.
 
@@ -91,9 +93,9 @@ Compose refuses to start without these; none has a default.
 | `IRIS_OTLP_HEADERS_FILE_HOST` | `/dev/null` | Host path of an optional mode-600 file containing the collector authentication header specification. Compose mounts it only into the server tier at the fixed path named by `IRIS_OTLP_HEADERS_FILE`; host-side only. Prefer this to putting collector credentials in `server/.env`. |
 | `IRIS_ARTIFACTS_HOST_DIR` | `../artifacts` | Host directory bind-mounted read-write at `/srv/artifacts`. Host-side only: it is interpolated into the bind mount, not passed into the container. |
 | `IRIS_SHARP_SANS_FONT_HOST` | `/dev/null` | Host path of the licensed Sharp Sans Bold `.woff2`, bind-mounted read-only over `server/webroot/fonts/SharpSans-Bold.woff2` inside the container. The font is excluded from the build context (`.dockerignore`) and the release tarball — Cisco's license does not permit redistributing it — so the console falls back to its default font stack without it (`font-display: swap`). Set this only on a deployment that independently holds the license; left unset it mounts `/dev/null`, a harmless no-op every other deployment never has to think about. Host-side only: interpolated into the bind mount, never passed into the container. See [Console](console.md#branding). |
-| `IRIS_GUI_PUBLISH` | `8080` | Published host port for the console, bound only to `IRIS_HOST_IP` by Compose. The container always listens on 8080 internally. |
-| `IRIS_CONSOLE_URL` | unset | Lets server-side status derive a non-default published Console port when `IRIS_GUI_PUBLISH` is unset. Prefer setting `IRIS_GUI_PUBLISH` directly. |
-| `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` makes the Console deliberately skip its TLS identity and serve plain HTTP. Without it the Console obtains its active identity through the authenticated management hop (or uses the independently mounted Kubernetes default) and refuses to start when no usable identity exists. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
+| `IRIS_GUI_PUBLISH` | `8080` | Published Console host port. The one-host Compose stack binds it to `IRIS_HOST_IP`; the standalone Console binds it to `IRIS_CONSOLE_BIND_IP`. The container always listens on 8080 internally. |
+| `IRIS_CONSOLE_URL` | unset | Full external HTTPS Console URL reported in server settings, for example `https://console.example.com:8080`. An explicit URL takes precedence over `IRIS_GUI_PUBLISH`; it does not change Docker's port binding. |
+| `IRIS_GUI_ALLOW_PLAINTEXT` | unset | `1` makes the Console deliberately skip its TLS identity and serve plain HTTP. Without it the Console obtains its active identity through the authenticated management hop or uses its independently mounted default and refuses to start when no usable identity exists. The session cookie loses its `Secure` attribute under the opt-in. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
 | `IRIS_CATALOG_ALLOW_PLAINTEXT` | unset | `1` lets the catalog serve plain HTTP when `IRIS_CERT` names no usable certificate. Without it `catalog.py` refuses to start in that state — every route answers a device bearer token. Same convention as `IRIS_GUI_ALLOW_PLAINTEXT`. The shipped `docker-entrypoint.sh` always provisions `IRIS_CERT`, so this only matters running `catalog.py` directly. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
 | `IRIS_ARTIFACTS_ALLOW_PLAINTEXT` | unset | `1` lets the artifact server serve plain HTTP when `IRIS_CERT` names no usable certificate. Without it `artifact_server.py` refuses to start: the authenticated v1 API carries resource-bound credentials, while Guest Shell enrollment relies on TLS to protect short-lived capability paths. Same convention as `IRIS_GUI_ALLOW_PLAINTEXT`. The shipped entrypoint always provisions `IRIS_CERT`, so this only matters running `artifact_server.py` directly. Loopback or an isolated lab only — see [Security](security.md#tls-and-certificates). |
 | `IRIS_VERSION` | unset | Build argument that bakes the release string the console's Settings page shows. Unset means the `VERSION` file in the image. Build-time only: it is not a container variable. |
@@ -171,15 +173,23 @@ services. What each directory holds is in
 The Kubernetes alpha maps the durable paths into one PVC under `/data` instead —
 see [Kubernetes](kubernetes.md).
 
+Onboarding reads the public device certificate from `$IRIS_CONFIG/tls/crt.pem`,
+unless `IRIS_CRT_PUBLIC` selects another public certificate file. The server's
+`IRIS_LOG` names its log directory. It is kept out of device installer options;
+the device-side `IRIS_LOG` switch controls aria2 logging separately.
+
 ### TLS trust and console certificate
 
 The browser Console's *Settings → TLS & trust* sub-page manages these through
 the management API. The durable certificate and trust state belongs to the
 server tier; the state-free Console owns only its active runtime TLS copy.
+For an independently deployed Docker Console, the default browser certificate
+and key are mounted on that host. See
+[Docker on separate hosts](docker-hosts.md#certificates-and-trust).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `IRIS_GUI_CERT` | Server: `/run/iris/tls/gui-cert.pem`; Compose Console: `/run/iris-console/cert.pem` | The server rebuilds an installed custom identity in its tmpfs. The Console obtains the active custom or Console-only fallback identity through the authenticated management API and atomically writes its own tmpfs copy. The catalog/device private key is never mounted into or sent to the Console. |
+| `IRIS_GUI_CERT` | Server: `/run/iris/tls/gui-cert.pem`; Compose Console: `/run/iris-console/cert.pem` | The server rebuilds an installed custom identity in its tmpfs. The Console fetches custom identities and the single-host fallback through the authenticated management API; independently mounted defaults are copied locally. It atomically writes the active pair into its own tmpfs. The catalog/device private key is never mounted into or sent to the Console. |
 | `IRIS_TRUST_DIR` | `/etc/iris/tls/trust` | Durable directory of installed root-CA PEMs: one `<sha256-fingerprint>.pem` per manual install, plus the downloaded public bundle as the distinguished file `downloaded-bundle.pem`. |
 | `IRIS_CA_BUNDLE` | `/run/iris/tls/ca-bundle.pem` | Runtime concatenation of the trust dir, rebuilt at every boot and on every trust change. Absent while the trust dir is empty. Outbound TLS (OTLP export, the CA-bundle download) verifies against the system store plus this bundle. |
 
@@ -188,9 +198,8 @@ The server-owned console certificate override persists as
 `/etc/iris/tls/gui-key.pem.age` (private key, age-encrypted to the same
 recipients as the rest of the secret store); boot rebuilds `IRIS_GUI_CERT`
 from the pair. An override that fails to decrypt — or whose certificate and key
-do not form a matching pair — is skipped with a warning, so the console falls
-back to the built-in certificate and a bad upload can never lock you out of the
-console.
+do not form a matching pair — is skipped with a warning. The Console then uses
+the deployment's valid default identity.
 
 The public-CA download settings live in `$IRIS_STATE/ca-trust-settings.json`
 (`{"url": ..., "auto": ...}`, owned and consumed by the server management
@@ -322,12 +331,12 @@ catalog token cannot call management operations.
 | `POST /api/v1/setup` | Authentication-establishment route, first run only. `{username, password, setup_grant}` creates the permanent admin account, where `setup_grant` is the one-use, 10-minute grant from the default-credential login above; 403 on a missing/invalid/expired grant, 409 once an admin exists. |
 | `POST /api/v1/logout` | Revokes the current session and expires the cookie. |
 | `GET /api/v1/session` | The current session's info, or 401. Any GET carrying `X-IRIS-Poll: 1` (the console's periodic refreshers) is validated without refreshing the session's idle clock. All `/api/v1/*` responses carry `Cache-Control: private, no-store`; a present-but-unreadable secrets store answers 503 on every store-backed route. |
-| `GET /api/v1/settings` | Console settings, published port, and the running version — plus the active console certificate (`gui_cert`), the installed trust entries (`trust`), the CA download settings (`ca_trust`), the effective telemetry destination with its source (`telemetry_destination`), and the audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
+| `GET /api/v1/settings` | Server address, full Console URL (`console_url`), published Console port, and running version — plus the certificate this Console serves (`gui_cert`), installed trust entries (`trust`), CA download settings (`ca_trust`), effective telemetry destination with its source (`telemetry_destination`), and audit-export destination with its last-run status (`audit_export`; a `password_set` flag only, never the password). |
 | `GET /api/v1/settings/setup-status` | The setup status behind the first-run wizard (`#setup`), Settings → Setup, and the persistent Settings → Device packages view: `admin`, `telemetry`, `packages`, and `image_verification`, each with a `state` of `ok`, `unset`, `stale`, `absent`, or `unknown`. `telemetry` is `ok` only when export is enabled *and* an endpoint resolves, and also carries `source` (`override` or `env`), `endpoint`, and `enabled`. `packages.items` covers the two IOx tars and `iris-xr.rpm`; each item reports artifact modification time (`built_at`, not an attested build time), state/reason, its wrapper-specific remedy, and canonical OCI provenance only after the served wrapper SHA-256 matches the adjacent manifest. An `ok` item does not claim package-content or native-signature inspection. The aggregate package state separately fails closed when the live served certificate or distributed `iris-catalog.pem` is unavailable or the two disagree; `reference_fingerprint` identifies the live certificate. Certificates are never compared with package build time or contents. See [Setup](console.md#setup). |
 | `POST /api/v1/settings/password` | `{current, new, confirm}`; changes the admin password and revokes every other session. |
 | `POST /api/v1/settings/sessions/revoke-others` | Revokes every session except the caller's. |
-| `POST /api/v1/settings/gui-cert` | `{cert_pem, key_pem}` — validates (real `load_cert_chain`; per-field errors on garbage PEM or key mismatch) and installs the console certificate, hot-applied. Returns `{gui_cert, applied, note}`: `applied` is `false` (with a `note`) when the listener is not serving TLS, in which case the saved certificate takes effect at the next restart. |
-| `DELETE /api/v1/settings/gui-cert` | Reverts the console to the built-in certificate, hot-applied. |
+| `POST /api/v1/settings/gui-cert` | `{cert_pem, key_pem}` — validates the certificate/key pair and stores the Console override encrypted on the server. Returns `{gui_cert, applied, note}` after the Console attempts to load it. `applied: false` means the saved identity did not reach this Console's TLS listener; follow the note and restart the Console when needed. |
+| `DELETE /api/v1/settings/gui-cert` | Removes the override and loads the deployment's default Console certificate. The result reports whether this Console applied it; restart the Console if the response reports a reload failure. |
 | `POST /api/v1/settings/trust` | `{pem}` — installs one or more CA certificates as one trust entry; returns `{entry}`, the new trust-store row. Every block must parse as an X.509 certificate; a decodable-but-not-a-certificate block rejects the whole upload (400). |
 | `DELETE /api/v1/settings/trust/<name>` | Removes one trust entry and rebuilds the runtime bundle. |
 | `POST /api/v1/settings/ca-trust` | `{url, auto}` — configures the public-CA bundle download; the URL must be `https://`. |

@@ -36,31 +36,44 @@
     <code>https://iris:9443/internal/v1</code> using a mounted service
     credential and the management CA.</p>
     <p>Docker assigns private addresses on the Compose network. The service
-    name <code>iris</code> resolves there; neither container needs a separate
-    LAN address. Operators and devices use the Docker host's published ports.</p>
+    name <code>iris</code> resolves there. On separate Docker hosts, the Console
+    calls the server's private address through
+    <code>IRIS_MANAGEMENT_API_URL</code>. Neither container needs a separate
+    LAN address. Devices use the server host's published ports; operators use
+    the Console host's address.</p>
     <ul>
       <li>Devices reach HTTPS <code>8443</code> (catalog),
       <code>8000</code> (install artifacts), and <code>6969</code>
       (tracker), plus TCP <code>6881</code> for image pieces.</li>
       <li>Operators reach Console HTTPS <code>8080</code>. Compose binds
-      this port only on <code>IRIS_HOST_IP</code>.</li>
+      this port on <code>IRIS_HOST_IP</code> in the one-host stack, or
+      <code>IRIS_CONSOLE_BIND_IP</code> in the standalone Console deployment.</li>
       <li>HTTPS <code>9101</code> serves probes and authenticated telemetry.
       The swarm map is in the Console, not on this port.</li>
-      <li>Management HTTPS <code>9443</code> stays inside the Compose
-      network. Seeder RPC <code>6800</code> stays on server loopback.</li>
+      <li>Management HTTPS <code>9443</code> uses the Compose network or a
+      private server-host binding restricted to the Console host. Seeder RPC
+      <code>6800</code> stays on server loopback.</li>
     </ul>
 
     <h2>Recovery checklist</h2>
     <p>Run these commands from the repository root to check both services:</p>
     <pre class="log">docker compose -f server/docker-compose.yml ps
 docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
+    <p>For separate hosts, use <code>server/docker-compose.server.yml</code>
+    on the server and <code>server/docker-compose.console.yml</code> on the
+    Console host, together with each host's <code>--env-file</code>. The
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">separate-host setup guide</a>
+    covers certificates, credentials, and commands.</p>
     <ol>
       <li>If the Console cannot load, check the <code>console</code> logs,
-      its published port, and the browser certificate. In Compose, Console
-      startup needs the server's management API to fetch its TLS identity.</li>
+      its published port, and the browser certificate. The one-host Compose
+      stack fetches that identity from the server. The standalone Console uses
+      its local certificate and can start while the server is unavailable.</li>
       <li>If the page loads but API requests return <code>503</code>, check
       <code>iris</code> health and logs, the private network, and the
-      Console's read-only tier-token and management-CA mounts. A browser
+      Console's management URL, private DNS or routing, firewall on 9443, and
+      read-only tier-token and management-CA mounts. Confirm the management
+      certificate covers the hostname or IP in the URL. A browser
       certificate and the management CA serve different connections.</li>
       <li>Use <code>/readyz</code> for readiness: on server port 9101 it
       checks the tracker, catalog, artifact, and management listeners.
@@ -106,13 +119,15 @@ docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
       manifests, and temporary install assets.</li>
     </ul>
     <p>The Console mounts none of that state. It mounts only the tier
-    credential and public management CA read-only, and keeps its active TLS
-    identity in tmpfs. Back up uploaded images as well as server state and
+    credential and public management CA read-only. The standalone deployment
+    also mounts its own default browser certificate and key; the active TLS
+    identity stays in tmpfs. Back up uploaded images as well as server state and
     encrypted configuration. Keep the age identity separately.</p>
 
     <h2>More detail</h2>
     <ul>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/server/" target="_blank" rel="noopener">Server</a> — services, state, bootstrap, certificates, chown rules</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/operations/" target="_blank" rel="noopener">Operations</a> — daily commands, backups, recovery checklist</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/observability/" target="_blank" rel="noopener">Observability</a> — metrics, telemetry export health, failure interpretation</li>

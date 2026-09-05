@@ -851,7 +851,7 @@
           <h3>Certificate</h3>
           <p class="muted">Serves the console only — the device-facing catalog and
             artifact certificates are untouched, so enrolled devices keep working.
-            The private key is stored age-encrypted and never shown again.</p>
+            Uploaded private keys are stored age-encrypted and never shown again.</p>
           <p class="muted" id="cert-status" role="status" aria-live="polite"></p>
           <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
               aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
@@ -867,7 +867,7 @@
             </label>
             <div class="form-actions">
               <button class="btn" type="submit">Replace certificate</button>
-              <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
+              <button class="linkish danger-link" type="button" id="cert-revert">Use deployment default certificate</button>
             </div>
             <span class="err" id="cert-msg" role="alert"></span>
           </form>

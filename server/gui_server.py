@@ -13,12 +13,15 @@ sent upstream.
 """
 
 import email.utils
+import hashlib
 import http.client
 import json
 import os
 import ssl
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -127,9 +130,39 @@ def _atomic_write(path, data):
             pass
 
 
+def _certificate_info(path, source):
+    """Read public metadata for the identity loaded by this Console."""
+    info = {"source": source if path else "none", "subject": "unknown",
+            "issuer": "unknown", "not_after": "unknown",
+            "fingerprint_sha256": "unknown"}
+    if not path:
+        return info
+    try:
+        with open(path, encoding="ascii") as stream:
+            text = stream.read(2 * 1024 * 1024)
+        start = text.index("-----BEGIN CERTIFICATE-----")
+        end = text.index("-----END CERTIFICATE-----", start) + 25
+        leaf = text[start:end]
+        info["fingerprint_sha256"] = hashlib.sha256(
+            ssl.PEM_cert_to_DER_cert(leaf)).hexdigest()
+        # Pass only the public leaf to openssl, never the combined private key.
+        result = subprocess.run(
+            ["openssl", "x509", "-noout", "-subject", "-issuer", "-enddate"],
+            input=leaf, text=True, capture_output=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                name, _, value = line.partition("=")
+                name = {"notAfter": "not_after"}.get(name, name)
+                if name in ("subject", "issuer", "not_after") and value.strip():
+                    info[name] = value.strip()
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        pass
+    return info
+
+
 def fetch_console_certificate(api_url, token_file, ca_file, output_path,
                               timeout=10, default_certfile=None,
-                              default_keyfile=None):
+                              default_keyfile=None, allow_unavailable_default=True):
     """Fetch the active console identity through the authenticated API.
 
     The combined PEM is written only to the console's runtime filesystem.  It
@@ -157,7 +190,7 @@ def fetch_console_certificate(api_url, token_file, ca_file, output_path,
         # transport-unavailable management API may fall back to it. An API
         # response that is authenticated but invalid is handled below and is
         # never masked by this fallback.
-        if not default_certfile:
+        if not default_certfile or not allow_unavailable_default:
             raise ConsoleConfigurationError(
                 "management API is unavailable") from None
         use_default = True
@@ -234,7 +267,8 @@ class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
 
 
 def make_server(host, port, api_url, token_file, ca_file, certfile=None,
-                default_certfile=None, default_keyfile=None):
+                default_certfile=None, default_keyfile=None,
+                cert_source="built-in"):
     backend_host, backend_port, backend_prefix = _backend_parts(api_url)
 
     class Handler(BaseHTTPRequestHandler):
@@ -460,11 +494,51 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                     remaining -= len(chunk)
                 self.connection.settimeout(self.timeout)
                 response = conn.getresponse()
+                public_path = urlsplit(self.path).path
+                refresh = (response.status < 300 and public_path ==
+                           "/api/v1/settings/gui-cert" and
+                           self.command in ("POST", "DELETE"))
+                local_settings = (response.status == 200 and
+                                  self.command == "GET" and
+                                  public_path == "/api/v1/settings")
+                body = None
+                if refresh or local_settings:
+                    raw = response.read(4 * 1024 * 1024 + 1)
+                    if len(raw) > 4 * 1024 * 1024:
+                        raise ConsoleConfigurationError("settings response is oversized")
+                    try:
+                        payload = json.loads(raw)
+                        if not isinstance(payload, dict):
+                            raise ValueError()
+                    except (ValueError, UnicodeError):
+                        raise ConsoleConfigurationError("settings response is invalid") from None
+                    if refresh:
+                        applied = False
+                        with srv.certificate_lock:
+                            try:
+                                if not certfile:
+                                    raise ConsoleConfigurationError("Console TLS is disabled")
+                                source = fetch_console_certificate(
+                                    api_url, token_file, ca_file, certfile,
+                                    default_certfile=default_certfile,
+                                    default_keyfile=default_keyfile,
+                                    allow_unavailable_default=False)
+                                applied = srv.reload_tls(source)
+                            except (ConsoleConfigurationError,
+                                    tier_auth.CredentialUnavailable):
+                                pass
+                        payload["applied"] = applied
+                        payload["note"] = (None if applied else
+                            "saved; restart the Console to apply the certificate")
+                    payload["gui_cert"] = dict(srv.certificate_info)
+                    body = json.dumps(payload, separators=(",", ":")).encode()
                 self.send_response(response.status, response.reason)
                 has_cache = False
                 for name, value in response.getheaders():
                     low = name.lower()
                     if low in _RESPONSE_DROP:
+                        continue
+                    if body is not None and low in ("content-length", "etag"):
                         continue
                     if low == "location":
                         if "/internal/v1/" in value:
@@ -479,7 +553,12 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         self.send_header(name, value)
                 if not has_cache:
                     self.send_header("Cache-Control", "private, no-store")
+                if body is not None:
+                    self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
+                if body is not None:
+                    self.wfile.write(body)
+                    return
                 reader = getattr(response, "read1", response.read)
                 while True:
                     chunk = reader(65536)
@@ -488,10 +567,6 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                     if self.command != "HEAD":
                         self.wfile.write(chunk)
                         self.wfile.flush()
-                refresh = (response.status < 300 and
-                           urlsplit(self.path).path ==
-                           "/api/v1/settings/gui-cert" and
-                           self.command in ("POST", "DELETE"))
             except (OSError, ssl.SSLError, http.client.HTTPException,
                     tier_auth.CredentialUnavailable,
                     ConsoleConfigurationError):
@@ -503,18 +578,6 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 return
             finally:
                 conn.close()
-            if refresh:
-                try:
-                    fetch_console_certificate(api_url, token_file, ca_file,
-                                              certfile,
-                                              default_certfile=default_certfile,
-                                              default_keyfile=default_keyfile)
-                    srv.reload_tls()
-                except (ConsoleConfigurationError,
-                        tier_auth.CredentialUnavailable):
-                    # The durable management-side change succeeded.  Keep the
-                    # current serving identity and retry on process restart.
-                    pass
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -578,14 +641,22 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             "console TLS identity is unavailable; refusing plaintext")
     srv.tls_context = context
     srv.tls_active = context is not None
+    srv.certificate_lock = threading.RLock()
+    srv.certificate_info = _certificate_info(certfile, cert_source)
 
-    def reload_tls():
+    def reload_tls(source=None):
         if context is None or not certfile:
             return False
         try:
             probe = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             probe.load_cert_chain(certfile)
-            context.load_cert_chain(certfile)
+            with srv.certificate_lock:
+                info = _certificate_info(
+                    certfile, "custom" if source == "custom" else
+                    "built-in" if source == "default" else
+                    srv.certificate_info["source"])
+                srv.tls_context = probe
+                srv.certificate_info = info
         except (OSError, ssl.SSLError):
             return False
         return True
@@ -605,15 +676,17 @@ def main():
     default_keyfile = os.environ.get("IRIS_GUI_DEFAULT_KEY", "").strip() or None
     try:
         plaintext = os.environ.get("IRIS_GUI_ALLOW_PLAINTEXT", "") == "1"
+        source = "none"
         if not plaintext:
-            fetch_console_certificate(
+            source = fetch_console_certificate(
                 api_url, token_file, ca_file, certfile,
                 default_certfile=default_certfile,
                 default_keyfile=default_keyfile)
         server = make_server(host, port, api_url, token_file, ca_file,
                              certfile=None if plaintext else certfile,
                              default_certfile=default_certfile,
-                             default_keyfile=default_keyfile)
+                             default_keyfile=default_keyfile,
+                             cert_source="custom" if source == "custom" else "built-in")
     except (ConsoleConfigurationError, tier_auth.CredentialUnavailable) as exc:
         print("iris-console: %s; refusing to start" % exc,
               file=sys.stderr, flush=True)

@@ -15,10 +15,12 @@ images, inventory, credentials, jobs, and audit records.
 Open:
 
 ```text
-https://<server-ip>:8080/
+https://<console-address>:8080/
 ```
 
-The server uses a self-signed certificate by default. Before an admin account
+Use the configured Console host and port. In the one-host Compose stack this
+is `IRIS_HOST_IP`; a separate deployment has its own Console address. Its
+browser certificate is independent of the device/catalog certificate. Before an admin account
 exists, sign in with the default credential `iris` / `irisisgreat!`. A correct
 login creates no session; it yields a one-use setup grant that expires after
 ten minutes and takes you to the account-creation page. Creating the real admin
@@ -491,6 +493,11 @@ rather than an in-page tab strip. Each sub-page is deep-linkable, including
 `#settings/setup`, `#settings/packages`, `#settings/general`,
 `#settings/tls`, `#settings/telemetry`, and `#settings/audit`.
 
+General shows the device-facing server IP and the Console's browser URL
+separately. They can belong to different hosts. `IRIS_CONSOLE_URL` on the
+server supplies the published Console URL; the Console host's Compose binding
+controls where it actually listens.
+
 ### Setup
 
 The **Setup** sub-page (`#settings/setup`) is a post-install status panel: four
@@ -554,7 +561,8 @@ mount, or the Guest Shell artifact flow. See
   private key reveals a passphrase field; the key is decrypted at import
   (`openssl pkey`, passphrase piped over stdin, never on the command line)
   instead of being rejected, and is still stored age-encrypted at rest either
-  way. **Use built-in certificate** reverts to the shipped self-signed cert
+  way. The card shows the identity this Console is serving.
+  **Use deployment default certificate** reverts to the deployment's default browser identity
   and appears only once a custom certificate is installed.
 - **Trusted CAs** — drop one or many CA certificate files to install them
   individually, or use the CA bundle source picker to download and trust a
@@ -585,7 +593,7 @@ The command line stays the right tool for four things:
 
 | Task | Why it stays on the CLI |
 | --- | --- |
-| Bringing the server up | The console does not exist until the server is running. |
+| Bringing the deployment up | Build and start the containers and provision their certificates and credentials on the hosts. |
 | Reproducible batch operations | Reviewed CSV files give you a diff and a rollback path. |
 | Building agent bundles and IOx packages | Build-time tooling, not a runtime operation. |
 | Credential minting, revocation, and seeder rotation | Deliberately kept off the browser surface. |

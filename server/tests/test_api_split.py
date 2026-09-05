@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import hashlib
 import http.client
 import http.server
 import json
@@ -309,6 +310,127 @@ def test_console_certificate_uses_default_only_on_transport_failure(tmp_path):
         default_certfile=str(cert), default_keyfile=str(key))
     assert source == "default"
     assert b"PRIVATE KEY" in output.read_bytes()
+
+
+def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypatch):
+    device_cert, device_key = _certificate(tmp_path, "device")
+    combined = tmp_path / "device.pem"
+    combined.write_bytes(device_cert.read_bytes() + device_key.read_bytes())
+    monkeypatch.setenv("IRIS_CERT", str(combined))
+    broken = tmp_path / "management.pem"
+    broken.write_text("invalid management certificate")
+    token = tmp_path / "tier-token"
+    _write_secret(token, "t" * 64)
+    with pytest.raises(management_api.ConsoleTLSError):
+        management_api.make_server(
+            "127.0.0.1", 0, _NoSessionApp(), certfile=str(broken),
+            management_token_file=str(token))
+
+
+def test_remote_console_reports_and_reloads_its_own_certificate(tmp_path, monkeypatch):
+    management_cert, management_key = _certificate(tmp_path, "management")
+    default_cert, default_key = _certificate(tmp_path, "browser-default")
+    custom_cert, custom_key = _certificate(tmp_path, "browser-custom")
+    token = tmp_path / "tier-token"
+    _write_secret(token, "t" * 64)
+    monkeypatch.setenv("IRIS_CONFIG", str(tmp_path / "config"))
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "server-custom.pem"))
+    monkeypatch.setenv("IRIS_CERT", str(management_cert))
+    monkeypatch.setenv("IRIS_TRUST_DIR", str(tmp_path / "trust"))
+    monkeypatch.setenv("IRIS_CONSOLE_URL", "https://console.example.com:8080")
+    monkeypatch.delenv("IRIS_AGE_RECIPIENTS", raising=False)
+    app = management_api.gui_app.GuiApp(str(tmp_path / "gui-secrets.json"))
+    app.set_admin("admin", "password-for-test")
+    management = management_api.make_server(
+        "127.0.0.1", 0, app, certfile=str(management_cert),
+        keyfile=str(management_key), management_token_file=str(token))
+    _thread(management)
+    backend = "https://localhost:%d" % management.server_address[1]
+    runtime = tmp_path / "console-runtime.pem"
+    gui_server.fetch_console_certificate(
+        backend, str(token), str(management_cert), str(runtime),
+        default_certfile=str(default_cert), default_keyfile=str(default_key))
+    console = gui_server.make_server(
+        "127.0.0.1", 0, backend, str(token), str(management_cert),
+        certfile=str(runtime), default_certfile=str(default_cert),
+        default_keyfile=str(default_key))
+    _thread(console)
+    port = console.server_address[1]
+
+    def fingerprint(cert):
+        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest()
+
+    def request(path, method="GET", body=None, headers=None):
+        return _request(port, path, method=method, body=body,
+                        headers=headers, https=True)
+
+    def served_fingerprint():
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            with ssl._create_unverified_context().wrap_socket(
+                    sock, server_hostname="localhost") as tls:
+                return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+    try:
+        assert request("/api/v1/settings")[0] == 401
+        status, login_headers, body = request(
+            "/api/v1/login", "POST",
+            json.dumps({"username": "admin", "password": "password-for-test"}),
+            {"Content-Type": "application/json"})
+        assert status == 200
+        auth = {"Cookie": login_headers["Set-Cookie"].split(";", 1)[0],
+                "X-CSRF-Token": json.loads(body)["csrf"],
+                "Content-Type": "application/json"}
+        status, headers, body = request("/api/v1/settings", headers=auth)
+        assert status == 200
+        assert int(headers["Content-Length"]) == len(body)
+        settings = json.loads(body)
+        assert settings["gui_cert"]["source"] == "built-in"
+        assert settings["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
+        assert settings["gui_cert"]["fingerprint_sha256"] == served_fingerprint()
+        assert settings["console_url"] == "https://console.example.com:8080"
+        assert b"PRIVATE KEY" not in body
+        status, _, body = request(
+            "/api/v1/settings/gui-cert", "POST",
+            json.dumps({"cert_pem": custom_cert.read_text(),
+                        "key_pem": custom_key.read_text()}), auth)
+        assert status == 200
+        result = json.loads(body)
+        assert result["applied"] is True and result["note"] is None
+        assert result["gui_cert"]["source"] == "custom"
+        assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(custom_cert)
+        assert served_fingerprint() == fingerprint(custom_cert)
+        status, _, body = request("/api/v1/settings/gui-cert", "DELETE", headers=auth)
+        assert status == 200
+        result = json.loads(body)
+        assert result["applied"] is True
+        assert result["gui_cert"]["source"] == "built-in"
+        assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
+        assert served_fingerprint() == fingerprint(default_cert)
+
+        # A durable save can succeed while the remote Console fails to fetch it.
+        upstream_request = http.client.HTTPSConnection.request
+        def unavailable_certificate(self, method, url, *args, **kwargs):
+            if url.endswith("/internal/v1/console-certificate"):
+                raise OSError("certificate endpoint disconnected")
+            return upstream_request(self, method, url, *args, **kwargs)
+        monkeypatch.setattr(http.client.HTTPSConnection, "request",
+                            unavailable_certificate)
+        status, _, body = request(
+            "/api/v1/settings/gui-cert", "POST",
+            json.dumps({"cert_pem": custom_cert.read_text(),
+                        "key_pem": custom_key.read_text()}), auth)
+        assert status == 200
+        result = json.loads(body)
+        assert result["applied"] is False and "restart" in result["note"]
+        assert result["gui_cert"]["fingerprint_sha256"] == fingerprint(default_cert)
+        assert served_fingerprint() == fingerprint(default_cert)
+        assert b"PRIVATE KEY" not in body
+    finally:
+        console.shutdown()
+        console.server_close()
+        management.shutdown()
+        management.server_close()
 
 
 def test_console_certificate_does_not_mask_authenticated_bad_response(

@@ -85,7 +85,8 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Server](server.md) | Server services, state, bootstrap, and certificates. |
-| [Container Deployments](containers.md) | The split Compose server/Console and unified device image. |
+| [Container Deployments](containers.md) | Server, Console, and shared device image. |
+| [Docker on Separate Hosts](docker-hosts.md) | Independent Docker deployments, private management HTTPS, and credential setup. |
 | [Kubernetes](kubernetes.md) | Optional split server and stateless Console manifests. |
 
 ### Onboard devices

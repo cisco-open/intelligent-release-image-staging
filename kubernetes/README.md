@@ -39,8 +39,8 @@ management API and never mounts the server PVC.
 The public server and console LoadBalancers may use different stable IPv4
 addresses. Put the server address in `IRIS_HOST_IP`; it becomes the device TLS
 certificate IP SAN, tracker URL, and seeder advertised address. Set
-`IRIS_CONSOLE_URL` when the console's browser URL is not inferable from the
-server address and port 8080.
+`IRIS_CONSOLE_URL` to the full browser-facing HTTPS Console URL, including
+its published port. Settings reports that URL separately from the server IP.
 
 ## Build and pin both images
 
@@ -48,6 +48,7 @@ Build from the repository root and push each tier to a registry the cluster can
 pull from:
 
 ```bash
+tools/get-aria2c.sh amd64
 docker build --pull --platform linux/amd64 \
   -f server/Dockerfile \
   -t registry.example.com/iris/server:candidate .
@@ -285,7 +286,8 @@ this repository.
 1. Reserve stable external IPv4 addresses using the mechanism for your cluster,
    such as cloud LoadBalancer annotations or a MetalLB address pool.
 2. Replace `REPLACE_WITH_STATIC_EXTERNAL_IP` and
-   `REPLACE_WITH_AGE_RECIPIENTS` in `iris-seed-server.env`.
+   `REPLACE_WITH_AGE_RECIPIENTS` in `iris-seed-server.env`, and set its full
+   `IRIS_CONSOLE_URL` to the browser-facing Console Service URL.
 3. Review the PVC size, resource budgets, NetworkPolicies, and both generated
    ConfigMap inputs. The checked-in CPU and memory values are initial guardrails,
    not measured fleet-capacity claims.
@@ -321,7 +323,8 @@ curl -fsS --cacert /secure/path/catalog-ca.crt \
   https://<server-external-ip>:9101/readyz
 curl -fsS --cacert /secure/path/catalog-ca.crt \
   https://<server-external-ip>:9101/healthz
-curl -fkSs https://<console-external-ip>:8080/readyz
+curl -fsS --cacert /secure/path/console-ca.crt \
+  https://<console-address>:8080/readyz
 ```
 
 `/readyz` is a non-disclosing dependency/readiness result and may answer 503
@@ -344,15 +347,21 @@ kubectl -n iris exec deployment/iris-seed-server -- \
 ### Operator-supplied device artifacts
 
 The server regenerates derivable Guest Shell assets at startup. The two IOx
-packages and XR appmgr RPM are built out of tree and must be copied to the
-server PVC after each package rebuild:
+packages and XR appmgr RPM are built out of tree and must be copied with their
+adjacent provenance manifests to the server PVC after each package rebuild.
+Use temporary filenames and publish each manifest last:
 
 ```bash
 POD="$(kubectl -n iris get pod -l app.kubernetes.io/name=iris-seed-server \
   -o jsonpath='{.items[0].metadata.name}')"
 for f in iris-arm64.tar iris-amd64.tar iris-xr.rpm; do
   [ -f "artifacts/$f" ] || continue
-  kubectl -n iris cp --no-preserve "artifacts/$f" "$POD:/data/artifacts/$f"
+  test -f "artifacts/$f.manifest" || exit 1
+  kubectl -n iris cp --no-preserve "artifacts/$f" "$POD:/data/artifacts/.$f.next" || exit 1
+  kubectl -n iris cp --no-preserve "artifacts/$f.manifest" "$POD:/data/artifacts/.$f.manifest.next" || exit 1
+  kubectl -n iris exec "$POD" -- rm -f "/data/artifacts/$f.manifest" || exit 1
+  kubectl -n iris exec "$POD" -- mv "/data/artifacts/.$f.next" "/data/artifacts/$f" || exit 1
+  kubectl -n iris exec "$POD" -- mv "/data/artifacts/.$f.manifest.next" "/data/artifacts/$f.manifest" || exit 1
 done
 kubectl -n iris exec "$POD" -- ls -la /data/artifacts
 ```

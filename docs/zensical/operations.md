@@ -26,7 +26,10 @@ This page collects the actions operators perform after the first deployment.
 
 The Console is a separate service. It reaches the server through the internal
 HTTPS management API on TCP 9443; it does not mount the server's state or image
-storage. For Kubernetes, use the corresponding deployments:
+storage. For [separate Docker hosts](docker-hosts.md), use
+`server/docker-compose.server.yml` on the server and
+`server/docker-compose.console.yml` on the Console host, with that host's
+`--env-file`. For Kubernetes, use the corresponding deployments:
 
 ```bash
 kubectl -n iris exec deployment/iris-seed-server -c iris -- iris-assign
@@ -230,9 +233,12 @@ the read-only import root. Keep the matching state, configuration, and age
 identity together: a certificate alone cannot restore device credentials,
 assignments, or deployment records.
 
-Also preserve the Compose `iris-tier-auth` and `iris-management-ca` volumes
-when restoring the existing Console-to-server identity. Treat the tier
-credential backup as a secret. Generated device packages and their adjacent
+For one-host Compose, preserve the `iris-tier-auth` and `iris-management-ca`
+volumes when restoring the Console-to-server identity. With separate Docker
+hosts, back up each host's local credential and TLS directories instead; keep
+the management private key on the server host and the default browser private
+key on the Console host. Treat the tier credential backup as a secret.
+Generated device packages and their adjacent
 manifests live in the host artifacts directory; retain them if you need to
 redeploy the same build.
 
@@ -476,6 +482,9 @@ The Console reaches server state only through the internal management API on
 Compose atomically provisions a scoped random value in its `iris-tier-auth`
 named volume on first start. Kubernetes operators create the corresponding
 Secret before deployment, as documented in [Kubernetes](kubernetes.md).
+Separate Docker hosts keep local credential directories; use the
+[remote rotation procedure](docker-hosts.md#rotate-the-management-credential)
+to transfer the new value before removing the old one.
 
 Rotation uses the current/previous overlap and is intentionally two phase:
 

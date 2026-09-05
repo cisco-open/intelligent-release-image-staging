@@ -3833,7 +3833,8 @@
     var rows = [
       ['Version', s.version],
       ['Admin', s.admin_username],
-      ['Host IP', s.host_ip || '(unset)', 'machine'],
+      ['Server IP', s.host_ip || '(unset)', 'machine'],
+      ['Console URL', s.console_url || location.origin, 'machine'],
       ['Ports', 'tracker ' + s.ports.tracker + ' · catalog ' + s.ports.catalog +
                 ' · artifacts ' + s.ports.artifacts + ' · swarm ' + s.ports.swarm +
                 ' · console ' + s.ports.console]
@@ -3851,17 +3852,17 @@
     if (gc.source === 'custom' || gc.source === 'built-in') {
       certStatus.innerHTML = (gc.source === 'custom'
           ? '<span class="badge badge-running">custom</span> '
-          : '<span class="badge badge-queued">built-in</span> ') +
+          : '<span class="badge badge-queued">deployment default</span> ') +
         esc(gc.subject || 'unknown') +
         ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>' +
-        (gc.source === 'custom' ? ''
-          : ' <span class="muted">(the revert button appears once a custom certificate is installed)</span>');
+        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>';
     } else {
       certStatus.textContent =
-        'No TLS certificate — the console is serving plain HTTP.';
+        'Certificate details are unavailable.';
     }
-    document.getElementById('cert-revert').hidden = gc.source !== 'custom';
+    // A saved override may still be pending after a failed reload. Keep the
+    // default action available even when the active certificate is unchanged.
+    document.getElementById('cert-revert').hidden = false;
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
     var caSrcNow = (s.ca_trust || {}).url;
@@ -4298,12 +4299,16 @@
   });
   document.getElementById('cert-revert').addEventListener('click', async function () {
     var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    if (!confirm('Use the built-in certificate?\n\nThe uploaded certificate and key ' +
-        'are deleted and the console serves the bootstrap certificate again. New ' +
+    if (!confirm('Use the deployment default certificate?\n\nThe uploaded certificate and key ' +
+        'are deleted and the Console serves its deployment certificate again. New ' +
         'connections switch immediately; open sessions continue.')) return;
     var r = await fetch('/api/v1/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
     if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
-    msg.textContent = 'Reverted to the built-in certificate.'; msg.classList.add('ok');
+    var certRes = await r.json().catch(function () { return {}; });
+    msg.textContent = certRes.applied === false
+      ? 'Certificate ' + (certRes.note || 'saved; takes effect at the next restart') + '.'
+      : 'Reverted to the deployment default certificate.';
+    msg.classList.add('ok');
     refreshSettings();
   });
   document.getElementById('trust-form').addEventListener('submit', async function (e) {
@@ -4650,7 +4655,7 @@
     password_change_fail: 'failed to change the console password',
     revoke_other_sessions: 'revoked other console sessions',
     'gui-cert-replace': 'replaced the console TLS certificate',
-    'gui-cert-revert': 'reverted the console to the built-in certificate',
+    'gui-cert-revert': 'selected the deployment default certificate',
     'trust-add': 'installed a trusted CA certificate',
     'trust-remove': 'removed a trusted CA certificate',
     'ca-trust-config': 'changed the CA bundle download settings',

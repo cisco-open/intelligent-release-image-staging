@@ -58,10 +58,13 @@ it forwards allowlisted operations to the server's internal `/internal/v1`
 management API over authenticated, CA-pinned HTTPS. Devices do not use that
 management API: they continue to call the device catalog and tracker directly.
 
-Compose assigns both server containers private IP addresses on its network.
-The Console resolves `iris` through Docker DNS and calls port 9443 there.
-Published host ports connect browsers and devices to the right container; no
-separate LAN IP is needed for either service. IOx and Guest Shell still need
+The server and Console can share a Docker host or run on separate hosts.
+On one host, Compose assigns private container addresses and the Console
+resolves `iris` through Docker DNS. Across hosts, the Console uses the server's
+private management address on HTTPS port 9443. Each host publishes its own
+service ports; the containers do not need separate LAN addresses. See
+[Docker on separate hosts](docker-hosts.md) for deployment and credential setup.
+IOx and Guest Shell still need
 an app address, supplied through routed, inband, or router networking. XR uses
 the router's host network and does not take a separate app address. See
 [Network ports and flows](network-ports.md).
@@ -97,8 +100,10 @@ loopback only. The separate Console image exposes only 8080 and has its own
 local health/readiness checks. Once running, Console readiness checks its own
 files and listener, not server availability. Compose starts it after the server
 is healthy because its initial browser certificate comes from the management
-API. Kubernetes provides an independent default Console certificate, allowing
-that pod to start while the server is unavailable.
+API. Docker on separate hosts and Kubernetes provide an independent default
+Console certificate, allowing the Console to start while the server is
+unavailable. API requests return a redacted 503 with `Retry-After` until the
+authenticated server connection is available.
 
 Docker Compose mounts operator images read-only from `IRIS_IMAGE_ROOT` (default
 `/opt/images`) and served artifacts from `IRIS_ARTIFACTS_HOST_DIR`, which

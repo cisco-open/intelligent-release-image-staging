@@ -2,6 +2,8 @@
 
 IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. A server container manages the catalog, private BitTorrent tracker, and origin seeder; a separate Console container provides the browser interface. One shared agent runs in Guest Shell or in the common IOx and IOS-XR device image.
 
+[Docker on one host](docs/zensical/getting-started.md) runs both server containers by default. You can also use [separate Docker hosts](docs/zensical/docker-hosts.md) or [Kubernetes](docs/zensical/kubernetes.md).
+
 The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image transfers use the private BitTorrent swarm; see [network ports and flows](docs/zensical/network-ports.md) for connectivity requirements.
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
@@ -28,7 +30,8 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 **Deploy the server**
 
 - [Server](docs/zensical/server.md) — services, state, bootstrap, certificates
-- [Container deployments](docs/zensical/containers.md) — the split Compose server/Console and unified device image
+- [Container deployments](docs/zensical/containers.md) — server, Console, and shared device image
+- [Docker on separate hosts](docs/zensical/docker-hosts.md) — independent server and Console deployment
 - [Kubernetes](docs/zensical/kubernetes.md) — optional split server and Console manifests
 
 **Onboard devices**

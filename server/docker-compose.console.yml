@@ -1,0 +1,61 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Independent Console host. No server state or Docker network is shared.
+#   docker compose --env-file server/console.env -f server/docker-compose.console.yml up -d --build
+# See docs/zensical/docker-hosts.md for provisioning, bootstrap, and rotation.
+name: iris-console
+services:
+  console:
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: server/Dockerfile.console
+    image: iris-console:latest
+    container_name: "${IRIS_CONSOLE_CONTAINER:-iris-console}"
+    init: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      IRIS_GUI_HOST: "0.0.0.0"
+      IRIS_GUI_PORT: "8080"
+      IRIS_GUI_CERT: "/run/iris-console/cert.pem"
+      IRIS_GUI_DEFAULT_CERT: "/run/iris-console-tls/tls.crt"
+      IRIS_GUI_DEFAULT_KEY: "/run/iris-console-tls/tls.key"
+      IRIS_MANAGEMENT_API_URL: "${IRIS_MANAGEMENT_API_URL:?Set IRIS_MANAGEMENT_API_URL to the server HTTPS address on port 9443}"
+      IRIS_MANAGEMENT_API_TOKEN_FILE: "/run/iris-tier/current.json"
+      IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE: "/run/iris-tier/previous.json"
+      IRIS_MANAGEMENT_API_CA: "/run/iris-management-ca/ca.pem"
+    ports:
+      - "${IRIS_CONSOLE_BIND_IP:?Set IRIS_CONSOLE_BIND_IP to an address on this Console host}:${IRIS_GUI_PUBLISH:-8080}:8080"
+    volumes:
+      - type: bind
+        source: "${IRIS_TIER_AUTH_DIR:?Set IRIS_TIER_AUTH_DIR to the Console token directory}"
+        target: /run/iris-tier
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IRIS_MANAGEMENT_CA_DIR:?Set IRIS_MANAGEMENT_CA_DIR to the management CA directory}"
+        target: /run/iris-management-ca
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IRIS_CONSOLE_TLS_DIR:?Set IRIS_CONSOLE_TLS_DIR to the browser TLS directory}"
+        target: /run/iris-console-tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - "${IRIS_SHARP_SANS_FONT_HOST:-/dev/null}:/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"
+    tmpfs:
+      - /run/iris-console:uid=10001,gid=10001,mode=0700
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

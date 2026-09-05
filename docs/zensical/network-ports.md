@@ -14,9 +14,11 @@ BitTorrent traffic.
 ## Container addresses
 
 In Docker Compose, the server and Console each have a private container IP.
-Docker publishes their external ports on the host. The Console reaches the
-server at `https://iris:9443` using Docker's service name; neither container
-needs a separate LAN address. The Console serves the web UI, including
+Docker publishes their external ports on their hosts. On one host, the Console
+reaches `https://iris:9443` through Docker DNS. On separate hosts, it uses the
+server's private management address on HTTPS port 9443. Neither container
+needs a separate LAN address. See [Docker on separate hosts](docker-hosts.md).
+The Console serves the web UI, including
 `index.html`; device containers do not serve a UI.
 
 IOx uses the app IP configured during onboarding. IOS-XR appmgr uses the
@@ -49,9 +51,9 @@ run; the Console has no UI for it.
 | 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTPS | Private BitTorrent announces. IOx/XR use a bearer header; Guest Shell uses its personalized query credential inside TLS. All agents and the origin seeder pin the server certificate; neither credential form is logged. |
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
-| 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. Compose publishes it only on `IRIS_HOST_IP`; the host port can be changed with `IRIS_GUI_PUBLISH`. |
+| 8080 | TCP | Operator browser -> Console | HTTPS | Console UI and API. Bind it to the Console host's operator-facing address; `IRIS_GUI_PUBLISH` sets the host port. |
 | 9101 | TCP | Prometheus or operator tooling -> server telemetry | HTTPS | Anonymous, non-disclosing `/healthz` and `/readyz`; authenticated optional `/metrics`. Swarm data is reserved for the authenticated management API. |
-| 9443 | TCP | Console -> server tier | Authenticated HTTPS | Internal management API. Never publish this port on the host or public LoadBalancer. |
+| 9443 | TCP | Console -> server tier | Authenticated HTTPS | Management API. Keep it on the Compose network, a private server-host binding restricted to the Console host, or the Kubernetes ClusterIP Service. |
 | 22 | TCP | IOx agent -> its own IOS SVI | SSH/SCP | IOx SSH-to-self control; SCP image transfer before the final IOS placement copy on IE-3400, or on a Catalyst 9300 falling back from the SSD share. |
 
 External telemetry is opt-in, and the 9101 listener runs either way.
@@ -73,12 +75,12 @@ Every service listens on an unprivileged port, which is what lets the whole
 server run as the non-root uid 10001 with all capabilities dropped. See
 [Container runtime privileges](security.md#container-runtime-privileges).
 
-## Local-only services
+## Restricted services
 
 | Port | Transport | Service | Constraint |
 | --- | --- | --- | --- |
 | 6800 | TCP | aria2 JSON-RPC | Bound to loopback in the device runtime and seed-server container. It is intentionally not published by Docker Compose and must not be opened in a firewall. |
-| 9443 | TCP | Server management API | Compose-network/Kubernetes-internal only and reachable only from the Console tier. It is intentionally absent from host/public Service mappings. |
+| 9443 | TCP | Server management API | Reachable from the Console tier only. Separate Docker hosts need a private server-host binding and a firewall rule allowing the Console host; a public LoadBalancer must not expose it. |
 
 ## Firewall rules
 
@@ -89,16 +91,16 @@ All ports below are **TCP**.
 | Permit | Transport | Destination ports |
 | --- | --- | --- |
 | Devices -> server | TCP | 6969, 8443, 6881; Guest Shell onboarding also needs 8000 |
-| Operators -> server | TCP | 8080 |
+| Operators -> Console host | TCP | 8080 |
 | Explicit artifact API clients -> server, when used | TCP | 8000 |
 | Prometheus or operator tooling -> server, when used | TCP | 9101 |
-| Console -> server, internal network only | TCP | 9443 |
+| Console -> server over the private management network | TCP | 9443 |
 | Server tier or manual installer host -> devices during onboarding | TCP | 22 |
 | Devices <-> devices | TCP | 6881-6999 in both directions |
 
 Compose's host binding prevents the Console from also appearing on every other
-host interface, but it is not an access-control list: restrict TCP 8080 on
-`IRIS_HOST_IP` to trusted operator sources, especially until the first admin is
+host interface, but it is not an access-control list: restrict the published
+Console port to trusted operator sources, especially until the first admin is
 created. Kubernetes operators must apply the equivalent restriction to the
 Console LoadBalancer.
 
@@ -114,8 +116,8 @@ to IRIS and is not published by the Compose stack.
 
 ## Important constraints
 
-- Trust `server/docker-compose.yml` or the Kubernetes Service definition for
-  published ports, not a Dockerfile `EXPOSE` declaration.
+- Check the selected Compose files or Kubernetes Service definition for
+  published ports; a Dockerfile `EXPOSE` declaration does not publish them.
 - The private swarm disables DHT, peer exchange, and local peer discovery. There
   is no UDP tracker or DHT firewall requirement; tracker discovery is TCP 6969.
 - The origin seeder is pinned to TCP 6881. Devices choose an available listen

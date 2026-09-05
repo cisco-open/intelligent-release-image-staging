@@ -11,6 +11,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Deployment
+- Run the Docker server and Console on separate hosts with independent Compose
+  files, verified HTTPS, management credentials, and separate browser TLS.
+- Report the Console's own URL and serving certificate in Settings. Certificate
+  changes report whether the Console loaded them successfully.
+- Use configured server paths when onboarding devices, and keep server log
+  settings out of device installer options.
+
 ## [2026.09.05]
 
 ### Documentation

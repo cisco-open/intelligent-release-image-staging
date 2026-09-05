@@ -8,7 +8,11 @@ SPDX-License-Identifier: Apache-2.0
 
 This path brings up the IRIS server and Console tiers, publishes an image,
 onboards devices, and assigns an image to a device. Docker Compose
-runs the two-container stack.
+runs the two-container stack on one host by default. To place the Console on another
+host, follow [Docker on separate hosts](docker-hosts.md).
+
+For an assistant-led deployment that chooses and verifies either Docker
+layout, use [AI-guided PoC](aiagent.md).
 
 Start from the command line on an empty host. Once both services are running
 and the required device packages are built, use the browser for image import, device onboarding, and assignments — see

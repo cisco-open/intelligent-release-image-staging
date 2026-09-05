@@ -4,6 +4,11 @@
 
 FROM python:3.12-slim-trixie
 
+# Certificate metadata is read locally from the browser-facing identity.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG TARGETARCH
 RUN case "${TARGETARCH:-amd64}" in \
       amd64) ;; \

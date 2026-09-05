@@ -124,23 +124,27 @@ The credential is valid nowhere else and never appears in an environment value,
 URL, process argument, exception, or audit entry. Browser session and CSRF
 checks remain independently required.
 
-Port 9443 is not published. Compose exposes it only on the project network;
-Kubernetes uses a ClusterIP Service plus a NetworkPolicy that selects Console
-pods. Those reachability controls are defense in depth and never substitute
-for the credential.
+The default Compose stack exposes port 9443 only on its project network.
+Across Docker hosts, bind it to the server's private management address and
+allow only the Console host through the firewall. Kubernetes uses a ClusterIP
+Service plus a NetworkPolicy that selects Console pods. These reachability
+controls supplement the credential and verified TLS.
 
-The one state item the Console needs is its own TLS serving identity. In
-Compose, the server tier generates a console-only fallback identity (distinct
-from the catalog/device identity) and sends it—or an installed custom Console
-identity—over that authenticated hop into Console tmpfs. Kubernetes instead
-mounts an independent `iris-console-tls` Secret and the management API returns
-no default key; a custom override still crosses the same protected hop. No
-Console private key is stored in a shared or persistent Console volume.
+The Console also needs its own TLS serving identity. The default Compose stack
+obtains a Console-only fallback or installed custom identity through the
+authenticated management connection. Docker on separate hosts and Kubernetes
+mount an independent default certificate and key read-only into the Console;
+the server has neither that default private key nor the ability to fetch it.
+A custom identity installed through Settings crosses the protected management
+connection. The Console keeps its active copy in tmpfs.
 
 The Compose tier credential is an exception to the encrypted server store: its
 current/previous files persist in the `iris-tier-auth` volume and are readable
-by both tiers, with the Console mount read-only. Restrict access to that volume
-and its backups. Kubernetes supplies those credentials through Secrets.
+by both tiers, with the Console mount read-only. Separate Docker hosts have
+local credential directories provisioned over a trusted channel; neither host
+mounts the other's storage. Restrict access to these files and their backups.
+Kubernetes supplies the credentials through Secrets. See
+[Docker on separate hosts](docker-hosts.md) for provisioning and rotation.
 
 ### Swarm data is console-gated
 
@@ -309,8 +313,9 @@ rate-limited and audited like any other login. The operator may name the real
 administrator `iris` or even deliberately retain the default pair.
 
 This is a deliberate trade: whoever reaches a brand-new Console first can
-claim the administrator account. Compose narrows the default exposure by
-publishing port 8080 only on `IRIS_HOST_IP`, not on every host interface. That
+claim the administrator account. The one-host Compose stack publishes port
+8080 only on `IRIS_HOST_IP`; the standalone Console uses
+`IRIS_CONSOLE_BIND_IP`. That
 binding is not caller authorization: anyone who can reach that address can
 still race the intended operator. Restrict the port to trusted operator sources
 (or apply the equivalent policy to the Kubernetes Console LoadBalancer) and
@@ -416,14 +421,17 @@ The Console's own certificate and key, imported through Settings → TLS &
 trust, get the same careful handling: an encrypted private key is decrypted
 with `openssl pkey`, its passphrase piped over stdin and never passed as an
 argument or written to a log, and the key is stored age-encrypted in the
-server tier. Compose's distinct console-only fallback is generated in server
-tmpfs; Kubernetes supplies an independent default TLS Secret. The active pair
-is validated and copied into Console tmpfs over the authenticated management
-hop, never into a persistent Console store.
+server tier. The default Compose stack generates a Console-only fallback in
+server tmpfs. Docker on separate hosts supplies a Console-local default
+certificate and key; Kubernetes supplies an independent TLS Secret. The Console
+validates and copies its active pair into tmpfs. Custom identities and the
+single-host fallback arrive over the authenticated management connection;
+independently mounted defaults are copied locally, and their private keys stay
+on the Console host.
 
 The Console **fails closed to TLS**. Unless the explicit plaintext opt-in is
 set, startup fetches the active identity through the verified management hop
-or uses its independently mounted Kubernetes default; an unavailable or
+or uses its independently mounted default; an unavailable or
 unusable identity makes `iris-console` exit. Set
 `IRIS_GUI_ALLOW_PLAINTEXT=1` to opt into a plaintext console deliberately —
 loopback or an isolated lab network only. With the opt-in the session

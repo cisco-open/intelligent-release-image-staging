@@ -14,9 +14,9 @@ dependencies narrow: Python standard-library services, `aria2c` for
 BitTorrent, `mktorrent` for torrent metadata, and OpenSSL/age tooling for
 certificates and encrypted secret material.
 
-Docker Compose and the Kubernetes manifests are the supported ways to run both
-tiers. There is no separate host install — the two images are the units of
-deployment.
+Docker Compose and the Kubernetes manifests run both tiers. Docker supports
+one host or [separate server and Console hosts](docker-hosts.md). The two images
+are the units of deployment.
 
 The server image includes the device installers and SSH helper used by Console
 onboarding. The browser application is built separately into the Console image.
@@ -50,18 +50,20 @@ artifacts, and test output from the build context.
 | 6881 | TCP | BitTorrent | Seeder data | Initial image pieces from the server seeder. |
 | 8080 | TCP | HTTPS | Web console | Admin browser interface. |
 | 9101 | TCP | HTTPS | Telemetry | Non-disclosing probes, authenticated optional metrics, and management-authenticated swarm state. |
-| 9443 | TCP | HTTPS | Management API | Internal Console-to-server API; exposed only on the Compose network or internal Kubernetes Service. |
+| 9443 | TCP | HTTPS | Management API | Console-to-server API over the Compose network, a private server-host binding, or an internal Kubernetes Service. |
 | 6800 | TCP | HTTP | aria2 RPC | Local-only inside the container; not published by Compose. |
 
-Every listener is TCP; IRIS opens no UDP port. Keep port 9443 off host
-interfaces. Compose connects the services over its private network at `https://iris:9443`; Docker assigns their private addresses
-and resolves the service name. Other containers on that same network could
-also reach the listener, so the management credential and pinned TLS are still
-required. Kubernetes additionally restricts 9443 ingress to Console pods.
+Every listener is TCP; IRIS opens no UDP port. The default Compose stack
+connects the services over its private network at `https://iris:9443`.
+Separate Docker hosts publish 9443 only on a private server address, with
+firewall access restricted to the Console host. Kubernetes restricts 9443
+ingress to Console pods. All layouts require the management credential and
+verified TLS.
 
 Devices use `IRIS_HOST_IP` and the published server ports; operators use the
 Console's published address. The containers do not need separate LAN IPs.
-Compose binds Console 8080 only on `IRIS_HOST_IP`, while the server mappings
+The one-host Compose stack binds Console 8080 only on `IRIS_HOST_IP`; the
+standalone Console uses `IRIS_CONSOLE_BIND_IP`. Device-facing server mappings
 bind all host interfaces by default. Restrict those server ports with the host
 firewall. See
 [Network ports and flows](network-ports.md#firewall-rules).
@@ -177,9 +179,11 @@ for every subsequent Compose command.
 
 None of these paths is mounted into the Console. Its only server-side inputs
 are the public management CA and the current/previous tier-credential files,
-all read-only. Its active browser TLS identity is fetched over that authenticated
-hop into Console tmpfs; Compose generates a console-only fallback distinct from
-the catalog identity, while Kubernetes mounts its independent default Secret.
+all read-only. Its active browser TLS identity is kept in Console tmpfs. The
+default Compose stack fetches a Console-only fallback over the authenticated
+management connection. Docker on separate hosts and Kubernetes mount an
+independent default identity; a custom identity installed through Settings is
+fetched from the server.
 The management API certificate and private key stay in the server container.
 
 !!! warning "`/etc/iris` is not wholly encrypted"
@@ -264,7 +268,9 @@ The seeder RPC secret is not published to the network. Tools that need it, such 
 The management API listens on internal HTTPS port 9443. On first Compose start,
 the server atomically creates a management-scoped token in the
 `iris-tier-auth` named volume; both tiers mount it, and the Console's mount is
-read-only. Kubernetes uses a Secret projection instead. The token is not
+read-only. Separate Docker hosts use local credential directories populated
+through the [provisioning procedure](docker-hosts.md), while Kubernetes uses a
+Secret projection. The token is not
 accepted by the catalog, tracker, or any device resource, and it never appears
 in Compose environment, a process argument, a URL, logs, or audit text. The
 server compares credentials in constant time before route lookup, body
@@ -279,7 +285,7 @@ rollouts so every replica sees an overlap. Missing, unreadable, wrongly scoped,
 or unmatched material fails closed. TLS is independently fail closed: the
 Console pins the management CA and cannot opt into plaintext for this hop.
 
-For Compose, the server-side helper generates the replacement without ever
+For a shared Compose volume, the server-side helper generates the replacement without ever
 printing the credential. Run the first command, verify a normal Console API
 request, and then retire the overlap:
 
@@ -289,6 +295,10 @@ docker compose -f server/docker-compose.yml exec iris \
 docker compose -f server/docker-compose.yml exec iris \
   iris-management-token retire-previous
 ```
+
+For separate Docker hosts, deliver the replacement to the Console host before
+retiring the previous value. Follow the
+[remote credential rotation procedure](docker-hosts.md#rotate-the-management-credential).
 
 The browser still uses its session cookie and CSRF token. Those checks are in
 addition to tier authentication, not replaced by it; `X-IRIS-Poll` continues

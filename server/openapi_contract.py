@@ -734,6 +734,13 @@ def _json_success_example(route):
         "/telemetry/stream": {"ok": True, "stream_every": 4,
                                "stream_pause": False},
         "/settings": {"admin_username": "admin", "trust": [],
+                        "host_ip": "192.0.2.10",
+                        "console_url": "https://console.example.com:8080",
+                        "gui_cert": {
+                            "source": "built-in", "subject": "CN=console.example.com",
+                            "issuer": "CN=IRIS CA",
+                            "not_after": "Sep 4 00:00:00 2027 GMT",
+                            "fingerprint_sha256": "00" * 32},
                         "telemetry_destination": {
                             "endpoint": None, "enabled": None,
                             "source": "env",
@@ -839,6 +846,8 @@ def _json_success_example(route):
         return {"deleted": True}
     if suffix == "/settings/gui-cert" and route.method == "DELETE":
         return {"deleted": True,
+                **({"applied": True, "note": None}
+                   if route.service == "console" else {}),
                 "gui_cert": {
                     "source": "built-in", "subject": "CN=iris.example",
                     "issuer": "CN=IRIS CA",
@@ -1534,6 +1543,12 @@ def _description(route):
         notes.append("Status filter keys remain stable: deployed displays as Staged, placement-failed as Staging failed, and waiting-staging means an assigned device has not reported work on the current set. Current per-image errors take precedence over earlier staged flags.")
     elif suffix == "/swarm":
         notes.append("Image rows include image_id when the torrent hash maps to one catalog image. Observations and reports carry image_id when known; match it before attributing measurements. Tracker seeder role does not establish device staging completion, and ambiguous peer rates remain unavailable.")
+    elif suffix == "/settings":
+        notes.append("host_ip identifies the device-facing server; console_url is the configured browser origin and may use another host.")
+        if route.service == "console":
+            notes.append("gui_cert describes the certificate loaded by this Console, including an independently mounted deployment default.")
+    elif suffix == "/settings/gui-cert" and route.service == "console":
+        notes.append("Successful changes persist on the server and reload this Console before replying. applied reports the Console reload result; gui_cert describes the identity currently loaded. If applied is false, restart the Console to load the saved configuration.")
     path_exception = _resource_path_exception(route)
     if path_exception is not None:
         notes.append(path_exception + ".")

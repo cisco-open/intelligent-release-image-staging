@@ -184,7 +184,7 @@ SPDX-License-Identifier: Apache-2.0
             IOx and IOS-XR appmgr use one device-agent container build for arm64 and amd64. Each platform has its own package and storage handling. Guest Shell runs the same agent code from a bundle.
           </p>
           <p>
-            The server and web Console run in separate containers. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
+            The server and web Console run in separate containers on one Docker host, <a href="docs/docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
           </p>
           <p>
             The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. See <a href="docs/network-ports/">network ports and flows</a> for firewall requirements.

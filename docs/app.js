@@ -62,7 +62,7 @@ const paths = {
   },
   server: {
     title: "Server and Console",
-    copy: "Run the server and browser Console in separate containers. The Console calls the server through an internal HTTPS management API.",
+    copy: "Run the server and browser Console on one Docker host, separate Docker hosts, or Kubernetes. The Console calls the server over authenticated HTTPS.",
     items: [
       "The server stores images and state and seeds the swarm.",
       "The Console serves the UI without mounting server data.",

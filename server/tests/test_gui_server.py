@@ -516,7 +516,7 @@ def test_settings_tls_trust_and_destination_sections_wired():
     assert "#trust-rows .trust-del" in js
     assert "danger-link trust-del" in js
     # destructive paths confirm with consequence-naming messages
-    assert "serves the bootstrap certificate again" in js     # cert revert
+    assert "serves its deployment certificate again" in js    # cert revert
     assert "stops trusting certificates issued" in js         # trust remove
     assert "goes back to the environment configuration" in js # dest revert
     # download-now polls the job like the image publish poller
@@ -4156,6 +4156,51 @@ def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
         ck, _csrf = _auth(host, port)
         st, _, b = _req(host, port, "GET", "/api/settings", headers={"Cookie": ck})
         assert st == 200 and json.loads(b)["ports"]["console"] == 8082
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("url, port", [
+    ("https://console.example.com:9080/", 9080),
+    ("https://console.example.com", 443),
+])
+def test_settings_reports_independent_console_origin(tmp_path, monkeypatch, url, port):
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8080")
+    monkeypatch.setenv("IRIS_CONSOLE_URL", url)
+    host, bound_port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, bound_port)
+        status, _, body = _req(host, bound_port, "GET", "/api/settings",
+                               headers={"Cookie": ck})
+        assert status == 200
+        settings = json.loads(body)
+        assert settings["host_ip"] == "192.0.2.10"
+        assert settings["console_url"] == url.rstrip("/")
+        assert settings["ports"]["console"] == port
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:private@console.example.com:8080",
+    "https://console.example.com:bad", "http://console.example.com:8080",
+    "https://console.example.com:8080/?token=private",
+])
+def test_settings_does_not_echo_invalid_console_url(tmp_path, monkeypatch, url):
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8082")
+    monkeypatch.setenv("IRIS_CONSOLE_URL", url)
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings",
+                               headers={"Cookie": ck})
+        assert status == 200
+        settings = json.loads(body)
+        assert settings["console_url"] == "https://192.0.2.10:8082"
+        assert settings["ports"]["console"] == 8082
+        assert b"private" not in body
     finally:
         stop()
 

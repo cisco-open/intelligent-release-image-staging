@@ -6,11 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # AI-guided PoC deployment
 
-Use this guide for a first proof-of-concept or proof-of-value deployment. It is
-not a production runbook: it does not cover high availability, scale hardening,
-or change control.
+Use this guide to stage an image with an assistant helping run the deployment.
+Docker on one host is the default: the server and Console are separate
+containers on that host. Docker on separate hosts and Kubernetes are also
+supported choices. The device workflow is the same for all three.
 
-IRIS is stage-only — see [Guardrails](security.md#guardrails).
+IRIS distributes, verifies, and stages images. It never installs, activates,
+reloads, or changes boot variables. See [Guardrails](security.md#guardrails).
 
 ## Before you start
 
@@ -23,245 +25,300 @@ chmod 600 creds/deploy.env
 ```
 
 Keep credentials in that file or enter them directly in the Console. Do not
-paste passwords, tokens, private keys, or certificate material into a chat.
+paste passwords, tokens, or private keys into a chat.
 
-Gather these non-secret decisions before starting:
+Gather these non-secret decisions:
 
-| Decision | Examples |
+| Decision | What to record |
 | --- | --- |
-| Server runtime | Docker Compose for a single host, or Kubernetes for the single-replica alpha deployment. |
-| Stable server address | A device-reachable IPv4 address, used in the server certificate and tracker announces. |
-| Image source | A host path to a Cisco `.bin`, `.iso`, `.tar`, or `.rpm` software artifact. |
-| Device inventory | Management IP, management type, VLAN or app addressing, and model for every device — see [Management type](management-type.md) for which columns each type needs. |
-| Catalyst 9300 hosting mode | Guest Shell, or IOx on an SSD-equipped Catalyst 9300. |
-| IOx package availability | `iris-arm64.tar` for IE-3400; `iris-amd64.tar` for Catalyst 9300 IOx. |
-| IOS-XR device support | Cisco 8000 series routers use management type `xr-host` (platform `xr-appmgr`) and need `artifacts/iris-xr.rpm` built before onboarding — see step 6. |
+| Deployment layout | One Docker host, separate Docker hosts, or Kubernetes. |
+| Server address | Stable device-reachable IPv4 address for the catalog, tracker, artifacts, and origin seeder. |
+| Console address | Browser HTTPS URL and published port. On one Docker host it normally uses the server address on 8080; a separate Console has its own address. |
+| Private management connection | For separate Docker hosts, the server's private bind address and the HTTPS hostname or IP the Console will use on 9443. |
+| Image source | A server-host path or upload source for a Cisco `.bin`, `.iso`, `.tar`, or `.rpm` file. |
+| Device inventory | Management IP, management type, network fields, and optional model for every device. See [Management type](management-type.md). |
+| Device agent | Guest Shell, IOx, or XR appmgr. A Catalyst 9300 can use Guest Shell or IOx with supported app-hosting storage. |
+| Package inputs | Both architecture binaries and required build tools for IOx/XR; the server must serve the packages before onboarding. |
 
-Review [Network Ports and Flows](network-ports.md) before bringing up the
-server. Devices need reachability to the server and to each other for the
-private swarm.
+Check out the same IRIS version on every deployment host. For a server already
+in use, identify its Compose project, container names, state volumes, age
+identity, and artifact directory before changing anything. Preserve those
+settings and data unless a reset is explicitly part of the task.
 
-### Settings that fail closed
+## Choose the layout
 
-Several controls refuse to guess rather than doing something unsafe. Each
-stops with a message naming the variable, so the failure is legible, but
-knowing them in advance saves a stalled PoC:
-
-| You see | Why | What to set |
+| Layout | Deployment files | Connection between containers |
 | --- | --- | --- |
-| The console refuses to start and exits rather than serving plain HTTP | A console served over HTTP puts the operator password on the wire in clear text | Provide a certificate (the normal path), or set `IRIS_GUI_ALLOW_PLAINTEXT=1` to accept the risk deliberately on an isolated lab network |
-| A device refuses the SSH connection, naming unsupported algorithms | SHA-1 key exchange and `ssh-rsa` host keys require explicit opt-in | `IRIS_SSH_LEGACY=1`, only when the device cannot offer stronger algorithms |
-| A device's SSH host key does not match the one recorded on first contact | The device was re-imaged or replaced, or the address now answers to a different box | Confirm the device's identity, then use **Forget SSH host key** in its Console drawer before onboarding again |
-| Routed Guest Shell onboarding leaves the new interface out of your routing domain | IRIS applies a routing protocol only when configured | Set the device's `svi_igp=isis` when the fabric runs IS-IS; leave blank to use the server's `SVI_IGP` default |
-| IOx package staging aborts asking for an image digest | The cross-architecture emulation helper runs privileged, so it is pinned by digest rather than a moving tag | `BINFMT_IMAGE_DIGEST` to the audited digest, or preconfigure emulation on the host |
+| Docker on one host — default | `server/docker-compose.yml`, configured by `server/.env` or exported variables | Docker DNS resolves `iris`; the Console calls `https://iris:9443`. Port 9443 stays unpublished. |
+| Docker on separate hosts | `server/docker-compose.server.yml` with `server/server.env`; `server/docker-compose.console.yml` with `server/console.env` | Private HTTPS 9443, a scoped file-mounted token, and verified management TLS. Each host has its own local files. |
+| Kubernetes | `kubernetes/` manifests and environment examples | Internal management Service on 9443, restricted by NetworkPolicy; credentials and certificates come from Secrets. |
 
-Set `IRIS_GUI_ALLOW_PLAINTEXT`, `IRIS_SSH_LEGACY`, and `SVI_IGP` in
-`server/.env`. Export `BINFMT_IMAGE_DIGEST` in the Docker host's shell before
-running the package helper; it is a build setting, not a Compose service setting.
+All layouts have one server and one Console instance. Separating the Console
+from the server does not cluster the tracker, catalog, or seeder.
+
+Review [Network ports and flows](network-ports.md). Devices contact the server
+and each other for swarm traffic. The server drives onboarding over SSH/SCP.
+Operators contact the Console; they do not need direct management API access.
+
+### Settings that stop deployment
+
+| Symptom | Check |
+| --- | --- |
+| Console exits before serving HTTPS | Its browser certificate and key must be readable and form a matching pair. The one-host stack fetches its default through the management API; separate-host Docker and Kubernetes mount their own default identity. |
+| Console loads but API requests return 503 | Server health, the private management route and DNS, the management certificate and CA, and matching scoped token files. Local Console readiness alone does not prove server access. |
+| Device SSH reports unsupported algorithms | Set `IRIS_SSH_LEGACY=1` only when the device cannot offer stronger algorithms. |
+| Device SSH host key differs from the saved key | Confirm the device identity before using **Forget SSH host key** in its Console drawer. |
+| Routed Guest Shell needs IS-IS on its new interface | Set the device's `svi_igp=isis`, or the server's `SVI_IGP=isis` default, when that matches the fabric. |
+| IOx staging requests an emulation image digest | Export the audited `BINFMT_IMAGE_DIGEST` on the package-build host, or configure ARM64 emulation there beforehand. |
+
+Put server runtime settings such as `IRIS_SSH_LEGACY` and `SVI_IGP` in the
+selected server environment file. For Kubernetes, use
+`kubernetes/iris-seed-server.env`. Package-build variables belong in the
+build host's shell. Tokens and private keys stay in protected files.
 
 ## Assistant operating rules
 
-Use an assistant that can read the repository, run the documented commands,
-and report failures accurately. Review its device targets and results as you
-would for a manual deployment.
-
-Give the assistant the following requirements when it helps operate a PoC:
+Give the assistant these requirements along with the chosen layout:
 
 ```text
 Operate IRIS as a stage-only system. Never install, activate, reload, change
-boot variables, or replace a running image on a device.
+boot variables, or replace the running software on a device.
 
-Keep credentials and secrets out of chat, output, logs, source control, and
-generated artifacts. Read local credentials only from creds/deploy.env when a
-step needs them. If a required value is absent or a precondition is unclear,
-stop and ask one plain question rather than guessing.
+Read CLAUDE.md and the current docs/zensical/ guide for the selected layout.
+Use Getting Started for Docker on one host, Docker on Separate Hosts for
+independent Docker hosts, or Kubernetes for the cluster manifests. Keep the
+same layout, Compose project, environment files, and container names in every
+command. Preserve existing server state and device assignments.
 
-Before any destructive action, state exactly what it changes and obtain my
-confirmation. Prefer the Web Console for inventory, onboarding, assignments,
-and monitoring. Use the documented CLI only when the Console does not cover the
-operation.
+Keep credentials and secrets out of chat, command output, logs, and source
+control. Read local credentials only when a step needs them. Do not copy
+server state, the age identity, or the management private key to the Console.
 
-Use the current Zensical documentation in docs/zensical/. Follow Getting
-Started for Docker Compose, Kubernetes for the Kubernetes alpha path, IOx App
-for app-hosting prerequisites, and Network Ports and Flows for firewall rules.
-At the end of every step, state the next action required from me.
+Continue work within the authorized scope. Ask for a missing value only when
+it prevents a safe next step. Obtain approval for a destructive action unless
+it has already been explicitly authorized. Use the Console for ordinary
+inventory, image, onboarding, assignment, and monitoring work.
+
+Verify the chosen layout and report observed results. Distinguish container
+health from an authenticated Console request, and distinguish torrent seeding
+from verified staging. Record any untested behavior without claiming success.
 ```
 
-## Guided sequence
+## Start the selected deployment
 
-1. **Choose the runtime.** Use [Getting Started](getting-started.md) for Docker
-   Compose on one server. Use [Kubernetes](kubernetes.md) only when a
-   single-replica Kubernetes deployment and its persistent volume are intended.
-2. **Bring up the server.** Complete [Getting Started → Configure the
-   server](getting-started.md#configure-the-server): create the age identity
-   outside the repository and export its host path. Give uid `10001` that file
-   and the host `artifacts/` directory — the container runs non-root and cannot chown host paths; see
-   [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
-   Then run
-   `tools/start-compose-server.sh` on the Linux Compose host. It
-   bootstraps encrypted state idempotently, starts Compose, waits for health,
-   and builds/stages both supported IOx packages before any Console onboarding.
-   Do not proceed until `https://<server-ip>:8080/` is reachable. The published
-   port is overridable in Compose when `:8080` is already taken on the host —
-   the container always listens on 8080 internally; substitute your published
-   port in every URL in this guide.
-3. **Create the Console admin immediately, before exposing it beyond the trusted
-   management network.** Whoever reaches a brand-new Console first can claim
-   the administrator account. Accept the self-signed certificate warning only
-   for the expected server, sign in with the default first-run credential
-   `iris` / `irisisgreat!`, and create the initial admin account. That login
-   creates no session: it returns a one-use setup grant that expires after ten
-   minutes. Creating the administrator permanently ends this special behavior;
-   the pair is then checked only against the stored administrator credentials
-   and normally fails. The next sign-in opens
-   the first-run setup wizard at `#setup` for telemetry, device packages, and
-   image verification against Cisco's Known Good Values feed. Configure the
-   verification schedule, run a refresh, or import a feed file for an offline
-   deployment. Skipped steps can be resumed under **Settings → Setup**; a
-   configured schedule is separate from a successful verification run.
-   See [Validation](validation.md). Build device packages on the Docker host
-   as described in step 6, then use **Re-check** in the Console to update
-   their setup status.
-4. **Publish an image.** Upload through the Console, import a file that is
-   already on the server from the Console **Import from disk** panel, or use
-   `iris-publish` from inside the server container. Publishing creates catalog
-   and torrent metadata; it does not change any device.
-5. **Add devices.** Use the Console Devices page or its example CSV. Choose the
-   management type to set which network fields appear, then the agent install.
-   Model is optional free text; a recognized model narrows installer choices
-   without changing the management type. Choose **Guest
-   Shell** for the standard C9300 path or a Catalyst 8000 (C8xxx, IOS-XE) router
-   VPG deployment, **IOx** for a supported IOx device, or **XR appmgr container** for a
-   Cisco 8000 series (IOS-XR) router. CSV/API platform values remain
-   `guestshell`, `router`, `iox`, and `xr-appmgr`, respectively. `xr-appmgr` rows
-   use management type `xr-host` and the router's own network; leave app,
-   VLAN/SVI, VPG, and NAT fields empty. See [Management type](management-type.md)
-   for the full column matrix.
-6. **Confirm device packages are ready.** The server bring-up step stages arm64
-   `iris-arm64.tar` for IE-3400 and amd64 `iris-amd64.tar` for Catalyst 9300 IOx. A Catalyst 9300
-   IOx deployment also requires a USB SSD and the Catalyst 9300 app-hosting interface.
-   See [IOx App](iox.md). The XR package is **not** staged by the bring-up
-   scripts: when Cisco 8000 (IOS-XR) devices are in scope, run
-   `tools/build-xr-package.sh --out artifacts/` from the repository root on
-   the Docker host (x86_64). Onboarding then finds `artifacts/iris-xr.rpm` to
-   push to the router.
-   The canonical OCI archive, both IOx tars, and the XR RPM are
-   deployment-neutral: none contains the server certificate, and none needs
-   `CATALOG_PEM` at build time. IOx onboarding supplies the current public
-   certificate as application data; XR onboarding copies it to the router's
-   `harddisk:` beside the RPM. After certificate rotation, re-onboard deployed
-   devices so they receive the new trust anchor; do not rebuild packages just
-   because the certificate changed.
-   Rebuild all served packages after **any source included in a device package
-   changes**: they are prebuilt, so otherwise onboarding silently ships old
-   code. A change under `device/agent/` also requires a fresh Guest Shell
-   bundle. The Console/API setup status reports package readiness from the
-   wrapper bytes and adjacent build-provenance manifest. It does not infer
-   readiness from certificate age, inspect package contents, or validate a
-   native package signature. Its separate certificate check only confirms that
-   the live server and the public copy handed out during onboarding agree.
-   `tools/check-package-freshness.sh` provides the same checks from the Docker
-   host; a green result does not compare the package with the current checkout
-   or confirm that an already-deployed device was upgraded. Keep native signed
-   wrappers unchanged: the IOx rebake helper refuses packages containing
-   signature metadata. See [Artifact handling](iox.md#artifact-handling) for
-   publishing signed output with its matching provenance manifest.
-   If an existing canonical OCI archive has older source at the same version,
-   use a new `IRIS_DEVICE_IMAGE_OCI` output path for both wrapper builds or
-   explicitly rebuild it with `IRIS_FORCE_DEVICE_IMAGE_BUILD=1`. See
+### Docker on one host
+
+Follow [Getting Started](getting-started.md) to create the age identity outside
+Git and configure `IRIS_HOST_IP`, `IRIS_AGE_KEY_FILE_HOST`, and
+`IRIS_AGE_RECIPIENTS` in `server/.env`. Give uid 10001 access to the key, image
+root, artifacts, and volumes as documented there. From the repository root:
+
+```bash
+set -a
+. server/.env
+set +a
+tools/get-aria2c.sh amd64
+tools/start-compose-server.sh
+docker compose -f server/docker-compose.yml ps
+```
+
+The helper builds both server images, bootstraps a fresh encrypted store,
+starts both services, and stages both IOx packages. An existing complete
+store is preserved. If an IOx build prerequisite fails, the stack may be
+running even though the helper exits nonzero; correct the prerequisite and
+rerun `tools/provision-iox-packages.sh` before onboarding IOx devices.
+
+Open `https://<server-ip>:8080/`, or the host port set by
+`IRIS_GUI_PUBLISH`. A Guest Shell deployment can use the manual Compose
+commands in [Getting Started](getting-started.md#start-the-server) without
+building native packages. XR requires its RPM separately.
+
+### Docker on separate hosts
+
+Follow [Docker on separate hosts](docker-hosts.md) to prepare and deliver the
+separate host bundles. The helper creates a management token, an independent
+management certificate, and an independent browser certificate:
+
+```bash
+python3 tools/prepare-docker-hosts.py \
+  --out "$HOME/.config/iris/docker-hosts" \
+  --management-host iris-mgmt.example.com \
+  --console-host console.example.com
+```
+
+Use your actual hostnames and a new output directory whose parent exists.
+Deliver only each host's bundle through verified SSH and set its ownership to
+uid/gid 10001. The full guide covers host paths, certificate trust, and file
+permissions.
+
+On the server host, copy `server/server.env.example` to `server/server.env`
+and set the device-facing server IP, private management bind IP, full Console
+URL, age identity and recipients, and local storage paths. From the repository
+root, for a fresh server:
+
+```bash
+tools/get-aria2c.sh amd64
+docker compose --env-file server/server.env \
+  -f server/docker-compose.server.yml build --pull
+docker compose --env-file server/server.env \
+  -f server/docker-compose.server.yml run --rm iris iris-bootstrap
+docker compose --env-file server/server.env \
+  -f server/docker-compose.server.yml up -d
+docker compose --env-file server/server.env \
+  -f server/docker-compose.server.yml ps
+```
+
+For an existing server, preserve its project name, volumes, identity, and
+paths; skip bootstrap. The standalone server file does not launch a Console.
+
+On the Console host, copy `server/console.env.example` to
+`server/console.env`. Set its browser bind address and port, the management
+HTTPS URL, and its three local credential/certificate directories. Then:
+
+```bash
+docker compose --env-file server/console.env \
+  -f server/docker-compose.console.yml build --pull
+docker compose --env-file server/console.env \
+  -f server/docker-compose.console.yml up -d
+docker compose --env-file server/console.env \
+  -f server/docker-compose.console.yml ps
+```
+
+Open the Console host's configured HTTPS URL. The Console can start while the
+server is unavailable using its local browser identity; API requests return
+503 until the authenticated server connection works. No server data volume
+or age key belongs on the Console host. Build device packages on the server
+host using the [package steps](docker-hosts.md#start-the-server-host).
+
+### Kubernetes
+
+Use a cluster with amd64 worker capacity, a suitable storage class,
+LoadBalancer support, and enforced NetworkPolicy. Follow
+[Kubernetes](kubernetes.md) for the complete configuration. For a small lab,
+use the [K3s setup choices](kubernetes.md#small-lab-with-k3s); Docker can remain
+on the same host with separate service addresses.
+
+Configure IRIS:
+
+1. Build the server and Console images from their Dockerfiles, publish them to
+   a registry reachable by the nodes, and pin both digests in
+   `kubernetes/kustomization.yaml`.
+2. Configure `kubernetes/iris-seed-server.env` with the reserved device-facing
+   Service address, age recipients, and full `IRIS_CONSOLE_URL`. Configure
+   `kubernetes/iris-console.env` with the internal management URL. The public
+   server and Console Services have independent addresses.
+3. Configure the server PVC and Service exposure. Preserve device source IPs
+   on the server Service and restrict the Console Service to operators.
+   Keep management 9443 on its internal Service.
+4. Provision the namespace, age identity, management and observability token
+   pairs, management certificate, public management CA, and Console
+   certificate using [Secrets and storage](kubernetes.md#secrets-and-storage).
+   The management certificate covers the internal Service names; the browser
+   certificate covers the external Console URL. Neither private key belongs
+   in a ConfigMap or image.
+5. Build the needed device packages and stage them with their manifests in
+   the server's artifact storage before onboarding devices.
+
+Apply the configured manifests and wait for both Deployments:
+
+```bash
+kubectl apply -k kubernetes
+kubectl -n iris rollout status deployment/iris-seed-server
+kubectl -n iris rollout status deployment/iris-console
+```
+
+Use the Console Service's browser address. It is independent of the server
+Service address used by devices.
+
+## Verify the deployment
+
+Run these checks for the selected layout before onboarding. When verifying
+both Docker options, use separate projects and data for each test, with
+nonconflicting container names and host ports. See
+[Running a second stack](server.md#running-a-second-stack-on-the-same-host).
+
+| Check | Docker on one host | Docker on separate hosts |
+| --- | --- | --- |
+| Containers | Both services are healthy in the same Compose project. | Server and Console are healthy in their respective projects. |
+| Management route | Console reaches `https://iris:9443` through its Docker network; no host port publishes 9443. | Console reaches the configured private HTTPS endpoint, with hostname and CA verification and matching token files. |
+| Browser and API | Login, inventory, Settings, image import/upload, and job logs work through the published Console URL. | The same operations work through the Console host's URL. |
+| Addresses and certificate | Settings shows the intended server IP, Console URL, and certificate actually served to the browser. | Settings distinguishes the device-facing server address from the Console URL and reports the Console's own browser certificate. |
+| Server restart | The running Console remains locally ready and API requests recover when the server returns. | Also check that the Console starts with its local identity while the server is stopped, then recovers API access when it returns. |
+| Storage | Only the server mounts state, images, artifacts, and encrypted configuration. | The Console host has only its scoped credential, public management trust, and default browser identity. |
+
+Use an isolated test deployment for server outage checks when device work is
+active. Check readiness and one authenticated API request after each restart.
+For Kubernetes, use the corresponding checks in
+[Health and operation](kubernetes.md#health-and-operation).
+
+## Stage an image
+
+1. **Create the administrator.** Open the configured Console URL from a trusted
+   management network. Verify the expected browser certificate, then sign in
+   with the first-run credential `iris` / `irisisgreat!` and create the admin.
+   That first login returns a one-use setup grant valid for ten minutes; it
+   does not create a session. The administrator account is stored on the
+   server and ends first-run setup. See [Console first run](console.md#first-run).
+2. **Complete setup.** Configure telemetry and image verification, and check
+   **Settings → Device packages**. A verification schedule alone does not prove
+   a successful verification run. Refresh Cisco's Bulk Hash feed or import a
+   feed file for an offline deployment. See [Validation](validation.md).
+3. **Publish an image.** Upload through the Console or use **Import from disk**
+   for a file already on the server. Publishing hashes the file and creates
+   catalog and torrent metadata; it does not change a device.
+4. **Add devices.** Management type controls the network fields. Model is
+   optional free text; a recognized model narrows installer choices without
+   changing management type. Choose Guest Shell, IOx, or XR appmgr as
+   appropriate. XR uses `xr-host` and the router's network, with app, VLAN/SVI,
+   VPG, and NAT fields empty. See [Management type](management-type.md).
+5. **Confirm packages.** IE-3400 IOx needs `iris-arm64.tar`; Catalyst 9300 IOx
+   needs `iris-amd64.tar` and supported app-hosting storage. XR needs
+   `iris-xr.rpm`. Serve each package with its matching provenance manifest.
+   See [IOx App](iox.md) and
    [Embedded agent packages](development.md#embedded-agent-packages).
-7. **Onboard devices.** Start one-click onboarding from the Console and watch
-   each job to completion. A Catalyst 9300 can use either Guest Shell or IOx; an
-   explicit IOx choice with an unknown model fails before it touches the device.
-   IOS-XE installers save successful configuration changes with
-   `copy running-config startup-config`; they do not save a failed or partial
-   lifecycle. XR uses appmgr instead of IOS-XE configuration commands.
-8. **Assign and observe.** Assign the published image, then use the Swarm and
-   Monitoring areas to verify downloading, verification, staging, and seeding.
-   For the proof-of-value figure, show how the bytes actually travelled — and
-   only what was actually measured: the server measures its own origin-to-peer
-   send rates, and per-peer receive attribution distinguishes bytes **traced**
-   to a specific device from an honest **untraced** residue. State the figure
-   as server-sent versus peer-carried using the attributed/unattributed
-   counters, and never present the untraced residue as per-device fact. See
-   [Telemetry export](telemetry-export.md) and the importable Splunk and
-   Grafana boards under `docs/zensical/dashboards/`.
-9. **Stop at staged.** Handoff installation, activation, reload, and boot
-   management to the normal device-management process. They are outside IRIS.
+6. **Onboard.** Start one-click onboarding and watch each job to completion.
+   Inspect failures before retrying. IRIS app/container lifecycle operations
+   do not install or activate the staged operating-system image.
+7. **Assign and observe.** Assign the image, then watch download, hash
+   verification, final staging, and seeding. A tracker seeder can still be
+   verifying or placing its file; confirm the device's final per-image staged
+   state. Use [Telemetry export](telemetry-export.md) for origin/peer traffic
+   measurements and their limits.
+8. **Stop at staged.** Installation, activation, reload, and boot management
+   belong to the operator's normal device-management process outside IRIS.
 
-## Reset or redeploy an existing PoC
+Device packages contain no deployment certificate. Onboarding supplies public
+server trust separately; a device certificate rotation needs re-onboarding,
+not a package rebuild. A shared-agent source change requires rebuilding the
+Guest Shell bundle, both IOx packages, and the XR RPM before rollout. Package
+readiness checks wrapper bytes and provenance; it does not prove those bytes
+match newer source or validate a native signature.
 
-For a routine upgrade, retain the existing state and rebuild the server and
-Console. Rebuild device packages if their source changed, then follow
+## Maintenance and cleanup
+
+Use the same deployment files, environment files, project names, and volume
+paths for maintenance. Retain server data when rebuilding containers. Rebuild
+and redeploy device agents when their source changes; see
 [Redeploying agents](operations.md#redeploying-agents-after-an-artifact-rebuild).
 
-Use the reset below only when you intend to discard the existing deployment
-and repeat first-run setup. Undeploy agents while their deployment records and
-credentials are still available, then back up the stopped server:
+Back up server state, encrypted configuration, uploaded images, and host
+artifacts as described in [Backups](operations.md#backups). Keep the age
+identity separately. A one-host stack also has local tier-token and management
+CA volumes. Separate hosts have independent credential/TLS directories; back
+up each on its owning host. Restoring only a certificate does not restore
+device credentials or assignments.
 
-1. Sync the newer source tree into the Compose project directory if this reset
-   accompanies an upgrade, preserving the host's `server/.env` and any local
-   `server/docker-compose.override.yml`.
-2. From the `server/` Compose directory: `docker compose down` (never `down -v`
-   — that deletes the state volumes with no backup).
-3. Back up every named volume before touching it — never skip this. The tier
-   credential and management-CA volumes are narrow, but they are still part of
-   a restorable two-container deployment:
-
-    ```bash
-    STAMP=$(date +%Y%m%d-%H%M%S)
-    for v in iris-state iris-config iris-images iris-tier-auth iris-management-ca; do
-      docker run --rm -v "$(docker compose config --format json | python3 -c \
-        'import json,sys; print(json.load(sys.stdin)["name"])')_${v}":/v \
-        -v "$HOME/iris-backups":/b alpine \
-        tar czf "/b/${v}-${STAMP}.tgz" -C /v .
-    done
-    ```
-
-    (Compose prefixes volume names with the project name; the snippet resolves
-    it. `docker volume ls` shows the exact names if in doubt.)
-4. Remove `iris-state`, `iris-config`, `iris-tier-auth`, and
-   `iris-management-ca` for a genuine first-run stack. The `iris-images`
-   volume holds images that were **uploaded through the Console** — keep it
-   (and know it is in your backup) if you want those payloads, or remove it as
-   well for an entirely empty upload library. Images imported from the host
-   image root (`IRIS_IMAGE_ROOT`, default `/opt/images`, bind-mounted read-only)
-   are untouched either way and reappear through the Console **Import from
-   disk** panel after setup.
-5. Do not treat a deployment-neutral package as stale merely because the wipe
-   minted a new server certificate. The canonical OCI archive, both IOx tars,
-   and the XR RPM remain reusable when their source is unchanged. The bring-up
-   path stages the new public certificate separately; subsequent IOx and XR
-   onboarding delivers it at runtime. If this reset also moved to changed
-   agent/container source, rebuild every device package before onboarding.
-6. Bring the stack back up with `tools/start-compose-server.sh` — not raw
-   `docker compose up`. The entrypoint fails closed when the encrypted secrets
-   file is missing from the freshly recreated config volume, and only the
-   bring-up script's `iris-bootstrap` step recreates it (raw `up -d` produces a
-   restart-looping container, never the first-run page). Then continue from
-   step 3 of the guided sequence: the default first-run credential works again
-   because no admin account exists in the fresh state.
-
-Adding a recovery recipient does **not** need any of this. `iris-bootstrap
---add-recipient` and `--rekey` re-encrypt the existing state in place, keeping
-every device credential, the admin account and the pinned certificate.
-`--force` is the one that regenerates them all, and it refuses to run
-without `--yes` and names what it would destroy first.
-
-The reset erases fleet rows, catalog entries and verification verdicts, the
-image-verification schedule, deployment records, settings, credential
-profiles, and the audit log (all captured in the backup). Devices themselves
-are not touched, but agents deployed before the reset are **orphaned by it**:
-they pinned the old server certificate and their enrollment tokens died with
-the state, so they cannot reconnect on their own. If agents were not undeployed
-before the reset, remove their old IRIS footprint using the documented
-recovery procedure before onboarding again. Onboarding refuses an existing
-footprint. Restoring the previous deployment instead requires its matching
-state and credentials as well as its TLS material; restoring only the old
-certificate does not restore enrollment tokens.
+A reset requires explicit authorization because it removes inventory,
+assignments, deployment records, settings, and credentials. Undeploy agents
+while their records and credentials are available, then back up before
+removing any selected server data. Use the chosen topology's fresh-bootstrap
+steps for the replacement. A Console relocation by itself does not require
+resetting server state or onboarding devices again.
 
 ## Completion record
 
-For a PoC handoff, record the server runtime and address, version, image id,
-device model/platform choice, staging target, Console audit entries, and whether
-each device reached staged/seeding state. Do not record credentials or tokens.
+Record the IRIS version, deployment layout, each host's role and address,
+Console URL, management endpoint, Compose projects or Kubernetes namespace,
+and checks actually performed. For device work, include image ID,
+model/agent choice, staging target, job result, and final per-image state.
+List anything not verified. Keep credentials and tokens out of the record.
