@@ -27,6 +27,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Refresh open swarm details with the map. Keep torrent role and staging
   status separate, and avoid duplicating rates across images or participants
   that share an IP address.
+- Keep the swarm details panel above the toolbar so its title and Close button
+  stay visible on desktop and mobile.
 - Shorten onboard and undeploy logs across Guest Shell, IOx, router and XR.
   Keep error details and remove the duplicate success footer.
 - Let management type control Add Device network fields. Model edits, failed
