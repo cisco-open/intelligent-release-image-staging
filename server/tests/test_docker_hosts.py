@@ -186,7 +186,10 @@ def test_console_renders_without_server_configuration_or_shared_state(compose):
     assert all(v["type"] == "bind" and v["read_only"] for v in console["volumes"])
     for mount in console["volumes"]:
         if mount["target"].startswith("/run/"):
-            assert mount["bind"]["create_host_path"] is False
+            # Compose v2 omits a false create_host_path from `config` output
+            # (omitempty); v5 emits it. Absent therefore means false; only an
+            # explicit true -- what short-syntax binds get -- is a failure.
+            assert not mount["bind"].get("create_host_path", False)
     env = console["environment"]
     assert env["IRIS_MANAGEMENT_API_URL"] == CONSOLE_ENV["IRIS_MANAGEMENT_API_URL"]
     assert env["IRIS_GUI_DEFAULT_CERT"] == "/run/iris-console-tls/tls.crt"
