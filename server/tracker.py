@@ -8,9 +8,11 @@
 peer lifecycle via peer_registry, bencoded responses, optional compact peers.
 Stdlib only. Run as a service: python3 tracker.py (reads IRIS_* env)."""
 import binascii
+import collections
 import ipaddress
 import json
 import os
+import random
 import socket
 import ssl
 import sys
@@ -30,9 +32,61 @@ import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
 import secrets_store
 import telemetry
-from peer_registry import PeerRegistry, INTERVAL
+from peer_registry import PeerRegistry, INTERVAL, NUMWANT_CAP
 
 MIN_INTERVAL = 10
+MAX_INTERVAL = 300
+
+LegacyAttributions = collections.namedtuple(
+    "LegacyAttributions", ["by_ip", "unreadable", "revoked"])
+
+
+def _stat_key(path):
+    """Return a replacement-sensitive identity for one durable file."""
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
+class PolicySnapshot:
+    """Thread-safe cache of one complete peer-policy load result.
+
+    Both authoritative and LKG identities participate in the key. A restat
+    after loading prevents publishing a result assembled while either path
+    was replaced.
+    """
+
+    def __init__(self, authoritative_path, lkg_path, loader=None):
+        self._paths = (authoritative_path, lkg_path)
+        self._loader = loader or _peer_policy.load_policy
+        self._key = None
+        self._result = None
+        self._lock = threading.Lock()
+
+    def _keys(self):
+        return tuple(_stat_key(path) for path in self._paths)
+
+    def load(self):
+        with self._lock:
+            while True:
+                before = self._keys()
+                if self._result is not None and before == self._key:
+                    return self._result
+                result = self._loader(*self._paths)
+                after = self._keys()
+                if before == after:
+                    self._key = after
+                    self._result = result
+                    return result
+
+
+def jittered_interval(interval, factor=None):
+    """Apply per-announce ±10 percent jitter and schema-bound the result."""
+    if factor is None:
+        factor = random.uniform(0.9, 1.1)
+    return max(MIN_INTERVAL, min(MAX_INTERVAL, int(round(interval * factor))))
 
 # Per-connection socket inactivity timeout (seconds), same posture as the
 # catalog handler: a client that opens a connection and never completes its
@@ -153,6 +207,10 @@ def parse_announce(query):
             return int(raw.get(name, default))
         except (TypeError, ValueError):
             return default
+
+    def as_nonnegative(name):
+        value = as_int(name, None)
+        return value if value is not None and value >= 0 else None
     # Port must be in 1-65535; clamp to default on bad input.
     raw_port = as_int("port", 6881)
     port = raw_port if 1 <= raw_port <= 65535 else None
@@ -177,6 +235,8 @@ def parse_announce(query):
         "numwant": as_int("numwant", 50),
         "compact": raw.get("compact") == "1",
         "ip": ip,
+        "uploaded": as_nonnegative("uploaded"),
+        "downloaded": as_nonnegative("downloaded"),
     }
 
 
@@ -199,15 +259,18 @@ def compact_peers(peers):
     return bytes(out)
 
 
-def build_announce_response(peers, compact=False, interval=INTERVAL):
+def build_announce_response(peers, compact=False, interval=INTERVAL,
+                            min_interval=None):
     if compact:
         peers_value = compact_peers(peers)
     else:
         peers_value = [{"ip": p["ip"], "peer id": "", "port": p["port"]}
                        for p in peers]
+    if min_interval is None:
+        min_interval = interval
     return bencode.encode({
         "interval": interval,
-        "min interval": MIN_INTERVAL,
+        "min interval": min_interval,
         "peers": peers_value,
     })
 
@@ -252,6 +315,72 @@ def _catalog_scrape_authorizer(state_dir):
             return False
 
     return allowed
+
+
+def _bounded_legacy_retention(policy, revoked, now, role_until):
+    """Retain deny evidence indefinitely and role-only evidence temporarily."""
+    compiled = policy.roles
+
+    def keep(principal_type, principal_id, ipv4):
+        principal_key = "%s:%s" % (principal_type, principal_id)
+        if principal_key in revoked:
+            return True
+        if policy.fail_closed or principal_type != "device":
+            return False
+        principal = auth.Principal(principal_type, principal_id)
+        if _peer_policy.evaluate(
+                policy.document, principal, ipv4,
+                compiled=compiled)[0] == "deny":
+            return True
+        role = compiled.role_of.get(principal_id)
+        role_active = now < role_until
+        return role_active and role in compiled.restricted
+
+    return keep
+
+
+def _legacy_token_deadline(store, grace=0):
+    """Last instant at which any previous seeder token can authenticate."""
+    deadlines = []
+    previous = store.get("seeder", {}).get("announce_token_previous", [])
+    for record in previous if isinstance(previous, list) else ():
+        if not isinstance(record, dict) or record.get("revoked"):
+            continue
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, (int, float)) and not isinstance(
+                expires_at, bool) and expires_at > 0:
+            deadlines.append(expires_at + grace)
+    return max(deadlines) if deadlines else 0
+
+
+def legacy_attributions(policy, endpoints_path, store, now, grace=0):
+    """Return all durable device principals attributable to each IPv4.
+
+    Shared addresses retain every principal so callers can apply universal,
+    deny-wins policy evaluation. A corrupt or unreadable store is represented
+    explicitly and makes legacy discovery fail closed.
+    """
+    if endpoints_path is None:
+        return LegacyAttributions({}, False, frozenset())
+    revoked = set(secrets_store.revoked_device_principals(store))
+    role_until = _legacy_token_deadline(store, grace)
+    try:
+        durable = _peer_endpoints.fresh_endpoints(
+            endpoints_path, now, keep=_bounded_legacy_retention(
+                policy, revoked, now=now, role_until=role_until))
+    except (OSError, _peer_endpoints.EndpointStoreError):
+        return LegacyAttributions({}, True, frozenset(revoked))
+    by_ip = {}
+    for entry in durable.values():
+        if entry.get("principal_type") != "device":
+            continue
+        principal = auth.Principal("device", entry.get("principal_id", ""))
+        for endpoint in entry.get("endpoints", ()):
+            by_ip.setdefault(endpoint.get("ipv4"), set()).add(principal)
+    return LegacyAttributions({
+        ip: tuple(sorted(principals)) for ip, principals in by_ip.items()
+        if ip is not None
+    }, False, frozenset(revoked))
 
 
 def make_server(host, port, secrets_path, registry=None, on_announce=None,
@@ -299,11 +428,13 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
     _credentials = credential_cache.CredentialResolver(secrets_path)
     _grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
     _record_endpoint = record_endpoint or _peer_endpoints.record_endpoint
+    _policy_snapshot = (PolicySnapshot(*policy_paths)
+                        if policy_paths is not None else None)
 
     def _load_policy():
-        if policy_paths is None:
+        if _policy_snapshot is None:
             return None
-        return _peer_policy.load_policy(policy_paths[0], policy_paths[1])
+        return _policy_snapshot.load()
 
     class Handler(BaseHTTPRequestHandler):
         # Socket inactivity timeout (see HANDLER_TIMEOUT): a stalled read
@@ -461,27 +592,54 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 peer_ip = a["ip"]
             else:
                 peer_ip = socket_ip
+            policy = _load_policy()
+            attribution_cache = []
+
+            def get_attributions():
+                if not attribution_cache:
+                    attribution_cache.append(legacy_attributions(
+                        policy, endpoints_path, store, now, grace=_grace))
+                return attribution_cache[0]
+
+            qos = self._announce_qos(
+                policy, principal, peer_ip, get_attributions)
+            issued_interval = jittered_interval(
+                qos.get("announce_min_interval_s", INTERVAL))
+            effective_numwant = min(
+                max(a["numwant"], 0), qos.get("numwant", 50))
+            legacy_restricted = self._legacy_restricted(
+                policy, principal, peer_ip, get_attributions)
             # port=None means the client sent an out-of-range value. Registering
             # a substitute port would advertise a wrong endpoint; skip
             # registration AND any durable endpoint write, but still 200.
             if a["port"] is None:
-                peers = self._select(a, principal, peer_ip, store, now)
+                peers = self._select(
+                    a, principal, peer_ip, policy, get_attributions,
+                    effective_numwant)
                 self._send(200, build_announce_response(
-                    peers, compact=a["compact"]))
+                    peers, compact=a["compact"], interval=issued_interval,
+                    min_interval=issued_interval))
                 return
             peer_port = a["port"]
             # Register the typed peer BEFORE candidate filtering so a valid
             # (even quarantined) announce is 200 and visible in the swarm.
             registry.announce(a["info_hash"], a["peer_id"], peer_ip, peer_port,
                               event=a["event"], left=a["left"],
-                              principal=principal)
+                              principal=principal, now=now,
+                              interval=issued_interval,
+                              uploaded=a["uploaded"],
+                              downloaded=a["downloaded"],
+                              legacy_restricted=legacy_restricted)
             # Durable endpoint write for attributable principals only. Failure
             # never changes the HTTP 200 or the policy filtering: enqueue the
             # latest pending tuple and signal a degrade / local wake.
             self._persist_endpoint(principal, peer_ip, peer_port, now)
-            peers = self._select(a, principal, peer_ip, store, now)
+            peers = self._select(
+                a, principal, peer_ip, policy, get_attributions,
+                effective_numwant)
             self._send(200, build_announce_response(
-                peers, compact=a["compact"]))
+                peers, compact=a["compact"], interval=issued_interval,
+                min_interval=issued_interval))
 
         def _persist_endpoint(self, principal, peer_ip, peer_port, now):
             if endpoints_path is None:
@@ -507,64 +665,125 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if on_endpoint_change is not None:
                 on_endpoint_change()
 
-        def _denied_legacy_addresses(self, policy, store, now):
-            """Addresses a durable endpoint row attributes to a device the
-            policy denies or whose credentials are revoked, or None when the
-            endpoint store cannot be read (the caller fails closed)."""
-            if endpoints_path is None:
-                return set()
-            revoked = secrets_store.revoked_device_principals(store)
-            keep = _reconciler.denied_retention(policy, revoked)
-            try:
-                durable = _peer_endpoints.fresh_endpoints(
-                    endpoints_path, now, keep=keep)
-            except _peer_endpoints.EndpointStoreError:
-                return None
-            return _reconciler.denied_endpoint_ips(policy, durable, revoked)
+        @staticmethod
+        def _attributed_principals(principal, peer_ip, attributions):
+            if principal is None or principal.type != "legacy":
+                return (principal,)
+            if attributions is None:
+                return (principal,)
+            if attributions.unreadable:
+                return ()
+            return attributions.by_ip.get(peer_ip, (principal,))
 
-        def _select(self, a, principal, peer_ip, store, now):
-            policy = _load_policy()
+        @staticmethod
+        def _announce_qos(policy, principal, peer_ip, get_attributions):
+            if policy is None:
+                return {"announce_min_interval_s": INTERVAL,
+                        "numwant": NUMWANT_CAP}
+            if principal.type == "device":
+                return _peer_policy.compile_qos(policy.document, principal.id)
+            if principal.type == "legacy":
+                attributions = get_attributions()
+            else:
+                attributions = None
+            if attributions is not None and not attributions.unreadable:
+                attributed = attributions.by_ip.get(peer_ip, ())
+                if attributed:
+                    values = [_peer_policy.compile_qos(
+                        policy.document, item.id) for item in attributed]
+                    # A shared NAT address receives the slowest cadence and
+                    # smallest handout ceiling of every possible owner.
+                    result = dict(values[0])
+                    result["announce_min_interval_s"] = max(
+                        item["announce_min_interval_s"] for item in values)
+                    result["numwant"] = min(item["numwant"] for item in values)
+                    return result
+            return _peer_policy.compile_qos(policy.document, None)
+
+        @staticmethod
+        def _legacy_restricted(policy, principal, peer_ip, get_attributions):
+            if policy is None or principal.type != "legacy":
+                return False
+            attributions = get_attributions()
+            if policy.fail_closed or attributions.unreadable:
+                return True
+            for attributed in attributions.by_ip.get(peer_ip, ()):
+                key = "%s:%s" % (attributed.type, attributed.id)
+                if key in attributions.revoked:
+                    return True
+                role = policy.roles.role_of.get(attributed.id)
+                if role in policy.roles.restricted:
+                    return True
+                if _peer_policy.evaluate(
+                        policy.document, attributed, peer_ip,
+                        compiled=policy.roles)[0] == "deny":
+                    return True
+            return False
+
+        @staticmethod
+        def _restricted_candidates(policy, principal):
+            """Return sparse registry indexes for a virtual-role requester."""
+            if principal.type != "device":
+                return None
+            if principal.id in policy.document.get("assignments", {}):
+                return None
+            compiled = policy.roles
+            role = compiled.role_of.get(principal.id)
+            if role not in compiled.restricted:
+                return None
+            definitions = policy.document.get("roles", {}).get("defs", {})
+            definition = definitions.get(role, {})
+            allowed_roles = set(definition.get("peers", [role]))
+            allowed_roles.add(role)
+            principals = set()
+            if _peer_policy.role_origin_enabled(policy.document, role):
+                principals.add(("service", "seeder"))
+            return frozenset(allowed_roles), frozenset(principals)
+
+        def _select(self, a, principal, peer_ip, policy, get_attributions,
+                    numwant):
             if policy is None:
                 return registry.peers(a["info_hash"], a["peer_id"],
-                                      numwant=a["numwant"])
+                                      numwant=numwant)
             if policy.fail_closed:
                 return []
             doc = policy.document
-            # A legacy credential (a previous seeder announce token, which
-            # every device that ever received a torrent carrying it still
-            # holds) has no ACL slot, so a quarantined device could otherwise
-            # reclassify itself out of quarantine by announcing with it. A
-            # previous token now expires on its own (secrets_store's
-            # SEEDER_PREV_TTL, enforced by the same `valid` check as any other
-            # credential), which is the real boundary; this address rule is the
-            # hint that holds inside the overlap window. The
-            # credential stays the identity; the address is only a DENY
-            # hint: a legacy requester or candidate at an address a durable
-            # endpoint attributes to a denied/revoked device is treated as
-            # that device -- no peers for it, and it is handed to nobody.
-            cache = {}
-
-            def legacy_denied(p, ip):
-                if p is None or p.type != "legacy":
-                    return False
-                if "ips" not in cache:
-                    cache["ips"] = self._denied_legacy_addresses(
-                        policy, store, now)
-                denied = cache["ips"]
-                return denied is None or ip in denied
-
-            if legacy_denied(principal, peer_ip):
+            if self._legacy_restricted(
+                    policy, principal, peer_ip, get_attributions):
                 return []
 
             def predicate(req_p, req_ip, cand_p, cand_ip):
-                if legacy_denied(cand_p, cand_ip):
+                if ((req_p is not None and req_p.type == "legacy") or
+                        cand_p.type == "legacy"):
+                    attributions = get_attributions()
+                else:
+                    attributions = None
+                requesters = self._attributed_principals(
+                    req_p, req_ip, attributions)
+                candidates = self._attributed_principals(
+                    cand_p, cand_ip, attributions)
+                if not requesters or not candidates:
                     return False
-                return _peer_policy.mutual_permit(
-                    doc, req_p, req_ip, cand_p, cand_ip)
+                if attributions is not None and any(
+                        "%s:%s" % (item.type, item.id) in attributions.revoked
+                        for item in requesters + candidates):
+                    return False
+                return all(
+                    _peer_policy.mutual_permit(
+                        doc, requester, req_ip, candidate, cand_ip,
+                        compiled=policy.roles)
+                    for requester in requesters for candidate in candidates)
 
+            sparse = self._restricted_candidates(policy, principal)
+            kwargs = {}
+            if sparse is not None:
+                kwargs["candidate_roles"] = sparse[0]
+                kwargs["candidate_principals"] = sparse[1]
+                kwargs["candidate_types"] = frozenset({"legacy"})
+                kwargs["compiled_roles"] = policy.roles
             return registry.select_peers(
                 a["info_hash"], a["peer_id"], principal, peer_ip,
-                predicate=predicate, numwant=a["numwant"])
+                predicate=predicate, numwant=numwant, **kwargs)
 
         def _handle_scrape(self, query, ctx):
             # Parse the RAW query like parse_announce: a real info_hash is 20
@@ -665,16 +884,6 @@ class Aria2BlocklistAdapter:
         return self._rpc("aria2.setBtPeerBlocklist", [list(ips)]) or {}
 
 
-def _stat_key(path):
-    """Cheap change-detection key (mtime + size) for a durable file; missing
-    file -> a sentinel. Same discipline as the console's StreamSettings poll."""
-    try:
-        st = os.stat(path)
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
-
-
 class TrackerReconciler:
     """The single serialized reconcile loop. Constructed ONLY by the tracker
     process (spec §0): the GUI/catalog/CLI never instantiate it, never call
@@ -697,7 +906,8 @@ class TrackerReconciler:
     def __init__(self, policy_paths, endpoints_path, enforcement_path, aria,
                   pending_queue, active_participants, revoked_principals,
                   protected_seeder_ip=None, audit_export=None,
-                  emit_policy_event=None, now=None):
+                  emit_policy_event=None, now=None,
+                  legacy_retention_until=None):
         self._policy_paths = policy_paths
         self._endpoints_path = endpoints_path
         self._enforcement_path = enforcement_path
@@ -705,6 +915,7 @@ class TrackerReconciler:
         self._pending = pending_queue
         self._active_participants = active_participants
         self._revoked_principals = revoked_principals
+        self._legacy_retention_until = legacy_retention_until or (lambda: 0)
         self._protected_seeder_ip = protected_seeder_ip
         self._audit_export = audit_export
         # The telemetry hub injects this to avoid a tracker -> OTLP import
@@ -898,7 +1109,9 @@ class TrackerReconciler:
         # that address outlive ENDPOINT_TTL (spec 7 retirement): the seeder
         # block for a device that stopped announcing must not lapse while it
         # is still quarantined or revoked.
-        keep = _reconciler.denied_retention(policy, revoked)
+        keep = _bounded_legacy_retention(
+            policy, revoked, now=now,
+            role_until=self._legacy_retention_until())
         if self._next_maintenance is None or now >= self._next_maintenance:
             # Maintenance-driven pass: TTL prune of the durable map. A wake
             # or change-driven pass only reads it (no per-announce rewrite).
@@ -1082,6 +1295,10 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     secrets_path = env.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    try:
+        token_grace = int(env.get("IRIS_TOKEN_SKEW_GRACE", "300"))
+    except (TypeError, ValueError):
+        token_grace = 300
 
     rpc = telemetry.make_jsonrpc_caller(
         env.get("IRIS_RPC", telemetry.DEFAULT_RPC_URL),
@@ -1107,6 +1324,8 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
         # a corrupt/unreadable store must never silently permit a known-revoked
         # device, so it fails safe by retaining the last-known revoked set.
         revoked_principals=_make_revoked_view(secrets_path),
+        legacy_retention_until=_make_legacy_retention_view(
+            secrets_path, token_grace),
         protected_seeder_ip=env.get("IRIS_HOST_IP") or None,
         audit_export=audit_export, emit_policy_event=emit_policy_event)
 
@@ -1142,6 +1361,22 @@ def _make_revoked_view(secrets_path):
         # credentials) correctly drops out of the deny set.
         last_known["keys"] = keys
         return set(keys)
+
+    return view
+
+
+def _make_legacy_retention_view(secrets_path, grace):
+    """Cache the previous-token deadline and fail safe across read errors."""
+    resolver = credential_cache.CredentialResolver(secrets_path)
+    last_known = {"deadline": float("inf")}
+
+    def view():
+        try:
+            deadline = _legacy_token_deadline(resolver.store(), grace)
+        except (OSError, ValueError, secrets_store.StoreCorruptError):
+            return last_known["deadline"]
+        last_known["deadline"] = deadline
+        return deadline
 
     return view
 

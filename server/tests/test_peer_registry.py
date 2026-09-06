@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import auth
+
 from peer_registry import PeerRegistry, INTERVAL
 
 
@@ -44,6 +46,30 @@ def test_numwant_caps_results():
     for n in range(10):
         reg.announce("ABC", "p%d" % n, "10.0.0.%d" % n, 6881 + n, now=0)
     assert len(reg.peers("ABC", "asker", numwant=3, now=0)) == 3
+
+
+def test_zero_or_negative_numwant_returns_no_peer_or_predicate_call():
+    reg = PeerRegistry()
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, now=0)
+    assert reg.peers("ABC", "asker", numwant=0, now=0) == []
+    assert reg.peers("ABC", "asker", numwant=-1, now=0) == []
+    calls = []
+    requester = auth.Principal("device", "requester")
+    assert reg.select_peers(
+        "ABC", "asker", requester, "10.0.0.9",
+        predicate=lambda *args: calls.append(args) or True,
+        numwant=0, now=0) == []
+    assert calls == []
+
+
+def test_numwant_cap_is_exact_at_and_above_two_hundred():
+    reg = PeerRegistry()
+    for index in range(210):
+        reg.announce(
+            "ABC", "p%d" % index, "10.0.%d.%d" %
+            (index // 254, index % 254 + 1), 6000 + index, now=0)
+    assert len(reg.peers("ABC", "asker", numwant=200, now=0)) == 200
+    assert len(reg.peers("ABC", "asker", numwant=500, now=0)) == 200
 
 
 def test_swarm_isolation_and_binary_info_hash():
@@ -301,6 +327,270 @@ def test_snapshot_seeder_first_announce_has_zero_download_seconds():
     assert p["joined_at"] == 42
     assert p["completed_at"] == 42
     assert p["download_seconds"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Issued cadence and amortized pruning
+# ---------------------------------------------------------------------------
+
+def test_record_expires_against_its_issued_interval_at_strict_boundary():
+    reg = PeerRegistry(interval=INTERVAL, read_prune_interval=0)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, interval=120, now=0)
+    assert reg.snapshot(now=60)["ABC"][0]["interval"] == 120
+    assert reg.snapshot(now=240)["ABC"][0]["peer_id"] == "p1"
+    assert reg.snapshot(now=241) == {}
+
+
+def test_reannounce_replaces_issued_interval_and_bare_call_uses_default():
+    reg = PeerRegistry(interval=30, read_prune_interval=0)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, now=0)
+    assert reg.snapshot(now=0)["ABC"][0]["interval"] == 30
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, interval=20, now=100)
+    assert reg.snapshot(now=140)["ABC"][0]["interval"] == 20
+    assert reg.snapshot(now=141) == {}
+
+
+def test_read_paths_share_one_prune_gate_and_prune_all_always_sweeps(
+        monkeypatch):
+    reg = PeerRegistry(read_prune_interval=30)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, now=100)
+    real_prune = reg._prune
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return real_prune(*args, **kwargs)
+
+    monkeypatch.setattr(reg, "_prune", counted)
+    principal = auth.Principal("device", "requester")
+    reg.peers("ABC", "asker", now=100)
+    reg.select_peers("ABC", "asker", principal, "10.0.0.9", now=100)
+    reg.scrape("ABC", now=100)
+    reg.stats(now=100)
+    reg.snapshot(now=100)
+    assert calls == ["ABC"]
+
+    reg.prune_all(now=101)
+    assert calls == ["ABC", "ABC"]
+    reg.snapshot(now=101)
+    assert calls == ["ABC", "ABC"]
+
+
+def test_read_prune_gate_forces_a_sweep_when_clock_moves_back(monkeypatch):
+    reg = PeerRegistry(read_prune_interval=30)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, now=100)
+    real_prune = reg._prune
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(args[0])
+        return real_prune(*args, **kwargs)
+
+    monkeypatch.setattr(reg, "_prune", counted)
+    reg.snapshot(now=100)
+    reg.snapshot(now=90)
+    assert calls == ["ABC", "ABC"]
+
+
+# ---------------------------------------------------------------------------
+# Bounded indexed selection
+# ---------------------------------------------------------------------------
+
+def test_general_selection_inspects_at_most_four_times_numwant():
+    reg = PeerRegistry(randbelow=lambda size: size // 2)
+    for index in range(10_000):
+        reg.announce(
+            "ABC", "p%d" % index, "10.%d.%d.%d" %
+            (index // 65536, (index // 256) % 256, index % 256),
+            6000 + index % 1000,
+            principal=auth.Principal("device", "d%d" % index), now=0)
+    calls = []
+    out = reg.select_peers(
+        "ABC", "asker", auth.Principal("device", "requester"),
+        "192.0.2.1", predicate=lambda *args: calls.append(args) or False,
+        numwant=50, now=0)
+    assert out == []
+    assert len(calls) == 200
+
+
+def test_random_start_changes_the_bounded_selection_window():
+    starts = iter((0, 5))
+    reg = PeerRegistry(randbelow=lambda _size: next(starts))
+    for index in range(10):
+        reg.announce(
+            "ABC", "p%d" % index, "10.0.0.%d" % (index + 1),
+            6000 + index, principal=auth.Principal("device", "d%d" % index),
+            now=0)
+    requester = auth.Principal("device", "requester")
+    first = reg.select_peers(
+        "ABC", "asker", requester, "192.0.2.1",
+        predicate=lambda *args: True, numwant=1, now=0)
+    second = reg.select_peers(
+        "ABC", "asker", requester, "192.0.2.1",
+        predicate=lambda *args: True, numwant=1, now=0)
+    assert first != second
+
+
+def test_sparse_candidate_principal_index_avoids_full_swarm_walk():
+    reg = PeerRegistry(randbelow=lambda _size: 0)
+    for index in range(10_000):
+        reg.announce(
+            "ABC", "p%d" % index, "10.%d.%d.%d" %
+            (index // 65536, (index // 256) % 256, index % 256),
+            6000 + index % 1000,
+            principal=auth.Principal("device", "d%d" % index), now=0)
+    calls = []
+    out = reg.select_peers(
+        "ABC", "asker", auth.Principal("device", "requester"),
+        "192.0.2.1", predicate=lambda *args: calls.append(args) or True,
+        numwant=50, now=0,
+        candidate_principals=frozenset({("device", "d9999")}))
+    assert out == [{"ip": "10.0.39.15", "port": 6999}]
+    assert len(calls) == 1
+
+
+def test_role_index_reuses_generation_and_tracks_ip_stop_expiry_and_policy():
+    class Compiled:
+        def __init__(self, role_of):
+            self.role_of = role_of
+
+    first = Compiled({"d1": "allowed", "d2": "allowed", "d3": "allowed"})
+    reg = PeerRegistry(read_prune_interval=0, randbelow=lambda _size: 0)
+    requester = auth.Principal("device", "requester")
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, interval=1,
+                 principal=auth.Principal("device", "d1"), now=0)
+    reg.announce("ABC", "p2", "10.0.0.2", 6882, interval=100,
+                 principal=auth.Principal("device", "d2"), now=0)
+
+    def select(compiled=first):
+        return reg.select_peers(
+            "ABC", "asker", requester, "192.0.2.1",
+            predicate=lambda *_args: True, numwant=50, now=0,
+            candidate_roles=frozenset({"allowed"}),
+            compiled_roles=compiled)
+
+    assert {row["ip"] for row in select()} == {"10.0.0.1", "10.0.0.2"}
+    assert reg._role_index_builds == 1
+    assert len(select()) == 2
+    assert reg._role_index_builds == 1
+
+    reg.announce("ABC", "p1", "10.0.0.9", 6881, interval=1,
+                 principal=auth.Principal("device", "d1"), now=0)
+    reg.announce("ABC", "p2", "10.0.0.2", 6882, event="stopped",
+                 principal=auth.Principal("device", "d2"), now=0)
+    reg.announce("ABC", "p3", "10.0.0.3", 6883, interval=100,
+                 principal=auth.Principal("device", "d3"), now=0)
+    assert {row["ip"] for row in select()} == {"10.0.0.9", "10.0.0.3"}
+    assert reg._role_index_builds == 1
+
+    reg.prune_all(now=3)
+    assert reg.select_peers(
+        "ABC", "asker", requester, "192.0.2.1",
+        predicate=lambda *_args: True, numwant=50, now=3,
+        candidate_roles=frozenset({"allowed"}),
+        compiled_roles=first) == [{"ip": "10.0.0.3", "port": 6883}]
+
+    second = Compiled({"d3": "other"})
+    assert reg.select_peers(
+        "ABC", "asker", requester, "192.0.2.1",
+        predicate=lambda *_args: True, numwant=50, now=3,
+        candidate_roles=frozenset({"allowed"}),
+        compiled_roles=second) == []
+    assert reg._role_index_builds == 2
+
+
+# ---------------------------------------------------------------------------
+# Session-cumulative transfer counter baselines
+# ---------------------------------------------------------------------------
+
+def _counter_row(reg, peer_id="p1", now=0):
+    return next(row for row in reg.snapshot(now=now)["ABC"]
+                if row["peer_id"] == peer_id)
+
+
+def test_transfer_counters_baseline_then_report_positive_deltas():
+    reg = PeerRegistry()
+    principal = auth.Principal("device", "d1")
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=100, downloaded=200, now=0)
+    assert _counter_row(reg)["uploaded_delta"] == 0
+    assert _counter_row(reg)["downloaded_delta"] == 0
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=175, downloaded=260, now=1)
+    row = _counter_row(reg, now=1)
+    assert row["uploaded_delta"] == 75
+    assert row["downloaded_delta"] == 60
+    assert row["counter_reset"] is False
+
+
+def test_started_peer_change_or_negative_delta_rebaselines_both_counters():
+    reg = PeerRegistry()
+    principal = auth.Principal("device", "d1")
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=100, downloaded=200, now=0)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=150, downloaded=250, event="started", now=1)
+    started = _counter_row(reg, now=1)
+    assert (started["uploaded_delta"], started["downloaded_delta"],
+            started["counter_reset"]) == (0, 0, True)
+
+    reg.announce("ABC", "p2", "10.0.0.1", 6881, principal=principal,
+                 uploaded=175, downloaded=275, now=2)
+    changed = _counter_row(reg, "p2", now=2)
+    assert (changed["uploaded_delta"], changed["downloaded_delta"],
+            changed["counter_reset"]) == (0, 0, True)
+
+    reg.announce("ABC", "p2", "10.0.0.1", 6881, principal=principal,
+                 uploaded=10, downloaded=300, now=3)
+    negative = _counter_row(reg, "p2", now=3)
+    assert (negative["uploaded_delta"], negative["downloaded_delta"],
+            negative["counter_reset"]) == (0, 0, True)
+
+
+def test_missing_counters_do_not_erase_a_sound_baseline():
+    reg = PeerRegistry()
+    principal = auth.Principal("device", "d1")
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=100, downloaded=200, now=0)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=None, downloaded=None, now=1)
+    reg.announce("ABC", "p1", "10.0.0.1", 6881, principal=principal,
+                 uploaded=130, downloaded=240, now=2)
+    row = _counter_row(reg, now=2)
+    assert row["uploaded_delta"] == 30
+    assert row["downloaded_delta"] == 40
+
+
+def test_stopping_or_pruning_old_peer_id_keeps_newer_counter_baseline():
+    reg = PeerRegistry(read_prune_interval=0)
+    principal = auth.Principal("device", "d1")
+    reg.announce("ABC", "old", "10.0.0.1", 6881, principal=principal,
+                 uploaded=100, downloaded=200, interval=1, now=0)
+    reg.announce("ABC", "new", "10.0.0.1", 6881, principal=principal,
+                 uploaded=10, downloaded=20, interval=100, now=1)
+    reg.announce("ABC", "old", "10.0.0.1", 6881, principal=principal,
+                 event="stopped", now=2)
+    reg.prune_all(now=3)
+    reg.announce("ABC", "new", "10.0.0.1", 6881, principal=principal,
+                 uploaded=15, downloaded=27, interval=100, now=4)
+    row = _counter_row(reg, "new", now=4)
+    assert row["uploaded_delta"] == 5
+    assert row["downloaded_delta"] == 7
+
+
+def test_stale_old_peer_id_does_not_delete_newer_counter_baseline():
+    reg = PeerRegistry(read_prune_interval=0)
+    principal = auth.Principal("device", "d1")
+    reg.announce("ABC", "old", "10.0.0.1", 6881, principal=principal,
+                 uploaded=100, downloaded=200, interval=1, now=0)
+    reg.announce("ABC", "new", "10.0.0.1", 6881, principal=principal,
+                 uploaded=10, downloaded=20, interval=100, now=1)
+    reg.prune_all(now=3)
+    reg.announce("ABC", "new", "10.0.0.1", 6881, principal=principal,
+                 uploaded=15, downloaded=27, interval=100, now=4)
+    row = _counter_row(reg, "new", now=4)
+    assert row["uploaded_delta"] == 5
+    assert row["downloaded_delta"] == 7
 
 
 # ---------------------------------------------------------------------------

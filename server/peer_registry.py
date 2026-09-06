@@ -57,12 +57,36 @@ def _public_principal_id(principal):
 
 
 class PeerRegistry:
-    def __init__(self, interval=INTERVAL, on_event=None):
+    def __init__(self, interval=INTERVAL, on_event=None,
+                 read_prune_interval=INTERVAL, randbelow=None):
         self._interval = interval
+        self._read_prune_interval = max(0, read_prune_interval)
+        self._randbelow = randbelow or secrets.randbelow
         # info_hash -> {peer_id: {"ip","port","last_seen","left"}}
         self._swarms = {}
+        # Selection indexes are updated with the swarm under the same lock.
+        # The insertion-order vector permits an O(1) random start; removals
+        # leave tombstones which are compacted amortized rather than shifting a
+        # fleet-sized list on every stop or expiry.
+        self._orders = {}
+        self._positions = {}
+        self._principal_keys = {}
+        self._ip_keys = {}
+        self._type_orders = {}
+        self._type_positions = {}
+        self._type_tombstones = {}
+        self._tombstones = {}
+        # Per-swarm role vectors are bound to one immutable CompiledRoles
+        # generation. A policy change rebuilds once; ordinary reannounces keep
+        # the current vectors hot and additions/removals update them in place.
+        self._role_indexes = {}
+        self._role_index_builds = 0
         # info_hash -> {count, last_seen}; expired once no swarm remains.
         self._downloaded = {}
+        # Session-cumulative transfer baselines are per torrent and typed
+        # principal, independent of the peer_id used by a particular session.
+        self._transfer_counters = {}
+        self._last_read_prune = None
         # optional telemetry hook: on_event({event, info_hash, peer_id, ip,
         # port, left, ts}) for join/complete/stop/stale. Best-effort — it is
         # called on the announce path, so it must never break the registry.
@@ -89,8 +113,184 @@ class PeerRegistry:
         except Exception:
             pass  # telemetry is observational, never on the critical path
 
+    def _index_add(self, info_hash, key, row):
+        order = self._orders.setdefault(info_hash, [])
+        positions = self._positions.setdefault(info_hash, {})
+        positions[key] = len(order)
+        order.append(key)
+        principal_key = (row["principal"].type, row["principal"].id)
+        self._principal_keys.setdefault(info_hash, {}).setdefault(
+            principal_key, {})[key] = None
+        self._ip_keys.setdefault(info_hash, {}).setdefault(
+            row["ip"], {})[key] = None
+        principal_type = row["principal"].type
+        type_order = self._type_orders.setdefault(info_hash, {}).setdefault(
+            principal_type, [])
+        self._type_positions.setdefault(info_hash, {}).setdefault(
+            principal_type, {})[key] = len(type_order)
+        type_order.append(key)
+        self._role_index_add(info_hash, key, row)
+
+    def _index_remove(self, info_hash, key, row):
+        position = self._positions.get(info_hash, {}).pop(key, None)
+        if position is not None:
+            self._orders[info_hash][position] = None
+            self._tombstones[info_hash] = self._tombstones.get(info_hash, 0) + 1
+        principal_key = (row["principal"].type, row["principal"].id)
+        for index, value in ((self._principal_keys, principal_key),
+                             (self._ip_keys, row["ip"])):
+            members = index.get(info_hash, {}).get(value)
+            if members is not None:
+                members.pop(key, None)
+                if not members:
+                    index[info_hash].pop(value, None)
+        principal_type = row["principal"].type
+        type_positions = self._type_positions.get(info_hash, {}).get(
+            principal_type, {})
+        type_offset = type_positions.pop(key, None)
+        if type_offset is not None:
+            self._type_orders[info_hash][principal_type][type_offset] = None
+            tombstones = self._type_tombstones.setdefault(
+                info_hash, {})
+            tombstones[principal_type] = tombstones.get(principal_type, 0) + 1
+        self._role_index_remove(info_hash, key)
+
+    def _compact_order(self, info_hash, force=False):
+        order = self._orders.get(info_hash, [])
+        tombstones = self._tombstones.get(info_hash, 0)
+        if not tombstones or (not force and
+                              tombstones < max(32, len(order) // 2)):
+            return
+        compact = [key for key in order if key is not None]
+        self._orders[info_hash] = compact
+        self._positions[info_hash] = {
+            key: index for index, key in enumerate(compact)}
+        self._tombstones[info_hash] = 0
+
+    def _role_index_add(self, info_hash, key, row):
+        role_index = self._role_indexes.get(info_hash)
+        principal = row["principal"]
+        if role_index is None or principal.type != "device":
+            return
+        role = role_index["compiled"].role_of.get(principal.id)
+        if role is None:
+            return
+        order = role_index["orders"].setdefault(role, [])
+        role_index["positions"][key] = (role, len(order))
+        order.append(key)
+
+    def _role_index_remove(self, info_hash, key):
+        role_index = self._role_indexes.get(info_hash)
+        if role_index is None:
+            return
+        position = role_index["positions"].pop(key, None)
+        if position is None:
+            return
+        role, offset = position
+        role_index["orders"][role][offset] = None
+        role_index["tombstones"][role] = \
+            role_index["tombstones"].get(role, 0) + 1
+
+    def _role_index(self, info_hash, compiled):
+        cached = self._role_indexes.get(info_hash)
+        if cached is not None and cached["compiled"] is compiled:
+            return cached
+        cached = {"compiled": compiled, "orders": {}, "positions": {},
+                  "tombstones": {}}
+        swarm = self._swarms.get(info_hash, {})
+        for key in self._orders.get(info_hash, ()):
+            if key is None:
+                continue
+            row = swarm.get(key)
+            if row is None or row["principal"].type != "device":
+                continue
+            role = compiled.role_of.get(row["principal"].id)
+            if role is None:
+                continue
+            order = cached["orders"].setdefault(role, [])
+            cached["positions"][key] = (role, len(order))
+            order.append(key)
+        self._role_indexes[info_hash] = cached
+        self._role_index_builds += 1
+        return cached
+
+    @staticmethod
+    def _compact_role(role_index, role):
+        order = role_index["orders"].get(role, [])
+        tombstones = role_index["tombstones"].get(role, 0)
+        if not tombstones or tombstones < max(32, len(order) // 2):
+            return order
+        compact = [key for key in order if key is not None]
+        role_index["orders"][role] = compact
+        for offset, key in enumerate(compact):
+            role_index["positions"][key] = (role, offset)
+        role_index["tombstones"][role] = 0
+        return compact
+
+    def _compact_type(self, info_hash, principal_type):
+        order = self._type_orders.get(info_hash, {}).get(principal_type, [])
+        tombstones = self._type_tombstones.get(info_hash, {}).get(
+            principal_type, 0)
+        if not tombstones or tombstones < max(32, len(order) // 2):
+            return order
+        compact = [key for key in order if key is not None]
+        self._type_orders[info_hash][principal_type] = compact
+        self._type_positions[info_hash][principal_type] = {
+            key: offset for offset, key in enumerate(compact)}
+        self._type_tombstones[info_hash][principal_type] = 0
+        return compact
+
+    def _remove_record(self, info_hash, swarm, key):
+        row = swarm.pop(key, None)
+        if row is None:
+            return None
+        self._index_remove(info_hash, key, row)
+        counter_key = (info_hash, row["principal"].type,
+                       row["principal"].id)
+        baseline = self._transfer_counters.get(counter_key)
+        if baseline is not None and baseline["peer_id"] == row["peer_id"]:
+            self._transfer_counters.pop(counter_key, None)
+        return row
+
+    def _counter_delta(self, info_hash, principal, peer_id, event,
+                       uploaded, downloaded, now):
+        counter_key = (info_hash, principal.type, principal.id)
+        previous = self._transfer_counters.get(counter_key)
+        supplied = uploaded is not None or downloaded is not None
+        reset = bool(previous is not None and (
+            event == "started" or previous["peer_id"] != peer_id or
+            (uploaded is not None and previous["uploaded"] is not None and
+             uploaded < previous["uploaded"]) or
+            (downloaded is not None and previous["downloaded"] is not None and
+             downloaded < previous["downloaded"])))
+        if previous is None or reset:
+            uploaded_delta = 0
+            downloaded_delta = 0
+            current_uploaded = uploaded
+            current_downloaded = downloaded
+        else:
+            uploaded_delta = (uploaded - previous["uploaded"]
+                              if uploaded is not None and
+                              previous["uploaded"] is not None else 0)
+            downloaded_delta = (downloaded - previous["downloaded"]
+                                if downloaded is not None and
+                                previous["downloaded"] is not None else 0)
+            current_uploaded = (previous["uploaded"] if uploaded is None
+                                else uploaded)
+            current_downloaded = (previous["downloaded"] if downloaded is None
+                                  else downloaded)
+        if supplied or previous is not None:
+            self._transfer_counters[counter_key] = {
+                "peer_id": peer_id,
+                "uploaded": current_uploaded,
+                "downloaded": current_downloaded,
+                "last_seen": now,
+            }
+        return uploaded_delta, downloaded_delta, reset
+
     def announce(self, info_hash, peer_id, ip, port, event=None,
-                 left=None, now=None, principal=None):
+                 left=None, now=None, principal=None, interval=None,
+                 uploaded=None, downloaded=None, legacy_restricted=False):
         now = time.time() if now is None else now
         principal = _DEFAULT_PRINCIPAL if principal is None else principal
         key = (principal.type, principal.id, peer_id)
@@ -100,11 +300,11 @@ class PeerRegistry:
         with self._lock:
             swarm = self._swarms.setdefault(info_hash, {})
             if event == "stopped":
-                if swarm.pop(key, None) is not None:
+                if self._remove_record(info_hash, swarm, key) is not None:
                     pending.append(("stop", info_hash, peer_id, ip, port, left,
                                     now, principal))
                 if not swarm:
-                    self._swarms.pop(info_hash, None)
+                    self._cleanup_empty(info_hash, swarm, now)
             else:
                 prev = swarm.get(key)
                 if prev is None:
@@ -135,6 +335,9 @@ class PeerRegistry:
                     completed_at = None
                 if completed_at is None and left == 0:
                     completed_at = now
+                uploaded_delta, downloaded_delta, counter_reset = \
+                    self._counter_delta(info_hash, principal, peer_id, event,
+                                        uploaded, downloaded, now)
                 if event == "completed":
                     completed = self._downloaded.get(
                         info_hash, {"count": 0, "last_seen": now})
@@ -150,7 +353,7 @@ class PeerRegistry:
                          principal))
                     if completed_at is None:
                         completed_at = now
-                swarm[key] = {
+                row = {
                     "ip": ip,
                     "port": int(port),
                     "last_seen": now,
@@ -159,18 +362,31 @@ class PeerRegistry:
                     "completed_at": completed_at,
                     "peer_id": peer_id,
                     "principal": principal,
+                    "interval": self._interval if interval is None else interval,
+                    "uploaded_delta": uploaded_delta,
+                    "downloaded_delta": downloaded_delta,
+                    "counter_reset": counter_reset,
+                    "legacy_restricted": bool(legacy_restricted),
                 }
+                if prev is not None and (prev["ip"] != ip or
+                                         prev["principal"] != principal):
+                    self._index_remove(info_hash, key, prev)
+                    self._index_add(info_hash, key, row)
+                elif prev is None:
+                    self._index_add(info_hash, key, row)
+                swarm[key] = row
         for args in pending:
             self._emit(*args)
 
     def _prune(self, info_hash, swarm, now):
         """Remove stale peers from *swarm* (caller must hold self._lock).
         Returns a list of telemetry event arg-tuples to fire after releasing."""
-        cutoff = now - 2 * self._interval
-        stale_keys = [k for k, r in swarm.items() if r["last_seen"] < cutoff]
+        stale_keys = [
+            key for key, row in swarm.items()
+            if row["last_seen"] < now - 2 * row.get("interval", self._interval)]
         pending = []
         for k in stale_keys:
-            r = swarm.pop(k)
+            r = self._remove_record(info_hash, swarm, k)
             pending.append(
                 ("stale", info_hash, r["peer_id"], r["ip"], r["port"],
                  r["left"], now, r["principal"]))
@@ -181,30 +397,140 @@ class PeerRegistry:
         if swarm:
             return
         self._swarms.pop(info_hash, None)
+        self._orders.pop(info_hash, None)
+        self._positions.pop(info_hash, None)
+        self._principal_keys.pop(info_hash, None)
+        self._ip_keys.pop(info_hash, None)
+        self._type_orders.pop(info_hash, None)
+        self._type_positions.pop(info_hash, None)
+        self._type_tombstones.pop(info_hash, None)
+        self._tombstones.pop(info_hash, None)
+        self._role_indexes.pop(info_hash, None)
         completed = self._downloaded.get(info_hash)
         if completed and completed["last_seen"] < now - DOWNLOADED_TTL:
             self._downloaded.pop(info_hash, None)
 
+    def _read_prune_locked(self, now, force=False):
+        last = self._last_read_prune
+        due = (force or last is None or now < last or
+               self._read_prune_interval == 0 or
+               now - last >= self._read_prune_interval)
+        if not due:
+            return []
+        self._last_read_prune = now
+        pending = []
+        for info_hash, swarm in list(self._swarms.items()):
+            pending.extend(self._prune(info_hash, swarm, now))
+            self._cleanup_empty(info_hash, swarm, now)
+        for info_hash in list(self._downloaded):
+            if info_hash not in self._swarms:
+                self._cleanup_empty(info_hash, {}, now)
+        return pending
+
+    @staticmethod
+    def _peer_result(row):
+        return {"ip": row["ip"], "port": row["port"]}
+
+    def _candidate_sources(self, info_hash, candidate_principals=None,
+                           candidate_ips=None, candidate_roles=None,
+                           candidate_types=None, compiled_roles=None):
+        if candidate_principals is None and candidate_ips is None \
+                and candidate_roles is None and candidate_types is None:
+            self._compact_order(info_hash)
+            order = self._orders.get(info_hash, [])
+            return [order] if order else []
+        sources = []
+        if candidate_roles is not None:
+            role_index = self._role_index(info_hash, compiled_roles)
+            for role in sorted(candidate_roles):
+                order = self._compact_role(role_index, role)
+                if order:
+                    sources.append(order)
+        principal_index = self._principal_keys.get(info_hash, {})
+        for principal_key in candidate_principals or ():
+            keys = principal_index.get(principal_key)
+            if keys:
+                sources.append(keys)
+        ip_index = self._ip_keys.get(info_hash, {})
+        for ip in candidate_ips or ():
+            keys = ip_index.get(ip)
+            if keys:
+                sources.append(keys)
+        for principal_type in candidate_types or ():
+            order = self._compact_type(info_hash, principal_type)
+            if order:
+                sources.append(order)
+        return sources
+
+    def _select_locked(self, info_hash, peer_id, requester_principal,
+                       requester_ip, predicate, numwant,
+                       candidate_principals=None, candidate_ips=None,
+                       candidate_roles=None, candidate_types=None,
+                       compiled_roles=None,
+                       bare_peer_id=False):
+        limit = min(max(0, numwant), NUMWANT_CAP)
+        if limit == 0:
+            return []
+        swarm = self._swarms.get(info_hash, {})
+        sources = self._candidate_sources(
+            info_hash, candidate_principals, candidate_ips,
+            candidate_roles, candidate_types, compiled_roles)
+        if not sources:
+            return []
+        req = (_DEFAULT_PRINCIPAL if requester_principal is None
+               else requester_principal)
+        self_key = (req.type, req.id, peer_id)
+        source_lengths = [len(source) for source in sources]
+        total_slots = sum(source_lengths)
+        start = self._randbelow(total_slots)
+        inspect_limit = min(4 * limit, len(swarm))
+        inspected = 0
+        out = []
+        seen = set()
+        first_source = start % len(sources)
+        for source_offset in range(len(sources)):
+            source = sources[(first_source + source_offset) % len(sources)]
+            keys = tuple(source) if isinstance(source, dict) else source
+            source_start = start % len(keys)
+            for offset in range(len(keys)):
+                if inspected >= inspect_limit or len(out) >= limit:
+                    break
+                key = keys[(source_start + offset) % len(keys)]
+                if key is None or key in seen:
+                    continue
+                seen.add(key)
+                row = swarm.get(key)
+                if row is None:
+                    continue
+                if (bare_peer_id and row["peer_id"] == peer_id) or \
+                        (not bare_peer_id and key == self_key):
+                    continue
+                inspected += 1
+                if predicate is not None and not predicate(
+                        requester_principal, requester_ip,
+                        row["principal"], row["ip"]):
+                    continue
+                out.append(self._peer_result(row))
+            if inspected >= inspect_limit or len(out) >= limit:
+                break
+        return out
+
     def peers(self, info_hash, peer_id, numwant=50, now=None):
         now = time.time() if now is None else now
         with self._lock:
-            swarm = self._swarms.get(info_hash, {})
-            pending = self._prune(info_hash, swarm, now)
-            self._cleanup_empty(info_hash, swarm, now)
-            limit = min(max(0, numwant), NUMWANT_CAP)
-            out = []
-            for r in swarm.values():
-                if r["peer_id"] == peer_id:
-                    continue
-                out.append({"ip": r["ip"], "port": r["port"]})
-                if len(out) >= limit:
-                    break
+            pending = self._read_prune_locked(now)
+            out = self._select_locked(
+                info_hash, peer_id, None, None, None, numwant,
+                bare_peer_id=True)
         for args in pending:
             self._emit(*args)
         return out
 
     def select_peers(self, info_hash, peer_id, requester_principal,
-                     requester_ip, predicate=None, numwant=50, now=None):
+                     requester_ip, predicate=None, numwant=50, now=None,
+                     candidate_principals=None, candidate_ips=None,
+                     candidate_roles=None, candidate_types=None,
+                     compiled_roles=None):
         """Return candidate peers for a requester, filtered by *predicate*.
 
         The predicate — when given — receives BOTH complete identities on each
@@ -219,35 +545,27 @@ class PeerRegistry:
         # (principal.type, principal.id, peer_id), not by bare peer_id: a
         # different typed principal that happens to reuse this peer_id is a
         # distinct peer and must stay discoverable (spec §0a/§6).
-        req = _DEFAULT_PRINCIPAL if requester_principal is None \
-            else requester_principal
-        self_key = (req.type, req.id, peer_id)
         with self._lock:
-            swarm = self._swarms.get(info_hash, {})
-            pending = self._prune(info_hash, swarm, now)
-            self._cleanup_empty(info_hash, swarm, now)
-            limit = min(max(0, numwant), NUMWANT_CAP)
-            out = []
-            for key, r in swarm.items():
-                if key == self_key:
-                    continue
-                if predicate is not None and not predicate(
-                        requester_principal, requester_ip,
-                        r["principal"], r["ip"]):
-                    continue
-                out.append({"ip": r["ip"], "port": r["port"]})
-                if len(out) >= limit:
-                    break
+            pending = self._read_prune_locked(now)
+            out = self._select_locked(
+                info_hash, peer_id, requester_principal, requester_ip,
+                predicate, numwant, candidate_principals, candidate_ips,
+                candidate_roles, candidate_types, compiled_roles)
         for args in pending:
             self._emit(*args)
         return out
 
+    def has_principal_type(self, info_hash, principal_type):
+        """O(1) hint used to avoid durable legacy scans for typed-only swarms."""
+        with self._lock:
+            return bool(self._type_positions.get(info_hash, {}).get(
+                principal_type))
+
     def scrape(self, info_hash, now=None):
         now = time.time() if now is None else now
         with self._lock:
+            pending = self._read_prune_locked(now)
             swarm = self._swarms.get(info_hash, {})
-            pending = self._prune(info_hash, swarm, now)
-            self._cleanup_empty(info_hash, swarm, now)
             records = list(swarm.values())
             downloaded = self._downloaded.get(info_hash, {}).get("count", 0)
         for args in pending:
@@ -267,11 +585,9 @@ class PeerRegistry:
         all_pending = []
         snapshots = {}
         with self._lock:
+            all_pending.extend(self._read_prune_locked(now))
             for info_hash in set(self._swarms) | set(self._downloaded):
                 swarm = self._swarms.get(info_hash, {})
-                pending = self._prune(info_hash, swarm, now)
-                all_pending.extend(pending)
-                self._cleanup_empty(info_hash, swarm, now)
                 if info_hash not in self._swarms and info_hash not in self._downloaded:
                     continue
                 snapshots[info_hash] = (
@@ -304,11 +620,9 @@ class PeerRegistry:
         all_pending = []
         raw = {}
         with self._lock:
+            all_pending.extend(self._read_prune_locked(now))
             for info_hash in list(self._swarms):
                 swarm = self._swarms.get(info_hash, {})
-                pending = self._prune(info_hash, swarm, now)
-                all_pending.extend(pending)
-                self._cleanup_empty(info_hash, swarm, now)
                 raw[info_hash] = list(swarm.values())
         for args in all_pending:
             self._emit(*args)
@@ -321,6 +635,12 @@ class PeerRegistry:
                       "principal_type": r["principal"].type,
                       "principal_id": _public_principal_id(r["principal"]),
                       "participant_class": _participant_class(r["principal"]),
+                      "peer_id": r["peer_id"],
+                      "interval": r.get("interval", self._interval),
+                      "uploaded_delta": r.get("uploaded_delta", 0),
+                      "downloaded_delta": r.get("downloaded_delta", 0),
+                      "counter_reset": r.get("counter_reset", False),
+                      "legacy_restricted": r.get("legacy_restricted", False),
                       "download_seconds": (
                           (r["completed_at"] - r["joined_at"])
                           if r.get("completed_at") is not None else None)}
@@ -333,12 +653,6 @@ class PeerRegistry:
         now = time.time() if now is None else now
         all_pending = []
         with self._lock:
-            for info_hash, swarm in list(self._swarms.items()):
-                all_pending.extend(self._prune(info_hash, swarm, now))
-                self._cleanup_empty(info_hash, swarm, now)
-            # Counters can outlive their swarm, so sweep them independently.
-            for info_hash in list(self._downloaded):
-                if info_hash not in self._swarms:
-                    self._cleanup_empty(info_hash, {}, now)
+            all_pending.extend(self._read_prune_locked(now, force=True))
         for args in all_pending:
             self._emit(*args)
