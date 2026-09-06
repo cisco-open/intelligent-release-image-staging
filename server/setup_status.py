@@ -21,6 +21,7 @@ GOVERNING RULE: never report ``ok`` on missing evidence. Unreadable, absent and
 unparseable inputs all degrade to a non-ok state.
 """
 import hashlib
+import json
 import os
 import re
 import ssl
@@ -203,6 +204,49 @@ def package_readiness(path, name, kind, platform, remedy):
     return entry
 
 
+def served_bundle_readiness(artifacts_dir, status_path):
+    """Bind the latest startup provisioning result to both served files."""
+    entry = {"name": "iris-agent.tgz", "fingerprint": None, "built_at": None,
+             "provenance": None, "state": "unknown",
+             "remedy": "Rebuild the server image and restart after correcting the provisioning error.",
+             "reason": "provisioning-unavailable",
+             "detail": "Guest Shell bundle provisioning evidence is unavailable or invalid."}
+    try:
+        with open(status_path, "rb") as handle:
+            raw = handle.read(4097)
+        if len(raw) > 4096:
+            return entry
+        receipt = json.loads(raw)
+        if not isinstance(receipt, dict) or receipt.get("format") != "iris-served-bundle-v1":
+            return entry
+        if receipt.get("state") != "ok":
+            entry.update(state="stale", reason="provisioning-failed",
+                         detail="The latest Guest Shell bundle provisioning did not succeed; inspect server startup logs.")
+            return entry
+        for name in ("iris-agent.tgz", "bootstrap.sh"):
+            expected = receipt.get(name)
+            if not isinstance(expected, str) or not _HEX_SHA256.fullmatch(expected):
+                return entry
+            with open(os.path.join(artifacts_dir, name), "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not info.st_size:
+                    return entry
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                if name == "iris-agent.tgz":
+                    entry["built_at"] = int(info.st_mtime)
+            if digest.hexdigest() != expected:
+                entry.update(state="stale", reason="served-bundle-changed",
+                             detail="The served bundle or bootstrap changed after verified provisioning.")
+                return entry
+    except (OSError, ValueError, UnicodeError):
+        return entry
+    entry.update(state="ok", reason="ready",
+                 detail="The served bundle and bootstrap match the latest successful provisioning from a checksum- and architecture-verified aria2c.")
+    return entry
+
+
 # Worst-of ordering. Higher wins, so an invalid package is never masked by an
 # unreadable sibling and "cannot determine" never resolves to done.
 _RANK = {"ok": 0, "absent": 1, "unknown": 2, "unset": 3, "stale": 4}
@@ -260,7 +304,7 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
                  admin_username,
                  telemetry_override_endpoint=None, telemetry_override_enabled=None,
                  telemetry_env_endpoint="", telemetry_env_enabled=False,
-                 image_verification_last_run=None):
+                 image_verification_last_run=None, provision_status_path=None):
     """Assemble the four-card setup status. Pure: all inputs are supplied."""
     reference = read_pem_fingerprint(served_cert_path)
     distributed = read_pem_fingerprint(distributed_cert_path)
@@ -272,6 +316,8 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
     items = [package_readiness(
         os.path.join(artifacts_dir, name), name, kind, platform, remedy)
         for name, kind, platform, remedy in _PACKAGE_SPECS]
+    if provision_status_path is not None:
+        items.append(served_bundle_readiness(artifacts_dir, provision_status_path))
 
     packages = {
         "state": _worst([i["state"] for i in items]),

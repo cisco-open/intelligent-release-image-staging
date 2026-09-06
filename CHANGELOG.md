@@ -12,6 +12,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Verify the server’s Guest Shell aria2c checksum and architecture before
+  publishing its bundle; failed provisioning remains visible in Device packages
+  readiness even when an older bundle is retained (issue #178).
 - Produce the ARM Guest Shell bundle with `tools/make-agent-bundle.sh --arch arm64 --aria2 PATH`, verifying the architecture and pinned checksum before packing (issue #179).
 - Accept incoming peers whose BitTorrent handshake arrives together with
   protocol messages, preserving the buffered messages (issue #174).

@@ -7,17 +7,28 @@
 # provision-served.sh stages the three DERIVABLE served artifacts (Guest Shell
 # bundle, bootstrap.sh, iris-catalog.pem) into the artifacts dir at container
 # startup, so a fresh deploy no longer fails onboarding on missing files. It is
-# best-effort: it must never exit non-zero (that would block the server start).
+# failure leaves the server running, but returns non-zero and reports readiness.
 
 setup() {
   PROV="$BATS_TEST_DIRNAME/../provision-served.sh"
   DEVICE="$BATS_TEST_DIRNAME/../../device"
   TMP="$(mktemp -d)"
   ART="$TMP/artifacts"; mkdir -p "$ART"
-  printf '#!/bin/sh\necho fake\n' > "$TMP/aria2c"; chmod +x "$TMP/aria2c"
+  mkdir -p "$TMP/server" "$TMP/run"
+  cp "$PROV" "$TMP/server/provision-served.sh"
+  cp "$BATS_TEST_DIRNAME/../pack-agent-bundle.sh" "$TMP/server/pack-agent-bundle.sh"
+  PROV="$TMP/server/provision-served.sh"
+  python3 - "$TMP/aria2c" <<'PYTHON'
+import pathlib,sys
+# Minimal ELF header: checksum/architecture fixture, never executed.
+pathlib.Path(sys.argv[1]).write_bytes(b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x02\x00\x3e\x00' + bytes(44))
+PYTHON
+  chmod +x "$TMP/aria2c"
+  printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
   mkdir -p "$TMP/config/tls"; printf 'CRTPEM\n' > "$TMP/config/tls/crt.pem"
   run_prov() {
     IRIS_DEVICE_DIR="$DEVICE" IRIS_ARIA2="$TMP/aria2c" \
+      IRIS_ARIA2_SUMS="$TMP/aria2c.sha256" IRIS_RUN="$TMP/run" \
       IRIS_CRT_SRC="$TMP/config/tls/crt.pem" \
       bash "$PROV" "$ART"
   }
@@ -49,12 +60,13 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$ART/iris-agent.tgz" ]
 }
 
-@test "best-effort: read-only artifacts dir warns but exits 0 (never blocks startup)" {
+@test "read-only artifacts dir warns and reports failure" {
   chmod -w "$ART"
   run run_prov
   chmod +w "$ART"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *"not writable"* ]]
+  check_guest_status stale
 }
 
 @test "missing server cert: still stages the bundle, exits 0, warns about the cert" {
@@ -75,4 +87,84 @@ teardown() { rm -rf "$TMP"; }
   printf 'IOXPKG\n' > "$ART/iris-arm64.tar"
   run run_prov
   [[ "$output" != *"build device/iox/build.sh"* ]]
+}
+
+
+check_guest_status() {
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$ART" "$TMP/run/served-bundle.json" "$1" <<'PYTHON'
+import sys
+import setup_status
+status = setup_status.build_status(sys.argv[1], '', '', 'admin',
+                                  provision_status_path=sys.argv[2])
+item = next(row for row in status['packages']['items'] if row['name'] == 'iris-agent.tgz')
+assert item['state'] == sys.argv[3], item
+if sys.argv[3] != 'ok':
+    assert status['packages']['state'] != 'ok', status
+PYTHON
+}
+
+@test "verified bundle readiness binds both served bundle and bootstrap bytes" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  check_guest_status ok
+  cp "$ART/iris-agent.tgz" "$TMP/verified.tgz"
+  printf 'changed bundle\n' >> "$ART/iris-agent.tgz"
+  check_guest_status stale
+  cp "$TMP/verified.tgz" "$ART/iris-agent.tgz"
+  printf 'changed bootstrap\n' >> "$ART/bootstrap.sh"
+  check_guest_status stale
+}
+
+@test "checksum mismatch preserves prior bundle and reports failed provisioning" {
+  run_prov
+  cp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  printf 'substituted\n' >> "$TMP/aria2c"
+  run run_prov
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"checksum"* ]]
+  cmp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  check_guest_status stale
+}
+
+@test "wrong ELF architecture is refused even with a matching checksum" {
+  python3 - "$TMP/aria2c" <<'PYTHON'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); data = bytearray(p.read_bytes()); data[18:20] = b'\xb7\x00'; p.write_bytes(data)
+PYTHON
+  printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
+  run run_prov
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"x86_64 ELF"* ]]
+  [ ! -f "$ART/iris-agent.tgz" ]
+  check_guest_status stale
+}
+
+@test "pack failure replaces previous success readiness while preserving prior bundle" {
+  run_prov
+  cp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/server/pack-agent-bundle.sh"
+  run run_prov
+  [ "$status" -ne 0 ]
+  cmp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  [ ! -f "$ART/.iris-agent.tgz.tmp" ]
+  check_guest_status stale
+}
+
+@test "missing manifest and missing receipt never report a healthy Guest Shell bundle" {
+  run_prov
+  rm "$TMP/aria2c.sha256"
+  run run_prov
+  [ "$status" -ne 0 ]
+  check_guest_status stale
+  rm "$TMP/run/served-bundle.json"
+  check_guest_status unknown
+}
+
+@test "malformed or interrupted provisioning evidence cannot report success" {
+  run_prov
+  printf '{broken\n' > "$TMP/run/served-bundle.json"
+  check_guest_status unknown
+  printf '{"format":"iris-served-bundle-v1","state":"pending"}\n' > "$TMP/run/served-bundle.json"
+  check_guest_status stale
 }

@@ -2160,7 +2160,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     os.path.join(artifacts_dir, "iris-catalog.pem"),
                     info["username"],
                     *_telemetry_status_args(),
-                    image_verification_last_run=_image_verification_last_run()))
+                    image_verification_last_run=_image_verification_last_run(),
+                    provision_status_path=os.path.join(
+                        os.environ.get("IRIS_RUN", "/run/iris"), "served-bundle.json")))
                 return
             if path == "/api/settings/image-verification":
                 # KGV reconciler Task 4: schedule config + last_run, its own

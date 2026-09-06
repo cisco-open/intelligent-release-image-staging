@@ -537,21 +537,33 @@ or XR package may be reused. Console onboarding requires the normal undeploy,
 then onboard sequence because preflight refuses an already-running IRIS agent.
 
 Console **Settings → Device packages** (also linked from the setup flow) keeps
-the two readiness questions separate:
+the readiness checks separate:
 
-- Each package row checks that the wrapper is readable and non-empty, that its
+- Each IOx/XR package row checks that the wrapper is readable and non-empty, that its
   adjacent `.manifest` has the expected wrapper kind, filename, platform, and
   canonical OCI digests, and that the manifest's wrapper SHA-256 matches the
   served bytes. `ok` proves that byte-to-provenance binding only; it does not
   inspect package contents or validate a native signature. `stale` means the
   wrapper digest disagrees with its manifest. Missing, unreadable, or malformed
   evidence reports `absent` or `unknown`, never success.
+- The `iris-agent.tgz` row checks the latest server startup provisioning
+  result and the resulting bundle and `bootstrap.sh` digests. Startup verifies
+  the image-baked aria2c against the x86_64 checksum pin and ELF architecture
+  before replacing the bundle. A verification, packing, or publication failure
+  reports `stale`; absent or invalid evidence reports `unknown`. The server
+  continues running, but an older bundle left on disk cannot appear ready.
+  Inspect startup logs and correct the image input or artifact-directory
+  permissions before restarting. The receipt lives at
+  `$IRIS_RUN/served-bundle.json` (default `/run/iris/served-bundle.json`),
+  independently of the artifacts mount so a read-only mount is visible.
 - The card separately compares the certificate the live services present with
   the public `iris-catalog.pem` copy onboarding distributes. A missing copy or
   mismatch means new onboarding is not ready. Reconcile that served artifact;
   rebuilding deployment-neutral packages cannot repair certificate drift.
 
-`tools/check-package-freshness.sh` is the scriptable equivalent. Its default
+`tools/check-package-freshness.sh` checks the IOx/XR wrapper and certificate
+conditions above; the Guest Shell provisioning receipt is reported by the
+Console setup-status endpoint. Its default
 mode is read-only; `--rebuild` rebuilds wrapper families whose package or
 provenance evidence is missing or invalid, then rechecks. It will not rebuild
 packages to paper over a served-versus-distributed certificate failure.
