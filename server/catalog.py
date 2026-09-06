@@ -83,7 +83,7 @@ def _resolve_refresh_auth(store, index, token, now, grace):
         return None
     if ctx is not None and ctx.secret_name != "catalog_token_prev":
         return ctx
-    entry = index.get(token)
+    entry = secrets_store.credential_for(index, token)
     if entry is None:
         return None
     principal, secret_name, record = entry

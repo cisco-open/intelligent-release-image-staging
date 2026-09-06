@@ -83,7 +83,8 @@ def test_expired_previous_is_dropped_on_the_next_rotation_pass():
     assert store["seeder"]["announce_token"]["value"] == v2
     # and the retired values are no longer resolvable at all
     idx = secrets_store.build_announce_index(store)
-    assert v0 not in idx and v1 not in idx
+    assert secrets_store.credential_for(idx, v0) is None
+    assert secrets_store.credential_for(idx, v1) is None
 
 
 def test_expired_previous_stops_authenticating_before_it_is_dropped():
@@ -94,7 +95,8 @@ def test_expired_previous_stops_authenticating_before_it_is_dropped():
     store = _seeded_store(now)
     old = store["seeder"]["announce_token"]["value"]
     secrets_store.rotate_announce(store, now + 1)
-    rec = secrets_store.build_announce_index(store)[old][2]
+    idx = secrets_store.build_announce_index(store)
+    rec = secrets_store.credential_for(idx, old)[2]
     inside = now + 1 + secrets_store.SEEDER_PREV_TTL - 1
     outside = now + 1 + secrets_store.SEEDER_PREV_TTL
     assert secrets_store.valid(rec, inside, 0)
@@ -219,18 +221,18 @@ def test_announce_index_resolves_current_and_previous_with_legacy_flags():
     idx = secrets_store.build_announce_index(store)
 
     # device current -> device principal, legacy False
-    p, sname, rec, legacy = idx[dev_val]
+    p, sname, rec, legacy = secrets_store.credential_for(idx, dev_val)
     assert p == auth.Principal("device", "dev-1")
     assert sname == "announce_token"
     assert legacy is False
 
     # seeder current -> service principal, legacy False
-    p, sname, rec, legacy = idx[new_cur]
+    p, sname, rec, legacy = secrets_store.credential_for(idx, new_cur)
     assert p == auth.Principal("service", "seeder")
     assert legacy is False
 
     # seeder previous -> service principal, legacy True, previous secret name
-    p, sname, rec, legacy = idx[prev_val]
+    p, sname, rec, legacy = secrets_store.credential_for(idx, prev_val)
     assert p == auth.Principal("service", "seeder")
     assert sname == "announce_token_previous"
     assert legacy is True
@@ -278,8 +280,8 @@ def test_device_seeder_distinct_from_service_seeder():
             "value": "devseeder000000000000000000000000",
             "created_at": now, "expires_at": 0, "revoked": False}}
     idx = secrets_store.build_announce_index(store)
-    p_service, _, _, _ = idx[store["seeder"]["announce_token"]["value"]]
-    p_device, _, _, _ = idx[store["devices"]["seeder"]["announce_token"]["value"]]
+    p_service, _, _, _ = secrets_store.credential_for(idx, store["seeder"]["announce_token"]["value"])
+    p_device, _, _, _ = secrets_store.credential_for(idx, store["devices"]["seeder"]["announce_token"]["value"])
     assert p_service == auth.Principal("service", "seeder")
     assert p_device == auth.Principal("device", "seeder")
     assert p_service != p_device

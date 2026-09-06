@@ -11,6 +11,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Reliability
+- Keep catalog and tracker credential lookup independent of fleet size with
+  digest-keyed indexes and a constant-time check of the selected credential.
+- Persist the previous management credential before replacing the current
+  credential so a host crash preserves the Console's rotation overlap.
+
 ### Deployment
 - Run the Docker server and Console on separate hosts with independent Compose
   files, verified HTTPS, management credentials, and separate browser TLS.

@@ -6,9 +6,9 @@
 
 New agents carry credentials in Authorization headers.  The tracker also keeps
 the previous query-token resolver solely for unchanged Guest Shell bundles;
-both paths scan the collision-detecting index with constant-time comparisons.
+both paths use a digest-keyed, collision-detecting index and verify the matched
+credential with a constant-time comparison.
 """
-import hmac
 from typing import NamedTuple
 from urllib.parse import parse_qs, parse_qsl
 
@@ -83,19 +83,7 @@ def _resolve_valid_credential(index, store, value, now, grace):
     *store* is unused here (the *index* already carries the resolved record);
     it is retained only to keep the positional signature stable for existing
     callers/tests. Do not rely on it for resolution."""
-    try:
-        candidate = value.encode("utf-8")
-    except (AttributeError, UnicodeError):
-        return None
-    entry = None
-    for indexed_value, possible in index.items():
-        try:
-            equal = hmac.compare_digest(
-                candidate, indexed_value.encode("utf-8"))
-        except (AttributeError, UnicodeError):
-            equal = False
-        if equal:
-            entry = possible
+    entry = _ss.credential_for(index, value)
     if entry is None:
         return None
     principal, secret_name, record, legacy = entry
@@ -113,19 +101,7 @@ def _known_expired(index, value, now, grace):
     credential that timed out" from "unknown/garbage" or "revoked" for the
     refused-announce counters. Never influences the auth decision itself,
     and never returns or logs the value."""
-    try:
-        candidate = value.encode("utf-8")
-    except (AttributeError, UnicodeError):
-        return False
-    entry = None
-    for indexed_value, possible in index.items():
-        try:
-            equal = hmac.compare_digest(
-                candidate, indexed_value.encode("utf-8"))
-        except (AttributeError, UnicodeError):
-            equal = False
-        if equal:
-            entry = possible
+    entry = _ss.credential_for(index, value)
     if entry is None:
         return False
     _principal, _secret_name, record, _legacy = entry
@@ -207,7 +183,7 @@ def resolve_catalog_auth(store, index, token, now, grace):
 
     *index* is the STRICT catalog auth index
     (``secrets_store.build_catalog_auth_index``): a mapping
-    ``{value: (Principal, secret_name, record)}`` that already fails token-free
+    ``{digest: (Principal, secret_name, record)}`` that already fails token-free
     on duplicate value ownership. This is the sole catalog authorization
     surface (spec §6) — never the broad ``secrets_store.build_index``.
 
@@ -220,23 +196,7 @@ def resolve_catalog_auth(store, index, token, now, grace):
     strict index already carries the live record, so resolution is driven
     entirely by *index*.
     """
-    if token is None:
-        return None
-    try:
-        candidate = token.encode("utf-8")
-    except (AttributeError, UnicodeError):
-        return None
-    entry = None
-    # Scan every record with constant-time byte comparison. Authentication is
-    # performed before route/resource lookup, so neither dict-key timing nor
-    # early exit becomes an ownership oracle across device principals.
-    for value, possible in index.items():
-        try:
-            equal = hmac.compare_digest(candidate, value.encode("utf-8"))
-        except (AttributeError, UnicodeError):
-            equal = False
-        if equal:
-            entry = possible
+    entry = _ss.credential_for(index, token)
     if entry is None:
         return None
     principal, secret_name, record = entry
@@ -248,25 +208,16 @@ def resolve_catalog_auth(store, index, token, now, grace):
 
 def resolve_announce_bearer(token, index, store, now=None, grace=None,
                             legacy_id=None):
-    """Resolve one header-carried announce credential in constant time.
+    """Resolve a header-carried announce credential without scanning the fleet.
 
-    ``index`` is the collision-detecting announce index.  Every value is
-    compared so the credential never becomes a URL component and a matching
-    record is not distinguished by an early-return timing signal.
+    The strict digest index selects at most one record, whose live credential
+    is verified before checking expiry, revocation, and principal scope.
     """
     now = 0 if now is None else now
     grace = 0 if grace is None else grace
     if not isinstance(token, str) or not token:
         raise AnnounceAuthError("missing announce credential")
-    candidate = token.encode("utf-8")
-    hit = None
-    for value, entry in index.items():
-        try:
-            equal = hmac.compare_digest(candidate, value.encode("utf-8"))
-        except (AttributeError, UnicodeError):
-            equal = False
-        if equal:
-            hit = entry
+    hit = _ss.credential_for(index, token)
     if hit is None:
         raise AnnounceAuthError("invalid announce credential")
     principal, secret_name, record, legacy = hit

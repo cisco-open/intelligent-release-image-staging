@@ -30,6 +30,7 @@ from urllib.parse import unquote, urlsplit
 
 import api_problem
 import api_routes
+import auth
 import bounded_pool
 import credential_cache
 import secrets_store
@@ -337,28 +338,17 @@ def make_server(host, port, directory, certfile=None, secrets_path=None,
                 api_problem.send(self, 503, "credential-store-unavailable",
                                  "Credential store unavailable")
                 return False
-            selected = None
-            candidate = presented.encode("utf-8")
-            # Artifact fetches are infrequent enrollment traffic. Scanning the
-            # strict index buys constant-time token comparison without putting
-            # a secret value in a URL or relying on dict-key timing.
-            for value, entry in index.items():
-                try:
-                    value_bytes = value.encode("utf-8")
-                except (AttributeError, UnicodeError):
-                    value_bytes = b""
-                if hmac.compare_digest(candidate, value_bytes):
-                    selected = entry
-            if selected is None:
+            context = auth.resolve_catalog_auth(
+                store, index, presented, time.time(), grace)
+            if context is None or context.principal.type != "device" \
+                    or context.scope != "catalog" \
+                    or context.secret_name not in (
+                        "catalog_token", "catalog_token_prev") \
+                    or not hmac.compare_digest(
+                        username.encode("utf-8"),
+                        context.principal.id.encode("utf-8")):
                 return None
-            principal, secret_name, record = selected
-            if principal.type != "device" or secret_name not in (
-                    "catalog_token", "catalog_token_prev") \
-                    or not secrets_store.valid(record, time.time(), grace) \
-                    or not hmac.compare_digest(username.encode("utf-8"),
-                                               principal.id.encode("utf-8")):
-                return None
-            return principal.id
+            return context.principal.id
 
         def _authorize_and_map(self):
             # Preserve the exact GET/HEAD flow of already-deployed Guest Shell

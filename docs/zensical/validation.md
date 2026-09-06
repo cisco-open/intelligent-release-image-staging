@@ -59,6 +59,9 @@ fleet drives concurrently — then reports how the cost of each moves as N
 grows. Reassigning the whole selected set through
 `FleetStore.bulk_upsert` costs at most `keyed_state.SHARD_COUNT` (256) shard
 writes, however many devices are selected.
+Credential checks call the actual catalog, tracker query and tracker bearer
+resolvers with accepted and unknown tokens. The harness counts index lookups
+and rejects fleet-wide scans during resolution.
 
 A small pair of sizes (50 and 500 devices) runs by default, in seconds, with
 every test suite. The full progression the project's own scale claims are
@@ -82,7 +85,7 @@ absolute milliseconds are noisy and **not comparable across separate runs,
 days, or machines** — only the growth factor within one run, across its own
 sizes, means anything. The assertions that actually run check deterministic
 counted work instead — which shard file changed, how many rows it holds, how
-many credential-index builds a run of requests costs, how many bytes a
+many credential-index builds and lookups requests cost, how many bytes a
 console response carries — the same style `test_keyed_state_scaling.py`
 uses. It deliberately does not measure concurrent load (every call runs
 sequentially, never the thousands-of-devices-at-once shape a real fleet

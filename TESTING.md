@@ -49,6 +49,9 @@ temporary directory and drives a tracker announce, a catalog heartbeat, a
 device policy read, a terminal report, a credential resolution, a fleet-wide
 bulk credential reassignment, and the Console's fleet projection (paged and
 unpaged). It reports how the cost of each changes as N grows.
+Credential checks run the actual catalog, tracker query and tracker bearer
+resolvers with accepted and unknown tokens. The harness counts index lookups
+and rejects fleet-wide scans during resolution.
 `FleetStore.bulk_upsert` writes at most `keyed_state.SHARD_COUNT` (256) shard
 files, however many devices are selected.
 
@@ -89,7 +92,7 @@ growth factor *within one run*, across its own sizes, is meaningful. The
 assertions that actually run are all deterministic counted work, in the
 style `server/tests/test_keyed_state_scaling.py` established: which shard
 file changed, how many rows a touched shard holds, how many credential-index
-builds a run of requests costs, how many bytes a console response carries.
+builds and lookups requests cost, how many bytes a console response carries.
 Not measured at all: concurrent load (every call in the harness runs
 sequentially, one at a time, never the thousands-of-devices-at-once shape a
 real fleet produces), process/thread/file-descriptor growth over time, and

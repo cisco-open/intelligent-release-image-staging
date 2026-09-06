@@ -252,7 +252,7 @@ def test_credential_index_is_built_once_until_the_store_changes(tmp_path):
 
     for _ in range(50):
         store, index = res.view("catalog", counting)
-        assert index["%032x" % 0][0].id == "d00000"
+        assert secrets_store.credential_for(index, "%032x" % 0)[0].id == "d00000"
     assert len(builds) == 1                     # 50 requests, one index build
 
 
@@ -262,13 +262,13 @@ def test_a_revoke_lands_on_the_very_next_request(tmp_path):
     res = credential_cache.CredentialResolver(path)
     _, index = res.view("catalog", secrets_store.build_catalog_auth_index)
     token = "%032x" % (3 * 3)
-    assert secrets_store.valid(index[token][2], 1000.0, 0)
+    assert secrets_store.valid(secrets_store.credential_for(index, token)[2], 1000.0, 0)
     # Another process revokes the device (iris-revoke), replacing the file.
     fresh = secrets_store.load(path)
     secrets_store.revoke(fresh, "d00003")
     secrets_store.save(fresh, path)
     _, index = res.view("catalog", secrets_store.build_catalog_auth_index)
-    assert not secrets_store.valid(index[token][2], 1000.0, 0)
+    assert not secrets_store.valid(secrets_store.credential_for(index, token)[2], 1000.0, 0)
 
 
 def test_duplicate_credential_ownership_fails_closed_every_time(tmp_path):

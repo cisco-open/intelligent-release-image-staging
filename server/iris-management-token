@@ -86,12 +86,13 @@ def rotate():
     replacement = (json.dumps({
         "scope": "management", "token": secrets.token_urlsafe(48)},
         separators=(",", ":")) + "\n").encode("utf-8")
-    # Previous is installed first while current still names the old value.
-    # A crash between the two replaces leaves an old/old pair, never a missing
-    # current credential; retrying safely completes the rotation.
+    # Make the overlap directory entry durable before replacing current, so a
+    # crash cannot persist the new current without the old credential overlap.
+    directory = os.path.dirname(current) or "."
     _atomic_write(previous, old)
+    _fsync_directory(directory)
     _atomic_write(current, replacement)
-    _fsync_directory(os.path.dirname(current) or ".")
+    _fsync_directory(directory)
 
 
 def retire_previous():

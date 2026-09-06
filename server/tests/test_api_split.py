@@ -601,6 +601,81 @@ def test_artifact_staging_resource_is_bound_to_basic_principal(tmp_path):
         server.server_close()
 
 
+@pytest.mark.parametrize("fleet_size", [1, 10_000])
+def test_artifact_basic_auth_uses_bounded_live_catalog_lookup(
+        tmp_path, monkeypatch, fleet_size):
+    class LookupOnlyIndex(dict):
+        lookups = 0
+
+        def get(self, key, default=None):
+            assert isinstance(key, bytes) and len(key) == 32
+            self.lookups += 1
+            return super().get(key, default)
+
+        def __iter__(self):
+            raise AssertionError("artifact authentication scanned the fleet")
+
+        items = keys = values = __iter__
+
+    indexes = []
+    original_builder = secrets_store.build_catalog_auth_index
+
+    def bounded_index(store):
+        index = LookupOnlyIndex(original_builder(store))
+        indexes.append(index)
+        return index
+
+    monkeypatch.setattr(secrets_store, "build_catalog_auth_index", bounded_index)
+    store = {"devices": {}, "seeder": {}}
+    for i in range(fleet_size):
+        store["devices"]["d%d" % i] = {"catalog_token": {
+            "value": "%032x" % i, "expires_at": 0, "revoked": False}}
+    target = store["devices"]["d0"]
+    target["catalog_token_prev"] = {
+        "value": "previous-catalog-token", "expires_at": 0, "revoked": False}
+    target["announce_token"] = {
+        "value": "announce-only-token", "expires_at": 0, "revoked": False}
+    secret_path = tmp_path / "secrets.json"
+    secrets_store.save(store, str(secret_path))
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    (root / "iris-agent.tgz").write_bytes(b"test artifact")
+    server = artifact_server.make_server(
+        "127.0.0.1", 0, str(root), secrets_path=str(secret_path), token_grace=0)
+    _thread(server)
+    path = "/v1/devices/d0/artifacts/iris-agent.tgz"
+
+    def basic(username, token, expected):
+        encoded = base64.b64encode((username + ":" + token).encode()).decode()
+        before = sum(index.lookups for index in indexes)
+        status, headers, body = _request(
+            server.server_address[1], path,
+            headers={"Authorization": "Basic " + encoded})
+        assert status == expected
+        assert sum(index.lookups for index in indexes) - before == 1
+        if expected == 200:
+            assert body == b"test artifact"
+        else:
+            assert "WWW-Authenticate" in headers
+
+    try:
+        basic("d0", target["catalog_token"]["value"], 200)
+        basic("d0", target["catalog_token_prev"]["value"], 200)
+        basic("different-device", target["catalog_token"]["value"], 401)
+        basic("d0", "unknown-password", 401)
+        basic("d0", target["announce_token"]["value"], 401)
+        assert len(indexes) == 1
+        target["catalog_token"]["expires_at"] = 1
+        secrets_store.save(store, str(secret_path))
+        basic("d0", target["catalog_token"]["value"], 401)
+        target["catalog_token_prev"]["revoked"] = True
+        secrets_store.save(store, str(secret_path))
+        basic("d0", target["catalog_token_prev"]["value"], 401)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_guest_shell_legacy_artifacts_are_narrow_and_not_cacheable(tmp_path):
     """Keep unchanged IOS copy HTTPS paths without reopening arbitrary files."""
     secret_path = tmp_path / "secrets.json"

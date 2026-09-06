@@ -272,30 +272,6 @@ def test_dedicated_revoked_credential_is_not_classified_expired():
     assert ei.value.expired is False
 
 
-def test_header_bearer_scans_index_once_for_known_and_unknown(monkeypatch):
-    now = 1_000_000
-    store = _store()
-    values = [secrets_store.mint(
-        store, "dev-%d" % i, "announce_token", now) for i in range(3)]
-    store["devices"]["dev-1"]["announce_token"]["expires_at"] = now + 1
-    idx = _index(store)
-    original = auth.hmac.compare_digest
-    calls = []
-
-    def counted(left, right):
-        calls.append((left, right))
-        return original(left, right)
-
-    monkeypatch.setattr(auth.hmac, "compare_digest", counted)
-    with pytest.raises(auth.AnnounceAuthError) as expired:
-        auth.resolve_announce_bearer(values[1], idx, store, now + 2, 0)
-    assert expired.value.expired is True
-    assert len(calls) == len(idx)
-
-    calls.clear()
-    with pytest.raises(auth.AnnounceAuthError):
-        auth.resolve_announce_bearer("unknown-token", idx, store, now, 0)
-    assert len(calls) == len(idx)
 
 
 def test_legacy_scan_all_expired_candidates_classified_expired():

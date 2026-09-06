@@ -21,6 +21,8 @@ seeding server (not bound to any individual device).
 """
 import contextlib
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -284,24 +286,63 @@ def _principal():
     return auth.Principal
 
 
+def _credential_bytes(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return value.encode("utf-8")
+    except UnicodeError:
+        return None
+
+
+def _credential_digest(value_bytes):
+    return hashlib.sha256(value_bytes).digest()
+
+
+def credential_for(index, value):
+    """Look up a credential in a strict digest index without scanning records.
+
+    Digest keys have a fixed size and reveal no raw credential prefixes through
+    dictionary comparisons. Verify the selected live record's value before
+    returning it: even a digest collision or an in-place token replacement must
+    not authenticate a different credential. Expiry and revocation remain the
+    caller's responsibility, including catalog refresh's bounded recovery rule.
+    """
+    candidate = _credential_bytes(value)
+    if candidate is None:
+        return None
+    entry = index.get(_credential_digest(candidate))
+    if entry is None:
+        return None
+    expected = _credential_bytes(entry[2].get("value"))
+    if expected is None or not hmac.compare_digest(candidate, expected):
+        return None
+    return entry
+
+
 def _strict_set(index, value, entry, principal_type, principal_id):
-    if value in index:
+    candidate = _credential_bytes(value)
+    if candidate is None:
+        return
+    digest = _credential_digest(candidate)
+    if digest in index:
         raise DuplicateCredentialError(
-            "duplicate credential value owned by %s:%s and %s:%s" % (
-                index[value][0].type, index[value][0].id,
+            "duplicate credential digest owned by %s:%s and %s:%s" % (
+                index[digest][0].type, index[digest][0].id,
                 principal_type, principal_id))
-    index[value] = entry
+    index[digest] = entry
 
 
 def build_announce_index(store):
-    """Return {value: (Principal, secret_name, record, legacy_bool)}.
+    """Return {SHA-256 digest: (Principal, secret_name, record, legacy_bool)}.
 
     Covers device ``announce_token`` (legacy=False), the seeder **current**
     ``announce_token`` (service principal, legacy=False), and every seeder
     **previous** record (service principal, secret_name
     ``announce_token_previous``, legacy=True). Returns the live record object so
     validity/revocation are checked at resolution time. Raises
-    DuplicateCredentialError (token-free) on any duplicate value ownership.
+    DuplicateCredentialError (token-free) on duplicate value or digest ownership.
+    Malformed or empty credential values are not indexed.
     """
     Principal = _principal()
     index = {}
@@ -327,12 +368,13 @@ def build_announce_index(store):
 
 
 def build_catalog_auth_index(store):
-    """Return {value: (Principal, secret_name, record)} for catalog auth.
+    """Return {SHA-256 digest: (Principal, secret_name, record)} for catalog auth.
 
     Covers ``catalog_token`` and ``catalog_token_prev`` across every device.
     A previous record may also carry ``refresh_expires_at``: its original
     pre-rotation expiry, used only by catalog.py's token-refresh recovery.
-    Raises DuplicateCredentialError (token-free) on duplicate value ownership.
+    Raises DuplicateCredentialError (token-free) on duplicate value or digest
+    ownership. Malformed or empty credential values are not indexed.
     """
     Principal = _principal()
     index = {}

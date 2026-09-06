@@ -186,6 +186,10 @@ value, index construction raises and every request in that lane is refused — a
 tracker 403 or a catalog authorization failure — rather than silently resolving
 to whichever record loaded last. No error message carries the offending value.
 
+Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
+record's token with a constant-time comparison. Each request checks that
+record's current expiry and revocation state without scanning other devices.
+
 ### Tracker transport security
 
 The tracker on TCP 6969 is **HTTPS-only** and presents the same server
