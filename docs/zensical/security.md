@@ -203,11 +203,22 @@ every device aria2 process load that public certificate as their CA and keep
 certificate verification enabled. A plaintext request fails during the TLS
 handshake and never reaches tracker authentication.
 
-IOx and IOS-XR send their resource-bound announce credential in an
+The origin seeder, IOx and IOS-XR send their announce credential in an
 `Authorization: Bearer` header. Guest Shell uses a BEP-compatible query
 credential. TLS encrypts the complete request, and credentials are never
 logged. The local aria2 JSON-RPC endpoint uses HTTP on `127.0.0.1` only and
 is not exposed to the network.
+
+Seeder credentials must contain only printable ASCII characters without
+whitespace. Startup validates both the RPC secret and announce token before
+replacing the private aria2 configuration; publishing and rotation validate
+the announce token before sending it to aria2. Invalid values stop the operation
+with an error that does not include the credential.
+
+For manually generated torrents, `tools/make-torrent.sh` requires an HTTPS
+announce URL with a nonempty `announce_token` or `key` query parameter. It
+parses the query and rejects missing or ambiguous credentials before creating
+the torrent.
 
 ### Peer policy failure posture
 

@@ -133,6 +133,49 @@ def test_default_tracker_url_does_not_embed_legacy_tokens(tmp_path, monkeypatch)
     assert publish.default_announce_header() is None
 
 
+@pytest.mark.parametrize("value", [
+    "private-token\nX-Injected: yes", "private-token\rX-Injected: yes",
+    "private-token\tmore", "private-token more", "private-token\x00",
+    "private-token\x7f", "private-token\u00e9", "private-token\ud800",
+    "", None, 12, ["private-token"], {"value": "private-token"},
+])
+def test_seeder_rpc_rejects_unsafe_persisted_announce_token(
+        tmp_path, monkeypatch, capsys, value):
+    sec = tmp_path / "secrets.json"
+    secrets_store.save({"devices": {}, "seeder": {
+        "announce_token": {"value": value}}}, str(sec))
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    calls = []
+    monkeypatch.setattr(publish, "_rpc_call", lambda *a, **kw: calls.append(a))
+
+    assert publish.default_announce_header() is None
+    with pytest.raises(RuntimeError) as error:
+        publish.add_torrent_rpc(b"torrent", str(tmp_path),
+                                rpc_url="http://127.0.0.1:6800/jsonrpc",
+                                rpc_secret="test-rpc")
+    assert str(error.value) == "seeder announce credential unavailable"
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_seeder_rpc_preserves_safe_printable_announce_token(tmp_path, monkeypatch):
+    value = "test-Token_0123.~+/=:!"
+    sec = tmp_path / "secrets.json"
+    secrets_store.save({"devices": {}, "seeder": {
+        "announce_token": {"value": value}}}, str(sec))
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    calls = []
+    monkeypatch.setattr(publish, "_rpc_call", lambda *a, **kw: calls.append(a))
+
+    publish.add_torrent_rpc(b"torrent", str(tmp_path),
+                            rpc_url="http://127.0.0.1:6800/jsonrpc",
+                            rpc_secret="test-rpc")
+    assert len(calls) == 1
+    assert calls[0][2] == "aria2.addTorrent"
+    assert calls[0][3][2]["header"] == ["Authorization: Bearer " + value]
+
+
 def test_default_tracker_url_fails_closed_without_host_ip(monkeypatch):
     monkeypatch.delenv("IRIS_HOST_IP", raising=False)
     monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)

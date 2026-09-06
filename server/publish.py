@@ -25,6 +25,7 @@ import urllib.request
 
 import bencode
 import catalog as catalog_mod
+from seeder_auth import announce_authorization_header
 import secrets_store
 import tracker_announce
 import torrent_personalize
@@ -151,8 +152,7 @@ def default_announce_header():
     try:
         store = secrets_store.load(secrets_path)
         tok = store.get("seeder", {}).get("announce_token", {}).get("value")
-        if tok:
-            return "Authorization: Bearer " + tok
+        return announce_authorization_header(tok)
     except Exception:
         pass
     return None

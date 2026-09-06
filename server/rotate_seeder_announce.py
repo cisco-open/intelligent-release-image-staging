@@ -68,6 +68,7 @@ import tempfile
 import time
 
 import secretfs
+import seeder_auth
 import secrets_store
 import telemetry
 import tracker_announce
@@ -857,18 +858,8 @@ def _seeder_rpc_ops(rpc):
 
 
 def _announce_authorization_header(announce_token):
-    """Build aria2's per-download tracker header without accepting injection.
-
-    Values minted by IRIS are printable hex. The slightly broader printable
-    ASCII check preserves compatibility with an existing valid store while
-    rejecting whitespace/control characters that could create another header.
-    Error text is fixed and never contains the credential.
-    """
-    if (not isinstance(announce_token, str) or not announce_token
-            or any(ord(ch) < 0x21 or ord(ch) > 0x7e
-                   for ch in announce_token)):
-        raise ValueError("current seeder announce credential unavailable")
-    return "Authorization: Bearer " + announce_token
+    """Build the same validated header used by seeder startup and publish."""
+    return seeder_auth.announce_authorization_header(announce_token)
 
 
 def _current_announce_token(secrets_path, now=None):

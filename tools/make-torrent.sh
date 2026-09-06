@@ -16,8 +16,8 @@
 #                            secrets store; iris-publish uses the same one),
 #                            embedded as /announce?announce_token=<token>
 #   ANNOUNCE_URL=<url>       a complete announce URL, used verbatim -- it
-#                            must still carry a non-empty announce_token=
-#                            (or legacy key=) query parameter
+#                            must carry one unambiguous, non-empty credential
+#                            query value (announce_token= or key=)
 #
 # Usage: ANNOUNCE_TOKEN=... tools/make-torrent.sh <file> <tracker-host>
 set -euo pipefail
@@ -30,40 +30,66 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 valid_https_announce() {
   # Feed the possibly credential-bearing URL on stdin, never as Python argv.
   # tracker_announce validates the token-free origin/path shared by every
-  # server-side producer; this wrapper separately rejects fragments/control
-  # bytes before removing the query for that check.
+  # server-side producer; this wrapper checks the query using the tracker
+  # parser rules. Return 1 for an invalid endpoint, 2 for invalid credentials.
   printf '%s' "$1" | PYTHONPATH="$SCRIPT_DIR/../server" python3 -c '
 import sys
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import tracker_announce
 try:
     raw = sys.stdin.read()
-    if any(ord(c) <= 0x20 or ord(c) == 0x7f for c in raw):
+    if "#" in raw or any(ord(c) <= 0x20 or ord(c) == 0x7f for c in raw):
         raise ValueError
     parts = urlsplit(raw)
-    if parts.fragment:
+    if parts.path != tracker_announce.ANNOUNCE_PATH:
         raise ValueError
     tracker_announce.validate(urlunsplit(
         (parts.scheme, parts.netloc, parts.path, "", "")))
 except Exception:
     raise SystemExit(1)
+
+# Match auth.resolve_announce_principal: preserve blank occurrences, reject
+# duplicate dedicated parameters, and prefer a nonempty dedicated value.
+pairs = parse_qsl(parts.query, keep_blank_values=True)
+dedicated = [value for name, value in pairs if name == "announce_token"]
+if len(dedicated) > 1:
+    raise SystemExit(2)
+if dedicated and dedicated[0]:
+    credential = dedicated[0]
+else:
+    keys = {value for name, value in pairs if name == "key" and value}
+    # This helper cannot check the remote secret store, so multiple distinct
+    # fallback keys are potentially ambiguous. Repeated identical keys are OK.
+    if len(keys) != 1:
+        raise SystemExit(2)
+    credential = keys.pop()
+if any(not 33 <= ord(c) <= 126 for c in credential):
+    raise SystemExit(2)
 '
 }
 
 if [ -n "${ANNOUNCE_URL:-}" ]; then
-  # Verbatim, but it must still carry a credential the tracker honours
-  # (announce_token=, or the legacy key=) with a non-empty value -- otherwise
-  # this escape hatch recreates exactly the unusable torrent refused below.
-  cred_re='[?&](announce_token|key)=[^&[:space:]]+'
-  [[ "$ANNOUNCE_URL" =~ $cred_re ]] \
-    || { echo "ERROR: ANNOUNCE_URL carries no announce credential (needs a non-empty announce_token= or key= query parameter); the tracker would answer 403" >&2; exit 1; }
-  valid_https_announce "$ANNOUNCE_URL" \
-    || { echo "ERROR: ANNOUNCE_URL must use the configured HTTPS tracker /announce endpoint" >&2; exit 1; }
-  ANNOUNCE="$ANNOUNCE_URL"
+  if valid_https_announce "$ANNOUNCE_URL"; then
+    ANNOUNCE="$ANNOUNCE_URL"
+  else
+    validation_status=$?
+    if [ "$validation_status" -eq 2 ]; then
+      echo "ERROR: ANNOUNCE_URL has no announce credential or an ambiguous/invalid credential query" >&2
+    else
+      echo "ERROR: ANNOUNCE_URL must use the configured HTTPS tracker /announce endpoint" >&2
+    fi
+    exit 1
+  fi
 elif [ -n "${ANNOUNCE_TOKEN:-}" ]; then
-  [[ "$ANNOUNCE_TOKEN" =~ ^[A-Za-z0-9._~-]+$ ]] \
-    || { echo "ERROR: ANNOUNCE_TOKEN must be URL-safe (letters, digits, . _ ~ -)" >&2; exit 1; }
-  ANNOUNCE="https://${TRACKER_HOST}:6969/announce?announce_token=${ANNOUNCE_TOKEN}"
+  announce_query="$(printf '%s' "$ANNOUNCE_TOKEN" | python3 -c '
+import sys
+from urllib.parse import urlencode
+token = sys.stdin.read()
+if not token or any(not 33 <= ord(c) <= 126 for c in token):
+    raise SystemExit(1)
+print(urlencode({"announce_token": token}))
+')" || { echo "ERROR: ANNOUNCE_TOKEN must contain printable ASCII without whitespace" >&2; exit 1; }
+  ANNOUNCE="https://${TRACKER_HOST}:6969/announce?${announce_query}"
   valid_https_announce "$ANNOUNCE" \
     || { echo "ERROR: tracker host does not form a usable HTTPS announce endpoint" >&2; exit 1; }
 else

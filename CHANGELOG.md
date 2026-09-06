@@ -11,6 +11,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Security
+- Validate seeder credentials before writing aria2 configuration or sending
+  tracker headers. Reject malformed credentials without exposing their values.
+
 ### Reliability
 - Keep catalog and tracker credential lookup independent of fleet size with
   digest-keyed indexes and a constant-time check of the selected credential.
@@ -20,6 +24,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Keep Console requests working when its token update reaches it before the
   server. Try the previous token only after a management-authentication
   rejection, and keep the accepted token through request forwarding.
+- Parse the manual torrent helper's announce query and refuse missing or
+  ambiguous credentials before creating a torrent.
 
 ### Deployment
 - Run the Docker server and Console on separate hosts with independent Compose

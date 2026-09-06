@@ -28,12 +28,6 @@ TRACKER_CA="${IRIS_TRACKER_CA:-$IRIS_CONFIG/tls/crt.pem}"
 # IRIS_RPC_SECRET_FILE. Left in place deliberately — removing it would force a
 # rewrite of test_seed_launch.bats for no behavior change.
 RPC_SECRET_FILE="${IRIS_RPC_SECRET_FILE:-$IRIS_CONFIG/rpc-secret}"
-RPC_SECRET="$(cat "$RPC_SECRET_FILE" 2>/dev/null)" \
-  || { echo "FATAL: rpc-secret missing or unreadable: $RPC_SECRET_FILE" >&2; exit 1; }
-if [ -z "$RPC_SECRET" ]; then
-  echo "FATAL: rpc-secret is empty in $RPC_SECRET_FILE — refusing to launch unauthenticated" >&2
-  exit 1
-fi
 # SEEDER_LOG=- sends the log to stdout (the container does this so docker's
 # json-file rotation caps it).
 LOGFILE="${SEEDER_LOG:-$IRIS_LOG/seeder.log}"
@@ -75,34 +69,47 @@ INPUT="$RUN_DIR/seeder.input"
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 python3 "$SCRIPT_DIR/reseed_input.py" "$IRIS_STATE" "$IRIS_IMAGES_DIR:$IMAGES_ROOT" "$IMAGES_DIR" > "$INPUT" 2>/dev/null || : > "$INPUT"
 
-# The RPC secret goes through a mode-0600 aria2 conf file, never the argv:
-# `--rpc-secret=...` on the command line is visible to every local user on
-# the Docker host via /proc/<pid>/cmdline (`docker top iris`, `ps`), which
-# undoes the tmpfs-only discipline the entrypoint keeps for the plaintext.
-# aria2 reads --conf-path before the remaining options, so everything else
-# stays on the command line where the tests and operators can see it.
+# Credentials go through a mode-0600 aria2 config, never the argv. Validate
+# both before replacing the runtime file: aria2 options are line-oriented,
+# so whitespace or control characters in either value could add an option.
+# The complete file is replaced atomically; failed validation preserves the
+# previous file and prevents aria2 from starting.
 CONF="$RUN_DIR/seeder.aria2.conf"
-( umask 077; printf 'rpc-secret=%s\n' "$RPC_SECRET" > "$CONF" ) \
-  || { echo "FATAL: cannot write $CONF" >&2; exit 1; }
-chmod 0600 "$CONF"
-unset RPC_SECRET
-
-# Tracker authentication is an HTTPS Authorization header, never a query
-# parameter in the torrent and never an argv value. Append it directly from
-# the tmpfs secret store into the mode-0600 aria2 config.
-PYTHONPATH="$SCRIPT_DIR" python3 - "${IRIS_SECRETS:-$RUN_DIR/secrets.json}" "$CONF" <<'PY' || {
+PYTHONPATH="$SCRIPT_DIR" python3 - "$RPC_SECRET_FILE" "${IRIS_SECRETS:-$RUN_DIR/secrets.json}" "$CONF" <<'PYCONF' || {
 import os
 import sys
-import secrets_store
+import tempfile
 
-store = secrets_store.load(sys.argv[1])
-token = store.get("seeder", {}).get("announce_token", {}).get("value")
-if not isinstance(token, str) or not token:
-    raise SystemExit(1)
-with open(sys.argv[2], "a") as stream:
-    stream.write("header=Authorization: Bearer %s\n" % token)
-PY
-  echo "FATAL: seeder announce credential missing or unreadable — refusing to launch" >&2
+import secrets_store
+import seeder_auth
+
+pending = None
+try:
+    with open(sys.argv[1], encoding="ascii", newline="") as stream:
+        # A file's terminal LF is not part of its token. Preserve CR and all
+        # other whitespace so malformed content fails validation.
+        rpc_secret = seeder_auth.credential_text(stream.read().rstrip("\n"))
+    store = secrets_store.load(sys.argv[2])
+    token = store.get("seeder", {}).get("announce_token", {}).get("value")
+    header = seeder_auth.announce_authorization_header(token)
+    fd, pending = tempfile.mkstemp(
+        prefix=".seeder-config-", dir=os.path.dirname(sys.argv[3]) or ".")
+    with os.fdopen(fd, "w", encoding="ascii") as stream:
+        stream.write("rpc-secret=%s\nheader=%s\n" % (rpc_secret, header))
+    os.replace(pending, sys.argv[3])
+    pending = None
+except Exception:
+    # Store shapes and decoder errors can carry credential contents. The
+    # shell emits one fixed diagnostic instead of a Python traceback.
+    raise SystemExit(1) from None
+finally:
+    if pending is not None:
+        try:
+            os.unlink(pending)
+        except OSError:
+            pass
+PYCONF
+  echo "FATAL: seeder RPC or announce credential is invalid or unavailable; refusing to launch" >&2
   exit 1
 }
 

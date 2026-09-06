@@ -45,10 +45,11 @@ STUB
   [[ "$output" == *"-a https://192.0.2.10:6969/announce?key=legacy"* ]]
 }
 
-@test "rejects a token that is not URL-safe" {
+@test "rejects a token containing whitespace" {
   run env ANNOUNCE_TOKEN='a b&c' bash "$HELPER" "$WORK/image.bin" 192.0.2.10
   [ "$status" -eq 1 ]
-  [[ "$output" == *"URL-safe"* ]]
+  [[ "$output" == *"printable ASCII"* ]]
+  [[ "$output" != *"MKTORRENT ARGS"* ]]
 }
 
 @test "ANNOUNCE_URL without a credential is refused, not passed through" {
@@ -78,4 +79,122 @@ STUB
   [ "$status" -eq 1 ]
   [[ "$output" == *"HTTPS tracker"* ]]
   [[ "$output" != *"MKTORRENT ARGS"* ]]
+}
+
+@test "ANNOUNCE_URL refuses credentials nested inside another query value" {
+  for query in 'x=?key=hidden-secret' 'x=?announce_token=hidden-secret' \
+    'x=%3Fannounce_token%3Dhidden-secret' 'x=1#?key=hidden-secret'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"hidden-secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL decodes credential names and values while preserving the URL" {
+  for query in 'announce%5Ftoken=abc%31%32%33' '%6Bey=abc%26def%3Dghi' \
+    'x=?key=unrelated&announce_token=abc123'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"-a https://192.0.2.10:6969/announce?$query"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL refuses duplicate dedicated credentials including blank and encoded names" {
+  for query in 'announce_token=secret&announce_token=secret' \
+    'announce_token=secret&announce_token=other' \
+    'announce_token=&announce_token=secret' \
+    'announce_token=secret&announce%5Ftoken=' \
+    'announce_token=&announce_token=&key=secret'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL follows dedicated credential precedence over key parameters" {
+  run env ANNOUNCE_URL='https://192.0.2.10:6969/announce?key=first&announce_token=abc123&key=second' \
+    bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"MKTORRENT ARGS"* ]]
+}
+
+@test "ANNOUNCE_URL allows one unique fallback key including repeated encoded equivalents" {
+  for query in 'announce_token=&key=abc123' 'key=abc123&key=abc%31%32%33' \
+    'key=&key=abc123' 'announce_token&key=abc123'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL refuses ambiguous fallback keys or no nonempty fallback" {
+  for query in 'key=first-secret&key=second-secret' \
+    'announce_token=&key=first-secret&key=second-secret' \
+    'announce_token=&key=' 'key' '%6Bey='; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"first-secret"* ]]
+    [[ "$output" != *"second-secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL refuses whitespace control and non-ASCII bytes in decoded credentials" {
+  for query in 'announce_token=+' 'announce_token=secret%20value' \
+    'announce_token=secret%09value' 'key=secret%0Avalue' \
+    'announce_token=secret%0Dvalue' 'key=secret%00value' \
+    'announce_token=secret%7Fvalue' 'key=secret%C3%A9value'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?$query" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL refuses literal whitespace controls and empty fragments" {
+  for suffix in ' ' $'\t' $'\n' $'\r' $'\177' '#'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969/announce?announce_token=hidden-secret$suffix" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"hidden-secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_URL requires an actual announce path in the verbatim URL" {
+  for path in '' '/' '/wrong'; do
+    run env ANNOUNCE_URL="https://192.0.2.10:6969$path?announce_token=hidden-secret" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"HTTPS tracker"* ]]
+    [[ "$output" != *"hidden-secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
+}
+
+@test "ANNOUNCE_TOKEN encodes reserved query and fragment characters" {
+  run env -u ANNOUNCE_URL ANNOUNCE_TOKEN='a&b?c=d#e/+%' \
+    bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-a https://192.0.2.10:6969/announce?announce_token=a%26b%3Fc%3Dd%23e%2F%2B%25"* ]]
+  [[ "$output" == *"announce_token=<redacted>"* ]]
+}
+
+@test "ANNOUNCE_TOKEN refuses control and non-ASCII characters" {
+  for token in $'hidden-secret\t' $'hidden-secret\n' $'hidden-secret\177' 'hidden-secreté'; do
+    run env -u ANNOUNCE_URL ANNOUNCE_TOKEN="$token" \
+      bash "$HELPER" "$WORK/image.bin" 192.0.2.10
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"printable ASCII"* ]]
+    [[ "$output" != *"hidden-secret"* ]]
+    [[ "$output" != *"MKTORRENT ARGS"* ]]
+  done
 }
