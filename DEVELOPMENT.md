@@ -23,7 +23,7 @@ mutates the running/booted software state of a device.
    cd intelligent-release-image-staging
    ```
 2. **Prerequisites:**
-   - **Python 3** with **pytest** (for the Python test suite)
+   - **Python 3.12** with `requirements-dev.txt` installed (for the Python test suite)
    - **bats** (for the shell test suite)
    - **Docker** and **Docker Compose** (for the server stack)
 3. **Run the server and Console** locally with Docker Compose from the

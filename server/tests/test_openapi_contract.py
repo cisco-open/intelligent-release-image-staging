@@ -36,7 +36,7 @@ def _specified_keys(doc):
 
 def test_openapi_is_generated_from_exact_runtime_route_registry():
     doc = _load()
-    assert doc["openapi"] == "3.1.0"
+    assert doc["openapi"] == "3.2.0"
     assert _specified_keys(doc) == api_routes.keys()
     # This second equality catches semantic drift beyond the route triples:
     # auth, examples, status contracts and compatibility declarations.
@@ -92,10 +92,10 @@ def test_every_operation_has_auth_schemas_statuses_and_examples():
                     assert "Retry-After" in response.get("headers", {}), (
                         method, path, status)
                 for media in response.get("content", {}).values():
-                    assert "schema" in media, (method, path)
+                    assert "schema" in media or "itemSchema" in media, (method, path)
                     assert "example" in media or "examples" in media, (
                         method, path)
-                    assert media["schema"] != {
+                    assert media.get("schema", media.get("itemSchema")) != {
                         "$ref": "#/components/schemas/JsonObject"}, (
                             method, path)
             for media in operation.get("requestBody", {}).get(

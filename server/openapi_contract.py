@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the checked-in OpenAPI 3.1 contract from the runtime route registry.
+"""Build the checked-in OpenAPI 3.2 contract from the runtime route registry.
 
 The generated document is intentionally JSON (which is valid YAML). Keeping
 the verbose path inventory mechanical makes review focus on semantics, while
@@ -551,10 +551,10 @@ def _request_body(route):
     if "/images/upload/" in path or suffix == "/image-verification/offline":
         return {"required": True, "content": {
             "application/octet-stream": _media(
-                {"type": "string", "format": "binary"}, "<binary payload>")}}
+                {}, "<binary payload>")}}
     if suffix == "/devices/import-csv":
         return {"required": True, "content": {"text/csv": _media(
-            {"type": "string", "format": "binary"},
+            {"type": "string"},
             "device_id,device_ip\nedge-01,192.0.2.10\n")}}
     lookup = path if route.service == "catalog" else suffix
     if path == "/internal/v1/authorizations":
@@ -871,11 +871,11 @@ def _success(route):
             "headers": {"X-IRIS-Certificate-Source": {
                 "schema": {"type": "string", "enum": ["custom", "built-in"]}}},
             "content": {"application/x-pem-file": _media(
-                {"type": "string", "format": "binary"}, "<certificate and private key PEM>")}}
+                {"type": "string"}, "<certificate and private key PEM>")}}
     if route.service == "tracker":
         return "200", {"description": "BEP 3 bencoded tracker response",
                        "content": {"text/plain": _media(
-                           {"type": "string", "format": "binary"},
+                           {},
                            "d8:intervali30ee")}}
     if route.service == "artifact":
         headers = ({"Deprecation": {
@@ -894,7 +894,7 @@ def _success(route):
         }
         if route.method != "HEAD":
             response["content"] = {"application/octet-stream": _media(
-                {"type": "string", "format": "binary"}, "<artifact bytes>")}
+                {}, "<artifact bytes>")}
         return "200", response
     if route.service == "catalog" and path.startswith("/v1/torrents/"):
         return "200", {
@@ -905,7 +905,7 @@ def _success(route):
                 "Vary": {"schema": {"type": "string",
                                       "const": "Authorization, X-IRIS-Tracker-Auth"}}},
             "content": {"application/x-bittorrent": _media(
-                {"type": "string", "format": "binary"}, "<bencoded torrent>")}}
+                {}, "<bencoded torrent>")}}
     if path.endswith("/metrics"):
         return "200", {"description": "Prometheus text exposition",
                        "content": {"text/plain": _media(
@@ -920,10 +920,28 @@ def _success(route):
             "An end event carries done, error, cancelled, idle, or unknown. "
             "Each connection replays the retained lines from the start; "
             "Last-Event-ID is not supported."),
-                       "content": {"text/event-stream": _media(
-                           {"type": "string"},
-                           "data: onboard complete: 192.0.2.10\n\n"
-                           "event: end\ndata: done\n\n")}}
+                       "content": {"text/event-stream": {
+                           # OpenAPI 3.2 validates parsed events individually;
+                           # keepalive comments are not dispatched events.
+                           "itemSchema": {
+                               "type": "object", "required": ["data"],
+                               "properties": {
+                                   "data": {"type": "string"},
+                                   "event": {"enum": ["message", "end"]},
+                               },
+                               "if": {"required": ["event"], "properties": {
+                                   "event": {"const": "end"}}},
+                               "then": {"properties": {"data": {
+                                   "enum": ["done", "error", "cancelled",
+                                            "idle", "unknown"]}}},
+                           },
+                           "examples": {"completed": {
+                               "summary": "A log line followed by completion",
+                               "serializedValue": (
+                                   "data: onboard complete: 192.0.2.10\n\n"
+                                   "event: end\ndata: done\n\n"),
+                           }},
+                       }}}
     if path.endswith("/deploy-logs/{filename}"):
         return "200", {"description": "Deployment log text",
                        "content": {"text/plain": _media(
@@ -1454,7 +1472,7 @@ def _tracker_error(status):
     response = {
         "description": "BEP-compatible bencoded failure; deliberate RFC 9457 exception",
         "content": {"text/plain": _media(
-            {"type": "string", "format": "binary"},
+            {},
             "d14:failure reason%d:%se" % (len(reason), reason))}}
     if status == 503:
         response["headers"] = {"Retry-After": {
@@ -1578,7 +1596,7 @@ def build_document():
         else:
             item[method] = _operation(route)
     return {
-        "openapi": "3.1.0",
+        "openapi": "3.2.0",
         "info": {
             "title": "IRIS HTTP API",
             "version": "1",

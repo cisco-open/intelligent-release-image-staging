@@ -16,6 +16,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   tracker headers. Reject malformed credentials without exposing their values.
 
 ### Reliability
+- Describe the API with OpenAPI 3.2, including individual SSE events and raw
+  binary bodies, and validate the contract and schemas during testing.
 - Keep catalog and tracker credential lookup independent of fleet size with
   digest-keyed indexes and a constant-time check of the selected credential.
 - Persist the previous management credential before replacing the current

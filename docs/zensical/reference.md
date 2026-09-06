@@ -268,9 +268,12 @@ startup log states which posture is in effect at boot.
 
 ## Console API
 
-The checked-in [OpenAPI 3.1 contract](openapi.yaml) describes the Console,
+The checked-in [OpenAPI 3.2 contract](openapi.yaml) describes the Console,
 management, catalog, tracker, telemetry, and artifact operations. It is generated
-from `server/openapi_contract.py` and checked against the runtime route registry.
+from `server/openapi_contract.py`, validated against OpenAPI 3.2, and checked
+against the runtime route registry. Job streams describe each parsed SSE event;
+image, artifact and torrent bodies are raw bytes. The API paths remain versioned
+as `/api/v1`, `/internal/v1`, and `/v1`.
 This section explains the operator-facing behavior.
 
 The browser calls `/api/v1` on the Console container's HTTPS listener, normally

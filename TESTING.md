@@ -8,9 +8,9 @@ test suites and what to include when reporting a bug.
 The project has a Python test suite (pytest) and a shell test suite (bats). Run
 both before submitting a change.
 
-The Python suites need `pytest` and `PyYAML`, declared in
-`requirements-dev.txt` — the same file CI installs. `bats` comes from your
-package manager.
+Use Python 3.12 with the dependencies in `requirements-dev.txt`: `pytest`,
+`PyYAML`, and the OpenAPI 3.2 validator. CI installs the same file. `bats`
+comes from your package manager.
 
 ```
 python3 -m pip install -r requirements-dev.txt

@@ -45,7 +45,7 @@ python3 -m pip install -r requirements-dev.txt
 
 | Pin | Where | Value |
 | --- | --- | --- |
-| Test dependencies | `requirements-dev.txt` | `pytest>=8`, `PyYAML>=6` |
+| Test dependencies | `requirements-dev.txt` | `pytest>=8`, `PyYAML>=6`, `openapi-spec-validator>=0.9.0,<0.10.0` |
 
 `.github/workflows/tests.yml` installs that same file, so a clean machine and
 CI run the same set. `PyYAML` is required, not optional: the Kubernetes
@@ -127,13 +127,19 @@ ship in the Console image and require a Console rebuild to appear in a
 deployment. The public homepage uses `docs/index.html` and `docs/app.js`;
 Zensical does not build either file.
 
-The API contract comes from `server/api_routes.py` and
-`server/openapi_contract.py`. After a contract change, regenerate and check it:
+The OpenAPI 3.2 contract comes from `server/api_routes.py` and
+`server/openapi_contract.py`. Install the test dependencies, then regenerate
+and check it after a contract change:
 
 ```bash
+python3 -m pip install -r requirements-dev.txt
 python3 server/openapi_contract.py > docs/zensical/openapi.yaml
-python3 -m pytest server/tests/test_openapi_contract.py -q
+python3 -m pytest server/tests/test_openapi_contract.py server/tests/test_openapi_validation.py -q
 ```
+
+The checks validate the document, its request and response schemas, and the
+runtime route inventory. The validator's schemas ship with the test dependency;
+validation does not download schemas or add a runtime dependency.
 
 Two versions are pinned so a local build matches the published one. Change either only deliberately:
 

@@ -17,3 +17,6 @@
 # same file (.github/workflows/tests.yml).
 pytest>=8
 PyYAML>=6
+# Validate the complete API document with OpenAPI 3.2 support. Test-only;
+# runtime services and contract generation remain stdlib-only.
+openapi-spec-validator>=0.9.0,<0.10.0
