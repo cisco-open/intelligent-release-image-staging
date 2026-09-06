@@ -16,7 +16,7 @@
 # (aarch64, IE-3x00/IR) and iris-amd64.tar (x86_64, Catalyst 9300) — both need
 # device/iox/build.sh; it just notes when they are absent.
 #
-# Bundle failures return non-zero and publish a runtime setup-status receipt.
+# Bundle failures return non-zero and publish a runtime setup-status record.
 # The entrypoint keeps existing services running; onboarding readiness stays
 # non-ok until a verified bundle and bootstrap have been published.
 #
@@ -34,7 +34,7 @@ FAILED=0
 
 # Runtime status remains writable even when the artifacts mount is read-only.
 # Record an attempt before packing so an interrupted run cannot leave an old
-# success receipt. Bind success to both published files, not just their names.
+# success record. Bind success to both published files, not just their names.
 write_status() {
   python3 - "$STATUS" "$ART" "$1" "$2" <<'PYTHON'
 import hashlib, json, os, sys, tempfile
@@ -124,7 +124,7 @@ elif "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$ART/.iris-agent.tgz.tmp" 
   if write_status ok ready; then
     echo "provision-served: staged iris-agent.tgz + bootstrap.sh (Guest Shell agent)"
   else
-    bundle_failed receipt-failed
+    bundle_failed status-write-failed
   fi
 else
   rm -f "$ART/.iris-agent.tgz.tmp" "$ART/.bootstrap.sh.tmp"

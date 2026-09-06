@@ -211,7 +211,7 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
              "remedy": "Rebuild the server image and restart after correcting the provisioning error.",
              "reason": "provisioning-unavailable",
              "detail": "Guest Shell bundle provisioning evidence is unavailable or invalid."}
-    # A receipt may survive a failed attempt to replace it. The supervisor's
+    # A record may survive a failed attempt to replace it. The supervisor's
     # current startup outcome is independent of that filesystem evidence.
     if startup_state != "ok":
         entry.update(state="stale" if startup_state == "failed" else "unknown",
@@ -223,15 +223,15 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
             raw = handle.read(4097)
         if len(raw) > 4096:
             return entry
-        receipt = json.loads(raw)
-        if not isinstance(receipt, dict) or receipt.get("format") != "iris-served-bundle-v1":
+        record = json.loads(raw)
+        if not isinstance(record, dict) or record.get("format") != "iris-served-bundle-v1":
             return entry
-        if receipt.get("state") != "ok":
+        if record.get("state") != "ok":
             entry.update(state="stale", reason="provisioning-failed",
                          detail="The latest Guest Shell bundle provisioning did not succeed; inspect server startup logs.")
             return entry
         for name in ("iris-agent.tgz", "bootstrap.sh"):
-            expected = receipt.get(name)
+            expected = record.get(name)
             if not isinstance(expected, str) or not _HEX_SHA256.fullmatch(expected):
                 return entry
             with open(os.path.join(artifacts_dir, name), "rb") as handle:

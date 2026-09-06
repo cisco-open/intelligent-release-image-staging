@@ -152,7 +152,7 @@ PYTHON
   check_guest_status stale
 }
 
-@test "missing manifest and missing receipt never report a healthy Guest Shell bundle" {
+@test "missing manifest and missing record never report a healthy Guest Shell bundle" {
   run_prov
   rm "$TMP/aria2c.sha256"
   run run_prov
@@ -207,17 +207,17 @@ assert item['state'] == ('ok' if startup == 'ok' else 'stale'), item
 PYTHON
 }
 
-@test "startup rejects an old successful receipt when the next receipt cannot be written" {
+@test "startup rejects an old successful record when the next record cannot be written" {
   run_prov
-  cp "$TMP/run/served-bundle.json" "$TMP/prior-receipt.json"
+  cp "$TMP/run/served-bundle.json" "$TMP/prior-record.json"
   chmod 500 "$TMP/run"
   run run_startup_provisioning failed
   chmod 700 "$TMP/run"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  cmp "$TMP/prior-receipt.json" "$TMP/run/served-bundle.json"
+  cmp "$TMP/prior-record.json" "$TMP/run/served-bundle.json"
 }
 
-@test "startup success overrides inherited failure and is exported with its receipt" {
+@test "startup success overrides inherited failure and is exported with its record" {
   export _IRIS_SERVED_BUNDLE_STARTUP=failed
   run run_startup_provisioning ok
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }

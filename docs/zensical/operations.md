@@ -553,18 +553,18 @@ the readiness checks separate:
   reports `stale`; absent or invalid evidence reports `unknown`. The server
   continues running, but an older bundle left on disk cannot appear ready.
   Inspect startup logs and correct the image input or artifact-directory
-  permissions before restarting. The receipt lives at
+  permissions before restarting. The provisioning record lives at
   `$IRIS_RUN/served-bundle.json` (default `/run/iris/served-bundle.json`),
   independently of the artifacts mount so a read-only mount is visible.
   Readiness also requires this server startup to have confirmed provisioning;
-  a previous success receipt cannot hide a failure to write the new receipt.
+  a previous successful record cannot hide a failure to write the new record.
 - The card separately compares the certificate the live services present with
   the public `iris-catalog.pem` copy onboarding distributes. A missing copy or
   mismatch means new onboarding is not ready. Reconcile that served artifact;
   rebuilding deployment-neutral packages cannot repair certificate drift.
 
 `tools/check-package-freshness.sh` checks the IOx/XR wrapper and certificate
-conditions above; the Guest Shell provisioning receipt is reported by the
+conditions above; the Guest Shell provisioning record is reported by the
 Console setup-status endpoint. Its default
 mode is read-only; `--rebuild` rebuilds wrapper families whose package or
 provenance evidence is missing or invalid, then rechecks. It will not rebuild
