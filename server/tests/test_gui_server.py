@@ -8,6 +8,289 @@ import management_api as gui_server
 import pytest
 
 
+def test_role_column_panel_and_modal_are_scoped_and_accessible():
+    html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
+    assert '<th>Device</th><th>Role</th>' in html
+    assert '<td class="dev-role">' in js and 'dash(d.role)' in js
+    assert 'colspan="12"' in js
+    assert html.count('id="dev-filter-role"') == 1
+    assert html.count('id="dev-filter-peer"') == 1
+    assert "peer-intent badge" in js and "Quarantined intent" in js
+    assert 'id="set-role-selected">Set role…</button>' in html
+    modal = html.split('id="role-modal"', 1)[1].split('id="img-picker"', 1)[0]
+    assert 'role="dialog" aria-modal="true" aria-labelledby="role-modal-title"' in modal
+    for cid in ('role-modal-title', 'role-selected', 'role-modal-msg',
+                'role-preview', 'role-modal-cancel', 'role-modal-x', 'apply-role-selected'):
+        assert 'id="%s"' % cid in modal
+    assert 'aria-live="polite"' in modal
+    assert "wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);" in js
+    assert "'role-modal'" in js.split('var BULK_MODALS = [', 1)[1].split(']', 1)[0]
+    assert "'apply-role-selected'" in js.split('var BULK_BTNS = [', 1)[1].split(']', 1)[0]
+    assert "'set-role-selected'" in js.split('var BULK_OPENERS = [', 1)[1].split(']', 1)[0]
+    assert 'id="peer-policy-panel"' in html and 'id="role-capability-banner"' in html
+    panel = html.split('id="peer-policy-panel"', 1)[1].split('</details>', 1)[0]
+    assert '<textarea' not in panel and '<textarea' not in modal
+    assert '.policy-counts' in css and 'minmax(' in css
+    workflow = js.split('// ---- Role workflow ----', 1)[1].split(
+        '// ---- End role workflow ----', 1)[0]
+    assert workflow.count("'/api/v1/devices/bulk-role'") == 1
+    assert 'forSelected(' not in workflow and "method: 'PUT'" not in workflow
+
+
+def _run_role_console_js(script):
+    """Execute the actual scoped Console code with a small DOM/fetch double.
+
+    This is a request/state-machine check, not a browser-layout claim.
+    """
+    import subprocess
+    js = _webroot('app.js')
+    assert '// ---- Role workflow ----' in js
+    code = js.split('// ---- Role workflow ----', 1)[1].split(
+        '// ---- End role workflow ----', 1)[0]
+    result = subprocess.run(['node', '-'], input=r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    value: '', textContent: '', innerHTML: '', hidden: false, disabled: false,
+    listeners: {}, addEventListener(k, f) { this.listeners[k] = f; },
+    focus() { this.focused = true; }
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el};
+var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
+var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
+var selection = ['on-page', 'off-page'];
+function selectedIds() { return selection.slice(); }
+function setBulkBusy(b) { bulkBusy = b; }
+function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
+function openModal(id) { el(id).hidden = false; }
+function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); }
+function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
+function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
+function fmtDate(v) { return 'time:' + v; }
+var refreshes = 0;
+async function refreshDevices() { refreshes++; }
+var calls = [], replies = [];
+async function fetch(url, opts) {
+  calls.push({url, ...opts, body: opts && JSON.parse(opts.body)});
+  const next = replies.shift();
+  if (next instanceof Error) throw next;
+  if (typeof next === 'function') return await next();
+  return {ok: next.status < 400, status: next.status, json: async () => next.body};
+}
+function reply(body, status = 200) { replies.push({status, body}); }
+function preview(extra = {}) {
+  return {ok: true, applied: 2, failed: {}, dry_run: true, revision: 8,
+    candidate_revision: 8, confirm_token: 'preview-token', requires_confirmation: true,
+    member_delta: 2, origin_access_lost: 1, empty_permitted_sets: 0,
+    role_pairs_stopped: 1, qos_changed: true, ...extra};
+}
+''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
+        text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_role_bulk_action_uses_one_aggregate_preview_and_commit():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 0, 'untouched picker must be a no-op');
+el('role-selected').value = 'boat';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, '/api/v1/devices/bulk-role?dry_run=1');
+assert.deepEqual(calls[0].body, {device_ids: selection, role: 'boat'});
+assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
+assert.equal(bulkBusy, true, 'retain selection lock while the operator reviews');
+assert.match(el('role-preview').textContent, /origin/i);
+assert.match(el('role-preview').textContent, /QoS policy changed: yes/);
+peerPolicy.revision = 99; // polling must not replace the preview's base revision
+reply({ok: true, applied: 2, failed: {}, revision: 8, role_drift: {count: 0}});
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 2);
+assert.equal(calls[1].url, '/api/v1/devices/bulk-role');
+assert.deepEqual(calls[1].body, {device_ids: selection, role: 'boat', confirm_token: 'preview-token'});
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(bulkBusy, false);
+assert.match(devStatus.textContent, /2\/2/);
+assert.equal(el('role-modal').hidden, true);
+assert.ok(refreshes);
+''')
+
+
+@pytest.mark.parametrize('status,code', [
+    (412, 'precondition_failed'), (428, 'confirmation_required'),
+    (409, 'operation_backlog_full'), (503, 'policy_unavailable')])
+def test_role_bulk_commit_error_discards_preview_and_never_retries(status, code):
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = '__none';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls[0].body.role, null);
+reply({error: CODE, unacknowledged: 256, capacity: 256}, STATUS);
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 2);
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+assert.ok(el('role-modal-msg').textContent.length > 10);
+assert.equal(el('role-modal').hidden, false);
+'''.replace('CODE', repr(code)).replace('STATUS', str(status)))
+
+
+def test_role_bulk_cancellation_partial_and_network_outcomes():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview({applied: 1, failed: {'off-page': 'role_shadowed_by_assignment'}}));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-preview').textContent, /off-page/);
+closeModal('role-modal');
+assert.equal(bulkBusy, false);
+assert.equal(calls.length, 1, 'cancel must never commit');
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview());
+await el('apply-role-selected').listeners.click();
+reply({error: 'fleet_write_failed', partial: true, applied: 1,
+  failed: {'off-page': 'write_failed'}, role_drift: {count: 1}}, 503);
+await el('apply-role-selected').listeners.click();
+assert.match(devStatus.textContent, /1\/2/);
+assert.match(devStatus.textContent, /off-page/);
+assert.match(devStatus.textContent, /drift.*1|1.*drift/i);
+reply(preview());
+await el('apply-role-selected').listeners.click();
+replies.push(new Error('offline'));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-modal-msg').textContent, /may have been saved/);
+assert.equal(bulkBusy, false);
+''')
+
+
+def test_role_bulk_pending_cancel_and_changed_choice_invalidate_preview():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+let resolvePreview;
+replies.push(() => new Promise(resolve => {resolvePreview = resolve;}));
+const pending = el('apply-role-selected').listeners.click();
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1, 'double click must not send a second preview');
+closeModal('role-modal');
+assert.equal(bulkBusy, true, 'retain lock until cancelled preview returns');
+resolvePreview({ok: true, status: 200, json: async () => preview()});
+await pending;
+assert.equal(bulkBusy, false);
+assert.equal(el('role-preview').hidden, true);
+assert.equal(el('role-modal').hidden, true);
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply(preview({requires_confirmation: false, confirm_token: null, qos_changed: false}));
+await el('apply-role-selected').listeners.click();
+assert.match(el('role-preview').textContent, /QoS policy changed: no/);
+el('role-selected').value = '__none';
+el('role-selected').listeners.change();
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+reply(preview());
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.at(-1).url, '/api/v1/devices/bulk-role?dry_run=1');
+assert.equal(calls.at(-1).body.role, null);
+''')
+
+
+def test_role_bulk_all_failed_preview_cannot_commit_and_labels_the_refusal():
+    _run_role_console_js(r'''
+await el('set-role-selected').listeners.click();
+el('role-selected').value = 'boat';
+reply({ok: false, applied: 0, failed: {'off-page': 'role_shadowed_by_assignment'}});
+await el('apply-role-selected').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(bulkBusy, false);
+assert.equal(el('apply-role-selected').textContent, 'Preview change');
+assert.match(el('role-modal-msg').textContent, /explicit ACL assignment shadows the role/);
+assert.equal(el('role-preview').hidden, true);
+''')
+
+
+def test_peer_policy_panel_count_only_and_capability_banner_behavior():
+    _run_role_console_js(r'''
+peerPolicy = {revision: 7, roles_supported: true, roles_present: true,
+  roles: {defined: 1, restricted: 1, members: {'boat<script>': 2}, nets: ['192.0.2.4']},
+  role_drift: {count: 3, device_ids: ['192.0.2.5']}, outbox: {unacknowledged: 9, capacity: 256},
+  origin_qos: {state: 'enforced', target_download_count: 4, applied_download_count: 4,
+    last_reconciled_at: 1000, addresses: ['192.0.2.6']},
+  enforcement: {mutual_origin: {mode: 'preflight', newly_denied_device_count: 2}}};
+renderPeerPolicyPanel();
+let rendered = [...elements.values()].map(e => e.textContent + e.innerHTML).join(' ');
+assert.match(rendered, /9\/256/);
+assert.match(rendered, /boat&lt;script>/);
+assert.doesNotMatch(rendered, /192\.0\.2\./);
+assert.match(rendered, /preflight/i);
+assert.equal(el('role-capability-banner').hidden, true);
+peerPolicy.roles_supported = false;
+renderPeerPolicyPanel();
+assert.equal(el('role-capability-banner').hidden, false);
+assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
+assert.equal(el('set-role-selected').disabled, true);
+assert.equal(el('apply-role-selected').disabled, true);
+delete peerPolicy.roles_supported; // genuinely older response, no capability flag
+delete peerPolicy.roles_present;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
+peerPolicy.roles_supported = true;
+peerPolicy.degraded = true;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /degraded/i);
+peerPolicy.fail_closed = true;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /fail.closed/i);
+peerPolicyReadOk = false;
+renderPeerPolicyPanel();
+assert.match(el('role-capability-banner').textContent, /unavailable/i);
+await el('set-role-selected').listeners.click();
+assert.equal(calls.length, 0);
+''')
+
+
+def test_role_policy_startup_signal_identifies_lost_state_without_addresses(tmp_path, capsys):
+    import peer_policy
+    state_dir = str(tmp_path)
+    auth = str(tmp_path / 'peer-policy.json')
+    gui_server._log_peer_policy_startup(state_dir)
+    assert 'roles supported' in capsys.readouterr().err
+    peer_policy._write_roles_watermark(auth)
+    gui_server._log_peer_policy_startup(state_dir)
+    warning = capsys.readouterr().err
+    assert 'role state lost' in warning
+    assert 'quarantine' in warning and 'downgrade' in warning
+    main = open(gui_server.__file__).read().split('def main():', 1)[1]
+    assert '_log_peer_policy_startup(state_dir)' in main
+
+
+@pytest.mark.parametrize('state,phrase', [
+    ('healthy', 'peer policy is healthy'), ('degraded', 'policy is degraded'),
+    ('fail_closed', 'policy is fail_closed'), ('unavailable', 'policy is unavailable')])
+def test_role_policy_startup_distinguishes_supported_policy_states(tmp_path, capsys, monkeypatch, state, phrase):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc['roles'] = {'defs': {}, 'role_of': {}}
+    def load(*_):
+        if state == 'unavailable':
+            raise OSError('sensitive storage detail 192.0.2.8')
+        return peer_policy.PolicyResult(doc, state in ('degraded', 'fail_closed'),
+                                        state == 'fail_closed')
+    monkeypatch.setattr(peer_policy, 'load_policy', load)
+    gui_server._log_peer_policy_startup(str(tmp_path))
+    logged = capsys.readouterr().err
+    assert 'roles supported' in logged and phrase in logged
+    assert 'role state lost' not in logged and '192.0.2.8' not in logged
+
+
 def test_webroot_assets_exist():
     for name in ("login.html", "index.html", "styles.css", "login.js", "app.js",
                  "setup.html", "setup.js"):
@@ -90,7 +373,8 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 11, "peer-policy column added without row action links"
+    assert devices_thead.count('<th>') == 12, "declared Role column added without row action links"
+    assert devices_thead.count('<th>Role</th>') == 1
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()

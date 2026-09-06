@@ -5019,6 +5019,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     return srv
 
 
+def _log_peer_policy_startup(state_dir):
+    """State-owner signal; the Console process has no policy state mount.
+
+    A capable binary can detect missing role state via the durable watermark.
+    This cannot add downgrade detection to a binary predating role support.
+    """
+    auth_path = os.path.join(state_dir, "peer-policy.json")
+    try:
+        policy = peer_policy.load_policy(
+            auth_path, os.path.join(state_dir, "peer-policy.lkg.json"))
+        roles_lost = (peer_policy.roles_ever_configured(auth_path) or
+                      policy.document.get("roles_present") is True) and \
+            "roles" not in policy.document
+        if roles_lost:
+            signal = ("WARNING: role state lost; roles were previously configured "
+                      "but the loaded policy has no roles. Restore the policy; "
+                      "quarantine restricted devices before any downgrade.")
+        elif policy.fail_closed:
+            signal = "WARNING: peer policy is fail_closed; restore a valid policy."
+        elif policy.degraded:
+            signal = "WARNING: peer policy is degraded; restore authoritative policy state."
+        else:
+            signal = "peer policy is healthy."
+    except (OSError, peer_policy.PolicyError):
+        signal = "WARNING: peer policy is unavailable; check policy state storage."
+    print("iris-management: roles supported; " + signal,
+          file=sys.stderr, flush=True)
+
+
 def main():
     import gui_images
     import gui_fleet
@@ -5055,6 +5084,7 @@ def main():
     # Mint the per-deployment instance id up front so the very first
     # /api/help call already sees the durable value.
     read_instance_id(state_dir)
+    _log_peer_policy_startup(state_dir)
     app = gui_app.GuiApp(secrets_path, recipients_csv=recipients, secrets_enc=secrets_enc)
     def _bg_audit(**kw):
         # audit sink for background jobs (onboard runs, async image publishes)

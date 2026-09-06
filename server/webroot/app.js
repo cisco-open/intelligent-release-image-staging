@@ -1119,6 +1119,7 @@
   // as "no credential" (an empty option list matches nothing).
   var credListOk = false;
   var peerPolicy = { revision: null, quarantine_assignments: [], enforcement: {} };
+  var peerPolicyReadOk = false;
   // Image and device ids are operator-chosen strings (the server accepts
   // "constructor", "toString", ...), so every id-keyed map is
   // prototype-free; a plain {} made a device called "constructor" render
@@ -1261,14 +1262,23 @@
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
       if (e && e.name === 'AbortError') return;
+      if (mine === devicesRefreshGeneration) {
+        peerPolicyReadOk = false;
+        renderPeerPolicyPanel();
+      }
       throw e;
     }
     var dr = results[0], ir = results[1], cr = results[2], pr = results[3], jobsBody = results[4];
-    if (!dr.ok || mine !== devicesRefreshGeneration) return;
-    var nextPolicy = pr.ok ? await pr.json() : peerPolicy;
+    if (mine !== devicesRefreshGeneration) return;
+    var nextPolicy = null;
+    try { if (pr.ok) nextPolicy = await pr.json(); } catch (e) { /* unreadable policy */ }
+    if (mine !== devicesRefreshGeneration) return;
+    peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
+    if (peerPolicyReadOk) peerPolicy = nextPolicy;
+    renderPeerPolicyPanel();
+    if (!dr.ok) return;
     var dbody = await dr.json();
     if (mine !== devicesRefreshGeneration) return;
-    peerPolicy = nextPolicy;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     devTotal = dbody.total || 0;
@@ -1424,14 +1434,16 @@
       return '<tr data-id="' + esc(d.device_id) + '">' +
         '<td><input type="checkbox" class="mark" data-id="' + esc(d.device_id) + '" aria-label="Select ' + esc(d.device_id) + '"' +
         (SELECTED[d.device_id] ? ' checked' : '') + '></td>' +
-        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="machine">' + dash(d.device_ip) + '</td>' +
+        '<td class="dev-id">' + esc(d.device_id) + '</td><td class="dev-role">' + dash(d.role) + '</td>' +
+        '<td class="machine">' + dash(d.device_ip) + '</td>' +
         '<td class="machine">' + dash(d.model || d.heartbeat_model) + '</td>' +
         '<td>' + esc(managementTypeLabel) + '</td>' +
         '<td><select class="platform">' + platSel + '</select></td>' +
         '<td><select class="cred"' + credAttrs + '>' + credSel + '</select></td>' +
         '<td><button type="button" class="linkish assign-btn">' + esc(assignLabel) + '</button></td>' +
         '<td>' + telemetryCell(d) + '</td>' +
-        '<td><span class="peer-intent">' + (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
+        '<td><span class="peer-intent badge ' + (peerPolicyAssigned(d.device_id) ? 'badge-fail' : 'badge-off') + '">' +
+        (peerPolicyAssigned(d.device_id) ? 'Quarantined intent' : 'Not quarantined') +
         '</span> ' + peerPolicyStatus() + ' <button type="button" class="linkish peer-quarantine" ' +
         'title="' + (peerPolicyAssigned(d.device_id) ? 'Release device from quarantine' : 'Quarantine device') + '" aria-label="' +
         (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
@@ -1439,7 +1451,7 @@
         (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('') : '<tr><td colspan="11" class="muted">' +
+    }).join('') : '<tr><td colspan="12" class="muted">' +
       (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1993,6 +2005,7 @@
     var overlay = document.getElementById(id);
     if (!overlay || overlay.hidden) return;
     overlay.hidden = true;
+    if (id === 'role-modal') cancelRoleDialog();
     // Return focus to whatever opened it -- if that button has since been
     // hidden with the bulk bar (the batch cleared the selection), focus()
     // on it is simply a no-op and the browser falls back to the document.
@@ -2022,10 +2035,11 @@
     });
     trapDialogFocus(overlay);
   }
-  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal'];
+  var BULK_MODALS = ['onboard-modal', 'undeploy-modal', 'cred-modal', 'role-modal'];
   wireModal('onboard-modal', ['onboard-cancel', 'onboard-modal-x']);
   wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
   wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
+  wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
   document.getElementById('onboard-selected').addEventListener('click', function () {
     openModal('onboard-modal');
   });
@@ -2358,13 +2372,13 @@
   // modal primaries; the bulk bar's own Onboard…/Undeploy… buttons only open
   // those modals and are listed as openers below.
   var BULK_BTNS = ['onboard-confirm', 'undeploy-confirm', 'adopt-selected',
-                   'delete-selected', 'apply-cred-selected',
+                   'delete-selected', 'apply-cred-selected', 'apply-role-selected',
                    'assign-images-selected',
                    'quarantine-selected', 'release-selected'];
   // Openers claim no lock of their own -- there is nothing to claim until the
   // modal's primary is pressed -- but they must not hand out a second modal
   // while a batch is still starting.
-  var BULK_OPENERS = ['onboard-selected', 'undeploy-selected', 'set-cred-selected'];
+  var BULK_OPENERS = ['onboard-selected', 'undeploy-selected', 'set-cred-selected', 'set-role-selected'];
   var bulkBusy = false;
   function setBulkBusy(busy) {
     bulkBusy = busy;
@@ -2372,6 +2386,7 @@
       var el = document.getElementById(id);
       if (el) el.disabled = busy;
     });
+    syncRoleActionAvailability();
   }
   // Claim the lock for a selected-action, returning the checked ids (or null if
   // another action holds it or nothing is selected).
@@ -2739,6 +2754,211 @@
       refreshDevices();
     });
   })();
+
+  // ---- Role workflow ----
+  // Consume the count-only view explicitly. Never render arbitrary policy or
+  // status objects: role member counts are the only dynamic keyed collection.
+  function policyCount(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : '—';
+  }
+  function roleCapabilityMessage() {
+    if (!peerPolicyReadOk) return 'Peer policy unavailable. Role changes are disabled; refresh to read current policy.';
+    if (peerPolicy.roles_supported !== true) {
+      return 'This Console cannot confirm backend role support. ' +
+        (peerPolicy.roles_present ? 'The backend declares role state. ' : '') +
+        'Role changes are disabled. Use a compatible server; quarantine restricted devices before a downgrade. ' +
+        'A fully downgraded Console and server cannot show this warning.';
+    }
+    if (peerPolicy.fail_closed) return 'Peer policy is fail-closed. Peer discovery is denied and role changes are disabled. Restore a valid policy.';
+    if (peerPolicy.degraded) return 'Peer policy is degraded. The server may be using a last-known-good policy or have lost role state. ' +
+      'Role changes are disabled; check server startup logs and restore authoritative policy state.';
+    return '';
+  }
+  function syncRoleActionAvailability() {
+    var unavailable = !!roleCapabilityMessage();
+    document.getElementById('set-role-selected').disabled = bulkBusy || unavailable;
+    document.getElementById('apply-role-selected').disabled =
+      unavailable || roleRequestBusy || (bulkBusy && !rolePreview);
+  }
+  function renderPeerPolicyPanel() {
+    var p = peerPolicyReadOk ? peerPolicy : {};
+    var roles = p.roles || {}, drift = p.role_drift || {}, outbox = p.outbox || {};
+    var origin = p.origin_qos || {}, enforcement = p.enforcement || {};
+    var mutual = enforcement.mutual_origin || {};
+    var banner = document.getElementById('role-capability-banner');
+    banner.textContent = roleCapabilityMessage();
+    banner.hidden = !banner.textContent;
+    syncRoleActionAvailability();
+    document.getElementById('policy-roles-defined').textContent = policyCount(roles.defined);
+    document.getElementById('policy-roles-restricted').textContent = policyCount(roles.restricted);
+    document.getElementById('policy-role-drift').textContent = policyCount(drift.count);
+    // Capacity is the API's bounded contract, never a count derived from rows.
+    var backlog = policyCount(outbox.unacknowledged) + '/' + policyCount(outbox.capacity);
+    document.getElementById('policy-outbox').textContent = backlog;
+    document.getElementById('peer-policy-summary').textContent = peerPolicyReadOk
+      ? policyCount(roles.defined) + ' roles · ' + policyCount(roles.restricted) +
+        ' restricted · ' + policyCount(drift.count) + ' drift · outbox ' + backlog
+      : 'Policy counts unavailable';
+    var members = roles.members || {};
+    document.getElementById('policy-role-members').innerHTML = Object.keys(members).sort().map(function (name) {
+      return '<li><span class="machine">' + esc(name) + '</span>: ' + policyCount(members[name]) + '</li>';
+    }).join('') || '<li class="muted">' + (peerPolicyReadOk && roles.defined === 0
+      ? 'No roles defined.' : 'Role member counts unavailable.') + '</li>';
+    var stateLabels = { enforced: 'enforced', degraded: 'degraded', rpc_unavailable: 'RPC unavailable' };
+    var state = Object.prototype.hasOwnProperty.call(stateLabels, origin.state)
+      ? stateLabels[origin.state] : 'unavailable';
+    document.getElementById('policy-origin-qos').textContent = 'Last origin QoS state: ' + state +
+      ' · ' + policyCount(origin.applied_download_count) + '/' + policyCount(origin.target_download_count) +
+      ' downloads applied · last reconciled: ' + (typeof origin.last_reconciled_at === 'number'
+        ? fmtDate(origin.last_reconciled_at) : 'never') + '. Origin limits apply globally or per torrent, not per role.';
+    document.getElementById('policy-mutual-origin').textContent = mutual.mode === 'preflight'
+      ? 'Mutual-origin preflight only: ' + policyCount(mutual.newly_denied_device_count) +
+        ' newly denied devices. This additional origin restriction is not active.' +
+        (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
+      : 'Mutual-origin preflight status unavailable.';
+  }
+
+  var rolePreview = null, roleDialogGeneration = 0, roleRequestBusy = false;
+  function resetRolePreview() {
+    rolePreview = null;
+    document.getElementById('role-preview').hidden = true;
+    document.getElementById('apply-role-selected').textContent = 'Preview change';
+  }
+  function cancelRoleDialog() {
+    roleDialogGeneration++;
+    resetRolePreview();
+    // Closing does not cancel a request already on the wire. Its finally
+    // releases the lock, so another batch cannot race that outstanding write.
+    if (!roleRequestBusy) setBulkBusy(false);
+  }
+  function roleFailureText(failed) {
+    var ids = Object.keys(failed || {});
+    if (!ids.length) return '';
+    return '; failed: ' + ids.slice(0, 10).map(function (id) {
+      var reason = failed[id] === 'role_shadowed_by_assignment'
+        ? 'explicit ACL assignment shadows the role' : failed[id];
+      return id + ' (' + reason + ')';
+    }).join(', ') + (ids.length > 10 ? '; and ' + (ids.length - 10) + ' more' : '');
+  }
+  function roleRequestError(status, body) {
+    if (status === 412 || body.error === 'revision_conflict') {
+      return 'Peer policy changed. Refresh, then preview the change again before saving.';
+    }
+    if (status === 428) return 'A fresh preview and confirmation are required. Preview the change again.';
+    if (body.error === 'operation_backlog_full') return 'The operation backlog is full (' +
+      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
+      '). Wait for the tracker to acknowledge operations, then preview again.';
+    if (status === 503) return 'Role changes are unavailable. Check policy state and the tracker, then refresh before retrying.';
+    return 'Set role was refused' + (body.error ? ': ' + body.error : ' (' + status + ')') +
+      '. Refresh and preview again.';
+  }
+  document.getElementById('set-role-selected').addEventListener('click', function () {
+    if (bulkBusy || !selectedIds().length) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { devStatus.textContent = warning; return; }
+    roleDialogGeneration++;
+    resetRolePreview();
+    document.getElementById('role-modal-msg').textContent = '';
+    document.getElementById('role-modal-count').textContent = selectedIds().length + ' selected';
+    var sel = document.getElementById('role-selected');
+    sel.innerHTML = '<option value="" disabled selected>— choose a role —</option>' +
+      '<option value="__none">— no role —</option>' +
+      Object.keys((peerPolicy.roles || {}).members || {}).sort().map(function (name) {
+        return '<option value="' + esc(name) + '">' + esc(name) + '</option>';
+      }).join('');
+    sel.value = '';
+    sel.disabled = false;
+    openModal('role-modal');
+  });
+  document.getElementById('role-selected').addEventListener('change', function () {
+    if (roleRequestBusy) return;
+    resetRolePreview();
+    setBulkBusy(false);
+    document.getElementById('role-modal-msg').textContent = '';
+  });
+  document.getElementById('apply-role-selected').addEventListener('click', async function () {
+    if (roleRequestBusy) return;
+    var msg = document.getElementById('role-modal-msg');
+    var raw = document.getElementById('role-selected').value;
+    if (!raw) { msg.textContent = 'Choose a role, or "no role" to clear the declared role.'; return; }
+    var warning = roleCapabilityMessage();
+    if (warning) { msg.textContent = warning; resetRolePreview(); setBulkBusy(false); return; }
+    var committing = !!rolePreview;
+    var ids = committing ? rolePreview.ids : claimSelection();
+    if (!ids) return;
+    // The preview response has a candidate revision. CAS always carries the
+    // revision read BEFORE preview, even when the regular table poll advances.
+    var revision = committing ? rolePreview.revision : peerPolicy.revision;
+    var role = committing ? rolePreview.role : (raw === '__none' ? null : raw);
+    var payload = { device_ids: ids, role: role };
+    if (committing) payload.confirm_token = rolePreview.confirm_token;
+    var generation = roleDialogGeneration;
+    var keepLock = false;
+    roleRequestBusy = true;
+    document.getElementById('role-selected').disabled = true;
+    document.getElementById('apply-role-selected').disabled = true;
+    msg.textContent = committing ? 'Setting role… Closing this dialog does not cancel the request.' : 'Previewing change…';
+    try {
+      var response = await fetch('/api/v1/devices/bulk-role' + (committing ? '' : '?dry_run=1'), {
+        method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json',
+          'If-Match': '"iris-peer-policy-' + revision + '"' }), body: JSON.stringify(payload)
+      });
+      var body = await response.json();
+      if (!committing && generation !== roleDialogGeneration) return;
+      if (committing && typeof body.applied === 'number') {
+        devStatus.textContent = 'Set role applied to ' + body.applied + '/' + ids.length + ' device(s)' +
+          roleFailureText(body.failed) + '; role drift: ' + policyCount((body.role_drift || {}).count) + '.';
+      }
+      if (!response.ok) {
+        msg.textContent = roleRequestError(response.status, body);
+        if (committing && (body.partial || typeof body.applied === 'number')) {
+          msg.textContent = devStatus.textContent + ' ' + msg.textContent;
+        }
+        resetRolePreview();
+      } else if (committing) {
+        if (!body.ok || Object.keys(body.failed || {}).length) {
+          msg.textContent = devStatus.textContent + ' Review the failed devices before another preview.';
+          resetRolePreview();
+        } else {
+          closeModal('role-modal');
+        }
+      } else if (!body.ok || !body.applied) {
+        msg.textContent = 'No role changes can be applied' + roleFailureText(body.failed) + '.';
+        resetRolePreview();
+      } else {
+        rolePreview = { ids: ids.slice(), role: role, revision: revision, confirm_token: body.confirm_token };
+        var previewEl = document.getElementById('role-preview');
+        previewEl.textContent = 'Set role to ' + (role || 'no role') + ' for ' + body.applied + '/' + ids.length + ' device(s)' +
+          roleFailureText(body.failed) + '.\n' +
+          'Membership changes: ' + policyCount(body.member_delta) +
+          '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
+          '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
+          '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
+          '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
+          '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
+          (body.requires_confirmation ? '\nThis exceeds the confirmation threshold. Set role confirms these effects.' : '');
+        previewEl.hidden = false;
+        msg.textContent = 'Review the preview, then choose Set role to save or Cancel to leave roles unchanged.';
+        document.getElementById('apply-role-selected').textContent = 'Set role';
+        document.getElementById('role-modal-count').textContent = ids.length + ' selected';
+        keepLock = true;
+      }
+    } catch (e) {
+      msg.textContent = committing
+        ? 'Response unavailable. Role changes may have been saved; refresh and review before trying again.'
+        : 'Preview unavailable. No commit was sent; refresh and preview again.';
+      if (committing) devStatus.textContent = msg.textContent;
+      resetRolePreview();
+    } finally {
+      roleRequestBusy = false;
+      document.getElementById('role-selected').disabled = false;
+      if (!keepLock || generation !== roleDialogGeneration) setBulkBusy(false);
+      syncRoleActionAvailability();
+      if (keepLock) document.getElementById('apply-role-selected').focus();
+      if (committing || !keepLock) refreshDevices().catch(function () {});
+    }
+  });
+  // ---- End role workflow ----
 
   // Quarantine/release the whole selection. The peer-policy API is one device
   // per call and carries a revision, so these run in sequence and carry the
