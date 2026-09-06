@@ -1298,6 +1298,56 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         stop()
 
 
+def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(tmp_path):
+    host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
+    try:
+        cookie, _ = _auth(host, port)
+        tracker_status = peer_enforcement.build_status(
+            "enforced", "session-1", "block-hash", 1, 0, 1000.0,
+            mutual_origin={
+                "mode": "preflight",
+                "newly_denied_device_count": 2,
+                "newly_denied_device_ids": ["preflight-a", "preflight-b"],
+            })
+        tracker_status["endpoint_ips"] = ["10.0.0.99"]
+        peer_enforcement.write_status(
+            os.path.join(cat.state_dir, "peer-enforcement.json"), tracker_status)
+        with open(os.path.join(cat.state_dir, "origin-qos.json"), "w") as handle:
+            json.dump({
+                "schema": 1, "updated_at": 1000.0, "state": "enforced",
+                "aria_session_id": "session-1", "desired_hash": "qos-hash",
+                "global_option_count": 1, "target_download_count": 2,
+                "applied_download_count": 2, "last_reconciled_at": 1000.0,
+                "last_error": "RpcError.10.0.0.97",
+                # Readers must not blindly pass through future identifier fields.
+                "gids": ["secret-target"], "addresses": ["10.0.0.98"],
+            }, handle)
+
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                              headers={"Cookie": cookie})
+        assert status == 200
+        view = json.loads(raw)
+        assert view["enforcement"]["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": 2,
+        }
+        assert view["origin_qos"] == {
+            "state": "enforced",
+            "global_option_count": 1,
+            "target_download_count": 2,
+            "applied_download_count": 2,
+            "last_reconciled_at": 1000.0,
+            "last_error": None,
+        }
+        body = raw.decode()
+        for forbidden in ("preflight-a", "preflight-b", "endpoint_ips",
+                          "10.0.0.99", "secret-target", "10.0.0.98",
+                          "RpcError.10.0.0.97", "10.0.0.97",
+                          "aria_session_id", "desired_hash"):
+            assert forbidden not in body
+    finally:
+        stop()
+
+
 def test_peer_policy_enforcement_stale_flag(tmp_path):
     """IRIS-99: the tracker reconciler can freeze (its degraded-pass write
     itself failing, or the process dying) with peer-enforcement.json's last

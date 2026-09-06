@@ -43,6 +43,25 @@ SEEDER = Principal("service", "seeder")
 SEEDER_IP = "192.0.2.10"
 
 
+def _role_doc(device_ids=("boat-1",), origin=False):
+    doc = peer_policy.base_document()
+    doc["roles"] = {
+        "defs": {
+            "boat": {
+                "restricted": True,
+                "peers": ["boat"],
+                "origin": origin,
+            },
+            "open": {"restricted": False},
+        },
+        "role_of": {device_id: "boat" for device_id in device_ids},
+        "qos_default": {},
+        "qos_device": {},
+    }
+    peer_policy.validate_document(doc)
+    return doc
+
+
 # --------------------------------------------------------------------------
 # Valid-policy mode
 # --------------------------------------------------------------------------
@@ -334,3 +353,193 @@ class TestDeniedRetention:
         # The shared 10.0.0.2 IS denied here (fail closed for the legacy
         # question) even though derive_denied_set would record a conflict.
         assert ips == {"10.0.0.2", "10.0.0.3"}
+
+
+# ---------------------------------------------------------------------------
+# B6 release-one preflight: compute mutual-origin effect without applying it
+# ---------------------------------------------------------------------------
+
+class TestMutualOriginPreflight:
+    def test_role_origin_false_is_reported_but_current_apply_stays_empty(self):
+        doc = _role_doc()
+        result = br.derive_denied_set(
+            peer_policy.PolicyResult(
+                doc, False, False, peer_policy.compile_roles(doc)),
+            _endpoints(("device:boat-1", "device", "boat-1", "10.0.0.2")),
+            {}, [], set(), SEEDER_IP)
+
+        assert result.denied_ips == []
+        assert result.conflicts == []
+        assert result.prospective_denied_ips == ["10.0.0.2"]
+        assert result.prospective_conflicts == []
+        assert result.newly_denied_device_ids == ["boat-1"]
+        # The Task 4 legacy-credential admission helper stays on the current
+        # self-evaluation rule throughout the preflight release.
+        assert br.denied_endpoint_ips(
+            _pr(doc),
+            _endpoints(("device:boat-1", "device", "boat-1", "10.0.0.2")),
+            set()) == set()
+
+    @pytest.mark.parametrize("deny_side", ["seeder", "device"])
+    def test_mutual_deny_in_either_direction_is_preflighted(self, deny_side):
+        doc = peer_policy.base_document()
+        if deny_side == "seeder":
+            doc["acls"]["origin-deny"] = {"rules": [
+                {"seq": 10, "action": "deny",
+                 "match": {"type": "device", "value": "d1"}},
+                {"seq": 20, "action": "permit", "match": {"type": "any"}},
+            ]}
+            doc["seeder_assignment"] = "origin-deny"
+        else:
+            doc["acls"]["device-deny"] = {"rules": [
+                {"seq": 10, "action": "deny",
+                 "match": {"type": "service", "value": "seeder"}},
+                {"seq": 20, "action": "permit", "match": {"type": "any"}},
+            ]}
+            doc["assignments"]["d1"] = "device-deny"
+        peer_policy.validate_document(doc)
+
+        result = br.derive_denied_set(
+            _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.3")),
+            {}, [], set(), SEEDER_IP)
+
+        assert result.denied_ips == []
+        assert result.prospective_denied_ips == ["10.0.0.3"]
+        assert result.newly_denied_device_ids == ["d1"]
+
+    def test_explicit_open_assignment_shadows_role_origin_deny(self):
+        doc = _role_doc()
+        doc["acls"]["open"] = {"rules": [
+            {"seq": 10, "action": "permit", "match": {"type": "any"}},
+        ]}
+        doc["assignments"]["boat-1"] = "open"
+        peer_policy.validate_document(doc)
+        result = br.derive_denied_set(
+            _pr(doc),
+            _endpoints(("device:boat-1", "device", "boat-1", "10.0.0.4")),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == []
+        assert result.prospective_denied_ips == []
+        assert result.newly_denied_device_ids == []
+
+    def test_existing_self_deny_is_not_newly_denied(self):
+        doc = peer_policy.base_document()
+        doc["acls"]["address-deny"] = {"rules": [
+            {"seq": 10, "action": "deny",
+             "match": {"type": "cidr", "value": "10.0.0.0/24"}},
+            {"seq": 20, "action": "permit", "match": {"type": "any"}},
+        ]}
+        doc["assignments"]["d1"] = "address-deny"
+        peer_policy.validate_document(doc)
+        result = br.derive_denied_set(
+            _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.5")),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == ["10.0.0.5"]
+        assert result.prospective_denied_ips == ["10.0.0.5"]
+        assert result.newly_denied_device_ids == []
+
+    @pytest.mark.parametrize("current_kind", ["quarantine", "revoked"])
+    def test_quarantine_and_revocation_are_not_newly_denied(self, current_kind):
+        doc = _role_doc(("d1",))
+        revoked = set()
+        if current_kind == "quarantine":
+            doc["assignments"]["d1"] = peer_policy.RESERVED_QUARANTINE
+        else:
+            revoked.add("device:d1")
+        result = br.derive_denied_set(
+            _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.6")),
+            {}, [], revoked, SEEDER_IP)
+        assert result.denied_ips == ["10.0.0.6"]
+        assert result.newly_denied_device_ids == []
+
+    def test_protected_address_is_excluded_from_both_sets_and_count(self):
+        doc = _role_doc()
+        result = br.derive_denied_set(
+            _pr(doc),
+            _endpoints(("device:boat-1", "device", "boat-1", SEEDER_IP)),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == []
+        assert result.prospective_denied_ips == []
+        assert result.newly_denied_device_ids == []
+
+    def test_prospective_only_nat_conflict_does_not_degrade_current_result(self):
+        doc = _role_doc(("boat-1",))
+        durable = _endpoints(
+            ("device:boat-1", "device", "boat-1", "10.0.0.7"),
+            ("device:open-1", "device", "open-1", "10.0.0.7"))
+        result = br.derive_denied_set(
+            _pr(doc), durable, {}, [], set(), SEEDER_IP)
+
+        assert result.denied_ips == []
+        assert result.conflicts == []
+        assert result.prospective_denied_ips == []
+        assert len(result.prospective_conflicts) == 1
+        assert result.prospective_conflicts[0]["reason"] == "shared_permit_deny"
+        assert result.newly_denied_device_ids == []
+
+    def test_multiple_endpoints_and_pending_duplicate_count_device_once(self):
+        doc = _role_doc()
+        durable = {
+            "device:boat-1": {
+                "principal_type": "device", "principal_id": "boat-1",
+                "endpoints": [
+                    {"ipv4": "10.0.0.8", "port": 1, "observed_at": 1},
+                    {"ipv4": "10.0.0.9", "port": 2, "observed_at": 1},
+                ],
+            },
+        }
+        pending = _endpoints(
+            ("device:boat-1", "device", "boat-1", "10.0.0.8"))
+        result = br.derive_denied_set(
+            _pr(doc), durable, pending, [], set(), SEEDER_IP)
+        assert result.prospective_denied_ips == ["10.0.0.8", "10.0.0.9"]
+        assert result.newly_denied_device_ids == ["boat-1"]
+
+    def test_supplied_compiled_index_is_used_by_every_current_helper(
+            self, monkeypatch):
+        doc = _role_doc()
+        compiled = peer_policy.compile_roles(doc)
+        policy = peer_policy.PolicyResult(doc, False, False, compiled)
+
+        def unexpected(_doc):
+            raise AssertionError("compiled roles must be reused")
+        monkeypatch.setattr(peer_policy, "compile_roles", unexpected)
+
+        durable = _endpoints(
+            ("device:boat-1", "device", "boat-1", "10.0.0.10"))
+        assert br.derive_denied_set(
+            policy, durable, {}, [], set(), SEEDER_IP).denied_ips == []
+        assert br.denied_retention(policy, set())(
+            "device", "boat-1", "10.0.0.10") is False
+        assert br.denied_endpoint_ips(policy, durable, set()) == set()
+
+    def test_missing_compiled_index_is_built_once_for_full_derivation(
+            self, monkeypatch):
+        doc = _role_doc(("boat-1", "boat-2"))
+        real = peer_policy.compile_roles
+        calls = []
+
+        def counted(value):
+            calls.append(value)
+            return real(value)
+        monkeypatch.setattr(peer_policy, "compile_roles", counted)
+        durable = _endpoints(
+            ("device:boat-1", "device", "boat-1", "10.0.0.11"),
+            ("device:boat-2", "device", "boat-2", "10.0.0.12"))
+        result = br.derive_denied_set(
+            peer_policy.PolicyResult(doc, False, False),
+            durable, {}, [], set(), SEEDER_IP)
+        assert result.newly_denied_device_ids == ["boat-1", "boat-2"]
+        assert calls == [doc]
+
+    def test_fail_closed_has_no_speculative_mutual_origin_evidence(self):
+        policy = peer_policy.PolicyResult(
+            peer_policy._fail_closed_document(), True, True)
+        result = br.derive_denied_set(
+            policy,
+            _endpoints(("device:d1", "device", "d1", "10.0.0.13")),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == ["10.0.0.13"]
+        assert result.prospective_denied_ips == []
+        assert result.prospective_conflicts == []
+        assert result.newly_denied_device_ids == []

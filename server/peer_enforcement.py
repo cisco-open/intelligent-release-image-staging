@@ -15,14 +15,61 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import tempfile
+
+import peer_endpoints
 
 SCHEMA = 1
 STATES = ("enforced", "degraded", "pending", "rpc_unavailable", "fail_closed")
+MUTUAL_ORIGIN_MODE = "preflight"
+_MUTUAL_ORIGIN_KEYS = frozenset((
+    "mode", "newly_denied_device_count", "newly_denied_device_ids"))
+_DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class EnforcementError(ValueError):
     """Raised on an invalid state or a false ``enforced`` claim."""
+
+
+def validate_mutual_origin(value):
+    """Return a defensive copy of the exact B6 preflight observation.
+
+    Typed device ids are retained for the authenticated ``/swarm`` identity
+    join. Management readers project only the count; no address is accepted.
+    """
+    if not isinstance(value, dict) or set(value) != _MUTUAL_ORIGIN_KEYS:
+        raise EnforcementError("bad mutual_origin fields")
+    if value.get("mode") != MUTUAL_ORIGIN_MODE:
+        raise EnforcementError("bad mutual_origin mode")
+    count = value.get("newly_denied_device_count")
+    ids = value.get("newly_denied_device_ids")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise EnforcementError("bad newly_denied_device_count")
+    if not isinstance(ids, list) or len(ids) > peer_endpoints.SUPPORTED_DEVICES:
+        raise EnforcementError("bad newly_denied_device_ids")
+    if any(not isinstance(device_id, str)
+           or not _DEVICE_ID_RE.fullmatch(device_id) for device_id in ids):
+        raise EnforcementError("bad newly denied device id")
+    if ids != sorted(ids) or len(ids) != len(set(ids)) or count != len(ids):
+        raise EnforcementError("mutual_origin count/order mismatch")
+    return {
+        "mode": MUTUAL_ORIGIN_MODE,
+        "newly_denied_device_count": count,
+        "newly_denied_device_ids": list(ids),
+    }
+
+
+def mutual_origin_from_status(status):
+    """Read only a validated preflight object from an untrusted status dict."""
+    try:
+        return validate_mutual_origin(status.get("mutual_origin"))
+    except (AttributeError, EnforcementError):
+        return validate_mutual_origin({
+            "mode": MUTUAL_ORIGIN_MODE,
+            "newly_denied_device_count": 0,
+            "newly_denied_device_ids": [],
+        })
 
 
 def _atomic_write_json(path, obj):
@@ -54,7 +101,8 @@ def _lock(path):
 
 def build_status(state, aria_session_id, desired_hash, applied_revision,
                  desired_ip_count, now, last_operation_exported_revision=0,
-                 conflicts=None, last_effect=None, last_error=None, **reject):
+                 conflicts=None, last_effect=None, last_error=None,
+                 mutual_origin=None, **reject):
     """Construct the exact enforcement status object (spec 10.5b).
 
     ``desired_ip_count`` is a count only. Passing any raw IP list (e.g.
@@ -74,6 +122,13 @@ def build_status(state, aria_session_id, desired_hash, applied_revision,
     if state == "enforced" and (not aria_session_id or not desired_hash):
         raise EnforcementError(
             "enforced requires a current session and desired hash")
+    if mutual_origin is None:
+        mutual_origin = {
+            "mode": MUTUAL_ORIGIN_MODE,
+            "newly_denied_device_count": 0,
+            "newly_denied_device_ids": [],
+        }
+    mutual_origin = validate_mutual_origin(mutual_origin)
     return {
         "schema": SCHEMA,
         "updated_at": float(now),
@@ -87,6 +142,7 @@ def build_status(state, aria_session_id, desired_hash, applied_revision,
         "conflicts": list(conflicts) if conflicts else [],
         "last_effect": last_effect,
         "last_error": last_error,
+        "mutual_origin": mutual_origin,
     }
 
 

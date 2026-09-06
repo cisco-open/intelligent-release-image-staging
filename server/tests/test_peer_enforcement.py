@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+import peer_endpoints
 import peer_enforcement
 
 
@@ -172,3 +173,85 @@ class TestGuiReader:
         with open(path, "w") as f:
             f.write("{ not json")
         assert peer_enforcement.read_status(path) is None
+
+
+class TestMutualOriginPreflightStatus:
+    @staticmethod
+    def _summary(ids=("boat-1", "boat-2")):
+        return {
+            "mode": "preflight",
+            "newly_denied_device_count": len(ids),
+            "newly_denied_device_ids": list(ids),
+        }
+
+    def test_exact_valid_summary_round_trips(self, path):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=self._summary())
+        peer_enforcement.write_status(path, status)
+        assert _read(path)["mutual_origin"] == self._summary()
+        assert peer_enforcement.mutual_origin_from_status(
+            peer_enforcement.read_status(path)) == self._summary()
+
+    def test_omitted_summary_defaults_to_empty_preflight(self):
+        status = peer_enforcement.build_status(
+            state="pending", aria_session_id=None, desired_hash=None,
+            applied_revision=None, desired_ip_count=0, now=1.0)
+        assert status["mutual_origin"] == self._summary(())
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "enforced", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": True,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-2", "boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 2,
+         "newly_denied_device_ids": ["boat-1", "boat-1"]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": [""]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": ["bad device"]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": ["x" * 65]},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": [], "denied_ips": ["10.0.0.1"]},
+    ])
+    def test_rejects_invalid_or_address_carrying_summary(self, summary):
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.build_status(
+                state="pending", aria_session_id=None, desired_hash=None,
+                applied_revision=None, desired_ip_count=0, now=1.0,
+                mutual_origin=summary)
+
+    def test_rejects_more_than_supported_fleet(self):
+        ids = ["d%05d" % index
+               for index in range(peer_endpoints.SUPPORTED_DEVICES + 1)]
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.validate_mutual_origin({
+                "mode": "preflight",
+                "newly_denied_device_count": len(ids),
+                "newly_denied_device_ids": ids,
+            })
+
+    def test_malformed_prior_status_is_not_propagated(self):
+        malformed = {"mutual_origin": {
+            "mode": "preflight", "newly_denied_device_count": 2,
+            "newly_denied_device_ids": ["same", "same"],
+        }}
+        assert peer_enforcement.mutual_origin_from_status(malformed) \
+            == self._summary(())
+
+    def test_status_never_serializes_raw_address_carrier(self, path):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=self._summary(("boat-1",)))
+        peer_enforcement.write_status(path, status)
+        blob = open(path).read()
+        assert "denied_ips" not in blob
+        assert "addresses" not in blob
+        assert "endpoints" not in blob

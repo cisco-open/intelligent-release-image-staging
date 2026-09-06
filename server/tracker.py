@@ -30,6 +30,7 @@ import credential_cache
 import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
+import origin_qos as _origin_qos
 import secrets_store
 import telemetry
 from peer_registry import PeerRegistry, INTERVAL, NUMWANT_CAP
@@ -856,20 +857,23 @@ RECONCILE_POLL = 2.0   # max seconds before durable cross-process changes apply
 # Upper bound on how long the loop may go without a full recompute even when
 # nothing on disk changed and no wake arrived. A bare ≤2s poll with unchanged
 # stat keys, an empty pending queue, a healthy known RPC/session and no dirty
-# flag is a no-op (the dead-poll gate suppresses the redundant per-2s RPC), but
-# endpoint TTL expiry and periodic RPC/session recovery are time-driven and have
+# flag performs only the lightweight QoS target-set probe; it suppresses the
+# full snapshot, session probe, and apply RPCs. Endpoint TTL expiry and periodic
+# RPC/session recovery are time-driven and have
 # no file-change signal — so we still force a maintenance pass at least this
 # often. A pass that runs because this deadline passed also prunes expired
 # rows from the durable endpoint map (peer_endpoints.prune); a wake- or
 # change-driven pass only reads it. Bounded to one endpoint-TTL horizon
 # (capped) so pruning is timely without blindly never running.
 MAINTENANCE_INTERVAL_CAP = 60.0   # seconds
+_NO_QOS_TARGETS = object()
 
 
 class Aria2BlocklistAdapter:
     """Thin adapter exposing the reconciler's ``aria`` contract over the local
     aria2 JSON-RPC. It calls ``aria2.getSessionInfo`` for the counter epoch and
-    ``aria2.setBtPeerBlocklist`` for the sole full-replace apply (spec §0). The
+    ``aria2.setBtPeerBlocklist`` for the sole full-replace apply (spec §0), plus
+    the narrowly-scoped origin QoS target and option calls. The
     RPC secret rides through the injected caller; no token is ever surfaced in
     an error (the reconciler records only the exception TYPE name)."""
 
@@ -882,6 +886,36 @@ class Aria2BlocklistAdapter:
 
     def set_blocklist(self, ips):
         return self._rpc("aria2.setBtPeerBlocklist", [list(ips)]) or {}
+
+    def get_active_download_gids(self):
+        active = self._rpc("aria2.tellActive", [["gid"]])
+        if not isinstance(active, list):
+            raise ValueError("bad tellActive result")
+        gids = []
+        for row in active:
+            if not isinstance(row, dict) or "gid" not in row:
+                raise ValueError("bad tellActive row")
+            gids.append(row["gid"])
+        try:
+            return _origin_qos.validate_target_gids(gids)
+        except _origin_qos.OriginQosError as exc:
+            raise ValueError("bad active gid set") from exc
+
+    def set_global_options(self, options):
+        if not isinstance(options, dict) \
+                or set(options) != _origin_qos.GLOBAL_OPTION_KEYS \
+                or any(not isinstance(value, str) for value in options.values()):
+            raise ValueError("bad origin global options")
+        return self._rpc("aria2.changeGlobalOption", [dict(options)])
+
+    def set_download_options(self, gid, options):
+        if not isinstance(gid, str) or not gid:
+            raise ValueError("bad origin download gid")
+        if not isinstance(options, dict) \
+                or set(options) != _origin_qos.DOWNLOAD_OPTION_KEYS \
+                or any(not isinstance(value, str) for value in options.values()):
+            raise ValueError("bad origin download options")
+        return self._rpc("aria2.changeOption", [gid, dict(options)])
 
 
 class TrackerReconciler:
@@ -896,6 +930,8 @@ class TrackerReconciler:
     exact count-only enforcement status; and export the policy operation outbox
     in revision order above the ack, advancing
     ``last_operation_exported_revision`` only after the audit contract succeeds.
+    The same serialized pass reconciles origin QoS with separate success memory
+    and a separately persisted, identifier-free status.
 
     Startup and every aria RPC transition to reachable / session change force a
     full valid desired apply (including a valid-empty list). ``fail_closed``
@@ -907,10 +943,12 @@ class TrackerReconciler:
                   pending_queue, active_participants, revoked_principals,
                   protected_seeder_ip=None, audit_export=None,
                   emit_policy_event=None, now=None,
-                  legacy_retention_until=None):
+                  legacy_retention_until=None, origin_qos_path=None):
         self._policy_paths = policy_paths
         self._endpoints_path = endpoints_path
         self._enforcement_path = enforcement_path
+        self._origin_qos_path = origin_qos_path or os.path.join(
+            os.path.dirname(enforcement_path), "origin-qos.json")
         self._aria = aria
         self._pending = pending_queue
         self._active_participants = active_participants
@@ -929,6 +967,14 @@ class TrackerReconciler:
         self._last_session = None
         self._last_hash = None
         self._rpc_ok = None            # None=unknown, then True/False
+        self._qos_last_session = None
+        self._qos_last_hash = None
+        self._qos_last_targets = None
+        self._qos_rpc_ok = None
+        self._prefetched_qos_targets = _NO_QOS_TARGETS
+        self._qos_enabled = all(hasattr(aria, name) for name in (
+            "get_active_download_gids", "set_global_options",
+            "set_download_options"))
 
         # Serialization: exactly one reconcile at a time; a change during a run
         # schedules exactly one rerun (dirty flag).
@@ -1032,10 +1078,61 @@ class TrackerReconciler:
                     "last_operation_exported_revision", 0),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error=type(exc).__name__)
+                last_error=type(exc).__name__,
+                mutual_origin=_peer_enforcement.mutual_origin_from_status(
+                    prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
         except Exception:
             pass
+        if self._qos_enabled:
+            self._write_origin_qos_failure(type(exc).__name__)
+
+    def _write_origin_qos_failure(self, error):
+        """Best-effort degraded QoS status preserving only validated scalars."""
+        try:
+            prior = _origin_qos.read_status(self._origin_qos_path) or {}
+
+            def count(name):
+                value = prior.get(name, 0)
+                return value if isinstance(value, int) \
+                    and not isinstance(value, bool) and value >= 0 else 0
+
+            session = prior.get("aria_session_id")
+            session = session if isinstance(session, str) and session else None
+            desired_hash = prior.get("desired_hash")
+            desired_hash = (desired_hash if isinstance(desired_hash, str)
+                            and desired_hash else None)
+            global_count = min(
+                count("global_option_count"),
+                len(_origin_qos.GLOBAL_OPTION_KEYS))
+            target_count = count("target_download_count")
+            applied_count = min(count("applied_download_count"), target_count)
+            status = _origin_qos.build_status(
+                state="degraded" if session and desired_hash
+                else "rpc_unavailable",
+                aria_session_id=session, desired_hash=desired_hash,
+                global_option_count=global_count,
+                target_download_count=target_count,
+                applied_download_count=applied_count,
+                now=self._now(), last_error=error)
+            _origin_qos.write_status(self._origin_qos_path, status)
+        except Exception:
+            pass
+
+    def _persist_origin_qos_status(self, status):
+        """Write QoS status without changing a truthful blocklist result.
+
+        The files and their success memories are independent. If only the QoS
+        status write fails, leave the peer-enforcement status intact, mark QoS
+        unhealthy, and force a complete QoS retry on the next poll.
+        """
+        try:
+            _origin_qos.write_status(self._origin_qos_path, status)
+        except Exception:
+            self._qos_rpc_ok = False
+            self._next_maintenance = None
+            return False
+        return True
 
     def _current_poll_keys(self):
         return (_stat_key(self._policy_paths[0]),
@@ -1052,7 +1149,8 @@ class TrackerReconciler:
         change), or the bounded maintenance deadline has passed (endpoint TTL
         prune / periodic reconciliation). Otherwise the poll is a no-op — no
         run_once, no getSessionInfo, no apply — so a steady idle loop performs
-        no per-2s RPC."""
+        no full reconcile RPC. A healthy idle pass performs only the required
+        ``tellActive`` GID-set probe for origin QoS churn."""
         keys = self._current_poll_keys()
         changed = keys != self._poll_keys
         self._poll_keys = keys
@@ -1064,9 +1162,24 @@ class TrackerReconciler:
             return True
         if self._rpc_ok is not True:
             return True
+        if self._qos_enabled and self._qos_rpc_ok is not True:
+            return True
         if self._next_maintenance is None:
             return True
-        return self._now() >= self._next_maintenance
+        if self._now() >= self._next_maintenance:
+            return True
+
+        # QoS target membership can change without touching policy/endpoints
+        # (for example, seeder credential rotation removes and re-adds GIDs).
+        # One light tellActive(gid) probe on an otherwise-idle poll keeps that
+        # change within RECONCILE_POLL without rebuilding the full snapshot.
+        if not self._qos_enabled:
+            return False
+        targets = self._probe_qos_targets()
+        if targets is None or targets != self._qos_last_targets:
+            self._prefetched_qos_targets = targets
+            return True
+        return False
 
     def _schedule_maintenance(self):
         """Arm the bounded next-maintenance deadline after a reconcile pass. The
@@ -1123,6 +1236,16 @@ class TrackerReconciler:
             durable = _peer_endpoints.fresh_endpoints(
                 self._endpoints_path, now, keep=keep)
         except _peer_endpoints.EndpointStoreError:
+            qos_status = None
+            if self._qos_enabled:
+                session = self._probe_session()
+                desired_qos, qos_outcome, qos_error = \
+                    self._prepare_origin_qos(policy, session)
+                session_stable = bool(session) and \
+                    self._probe_session() == session
+                qos_status = self._finish_origin_qos(
+                    now, session, session_stable, desired_qos, qos_outcome,
+                    qos_error)
             prior = _peer_enforcement.read_status(self._enforcement_path) or {}
             status = _peer_enforcement.build_status(
                 state="fail_closed",
@@ -1134,9 +1257,15 @@ class TrackerReconciler:
                     "last_operation_exported_revision", 0),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error="EndpointStoreError")
+                last_error="EndpointStoreError",
+                mutual_origin=_peer_enforcement.mutual_origin_from_status(
+                    prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
-            self._schedule_maintenance()
+            qos_status_written = True
+            if qos_status is not None:
+                qos_status_written = self._persist_origin_qos_status(qos_status)
+            if qos_status_written:
+                self._schedule_maintenance()
             return status
         active = list(self._active_participants() or [])
         derived = _reconciler.derive_denied_set(
@@ -1147,6 +1276,11 @@ class TrackerReconciler:
         #    RPC recovery) — otherwise skip a redundant identical apply.
         desired_hash = _reconciler.canonical_hash(derived.denied_ips)
         session = self._probe_session()
+        desired_qos = qos_outcome = None
+        qos_error = None
+        if self._qos_enabled:
+            desired_qos, qos_outcome, qos_error = \
+                self._prepare_origin_qos(policy, session)
         force = (self._last_hash is None
                  or session != self._last_session
                  or self._rpc_ok is not True
@@ -1155,7 +1289,24 @@ class TrackerReconciler:
         outcome = None
         if force:
             outcome = _reconciler.apply_blocklist(
-                self._aria, derived.denied_ips, derived.apply_empty)
+                self._aria, derived.denied_ips, derived.apply_empty,
+                session_id=session) if self._qos_enabled else \
+                _reconciler.apply_blocklist(
+                    self._aria, derived.denied_ips, derived.apply_empty)
+
+        qos_status = None
+        if self._qos_enabled:
+            session_stable = bool(session) and self._probe_session() == session
+            if not session_stable:
+                self._rpc_ok = False
+                if outcome is not None:
+                    outcome = outcome._replace(
+                        success=False,
+                        last_error=("AriaSessionChanged" if session
+                                    else "AriaSessionUnavailable"))
+            qos_status = self._finish_origin_qos(
+                now, session, session_stable, desired_qos, qos_outcome,
+                qos_error)
 
         # 4) Persist the exact count-only enforcement status.
         status = self._build_status(
@@ -1169,10 +1320,14 @@ class TrackerReconciler:
         status["last_operation_exported_revision"] = exported_rev
 
         _peer_enforcement.write_status(self._enforcement_path, status)
+        qos_status_written = True
+        if qos_status is not None:
+            qos_status_written = self._persist_origin_qos_status(qos_status)
         # Arm the bounded next-maintenance deadline so a subsequent idle bare
         # poll stays a no-op until either something changes or the deadline
         # passes (TTL prune / periodic recovery).
-        self._schedule_maintenance()
+        if qos_status_written:
+            self._schedule_maintenance()
         return status
 
     def _retry_pending(self, now):
@@ -1186,9 +1341,98 @@ class TrackerReconciler:
 
     def _probe_session(self):
         try:
-            return self._aria.get_session_id()
+            return self._aria.get_session_id() or None
         except Exception:
             return None
+
+    def _probe_qos_targets(self):
+        try:
+            return _origin_qos.validate_target_gids(
+                self._aria.get_active_download_gids())
+        except Exception:
+            return None
+
+    def _take_qos_targets(self):
+        targets = self._prefetched_qos_targets
+        self._prefetched_qos_targets = _NO_QOS_TARGETS
+        if targets is _NO_QOS_TARGETS:
+            return self._probe_qos_targets()
+        return targets
+
+    def _prepare_origin_qos(self, policy, session):
+        targets = self._take_qos_targets()
+        if targets is None:
+            self._qos_rpc_ok = False
+            return None, None, "TargetDiscoveryUnavailable"
+        try:
+            desired = _origin_qos.build_desired(policy.document, targets)
+        except Exception as exc:
+            self._qos_rpc_ok = False
+            return None, None, type(exc).__name__
+        if policy.fail_closed:
+            self._qos_rpc_ok = False
+            return desired, None, "PolicyFailClosed"
+        force = (self._qos_last_hash is None
+                 or session != self._qos_last_session
+                 or self._qos_rpc_ok is not True
+                 or desired.desired_hash != self._qos_last_hash
+                 or desired.target_gids != self._qos_last_targets)
+        outcome = (_origin_qos.apply_desired(self._aria, desired, session)
+                   if force else None)
+        return desired, outcome, None
+
+    def _finish_origin_qos(self, now, session, session_stable, desired,
+                           outcome, preparation_error=None):
+        desired_hash = desired.desired_hash if desired is not None else None
+        target_count = len(desired.target_gids) if desired is not None else 0
+        global_count = 0
+        applied_count = 0
+        last_error = preparation_error
+
+        if outcome is not None:
+            global_count = 1 if outcome.global_applied else 0
+            applied_count = outcome.applied_download_count
+            last_error = outcome.last_error
+
+        if not session_stable:
+            last_error = ("AriaSessionChanged" if session
+                          else "AriaSessionUnavailable")
+            state = "degraded" if session else "rpc_unavailable"
+            self._qos_rpc_ok = False
+        elif preparation_error is not None:
+            state = ("rpc_unavailable"
+                     if preparation_error == "TargetDiscoveryUnavailable"
+                     or not session else "degraded")
+            self._qos_rpc_ok = False
+        elif outcome is not None and outcome.success:
+            self._qos_last_session = session
+            self._qos_last_hash = desired_hash
+            self._qos_last_targets = desired.target_gids
+            self._qos_rpc_ok = True
+            state = "enforced"
+        elif outcome is not None:
+            self._qos_rpc_ok = False
+            state = "degraded" if session else "rpc_unavailable"
+        elif self._qos_rpc_ok is True and session \
+                and desired_hash == self._qos_last_hash \
+                and desired.target_gids == self._qos_last_targets:
+            state = "enforced"
+            global_count = len(_origin_qos.GLOBAL_OPTION_KEYS)
+            applied_count = target_count
+            last_error = None
+        else:
+            self._qos_rpc_ok = False
+            state = "degraded" if session else "rpc_unavailable"
+
+        return _origin_qos.build_status(
+            state=state,
+            aria_session_id=session,
+            desired_hash=desired_hash,
+            global_option_count=global_count,
+            target_download_count=target_count,
+            applied_download_count=applied_count,
+            now=now,
+            last_error=last_error)
 
     def _build_status(self, now, policy, derived, desired_hash, outcome,
                       pending_outstanding):
@@ -1244,11 +1488,23 @@ class TrackerReconciler:
         eff_hash = desired_hash if session else None
         if state == "enforced" and (not session or not eff_hash):
             state = "degraded"
+        if policy.fail_closed:
+            mutual_origin = _peer_enforcement.mutual_origin_from_status(
+                _peer_enforcement.read_status(self._enforcement_path) or {})
+        else:
+            mutual_origin = {
+                "mode": _peer_enforcement.MUTUAL_ORIGIN_MODE,
+                "newly_denied_device_count": len(
+                    derived.newly_denied_device_ids),
+                "newly_denied_device_ids": list(
+                    derived.newly_denied_device_ids),
+            }
         return _peer_enforcement.build_status(
             state=state, aria_session_id=session, desired_hash=eff_hash,
             applied_revision=applied_revision,
             desired_ip_count=len(derived.denied_ips), now=now,
-            conflicts=conflicts, last_effect=last_effect, last_error=last_error)
+            conflicts=conflicts, last_effect=last_effect, last_error=last_error,
+            mutual_origin=mutual_origin)
 
     def _read_acked_revision(self):
         """The single, centralized source of the persisted outbox ack watermark
@@ -1293,6 +1549,7 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     lkg_path = os.path.join(state_dir, "peer-policy.lkg.json")
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
     enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
+    origin_qos_path = os.path.join(state_dir, "origin-qos.json")
     audit_path = env.get("IRIS_AUDIT", "/etc/iris/audit.jsonl")
     secrets_path = env.get("IRIS_SECRETS", "/run/iris/secrets.json")
     try:
@@ -1316,6 +1573,7 @@ def _build_reconciler_from_env(env, registry, emit_policy_event=None):
     return TrackerReconciler(
         policy_paths=(policy_path, lkg_path),
         endpoints_path=endpoints_path, enforcement_path=enforcement_path,
+        origin_qos_path=origin_qos_path,
         aria=aria, pending_queue=_peer_endpoints.PendingEndpointQueue(),
         active_participants=lambda: _active_participants(registry),
         # Revocation view (spec §7 retirement): a device principal whose every

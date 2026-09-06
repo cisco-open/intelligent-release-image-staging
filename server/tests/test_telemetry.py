@@ -1689,6 +1689,40 @@ class TestPeerPolicyEnforcementFacts:
         assert "blocked" not in row["peer_enforcement"]
         assert "conflict" not in row["peer_enforcement"]
 
+    @pytest.mark.parametrize("principal_id,expected", [
+        ("iris8kv-1", True),
+        ("iris8kv-2", False),
+    ])
+    def test_mutual_origin_preflight_is_typed_identity_fact(
+            self, principal_id, expected):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight",
+                "newly_denied_device_count": 1,
+                "newly_denied_device_ids": ["iris8kv-1"],
+            },
+        }
+        row = self._row(self._hub(
+            enforcement=enforcement, principal_id=principal_id,
+            # Both rows deliberately share the same address: attribution must
+            # come from the authenticated principal id, never the IP.
+            ip="198.51.100.14"))
+        assert row["peer_enforcement"]["mutual_origin_preflight"] is expected
+        blob = json.dumps(row, sort_keys=True)
+        assert "newly_denied_device_ids" not in blob
+
+    def test_malformed_preflight_never_creates_typed_fact(self):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight", "newly_denied_device_count": 2,
+                "newly_denied_device_ids": ["iris8kv-1", "iris8kv-1"],
+            },
+        }
+        row = self._row(self._hub(enforcement=enforcement))
+        assert "mutual_origin_preflight" not in row["peer_enforcement"]
+
     def test_fail_closed_enforcement_state_does_not_prove_peer_block(self):
         enforcement = {"state": "fail_closed", "conflicts": []}
         row = self._row(self._hub(enforcement=enforcement))
@@ -1702,7 +1736,13 @@ class TestPeerPolicyEnforcementFacts:
             peer_policy.base_document(), degraded=False, fail_closed=False)
         hub = telemetry.Telemetry(
             PeerRegistry(), policy_info=lambda: policy,
-            enforcement_info=lambda: {"state": "enforced", "conflicts": []})
+            enforcement_info=lambda: {
+                "state": "enforced", "conflicts": [],
+                "mutual_origin": {
+                    "mode": "preflight", "newly_denied_device_count": 1,
+                    "newly_denied_device_ids": ["iris8kv-1"],
+                },
+            })
         hub._registry.announce("abc", "p1", "198.51.100.31", 6881, left=5,
                                now=0, principal=auth.Principal("legacy", ""))
         row = hub.swarm_snapshot(now=0)["images"][0]["peers"][0]

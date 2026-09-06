@@ -36,11 +36,17 @@ import ipaddress
 import peer_policy
 
 DerivedSet = collections.namedtuple(
-    "DerivedSet", ["denied_ips", "conflicts", "apply_empty", "fail_closed"])
+    "DerivedSet",
+    ["denied_ips", "conflicts", "apply_empty", "fail_closed",
+     "prospective_denied_ips", "prospective_conflicts",
+     "newly_denied_device_ids"],
+    defaults=((), (), ()))
 
 ApplyOutcome = collections.namedtuple(
     "ApplyOutcome", ["applied", "success", "aria_session_id", "desired_hash",
                      "applied_revision", "last_effect", "last_error"])
+
+_SESSION_UNSET = object()
 
 
 def _endpoint_ips(snapshot):
@@ -73,7 +79,7 @@ def derive_denied_set(policy_result, durable_endpoints, pending_endpoints,
             durable_endpoints, pending_endpoints, active_participants,
             protected_seeder_ip)
     return _derive_valid(
-        policy_result.document, durable_endpoints, pending_endpoints,
+        policy_result, durable_endpoints, pending_endpoints,
         revoked_principals, protected_seeder_ip)
 
 
@@ -91,13 +97,16 @@ def denied_retention(policy_result, revoked_principals):
     un-quarantined, and ``clear_principal`` drops it on re-onboard."""
     revoked = set(revoked_principals or ())
     doc = policy_result.document
+    compiled = policy_result.roles or peer_policy.compile_roles(doc)
 
     def keep(ptype, pid, ipv4):
         if "%s:%s" % (ptype, pid) in revoked:
             return True
         if policy_result.fail_closed:
             return False
-        return peer_policy.evaluate(doc, _Struct(ptype, pid), ipv4)[0] == "deny"
+        return peer_policy.evaluate(
+            doc, _Struct(ptype, pid), ipv4,
+            compiled=compiled)[0] == "deny"
     return keep
 
 
@@ -113,39 +122,25 @@ def denied_endpoint_ips(policy_result, durable_endpoints, revoked_principals):
     revoked device announce from this address?"."""
     revoked = set(revoked_principals or ())
     doc = policy_result.document
+    compiled = policy_result.roles or peer_policy.compile_roles(doc)
     out = set()
     for key, ptype, pid, ip in _endpoint_ips(durable_endpoints):
         if ptype != "device":
             continue
         if key in revoked or (not policy_result.fail_closed and
                               peer_policy.evaluate(
-                                  doc, _Struct(ptype, pid), ip)[0] == "deny"):
+                                  doc, _Struct(ptype, pid), ip,
+                                  compiled=compiled)[0] == "deny"):
             out.add(ip)
     return out
 
 
-def _derive_valid(doc, durable_endpoints, pending_endpoints,
-                  revoked_principals, protected_seeder_ip):
-    # Merge durable + pending; a key present in both contributes both IPs.
-    denied_by_ip = {}   # ip -> set of denied principal keys
-    permitted_by_ip = {}  # ip -> set of permitted principal keys
-    for snapshot in (durable_endpoints, pending_endpoints):
-        for key, ptype, pid, ip in _endpoint_ips(snapshot):
-            if ip == protected_seeder_ip:
-                continue  # protected service-seeder address never blocked
-            principal = _Struct(ptype, pid)
-            revoked = key in revoked_principals
-            decision = peer_policy.evaluate(doc, principal, ip)[0]
-            if revoked or decision == "deny":
-                denied_by_ip.setdefault(ip, set()).add(key)
-            else:
-                permitted_by_ip.setdefault(ip, set()).add(key)
-
+def _resolved_set(denied_by_ip, permitted_by_ip):
+    """Resolve shared-address conflicts for one independent classification."""
     denied_ips = []
     conflicts = []
     for ip in sorted(denied_by_ip):
         if ip in permitted_by_ip:
-            # shared permit/deny -> skip global block, record conflict
             denied_key = sorted(denied_by_ip[ip])[0]
             permitted_key = sorted(permitted_by_ip[ip])[0]
             dt, di = denied_key.split(":", 1)
@@ -157,9 +152,59 @@ def _derive_valid(doc, durable_endpoints, pending_endpoints,
                 "global_block_applied": False})
             continue
         denied_ips.append(ip)
+    return denied_ips, conflicts
+
+
+def _derive_valid(policy_result, durable_endpoints, pending_endpoints,
+                  revoked_principals, protected_seeder_ip):
+    doc = policy_result.document
+    compiled = policy_result.roles or peer_policy.compile_roles(doc)
+    seeder = _Struct("service", "seeder")
+    revoked_principals = set(revoked_principals or ())
+    # Merge durable + pending; a key present in both contributes both IPs.
+    current_denied_by_ip = {}
+    current_permitted_by_ip = {}
+    prospective_denied_by_ip = {}
+    prospective_permitted_by_ip = {}
+    device_ids_by_ip = {}
+    for snapshot in (durable_endpoints, pending_endpoints):
+        for key, ptype, pid, ip in _endpoint_ips(snapshot):
+            if ip == protected_seeder_ip:
+                continue  # protected service-seeder address never blocked
+            principal = _Struct(ptype, pid)
+            revoked = key in revoked_principals
+            decision = peer_policy.evaluate(
+                doc, principal, ip, compiled=compiled)[0]
+            current_denied = revoked or decision == "deny"
+            if current_denied:
+                current_denied_by_ip.setdefault(ip, set()).add(key)
+            else:
+                current_permitted_by_ip.setdefault(ip, set()).add(key)
+
+            prospective_denied = current_denied or not peer_policy.mutual_permit(
+                doc, seeder, protected_seeder_ip, principal, ip,
+                compiled=compiled)
+            if prospective_denied:
+                prospective_denied_by_ip.setdefault(ip, set()).add(key)
+            else:
+                prospective_permitted_by_ip.setdefault(ip, set()).add(key)
+            if ptype == "device":
+                device_ids_by_ip.setdefault(ip, set()).add(pid)
+
+    denied_ips, conflicts = _resolved_set(
+        current_denied_by_ip, current_permitted_by_ip)
+    prospective_denied_ips, prospective_conflicts = _resolved_set(
+        prospective_denied_by_ip, prospective_permitted_by_ip)
+    newly_denied_ips = set(prospective_denied_ips) - set(denied_ips)
+    newly_denied_device_ids = sorted({
+        device_id for ip in newly_denied_ips
+        for device_id in device_ids_by_ip.get(ip, ())})
     # valid policy always applies (valid-empty is a real apply)
     return DerivedSet(denied_ips=sorted(denied_ips), conflicts=conflicts,
-                      apply_empty=True, fail_closed=False)
+                      apply_empty=True, fail_closed=False,
+                      prospective_denied_ips=sorted(prospective_denied_ips),
+                      prospective_conflicts=prospective_conflicts,
+                      newly_denied_device_ids=newly_denied_device_ids)
 
 
 def _derive_emergency(durable_endpoints, pending_endpoints,
@@ -186,7 +231,9 @@ def _derive_emergency(durable_endpoints, pending_endpoints,
     # If no address is known, nothing is applied -> no false success. Otherwise
     # the full emergency list is applied on fresh sessions/recovery.
     return DerivedSet(denied_ips=denied, conflicts=[],
-                      apply_empty=bool(denied), fail_closed=True)
+                      apply_empty=bool(denied), fail_closed=True,
+                      prospective_denied_ips=[], prospective_conflicts=[],
+                      newly_denied_device_ids=[])
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +262,7 @@ def _safe_session_id(aria):
         return None
 
 
-def apply_blocklist(aria, denied_ips, apply_empty):
+def apply_blocklist(aria, denied_ips, apply_empty, session_id=_SESSION_UNSET):
     """Full-replace apply of the desired list via ``aria.set_blocklist`` (spec
     5/13). Validates every IP first (one bad rule rejects the whole call). When
     there is nothing to apply and ``apply_empty`` is False (fail-closed, no known
@@ -235,7 +282,8 @@ def apply_blocklist(aria, denied_ips, apply_empty):
             desired_hash=desired_hash, applied_revision=None,
             last_effect=None, last_error=None)
 
-    session = _safe_session_id(aria)
+    session = (_safe_session_id(aria) if session_id is _SESSION_UNSET
+               else session_id)
     try:
         ret = aria.set_blocklist(ordered)
     except Exception as exc:  # RPC failure is never success / never permit-all

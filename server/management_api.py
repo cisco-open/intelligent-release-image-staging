@@ -42,6 +42,7 @@ import gui_fleet
 import gui_onboard
 import gui_tls
 import live_samples
+import origin_qos
 import otlp
 import peer_endpoints
 import peer_policy
@@ -1006,6 +1007,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         result = peer_policy.load_policy(auth_path, lkg_path)
         doc = result.document
         status = peer_enforcement.read_status(enforcement_path) or {}
+        preflight = peer_enforcement.mutual_origin_from_status(status)
+        origin_status = origin_qos.read_status(os.path.join(
+            policy_state_dir(), "origin-qos.json")) or {}
         conflicts = status.get("conflicts")
         if not isinstance(conflicts, list):
             conflicts = []
@@ -1047,6 +1051,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "last_operation_exported_revision": status.get("last_operation_exported_revision")
                 if isinstance(status.get("last_operation_exported_revision"), int)
                 and not isinstance(status.get("last_operation_exported_revision"), bool) else 0,
+            "mutual_origin": {
+                "mode": preflight["mode"],
+                "newly_denied_device_count": preflight[
+                    "newly_denied_device_count"],
+            },
+        }
+
+        def origin_count(name):
+            value = origin_status.get(name)
+            return value if isinstance(value, int) \
+                and not isinstance(value, bool) and value >= 0 else 0
+
+        origin_last_reconciled = origin_status.get("last_reconciled_at")
+        if not isinstance(origin_last_reconciled, (int, float)) \
+                or isinstance(origin_last_reconciled, bool):
+            origin_last_reconciled = None
+        try:
+            origin_last_error = origin_qos.validate_error_code(
+                origin_status.get("last_error"))
+        except origin_qos.OriginQosError:
+            origin_last_error = None
+        origin_view = {
+            "state": origin_status.get("state")
+                if origin_status.get("state") in origin_qos.STATES else None,
+            "global_option_count": origin_count("global_option_count"),
+            "target_download_count": origin_count("target_download_count"),
+            "applied_download_count": origin_count("applied_download_count"),
+            "last_reconciled_at": origin_last_reconciled,
+            "last_error": origin_last_error,
         }
         return {"schema": doc.get("schema"), "revision": doc.get("revision"),
                 "degraded": result.degraded, "fail_closed": result.fail_closed,
@@ -1055,7 +1088,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "quarantine_assignments": sorted(
                     device_id for device_id, acl in doc.get("assignments", {}).items()
                     if acl == peer_policy.RESERVED_QUARANTINE),
-                "enforcement": enforcement}
+                "enforcement": enforcement, "origin_qos": origin_view}
 
     def quarantine_assignment_ids():
         """The bare set of device ids under quarantine intent -- what the

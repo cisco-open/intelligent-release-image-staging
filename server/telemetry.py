@@ -1547,6 +1547,7 @@ class Telemetry:
         policy = self._policy_snapshot()
         enforcement = self._enforcement_snapshot()
         derived_denied = _derived_denied_ids(enforcement)
+        mutual_origin_preflight = _mutual_origin_preflight_ids(enforcement)
         # Filenames are presentation, not image identity. Preserve the catalog
         # id so a map can scope device observations to the selected torrent.
         # An absent or ambiguous mapping leaves legacy snapshots unchanged.
@@ -1586,7 +1587,8 @@ class Telemetry:
                     continue
                 out.append(_peer_row(
                     p, total, up_now, devices_by_id, report_by_device,
-                    live_by_device, policy, enforcement, derived_denied, now,
+                    live_by_device, policy, enforcement, derived_denied,
+                    mutual_origin_preflight, now,
                     self._torrent_observed_at, ambiguous_ips, ambiguous_endpoints))
             image = {
                 "image": self._names.get(info_hash, info_hash),
@@ -1959,7 +1961,8 @@ def _read_reports(state_dir):
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,
-              live_by_device, policy, enforcement, derived_denied, now,
+              live_by_device, policy, enforcement, derived_denied,
+              mutual_origin_preflight, now,
               server_observed_at=None, ambiguous_ips=(), ambiguous_endpoints=()):
     """One canonical peer row (spec §10.3), source-grouped. All device
     attribution joins on the authenticated device principal id, never on the
@@ -2045,7 +2048,8 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
         if pol is not None:
             row["peer_policy"] = pol
         enf = _peer_enforcement_fact(
-            enforcement, derived_denied, ptype, device_id, p["ip"])
+            enforcement, derived_denied, mutual_origin_preflight,
+            ptype, device_id, p["ip"])
         if enf is not None:
             row["peer_enforcement"] = enf
         # model + device_id ONLY for typed device principals (spec §10.3).
@@ -2188,7 +2192,20 @@ def _derived_denied_ids(enforcement):
     return denied
 
 
-def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
+def _mutual_origin_preflight_ids(enforcement):
+    """Validated typed IDs observed by the inert mutual-origin preflight."""
+    if not isinstance(enforcement, dict):
+        return None
+    try:
+        summary = _peer_enforcement.validate_mutual_origin(
+            enforcement.get("mutual_origin"))
+    except _peer_enforcement.EnforcementError:
+        return None
+    return frozenset(summary["newly_denied_device_ids"])
+
+
+def _peer_enforcement_fact(enforcement, derived_denied,
+                           mutual_origin_preflight, principal_type,
                            device_id, ipv4):
     """Per-participant ``peer_enforcement`` fact (spec §7/§10.3). Factual, not a
     causal claim: ``blocked`` is asserted only when this device's typed conflict
@@ -2203,6 +2220,9 @@ def _peer_enforcement_fact(enforcement, derived_denied, principal_type,
         return None
     state = enforcement.get("state")
     fact = {"state": state}
+    if principal_type == "device" and mutual_origin_preflight is not None:
+        fact["mutual_origin_preflight"] = \
+            device_id in mutual_origin_preflight
     # Surface a shared-IP conflict for this participant when the tracker
     # published one (typed, count-safe — no raw list).
     for c in enforcement.get("conflicts") or []:
