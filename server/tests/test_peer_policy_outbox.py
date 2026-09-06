@@ -169,6 +169,67 @@ class TestRestartRetainsEntries:
         assert [e["revision"] for e in reloaded["operation_outbox"]] == [2, 3]
 
 
+class TestLkgRing:
+    def test_ring_retains_the_five_latest_prior_documents(self, paths):
+        auth, lkg = paths
+        for i in range(7):
+            _assign(auth, lkg, "device-%d" % i, now=float(i))
+        assert peer_policy.lkg_ring_revisions(lkg) == [3, 4, 5, 6, 7]
+
+    def test_any_retained_revision_restores_as_a_new_commit(self, paths):
+        auth, lkg = paths
+        for i in range(7):
+            _assign(auth, lkg, "device-%d" % i, now=float(i))
+        before = _read(auth)
+        historical = peer_policy.read_lkg_revision(lkg, 4)
+        restored = peer_policy.restore_lkg_revision(
+            auth, lkg, 4, actor="console:admin", now=20.0)
+        assert restored["revision"] == before["revision"] + 1
+        assert restored["assignments"] == historical["assignments"]
+        assert restored["operation_outbox"][:-1] == before["operation_outbox"]
+        assert restored["operation_outbox"][-1]["action"] == "restore"
+        assert restored["operation_outbox"][-1]["target"] == "revision:4"
+
+    def test_missing_or_corrupt_ring_revision_is_not_restored(self, paths):
+        auth, lkg = paths
+        _assign(auth, lkg, "device-1")
+        before = _read(auth)
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.restore_lkg_revision(
+                auth, lkg, 99, actor="a", now=1.0)
+        assert _read(auth) == before
+        path = peer_policy.lkg_revision_path(lkg, 1)
+        with open(path, "w") as f:
+            f.write("{bad")
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.restore_lkg_revision(
+                auth, lkg, 1, actor="a", now=1.0)
+        assert _read(auth) == before
+
+    def test_post_commit_prune_failure_does_not_report_mutation_failure(
+            self, paths, monkeypatch):
+        auth, lkg = paths
+        for i in range(5):
+            _assign(auth, lkg, "device-%d" % i, now=float(i))
+        before = _read(auth)
+
+        def fail_prune(_lkg_path):
+            raise OSError("retention cleanup failed")
+
+        monkeypatch.setattr(peer_policy, "_prune_lkg_ring", fail_prune)
+        result = peer_policy.commit_mutation(
+            auth, lkg, action="assign", target="device-5", actor="a",
+            now=6.0,
+            mutate=lambda doc: doc["assignments"].__setitem__(
+                "device-5", "quarantine"))
+
+        assert result == _read(auth)
+        assert result["revision"] == before["revision"] + 1
+        assert len(result["operation_outbox"]) == \
+            len(before["operation_outbox"]) + 1
+        assert peer_policy.lkg_ring_revisions(lkg) == [1, 2, 3, 4, 5, 6]
+
+
 class TestImpossibleAckWatermark:
     """`last_operation_exported_revision` is persisted in the enforcement status
     file, separately from the policy document. A restored/reset document can sit
@@ -237,3 +298,25 @@ class TestImpossibleAckWatermark:
         assert peer_policy.effective_acked({"revision": 9}, 4) == 4
         assert peer_policy.effective_acked({"revision": 9}, 9) == 9
         assert peer_policy.effective_acked({"revision": 9}, 0) == 0
+
+
+class TestDeviceRetirementRoleCleanup:
+    def test_unassign_pops_acl_role_and_device_qos_in_one_commit(self, paths):
+        auth, lkg = paths
+        doc = peer_policy.load_policy(auth, lkg).document
+        doc["assignments"]["device-1"] = "quarantine"
+        doc["roles"] = {
+            "defs": {"boat": {"restricted": True}},
+            "role_of": {"device-1": "boat"},
+            "qos_default": {},
+            "qos_device": {"device-1": {"max_peers": 4}},
+        }
+        peer_policy._atomic_write_json(auth, doc)
+        before = _read(auth)
+        result = peer_policy.unassign_device(
+            auth, lkg, "device-1", actor="system", now=1.0)
+        assert result["revision"] == before["revision"] + 1
+        assert "device-1" not in result["assignments"]
+        assert "device-1" not in result["roles"]["role_of"]
+        assert "device-1" not in result["roles"]["qos_device"]
+        assert len(result["operation_outbox"]) == 1
