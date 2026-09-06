@@ -21,7 +21,7 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image>` | Assign one image to one device. |
 | `tools/gen-device-installers.sh fleet/devices.csv` | Generate per-device installers. |
 | `tools/apply-assignments.sh fleet/assignments.csv` | Validate and apply assignment CSV. |
-| `tools/make-agent-bundle.sh` | Build the Guest Shell agent bundle manually. |
+| `tools/make-agent-bundle.sh` | Build the x86_64 Guest Shell bundle; `--arch arm64 --aria2 PATH` builds the ARM bundle from a verified aarch64 binary. |
 | `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
 | `device/iox/install.sh` | Install the IOx app path. |
 | `device/iox/uninstall.sh` | Remove the IOx app path. |

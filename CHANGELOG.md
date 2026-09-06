@@ -12,6 +12,7 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Produce the ARM Guest Shell bundle with `tools/make-agent-bundle.sh --arch arm64 --aria2 PATH`, verifying the architecture and pinned checksum before packing (issue #179).
 - Accept incoming peers whose BitTorrent handshake arrives together with
   protocol messages, preserving the buffered messages (issue #174).
 - Enforce the per-torrent peer admission cap for stalled downloads and

@@ -145,3 +145,60 @@ EOF
     || { echo "$output"; return 1; }
   [ -f "$ROOT/artifacts/iris-agent.tgz" ]
 }
+
+_arm_input() {
+  printf 'fake-aarch64-binary\n' > "$ROOT/bin/aria2c-arm64"
+  ARM_SHA="$(sha256sum "$ROOT/bin/aria2c-arm64" | awk '{print $1}')"
+  printf '%s  x86_64\n%s  aarch64\n' "$ARIA2_SHA" "$ARM_SHA" > "$ROOT/tools/aria2c.sha256"
+  cat > "$BIN/file" <<'STUB'
+#!/usr/bin/env bash
+case "$2" in
+  *aria2c-arm64) echo 'ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped' ;;
+  *) echo 'ELF 64-bit LSB executable, x86-64, statically linked, stripped' ;;
+esac
+STUB
+}
+
+@test "arm bundler selects the explicit verified input and arm output without replacing x86" {
+  _arm_input
+  printf 'existing-x86-bundle\n' > "$ROOT/artifacts/iris-agent.tgz"
+  cat > "$ROOT/server/pack-agent-bundle.sh" <<'PACK'
+#!/usr/bin/env bash
+cp "$2" "$3"
+PACK
+  run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" \
+    --arch arm64 --aria2 "$ROOT/bin/aria2c-arm64" < /dev/null
+  [ "$status" -eq 0 ]
+  cmp "$ROOT/bin/aria2c-arm64" "$ROOT/artifacts/iris-agent-arm.tgz"
+  [ "$(cat "$ROOT/artifacts/iris-agent.tgz")" = existing-x86-bundle ]
+}
+
+@test "arm bundler refuses a substituted binary before replacing the prior bundle" {
+  _arm_input
+  printf 'prior-arm\n' > "$ROOT/artifacts/iris-agent-arm.tgz"
+  printf 'substituted\n' >> "$ROOT/bin/aria2c-arm64"
+  run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" \
+    --arch arm64 --aria2 "$ROOT/bin/aria2c-arm64" < /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"aarch64 entry"* ]]
+  [ "$(cat "$ROOT/artifacts/iris-agent-arm.tgz")" = prior-arm ]
+}
+
+@test "arm bundler rejects x86 input even if its checksum is pinned for arm" {
+  _arm_input
+  printf '%s  aarch64\n' "$ARIA2_SHA" > "$ROOT/tools/aria2c.sha256"
+  run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" \
+    --arch arm64 --aria2 "$ROOT/bin/aria2c" < /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"aarch64 ELF"* ]]
+  [ ! -f "$ROOT/artifacts/iris-agent-arm.tgz" ]
+}
+
+@test "arm bundler requires an explicit input and never falls back to x86" {
+  _valid_manifest
+  run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" --arch arm64 < /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--aria2"* ]]
+  [ ! -f "$ROOT/artifacts/iris-agent-arm.tgz" ]
+  [ ! -f "$ROOT/artifacts/iris-agent.tgz" ]
+}

@@ -572,6 +572,24 @@ changed without a `VERSION` change. To retain that archive, set
 `IRIS_DEVICE_IMAGE_OCI` to a new path for both wrapper commands instead. Both
 families must package the same canonical build.
 
+For a manual Guest Shell bundle build, the no-argument command still verifies
+`bin/aria2c` against the x86_64 pin and writes `artifacts/iris-agent.tgz`.
+Produce the ARM bundle from an explicitly selected aarch64 binary:
+
+```bash
+tools/make-agent-bundle.sh
+tools/make-agent-bundle.sh --arch arm64 \
+  --aria2 tools/aria2c-build/out/aarch64/aria2c
+```
+
+The ARM command verifies both the static ELF architecture and the aarch64
+entry in `tools/aria2c.sha256`, then writes `artifacts/iris-agent-arm.tgz`.
+It leaves the x86_64 bundle and `bin/aria2c` unchanged. `--out /path/bundle.tgz`
+selects another output path. These commands pack existing binaries; they do
+not rebuild aria2c or contact a device. Refresh the ARM bundle before any
+wrapper build that uses it as an input, or pass the verified binary directly
+with `ARIA2C_BIN_ARM64`.
+
 Then redeploy affected devices so they actually run the new agent bytes. A
 green package row verifies the served wrapper against its manifest; it does
 not compare the package with the current checkout or confirm that an already
