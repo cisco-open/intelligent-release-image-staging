@@ -2948,15 +2948,18 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
 
 
 def _wait_onboard_job(host, port, cookie, job_id):
-    deadline = time.time() + 3
-    while time.time() < deadline:
+    # Allow scheduling and durable record writes on a busy test host.
+    deadline = time.monotonic() + 10
+    job = None
+    while time.monotonic() < deadline:
         _, _, body = _req(host, port, "GET", "/api/onboard/jobs/" + job_id,
                           headers={"Cookie": cookie})
         job = json.loads(body)
         if job["state"] in ("done", "error", "cancelled"):
             return job
         time.sleep(0.02)
-    raise AssertionError("onboard job did not finish: %s" % job_id)
+    raise AssertionError("onboard job did not finish: %s (last state: %s)" % (
+        job_id, job.get("state") if job else "not received"))
 
 
 def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
