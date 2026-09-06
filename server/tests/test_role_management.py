@@ -1,0 +1,833 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Cross-store role write contracts.
+
+These tests deliberately exercise the coordinator rather than duplicating its
+two-store sequence in an API or CLI fixture.  The role transaction lock must
+always be the outer lock: role-management -> fleet/keyed state or peer-policy.
+"""
+import importlib
+import json
+import os
+import threading
+import time
+
+import pytest
+
+import gui_fleet
+import keyed_state
+import peer_policy
+
+
+def _module():
+    # Kept inside a helper so the prescribed red run reports missing behavior
+    # as test failures instead of aborting collection before the other red
+    # assertions execute.
+    return importlib.import_module("role_management")
+
+
+def _paths(tmp_path):
+    state = str(tmp_path)
+    return (os.path.join(state, "peer-policy.json"),
+            os.path.join(state, "peer-policy.lkg.json"))
+
+
+def _write_roles(tmp_path, definitions):
+    auth_path, lkg_path = _paths(tmp_path)
+    for name, definition in definitions:
+        peer_policy.define_role(
+            auth_path, lkg_path, name, definition,
+            actor="test", now=1.0)
+    return auth_path, lkg_path
+
+
+def _fleet(tmp_path, count=1):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    for index in range(count):
+        fleet.upsert({"device_id": "d%02d" % index,
+                      "device_ip": "10.0.0.%d" % (index + 1)})
+    return fleet
+
+
+def _manager(tmp_path, fleet=None, now=10.0):
+    mod = _module()
+    auth_path, lkg_path = _paths(tmp_path)
+    return mod.RoleCoordinator(
+        fleet or gui_fleet.FleetStore(str(tmp_path)), auth_path, lkg_path,
+        now_fn=lambda: now)
+
+
+def _policy(auth_path, lkg_path):
+    return peer_policy.load_policy(auth_path, lkg_path)
+
+
+def test_role_transaction_lock_is_outer_to_fleet_and_policy(tmp_path,
+                                                            monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    mod = _module()
+    held = {"role": False}
+    real_lock = mod.secrets_store.store_lock
+    real_bulk = fleet.bulk_upsert
+    real_commit = peer_policy.commit_mutation
+
+    class Marker:
+        def __init__(self, path):
+            self.is_role_lock = os.path.basename(path) == "role-management"
+
+        def __enter__(self):
+            if self.is_role_lock:
+                assert held["role"] is False
+                held["role"] = True
+        def __exit__(self, *_):
+            if self.is_role_lock:
+                held["role"] = False
+
+    monkeypatch.setattr(mod.secrets_store, "store_lock", Marker)
+
+    def bulk(*args, **kwargs):
+        assert held["role"] is True
+        return real_bulk(*args, **kwargs)
+
+    def commit(*args, **kwargs):
+        assert held["role"] is True
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(fleet, "bulk_upsert", bulk)
+    monkeypatch.setattr(peer_policy, "commit_mutation", commit)
+    manager = mod.RoleCoordinator(fleet, auth_path, lkg_path, now_fn=lambda: 10)
+    manager.set_roles({"d00": "boat"}, actor="test")
+    assert held["role"] is False
+    # Keep a reference so an accidental replacement of the real lock helper
+    # is visible to linters and reviewers; this test intentionally substitutes
+    # only the outer lock and observes both nested stores.
+    assert callable(real_lock)
+
+
+def test_bulk_role_mapping_is_one_revision_and_one_outbox_event(tmp_path):
+    fleet = _fleet(tmp_path, 3)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": False, "peers": ["fiber"]}),
+    ])
+    before = _policy(auth_path, lkg_path).document
+    result = _manager(tmp_path, fleet).set_roles(
+        {"d00": "boat", "d01": "fiber", "d02": "boat"}, actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert result["ok"] is True and result["applied"] == 3
+    assert after["revision"] == before["revision"] + 1
+    assert len(after["operation_outbox"]) == len(before["operation_outbox"]) + 1
+    assert after["roles"]["role_of"] == {
+        "d00": "boat", "d01": "fiber", "d02": "boat"}
+
+
+def test_add_or_tighten_declares_before_policy_and_reports_failed_phase2(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+
+    def fail(*_args, **_kwargs):
+        assert fleet.get_device("d00")["role"] == "boat"
+        raise peer_policy.OperationBacklogFull("full")
+
+    monkeypatch.setattr(peer_policy, "commit_mutation", fail)
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).set_role("d00", "boat", actor="test")
+    assert caught.value.status == 503
+    assert caught.value.partial is True
+    assert caught.value.result["role_drift"] == {
+        "count": 1, "device_ids": ["d00"], "truncated": False}
+
+
+def test_remove_or_relax_compiles_before_fleet_and_reports_failed_phase2(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+
+    def fail(*_args, **_kwargs):
+        assert _policy(auth_path, lkg_path).roles.role_of.get("d00") is None
+        raise gui_fleet.FleetStateError("fleet unavailable")
+
+    monkeypatch.setattr(fleet, "bulk_upsert", fail)
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.set_role("d00", None, actor="test")
+    assert caught.value.status == 503
+    assert caught.value.partial is True
+    assert fleet.get_device("d00")["role"] == "boat"
+    assert caught.value.result["role_drift"]["device_ids"] == ["d00"]
+
+
+def test_explicit_single_role_clear_converges_fleet_and_policy(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    before = _policy(auth_path, lkg_path).document
+    result = manager.set_role("d00", None, actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert result["ok"] is True and result["direction"] == "relax"
+    assert result["role_drift"]["count"] == 0
+    assert "role" not in fleet.get_device("d00")
+    assert "d00" not in after["roles"]["role_of"]
+    assert after["revision"] == before["revision"] + 1
+
+
+def test_explicit_mixed_bulk_clear_and_relax_converges(tmp_path):
+    fleet = _fleet(tmp_path, 2)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": False, "peers": ["fiber"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_roles({"d00": "boat", "d01": "boat"}, actor="test")
+    before = _policy(auth_path, lkg_path).document
+    result = manager.set_roles(
+        {"d00": None, "d01": "fiber"}, actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert result["ok"] is True and result["direction"] == "relax"
+    assert result["role_drift"]["count"] == 0
+    assert "role" not in fleet.get_device("d00")
+    assert fleet.get_device("d01")["role"] == "fiber"
+    assert after["roles"]["role_of"] == {"d01": "fiber"}
+    assert after["revision"] == before["revision"] + 1
+
+
+def test_generic_device_upsert_with_explicit_null_role_clears(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    result = manager.upsert_device(
+        {"device_id": "d00", "role": None}, actor="test")
+    assert result["ok"] is True and result["direction"] == "relax"
+    assert result["role_drift"]["count"] == 0
+    assert "role" not in fleet.get_device("d00")
+    assert "d00" not in _policy(auth_path, lkg_path).roles.role_of
+
+
+def test_mixed_direction_and_incomparable_role_changes_are_stable_422(tmp_path):
+    fleet = _fleet(tmp_path, 4)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("tight", {"restricted": True, "origin": False,
+                   "peers": ["tight"]}),
+        ("left-peer", {"restricted": True, "peers": ["left-peer"]}),
+        ("left", {"restricted": True,
+                  "peers": ["left", "left-peer"]}),
+        ("right-peer", {"restricted": True, "origin": False,
+                        "peers": ["right-peer"]}),
+        ("right", {"restricted": True, "origin": False,
+                   "peers": ["right", "right-peer"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "tight", actor="test")
+    with pytest.raises(_module().RoleManagementError) as mixed:
+        manager.set_roles({"d00": None, "d01": "tight"}, actor="test")
+    assert mixed.value.status == 422
+    assert mixed.value.code == "mixed_role_direction"
+    # Seed the starting restricted membership directly. Going from
+    # unrestricted to ``left`` also gains the existing ``left-peer`` cohort,
+    # so the full mutual-edge classifier correctly refuses that combined
+    # add/remove operation as incomparable.
+    fleet.bulk_set_roles({"d01": "left", "d02": "left-peer",
+                          "d03": "right-peer"})
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d01", "test", 11,
+        lambda candidate: candidate["roles"]["role_of"].update({
+            "d01": "left", "d02": "left-peer", "d03": "right-peer"}))
+    with pytest.raises(_module().RoleManagementError) as incomparable:
+        manager.set_role("d01", "right", actor="test")
+    assert incomparable.value.status == 422
+    assert incomparable.value.code == "incomparable_role_change"
+    assert "split" in str(incomparable.value).lower()
+    assert _policy(auth_path, lkg_path).roles.role_of["d01"] == "left"
+
+
+def test_restricted_role_direction_uses_actual_reachable_populations():
+    mod = _module()
+    document = peer_policy.base_document()
+    document["roles"] = {
+        "defs": {
+            "isolated-a": {"restricted": True, "origin": False,
+                           "peers": ["isolated-a"]},
+            "isolated-b": {"restricted": True, "origin": False,
+                           "peers": ["isolated-b"]},
+            "connected-a": {"restricted": True, "origin": False,
+                            "peers": ["connected-a", "connected-b"]},
+            "connected-b": {"restricted": True, "origin": False,
+                            "peers": ["connected-a", "connected-b"]},
+        },
+        "role_of": {}, "qos_default": {}, "qos_device": {},
+    }
+    document["roles_present"] = True
+    peer_policy.validate_document(document)
+    assert mod._change_direction(
+        document, "isolated-a", "isolated-b") == "incomparable"
+    assert mod._change_direction(
+        document, "connected-a", "connected-b") == "neutral"
+
+
+def test_bulk_direction_computes_each_distinct_transition_once(tmp_path,
+                                                               monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("a", {"restricted": True, "origin": False,
+               "peers": ["a"]}),
+        ("b", {"restricted": True, "origin": False,
+               "peers": ["b"]}),
+    ])
+    document = _policy(auth_path, lkg_path).document
+    document["roles"]["defs"]["a"]["peers"] = ["a", "b"]
+    document["roles"]["defs"]["b"]["peers"] = ["a", "b"]
+    document["roles"]["role_of"] = {
+        "d%05d" % index: "a" for index in range(10_000)}
+    peer_policy.validate_document(document)
+    mod = _module()
+    calls = []
+    real_change_direction = mod._change_direction
+
+    def counted(*args, **kwargs):
+        calls.append(args[1:])
+        return real_change_direction(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_change_direction", counted)
+    mapping = {"d%05d" % index: "b" for index in range(10_000)}
+    assert _manager(tmp_path, fleet)._direction(document, mapping) == "neutral"
+    assert calls == [("a", "b", False)]
+
+
+def test_idempotent_role_retry_does_not_grow_policy_revision_or_outbox(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    before = _policy(auth_path, lkg_path).document
+    result = manager.set_role("d00", "boat", actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert result["ok"] is True
+    assert result["direction"] == "neutral"
+    assert result["revision"] == before["revision"]
+    assert after["revision"] == before["revision"]
+    assert after["operation_outbox"] == before["operation_outbox"]
+
+
+def test_migration_confirmation_binds_actual_shadow_removal_candidate(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "origin": False,
+                  "peers": ["boat"]}),
+        ("other", {"restricted": True, "origin": False,
+                   "peers": ["other"]}),
+    ])
+
+    def assign(candidate):
+        candidate["acls"]["old"] = {
+            "rules": [{"seq": 10, "action": "permit",
+                       "match": {"type": "any"}}]}
+        candidate["assignments"]["d00"] = "old"
+
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "assign", "d00", "test", 2, assign)
+    manager = _manager(tmp_path, fleet)
+    preview = manager.migrate_assignment(
+        "old", "boat", actor="test", dry_run=True)
+    assert preview["shadowed_inert"] == ["d00"]
+    assert preview["newly_restricted"] == ["d00"]
+    assert preview["origin_access_lost"] == 1
+
+    real_commit = peer_policy.commit_mutation
+
+    def tamper_release(*args, **kwargs):
+        if kwargs.get("action") == "migrate_release":
+            real_mutate = kwargs["mutate"]
+
+            def tamper(candidate):
+                real_mutate(candidate)
+                candidate["roles"]["role_of"]["d00"] = "other"
+
+            kwargs["mutate"] = tamper
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(peer_policy, "commit_mutation", tamper_release)
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.migrate_assignment(
+            "old", "boat", actor="test", dry_run=False,
+            confirm_token=preview["confirm_token"])
+    assert caught.value.code == "confirmation_required"
+    assert caught.value.partial is True
+    live = _policy(auth_path, lkg_path).document
+    assert live["roles"]["role_of"]["d00"] == "boat"
+    assert live["assignments"]["d00"] == "old"
+
+
+def test_unknown_role_and_nonquarantine_shadow_refuse_before_writes(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+    with pytest.raises(_module().RoleManagementError) as missing:
+        manager.set_role("d00", "missing", actor="test")
+    assert missing.value.code == "role_not_found"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+    def assign(candidate):
+        candidate["acls"]["manual"] = {
+            "rules": [{"seq": 10, "action": "permit",
+                       "match": {"type": "any"}}]}
+        candidate["assignments"]["d00"] = "manual"
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "assign", "d00", "test", 20, assign)
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+    with pytest.raises(_module().RoleManagementError) as shadow:
+        manager.set_role("d00", "boat", actor="test")
+    assert shadow.value.status == 409
+    assert shadow.value.code == "role_shadowed_by_assignment"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+
+def test_role_drift_is_bounded_sorted_and_quarantine_is_not_shadow_drift(tmp_path):
+    fleet = _fleet(tmp_path, 14)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    doc = _policy(auth_path, lkg_path).document
+    doc["roles"]["role_of"] = {
+        "d%02d" % index: "boat" for index in range(14)}
+    doc["assignments"]["d00"] = peer_policy.RESERVED_QUARANTINE
+    peer_policy.validate_document(doc)
+    peer_policy._atomic_write_json(auth_path, doc)
+    drift = _manager(tmp_path, fleet).role_drift()
+    assert drift == {"count": 14,
+                     "device_ids": ["d%02d" % index for index in range(10)],
+                     "truncated": True}
+
+    fleet.bulk_upsert(["d%02d" % index for index in range(14)], {"role": "boat"})
+    assert _manager(tmp_path, fleet).role_drift() == {
+        "count": 0, "device_ids": [], "truncated": False}
+
+
+def test_role_dry_run_and_csv_preview_write_nothing(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+    preview = manager.set_role("d00", "boat", actor="test", dry_run=True)
+    assert preview["dry_run"] is True
+    assert preview["direction"] == "tighten"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+    row = fleet.get_device("d00")
+    row["role"] = "boat"
+    csv_text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+        ",".join(str(row.get(key, "")) for key in gui_fleet.CSV_V2_COLS) + "\n"
+    preview = manager.import_csv(csv_text, actor="test", dry_run=True)
+    assert preview["dry_run"] is True and preview["stats"]["imported"] == 1
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+
+def test_csv_import_synchronizes_multiple_roles_with_one_policy_event(tmp_path):
+    fleet = _fleet(tmp_path, 2)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": False, "peers": ["boat"]}),
+        ("fiber", {"restricted": False, "peers": ["fiber"]}),
+    ])
+    rows = []
+    for index, role in enumerate(("boat", "fiber")):
+        row = fleet.get_device("d%02d" % index)
+        row["role"] = role
+        rows.append(",".join(str(row.get(key, ""))
+                             for key in gui_fleet.CSV_V2_COLS))
+    before = _policy(auth_path, lkg_path).document
+    result = _manager(tmp_path, fleet).import_csv(
+        ",".join(gui_fleet.CSV_V2_COLS) + "\n" + "\n".join(rows) + "\n",
+        actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert result["ok"] is True and result["stats"]["imported"] == 2
+    assert after["revision"] == before["revision"] + 1
+    assert len(after["operation_outbox"]) == len(before["operation_outbox"]) + 1
+    assert {fleet.get_device("d00")["role"],
+            fleet.get_device("d01")["role"]} == {"boat", "fiber"}
+
+
+def test_blank_csv_has_no_membership_opinion_during_existing_drift(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    peer_policy.set_role(
+        auth_path, lkg_path, "d00", "boat", actor="test", now=2.0)
+    row = fleet.get_device("d00")
+    text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+        ",".join(str(row.get(key, ""))
+                 for key in gui_fleet.CSV_V2_COLS) + "\n"
+    before = _policy(auth_path, lkg_path).document
+    result = _manager(tmp_path, fleet).import_csv(text, actor="test")
+    after = _policy(auth_path, lkg_path).document
+    assert after == before
+    assert fleet.get_device("d00").get("role") is None
+    assert result["role_drift"] == {
+        "count": 1, "device_ids": ["d00"], "truncated": False}
+
+
+@pytest.mark.parametrize("ingress", ["set", "generic", "csv"])
+def test_every_fleet_first_ingress_cas_protects_its_classified_revision(
+        tmp_path, monkeypatch, ingress):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": False, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    real_commit = peer_policy.commit_mutation
+
+    def interleave():
+        real_commit(
+            auth_path, lkg_path, "assign", "racer", "test", 20,
+            lambda candidate: candidate["assignments"].__setitem__(
+                "racer", peer_policy.RESERVED_QUARANTINE))
+
+    if ingress == "set":
+        real_write = fleet.bulk_upsert
+        def raced_write(*args, **kwargs):
+            result = real_write(*args, **kwargs)
+            interleave()
+            return result
+        monkeypatch.setattr(fleet, "bulk_upsert", raced_write)
+        invoke = lambda: manager.set_role("d00", "boat", actor="test")
+        device_id = "d00"
+    elif ingress == "generic":
+        real_write = fleet.upsert
+        def raced_write(*args, **kwargs):
+            result = real_write(*args, **kwargs)
+            interleave()
+            return result
+        monkeypatch.setattr(fleet, "upsert", raced_write)
+        invoke = lambda: manager.upsert_device(
+            {"device_id": "new", "device_ip": "10.0.0.9", "role": "boat"},
+            actor="test")
+        device_id = "new"
+    else:
+        row = fleet.get_device("d00")
+        row["role"] = "boat"
+        text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+            ",".join(str(row.get(key, ""))
+                     for key in gui_fleet.CSV_V2_COLS) + "\n"
+        real_write = fleet.import_parsed_csv
+        def raced_write(*args, **kwargs):
+            result = real_write(*args, **kwargs)
+            interleave()
+            return result
+        monkeypatch.setattr(fleet, "import_parsed_csv", raced_write)
+        invoke = lambda: manager.import_csv(text, actor="test")
+        device_id = "d00"
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        invoke()
+    assert caught.value.code == "revision_conflict"
+    assert caught.value.partial is True
+    assert fleet.get_device(device_id)["role"] == "boat"
+    assert device_id not in _policy(auth_path, lkg_path).roles.role_of
+
+
+def _two_shard_ids(fleet):
+    first = "d00"
+    first_bucket = keyed_state.bucket_of(first, fleet._devices.shards)
+    second = next("d%02d" % index for index in range(1, 100)
+                  if keyed_state.bucket_of(
+                      "d%02d" % index, fleet._devices.shards) != first_bucket)
+    return first, second
+
+
+def _three_shard_ids(fleet):
+    result = []
+    buckets = set()
+    for index in range(100):
+        device_id = "d%02d" % index
+        bucket = keyed_state.bucket_of(device_id, fleet._devices.shards)
+        if bucket not in buckets:
+            result.append(device_id)
+            buckets.add(bucket)
+        if len(result) == 3:
+            return tuple(result)
+    raise AssertionError("could not find three distinct fleet shards")
+
+
+def test_bulk_second_shard_failure_reports_exact_live_outcomes_and_drift(
+        tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    first, second = _two_shard_ids(fleet)
+    for index, device_id in enumerate((first, second), 1):
+        fleet.upsert({"device_id": device_id,
+                      "device_ip": "10.0.0.%d" % index})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    real_write = fleet._devices._write_shard
+    calls = {"count": 0}
+    def fail_second(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("second shard failed")
+        return real_write(*args, **kwargs)
+    monkeypatch.setattr(fleet._devices, "_write_shard", fail_second)
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).set_roles(
+            {first: "boat", second: "boat"}, actor="test")
+    body = caught.value.result
+    assert caught.value.partial is True
+    assert body["applied"] == 1 and len(body["failed"]) == 1
+    assert body["role_drift"]["count"] == 1
+    assert sum(fleet.get_device(d).get("role") == "boat"
+               for d in (first, second)) == 1
+    assert _policy(auth_path, lkg_path).roles.role_of == {}
+
+
+def test_bulk_partial_counts_unvisited_already_satisfied_row_as_applied(
+        tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    first, second, satisfied = _three_shard_ids(fleet)
+    for index, device_id in enumerate((first, second, satisfied), 1):
+        fleet.upsert({"device_id": device_id,
+                      "device_ip": "10.0.0.%d" % index,
+                      "role": "boat" if device_id == satisfied else None})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": False, "peers": ["boat"]})])
+    peer_policy.set_role(
+        auth_path, lkg_path, satisfied, "boat", actor="test", now=2)
+    real_write = fleet._devices._write_shard
+    calls = {"count": 0}
+    def fail_second(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("second shard failed")
+        return real_write(*args, **kwargs)
+    monkeypatch.setattr(fleet._devices, "_write_shard", fail_second)
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).set_roles(
+            {first: "boat", second: "boat", satisfied: "boat"},
+            actor="test")
+    assert caught.value.result["applied"] == 2
+    assert set(caught.value.result["failed"]) == {second}
+    assert caught.value.result["role_drift"] == {
+        "count": 1, "device_ids": [first], "truncated": False}
+
+
+def test_csv_second_shard_failure_reports_exact_live_rows_and_stats(
+        tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    first, second = _two_shard_ids(fleet)
+    for index, device_id in enumerate((first, second), 1):
+        fleet.upsert({"device_id": device_id,
+                      "device_ip": "10.0.0.%d" % index})
+    _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    rows = []
+    for device_id in (first, second):
+        row = fleet.get_device(device_id)
+        row["role"] = "boat"
+        rows.append(",".join(str(row.get(key, ""))
+                             for key in gui_fleet.CSV_V2_COLS))
+    text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + "\n".join(rows) + "\n"
+    real_write = fleet._devices._write_shard
+    calls = {"count": 0}
+    def fail_second(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("second shard failed")
+        return real_write(*args, **kwargs)
+    monkeypatch.setattr(fleet._devices, "_write_shard", fail_second)
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).import_csv(text, actor="test")
+    body = caught.value.result
+    assert caught.value.partial is True
+    assert body["applied"] == body["stats"]["imported"] == 1
+    assert body["stats"]["updated"] == 1
+    assert len(body["failed"]) == 1
+    assert body["role_drift"]["count"] == 1
+
+
+def test_unrestricted_direction_includes_restricted_candidate_side_edges(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path, 2)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("u1", {"restricted": False, "peers": ["u1"]}),
+        ("u2", {"restricted": False, "peers": ["u2"]}),
+        ("r", {"restricted": True, "peers": ["r", "u1"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "u2", actor="test")
+    fleet.bulk_upsert(["d01"], {"role": "r"})
+    peer_policy.set_role(
+        auth_path, lkg_path, "d01", "r", actor="test", now=3)
+    real_commit = peer_policy.commit_mutation
+    def fail_change(*args, **kwargs):
+        if kwargs.get("action") == "set_roles_bulk":
+            raise peer_policy.OperationBacklogFull("full")
+        return real_commit(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "commit_mutation", fail_change)
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.set_role("d00", "u1", actor="test")
+    assert caught.value.code == "operation_backlog_full"
+    assert fleet.get_device("d00")["role"] == "u2"
+    assert _policy(auth_path, lkg_path).roles.role_of["d00"] == "u2"
+
+
+def test_restricted_boundary_uses_full_signature_and_rejects_added_edge(
+        tmp_path):
+    fleet = _fleet(tmp_path, 3)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("peer", {"restricted": True, "peers": ["peer"]}),
+        ("target", {"restricted": True,
+                    "peers": ["target", "peer"]}),
+    ])
+    fleet.bulk_upsert(["d01"], {"role": "peer"})
+    peer_policy.set_role(
+        auth_path, lkg_path, "d01", "peer", actor="test", now=3)
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).set_role("d00", "target", actor="test")
+    assert caught.value.code == "incomparable_role_change"
+    assert fleet.get_device("d00").get("role") is None
+
+    fleet.bulk_upsert(["d00"], {"role": "target"})
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d00", "test", 12,
+        lambda candidate: candidate["roles"]["role_of"].__setitem__(
+            "d00", "target"))
+    with pytest.raises(_module().RoleManagementError) as reverse:
+        _manager(tmp_path, fleet).set_role("d00", None, actor="test")
+    assert reverse.value.code == "incomparable_role_change"
+    assert fleet.get_device("d00")["role"] == "target"
+
+
+@pytest.mark.parametrize("source,target", [("u", "r"), ("r", "u")])
+def test_restricted_boundary_keeps_other_members_of_old_and_new_cohorts(
+        tmp_path, source, target):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    for index, (device_id, role) in enumerate((
+            ("moving", source), ("u-peer", "u"), ("r-peer", "r")), 1):
+        fleet.upsert({"device_id": device_id,
+                      "device_ip": "10.0.0.%d" % index, "role": role})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("u", {"restricted": False, "peers": ["u"]}),
+        ("r", {"restricted": True, "peers": ["r"]}),
+    ])
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "roles", "test", 3,
+        lambda candidate: candidate["roles"]["role_of"].update({
+            "moving": source, "u-peer": "u", "r-peer": "r"}))
+    before = fleet.snapshot(), _policy(auth_path, lkg_path).document
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        _manager(tmp_path, fleet).set_role("moving", target, actor="test")
+    assert caught.value.code == "incomparable_role_change"
+    assert (fleet.snapshot(), _policy(auth_path, lkg_path).document) == before
+
+
+def test_zero_member_migration_preview_and_apply_are_write_free(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "define", "old", "test", 2,
+        lambda candidate: candidate["acls"].__setitem__(
+            "old", {"rules": [{"seq": 10, "action": "deny",
+                                "match": {"type": "any"}}]}))
+    manager = _manager(tmp_path, fleet)
+    before = _policy(auth_path, lkg_path).document
+    preview = manager.migrate_assignment("old", "boat", actor="test")
+    applied = manager.migrate_assignment(
+        "old", "boat", actor="test", dry_run=False)
+    assert preview["devices"] == applied["devices"] == []
+    assert preview["ok"] is applied["ok"] is True
+    assert _policy(auth_path, lkg_path).document == before
+
+
+def test_migration_second_shard_failure_reports_live_partial_and_drift(
+        tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    first, second = _two_shard_ids(fleet)
+    for index, device_id in enumerate((first, second), 1):
+        fleet.upsert({"device_id": device_id,
+                      "device_ip": "10.0.0.%d" % index})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    def assign(candidate):
+        candidate["acls"]["old"] = {
+            "rules": [{"seq": 10, "action": "deny",
+                       "match": {"type": "any"}}]}
+        candidate["assignments"].update({first: "old", second: "old"})
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "assign", "old", "test", 2, assign)
+    manager = _manager(tmp_path, fleet)
+    preview = manager.migrate_assignment("old", "boat", actor="test")
+    real_write = fleet._devices._write_shard
+    calls = {"count": 0}
+    def fail_second(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("second shard failed")
+        return real_write(*args, **kwargs)
+    monkeypatch.setattr(fleet._devices, "_write_shard", fail_second)
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.migrate_assignment(
+            "old", "boat", actor="test", dry_run=False,
+            confirm_token=preview["confirm_token"])
+    assert caught.value.partial is True
+    assert caught.value.result["applied"] == 1
+    assert len(caught.value.result["failed"]) == 1
+    assert caught.value.result["role_drift"] == {
+        "count": 1, "device_ids": [first], "truncated": False}
+
+
+def test_quarantine_waiting_on_retirement_rechecks_device_under_outer_lock(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _paths(tmp_path)
+    manager = _manager(tmp_path, fleet)
+    entered_delete = threading.Event()
+    allow_delete = threading.Event()
+    real_delete = fleet.delete
+
+    def blocked_delete(device_id):
+        entered_delete.set()
+        assert allow_delete.wait(3)
+        return real_delete(device_id)
+    monkeypatch.setattr(fleet, "delete", blocked_delete)
+    retired = {}
+    quarantined = {}
+
+    def retire():
+        retired["result"] = manager.retire_device("d00", actor="test")
+    def quarantine():
+        try:
+            manager.set_quarantine("d00", True, actor="test",
+                                   expected_revision=1)
+        except Exception as exc:
+            quarantined["error"] = exc
+
+    first = threading.Thread(target=retire)
+    second = threading.Thread(target=quarantine)
+    first.start()
+    assert entered_delete.wait(3)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive()
+    allow_delete.set()
+    first.join(3)
+    second.join(3)
+    assert retired["result"]["deleted"] is True
+    assert quarantined["error"].code == "unknown_device"
+    live = _policy(auth_path, lkg_path).document
+    assert fleet.get_device("d00") is None
+    assert "d00" not in live["assignments"]

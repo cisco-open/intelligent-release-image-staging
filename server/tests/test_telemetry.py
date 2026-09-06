@@ -2254,7 +2254,7 @@ class TestFromEnvDestination:
         assert hub._headers == {"Authorization": "Bearer x"}
 
 
-def _rate_hub(peer_rows):
+def _rate_hub(peer_rows, policy=None):
     """A hub whose seeder poll reports *peer_rows* from aria2.getPeers."""
     def rpc(method, params=None):
         if method == "aria2.getGlobalStat":
@@ -2271,7 +2271,37 @@ def _rate_hub(peer_rows):
         if method == "aria2.getPeers":
             return peer_rows
         raise AssertionError(method)
-    return telemetry.Telemetry(PeerRegistry(), rpc=rpc, interval=10)
+    return telemetry.Telemetry(
+        PeerRegistry(), rpc=rpc, interval=10,
+        policy_info=(lambda: policy) if policy is not None else None)
+
+
+def _role_policy(device_id="d1", role="boat"):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {
+        "defs": {role: {"restricted": True, "peers": [role]}},
+        "role_of": {device_id: role}, "qos_default": {}, "qos_device": {}}
+    peer_policy.validate_document(doc)
+    return peer_policy.PolicyResult(
+        doc, degraded=False, fail_closed=False,
+        roles=peer_policy.compile_roles(doc))
+
+
+def test_tracker_event_uses_only_compiled_enforced_device_role():
+    """A tracker lifecycle event is attributed from PolicyResult.roles,
+    never from fleet declaration or a caller-provided event label."""
+    policy = _role_policy()
+    hub = telemetry.Telemetry(PeerRegistry(), policy_info=lambda: policy)
+    hub.on_swarm_event({
+        "event": "join", "principal_type": "device", "principal_id": "d1",
+        "device_role": "declared-but-not-enforced", "left": 1, "ts": 1})
+    raw = hub.log_queue.snapshot()[0]
+    assert raw["device_role"] == "boat"
+    hub.on_swarm_event({
+        "event": "join", "principal_type": "legacy", "principal_id": "",
+        "device_role": "boat", "left": 1, "ts": 1})
+    assert "device_role" not in hub.log_queue.snapshot()[1]
 
 
 def test_measured_rate_survives_an_ephemeral_source_port():
@@ -2360,6 +2390,24 @@ def test_sampler_emits_a_peer_rate_record_per_measured_edge():
     assert a["iris.peer.role"] == "leecher"
 
 
+def test_sampler_peer_rate_uses_enforced_role_and_keeps_peer_role_distinct():
+    import auth
+    emitted = []
+    hub = _rate_hub(
+        [{"ip": "10.0.0.5", "port": "51999", "uploadSpeed": "2048"}],
+        policy=_role_policy("dz", "boat"))
+    hub._registry.announce("abc", "lx", "10.0.0.5", 6881, left=900,
+                           principal=auth.Principal("device", "dz"))
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
+    hub.sample()
+    record = next(r for r in emitted
+                  if r.get("eventName") == "iris.swarm.peer_rate")
+    attrs = {x["key"]: list(x["value"].values())[0]
+             for x in record["attributes"]}
+    assert attrs["iris.device.role"] == "boat"
+    assert attrs["iris.peer.role"] == "leecher"
+
+
 def test_seeder_torrent_upload_rate_is_exported_and_measured():
     """The device-reported iris.transfer.throughput cannot see a transfer that
     finishes inside one 60s agent tick -- and at lab speed a 929 MB image lands
@@ -2388,7 +2436,8 @@ def test_seeder_torrent_upload_rate_is_exported_and_measured():
 
 # --- durable origin -> peer attribution (peer ledger wiring) ---
 
-def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None):
+def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None,
+               policy=None):
     """A hub with a durable peer ledger whose aria2 double reads the MUTABLE
     `peers` (the getPeers reply) and `torrent` ({"uploadLength": n}) so a test
     can move the swarm between samples the way a real transfer does."""
@@ -2414,7 +2463,8 @@ def _swarm_hub(tmp_path, peers, torrent, session=None, devices=None):
     return telemetry.Telemetry(
         PeerRegistry(), rpc=rpc, interval=10,
         peer_ledger=peer_ledger.PeerLedger(str(tmp_path)),
-        device_info=(lambda: devices) if devices is not None else None)
+        device_info=(lambda: devices) if devices is not None else None,
+        policy_info=(lambda: policy) if policy is not None else None)
 
 
 def _peer(ip, port, uploaded, seeder="false"):
@@ -2501,6 +2551,27 @@ def test_peer_bytes_record_names_the_device_and_the_measured_role(tmp_path):
     assert a["iris.peer.role"] == "seeder"
     assert int(a["iris.transfer.peer_sent_bytes"]) == 700
     assert int(a["iris.transfer.peer_sent_delta_bytes"]) == 300
+
+
+def test_peer_bytes_uses_enforced_role_during_declared_policy_drift(tmp_path):
+    peers = [_peer("10.0.0.2", "51422", 400, seeder="true")]
+    torrent = {"uploadLength": 400}
+    hub = _swarm_hub(
+        tmp_path, peers, torrent,
+        devices={"rtr-04": {"swarm_ip": "10.0.0.2", "role": "declared"}},
+        policy=_role_policy("rtr-04", "enforced"))
+    hub.sample()
+    emitted = []
+    hub.log_queue.emit = lambda rec, **kw: emitted.append(rec)
+    peers[0] = _peer("10.0.0.2", "51422", 700, seeder="true")
+    torrent["uploadLength"] = 700
+    hub.sample()
+    record = next(r for r in emitted
+                  if r.get("eventName") == "iris.swarm.peer_bytes")
+    attrs = {x["key"]: list(x["value"].values())[0]
+             for x in record["attributes"]}
+    assert attrs["iris.device.role"] == "enforced"
+    assert attrs["iris.peer.role"] == "seeder"
 
 
 def test_no_record_is_emitted_for_a_peer_that_gained_nothing(tmp_path):

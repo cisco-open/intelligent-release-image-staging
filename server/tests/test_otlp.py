@@ -542,6 +542,40 @@ def test_peer_bytes_record_tolerates_garbage():
     assert rec["timeUnixNano"] == "0"
 
 
+def test_enforced_device_role_coexists_with_tracker_role_on_all_peer_records():
+    """Device policy role and BitTorrent progress role answer different
+    questions and must remain separately named on tracker/rate/byte records."""
+    tracker = otlp.build_log_record({
+        "event_id": "e1", "principal_type": "device", "principal_id": "d1",
+        "device_role": "boat", "info_hash": "abc", "left": 10, "ts": 1})
+    rate = otlp.build_peer_rate_record({
+        "principal": "device:d1", "device_role": "boat", "role": "leecher",
+        "info_hash": "abc", "send_bps": 1, "ts": 1})
+    byte = otlp.build_peer_bytes_record({
+        "device_id": "d1", "device_role": "boat", "role": "seeder",
+        "info_hash": "abc", "peer_sent_bytes": 1,
+        "peer_sent_delta_bytes": 1, "ts": 1})
+    for record, measured in ((tracker, "leecher"), (rate, "leecher"),
+                             (byte, "seeder")):
+        attrs = _attrs(record)
+        assert attrs["iris.device.role"] == {"stringValue": "boat"}
+        assert attrs["iris.peer.role"] == {"stringValue": measured}
+
+
+def test_device_role_is_omitted_for_legacy_service_and_unattributed_records():
+    for event in (
+        {"principal_type": "legacy", "principal_id": "", "device_role": "boat",
+         "left": 1, "ts": 1},
+        {"principal_type": "service", "principal_id": "seeder",
+         "device_role": "boat", "left": 0, "ts": 1},
+    ):
+        assert "iris.device.role" not in _attrs(otlp.build_log_record(event))
+    assert "iris.device.role" not in _attrs(otlp.build_peer_rate_record({
+        "principal": "legacy:", "device_role": "boat", "ts": 1}))
+    assert "iris.device.role" not in _attrs(otlp.build_peer_bytes_record({
+        "device_role": "boat", "ts": 1}))
+
+
 # ---------------------------------------------------------------------------
 # iris.device.peer_transfer_record -- the EXACT device-side measurement
 #

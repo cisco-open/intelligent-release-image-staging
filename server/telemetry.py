@@ -794,7 +794,28 @@ class Telemetry:
         # never swapped by a destination change, so an event emitted here is
         # never lost to a transport swap. (A legacy `exporter` passed directly
         # shares this queue — see __init__.)
+        event = dict(event or {})
+        # A caller-supplied declaration is not enforcement evidence.  Replace
+        # it only from the compiled policy snapshot, and remove it for every
+        # non-device principal.
+        event.pop("device_role", None)
+        if event.get("principal_type") == "device":
+            role = self._enforced_device_role(event.get("principal_id"))
+            if role is not None:
+                event["device_role"] = role
         self.log_queue.emit(event)
+
+    def _enforced_device_role(self, device_id, policy=None):
+        """The active compiled membership for one typed device, or ``None``."""
+        if not device_id:
+            return None
+        policy = self._policy_snapshot() if policy is None else policy
+        compiled = getattr(policy, "roles", None)
+        role_of = getattr(compiled, "role_of", None)
+        if not isinstance(role_of, dict):
+            return None
+        role = role_of.get(str(device_id))
+        return role if isinstance(role, str) and role else None
 
     def _emit_peer_rates(self, peer_up, now):
         """One ``iris.swarm.peer_rate`` record per measured connection.
@@ -810,6 +831,7 @@ class Telemetry:
             snap = self._registry.snapshot(now=now)
         except Exception:
             return                      # telemetry is never on the critical path
+        policy = self._policy_snapshot()
         for info_hash, endpoints in (peer_up or {}).items():
             peers = snap.get(info_hash) or []
             by_ip = {}
@@ -826,6 +848,8 @@ class Telemetry:
                 ptype = match.get("principal_type")
                 pid = match.get("principal_id")
                 principal = ("%s:%s" % (ptype, pid)) if ptype and pid else None
+                device_role = (self._enforced_device_role(pid, policy)
+                               if ptype == "device" else None)
                 left = match.get("left")
                 try:
                     # evictable: a sampled record (one per connection per
@@ -836,6 +860,7 @@ class Telemetry:
                         "image_id": image_id, "ip": ip, "port": port,
                         "send_bps": bps, "left": left,
                         "role": "seeder" if left == 0 else "leecher",
+                        "device_role": device_role,
                         "ts": now, "event_id": secrets.token_hex(16)}),
                         evictable=True)
                 except Exception:
@@ -1109,6 +1134,7 @@ class Telemetry:
         if ledger is None:
             return
         devices = self._device_by_ip(self._read_device_info())
+        policy = self._policy_snapshot()
         for info_hash in sorted(set(upload_lengths or {})
                                 | set(peer_bytes or {})):
             image_id = self._names.get(info_hash)
@@ -1131,6 +1157,9 @@ class Telemetry:
                 device_id = devices.get(row["ip"])
                 if device_id:
                     record["device_id"] = device_id
+                    device_role = self._enforced_device_role(device_id, policy)
+                    if device_role is not None:
+                        record["device_role"] = device_role
                 role = roles.get(row["ip"])
                 if role is not None:
                     record["role"] = "seeder" if role else "leecher"

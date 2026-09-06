@@ -47,6 +47,7 @@ import otlp
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import role_management
 import secretfs
 import secrets_store
 import setup_status
@@ -133,7 +134,7 @@ _MAX_CSV = 8 * 1024 * 1024  # 8 MiB — bulk devices.csv import (all-or-nothing,
 # plus a small field patch comfortably fits well under 64 KiB * 10; generous
 # headroom over the ~700 KB worst case without approaching _MAX_CSV's size
 # (this body is an id LIST, not per-device CSV rows).
-_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — /api/devices/bulk-credential
+_MAX_BULK_DEVICE_IDS = 2 * 1024 * 1024  # 2 MiB — fleet-id bulk JSON bodies
 _CAS_COMPATIBILITY_HEADERS = (
     ("Deprecation", "true"),
     ("Sunset", "Sat, 04 Sep 2027 00:00:00 GMT"),
@@ -440,8 +441,8 @@ def _swarm_page(body, limit, offset):
 
 
 # ---- server-side filter parity for the Devices table (issue #112) --------
-# The console's filter bar offers seven controls: free-text q (already
-# server-side, above) plus six column filters -- management type, agent
+# The console's filter bar offers eight controls: free-text q (already
+# server-side, above) plus seven column filters -- management type, agent
 # install (platform), credential, telemetry, peer-quarantine and status --
 # and app.js filters every one of them client-side over the whole fleet
 # (deviceMatchesFilters, webroot/app.js). A paged table can only offer a
@@ -452,7 +453,7 @@ def _swarm_page(body, limit, offset):
 # deviceMatchesFilters condition-for-condition so the two can never decide
 # a row differently.
 _DEVICE_FILTER_PARAM_NAMES = ("management_type", "platform", "cred",
-                              "telemetry", "peer", "status")
+                              "telemetry", "peer", "role", "status")
 
 
 def _device_filter_params(qs):
@@ -1001,6 +1002,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 os.path.join(state_dir, "peer-policy.lkg.json"),
                 os.path.join(state_dir, "peer-enforcement.json"))
 
+    def role_coordinator():
+        """Build the shared direct-store coordinator for this state owner."""
+        if fleet is None:
+            return None
+        auth_path, lkg_path, enforcement_path = policy_paths()
+
+        def acked_revision():
+            status = peer_enforcement.read_status(enforcement_path) or {}
+            value = status.get("last_operation_exported_revision", 0)
+            return value if type(value) is int and value >= 0 else 0
+
+        return role_management.RoleCoordinator(
+            fleet, auth_path, lkg_path, now_fn=now_fn,
+            acked_revision_fn=acked_revision)
+
     def policy_view():
         """Return the GUI-safe, count-only policy and tracker-status view."""
         auth_path, lkg_path, enforcement_path = policy_paths()
@@ -1081,6 +1097,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "last_reconciled_at": origin_last_reconciled,
             "last_error": origin_last_error,
         }
+        compiled_roles = peer_policy.compile_roles(doc)
+        role_members = {name: len(device_ids) for name, device_ids in
+                        compiled_roles.members_by_role.items()}
         return {"schema": doc.get("schema"), "revision": doc.get("revision"),
                 "degraded": result.degraded, "fail_closed": result.fail_closed,
                 "quarantine": {"reserved": True,
@@ -1088,6 +1107,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "quarantine_assignments": sorted(
                     device_id for device_id, acl in doc.get("assignments", {}).items()
                     if acl == peer_policy.RESERVED_QUARANTINE),
+                "roles": {"members": role_members},
                 "enforcement": enforcement, "origin_qos": origin_view}
 
     def quarantine_assignment_ids():
@@ -2247,7 +2267,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             """(rows, total, revision) for the merged device projection.
 
             *limit*/*offset* page it; *q* and *filters* (see _row_matches_q
-            and _row_matches_extra_filters -- the six column filters the
+            and _row_matches_extra_filters -- the seven column filters the
             issue #112 prerequisite requires parity for) narrow it. With
             everything at its default this is the full fleet in store order,
             exactly what the console has always received.
@@ -2374,6 +2394,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                      if row.get("device_id") in (quarantined_ids or ())
                      else "not-quarantined")
                 if q != peer:
+                    return False
+            role = filters.get("role")
+            if role:
+                declared = row.get("role") or ""
+                if role == "__none":
+                    if declared:
+                        return False
+                elif declared != role:
                     return False
             status = filters.get("status")
             if status:
@@ -2914,34 +2942,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(503, {"error": "policy_fail_closed"}); return
                 if view["degraded"]:
                     self._json(422, {"error": "policy_error"}); return
-                auth_path, lkg_path, enforcement_path = policy_paths()
-                status = peer_enforcement.read_status(enforcement_path) or {}
-                acked = status.get("last_operation_exported_revision", 0)
-                if type(acked) is not int or acked < 0:
-                    acked = 0
                 quarantined = body["quarantined"]
-                def mutate(candidate):
-                    if quarantined:
-                        candidate["assignments"][device_id] = peer_policy.RESERVED_QUARANTINE
-                    else:
-                        candidate["assignments"].pop(device_id, None)
                 try:
-                    committed = peer_policy.commit_mutation(
-                        auth_path, lkg_path,
-                        action="assign" if quarantined else "unassign",
-                        target=device_id, actor="console:" + info["username"],
-                        now=now_fn(), mutate=mutate, acked_revision=acked,
+                    committed = role_coordinator().set_quarantine(
+                        device_id, quarantined,
+                        actor="console:" + info["username"],
                         expected_revision=body["if_revision"])
-                except peer_policy.RevisionConflict as exc:
-                    self._json(409, {"error": "revision_conflict",
-                                     "revision": exc.revision},
-                               extra_headers=[("ETag", _revision_etag(
-                                   "peer-policy", exc.revision))])
+                except role_management.RoleManagementError as exc:
+                    payload = dict(exc.result)
+                    revision = payload.get("revision")
+                    headers = ([('ETag', _revision_etag(
+                        'peer-policy', revision))]
+                        if type(revision) is int else None)
+                    self._json(exc.status, payload, extra_headers=headers)
                     return
-                except peer_policy.OperationBacklogFull:
-                    self._json(503, {"error": "operation_backlog_full"}); return
-                except peer_policy.PolicyError:
-                    self._json(422, {"error": "policy_error"}); return
                 self._json(200, {"ok": True, "revision": committed["revision"],
                                  "quarantined": quarantined},
                            extra_headers=[("ETag", _revision_etag(
@@ -3060,7 +3074,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return
             if path == "/api/devices/import-csv":
                 cap = _MAX_CSV
-            elif path == "/api/devices/bulk-credential":
+            elif path in ("/api/devices/bulk-credential",
+                           "/api/devices/bulk-role"):
                 cap = _MAX_BULK_DEVICE_IDS
             else:
                 cap = _MAX_BODY
@@ -3669,7 +3684,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 rec_id = str(rec.get("device_id") or "").strip()
                 prev = fleet.get_device(rec_id) if rec_id else None
                 try:
-                    saved = fleet.upsert(rec)
+                    if "role" in rec:
+                        saved = role_coordinator().upsert_device(
+                            rec, actor=actor)["device"]
+                    else:
+                        saved = fleet.upsert(rec)
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_upsert", "device", action="update" if prev
+                        else "create", target=rec_id, actor=actor,
+                        result="fail", detail="role coordination refused: %s"
+                        % exc.code)
+                    self._json(exc.status, exc.result); return
                 except (ValueError, KeyError) as exc:
                     self._json(400, {"error": str(exc)}); return
                 if prev is None:
@@ -3701,7 +3727,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
                 try:
-                    stats = fleet.import_csv(raw.decode("utf-8"))
+                    result = role_coordinator().import_csv(
+                        raw.decode("utf-8"), actor=actor)
+                    stats = result["stats"]
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_csv_import", "device", action="import_csv",
+                        actor=actor, result="fail",
+                        detail="role coordination refused: %s" % exc.code)
+                    self._json(exc.status, exc.result); return
                 except (ValueError, UnicodeDecodeError) as exc:
                     self._json(400, {"error": str(exc)}); return
                 self._audit("device_csv_import", "device", action="import_csv",
@@ -3711,6 +3745,61 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (stats["imported"], stats["new"],
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
+            if path == "/api/devices/bulk-role":
+                if fleet is None:
+                    self._json(404, {"error": "not found"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                ids = body.get("device_ids")
+                if not isinstance(ids, list) or not ids or not all(
+                        isinstance(device_id, str) and device_id for
+                        device_id in ids):
+                    self._json(400, {"error": "device_ids must be a "
+                                              "non-empty array of strings"})
+                    return
+                if len(ids) > peer_endpoints.SUPPORTED_DEVICES:
+                    self._json(400, {"error": "device_ids exceeds the "
+                                              "supported fleet size (%d)"
+                                              % peer_endpoints.SUPPORTED_DEVICES})
+                    return
+                if "role" not in body:
+                    self._json(400, {"error": "role is required"}); return
+                requested_role = body.get("role")
+                try:
+                    result = role_coordinator().set_roles(
+                        {device_id: requested_role for device_id in ids},
+                        actor=actor)
+                except role_management.RoleManagementError as exc:
+                    result = exc.result
+                    drift_ids = result.get("role_drift", {}).get(
+                        "device_ids", [])
+                    detail = ("role -> %s; fleet applied %d/%d, fleet failed "
+                              "%d; coordination failed: %s" % (
+                                  requested_role or "(cleared)",
+                                  result.get("applied", 0), len(ids),
+                                  len(result.get("failed", {})), exc.code))
+                    if drift_ids:
+                        detail += "; drift: " + ", ".join(drift_ids[:10])
+                    self._audit(
+                        "device_role_bulk_change", "device", action="role",
+                        target="role:%s" % (requested_role or ""), actor=actor,
+                        result="fail", detail=detail)
+                    self._json(exc.status, result); return
+                failed = result.get("failed", {})
+                detail = "role -> %s across %d/%d device(s)" % (
+                    requested_role or "(cleared)", result["applied"], len(ids))
+                if failed:
+                    named = sorted(failed.items())
+                    detail += "; refused: " + ", ".join(
+                        "%s (%s)" % item for item in named[:10])
+                    if len(named) > 10:
+                        detail += " (+%d more)" % (len(named) - 10)
+                self._audit(
+                    "device_role_bulk_change", "device", action="role",
+                    target="role:%s" % (requested_role or ""), actor=actor,
+                    result="ok" if result.get("ok") else "fail", detail=detail)
+                self._json(200, result); return
             if path == "/api/devices/bulk-credential":
                 # issue #125: the console's "Select all N matching devices"
                 # bulk action used to fire one /api/devices/<id>/credential
@@ -3770,6 +3859,38 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            result="ok" if applied else "fail")
                 self._json(200, {"ok": True, "applied": applied,
                                  "failed": failed}); return
+            if path.startswith("/api/devices/") and path.endswith("/role"):
+                if fleet is None:
+                    self._json(404, {"error": "not found"}); return
+                did = unquote(path[len("/api/devices/"):-len("/role")])
+                if not did.strip():
+                    self._json(400, {"error": "bad device id"}); return
+                body = self._json_body(raw)
+                if body is None:
+                    return
+                if "role" not in body:
+                    self._json(400, {"error": "role is required"}); return
+                old = (fleet.get_device(did) or {}).get("role")
+                try:
+                    result = role_coordinator().set_role(
+                        did, body.get("role"), actor=actor)
+                except role_management.RoleManagementError as exc:
+                    fleet_applied = exc.result.get(
+                        "applied", 1 if exc.partial else 0)
+                    self._audit(
+                        "device_role_change", "device", action="role",
+                        target=did, actor=actor, result="fail",
+                        detail="role %s -> %s; fleet applied %d/1; refused: %s" % (
+                            old or "(none)", body.get("role") or "(none)",
+                            fleet_applied, exc.code))
+                    self._json(exc.status, exc.result); return
+                self._audit(
+                    "device_role_change", "device", action="role", target=did,
+                    actor=actor, result="ok" if result.get("ok") else "fail",
+                    detail="role %s -> %s; applied %d, failed %d" % (
+                        old or "(none)", body.get("role") or "(none)",
+                        result["applied"], len(result.get("failed", {}))))
+                self._json(200, result); return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
                 did = unquote(path[len("/api/devices/"):-len("/assign")])
                 if not did.strip():
@@ -4468,20 +4589,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # policy + fleet + catalog state. Any failure here is
                 # partial/degraded but CANNOT permit the device.
                 degraded = []
-                # Peer-policy lives in the shared IRIS state dir. Prefer the
-                # catalog's own state_dir (single source of truth, and what the
-                # tracker reconciler reads) so console + tracker agree; fall back
-                # to IRIS_STATE only when no catalog is wired.
-                state_dir = (catalog.state_dir if catalog is not None
-                             else os.environ.get("IRIS_STATE", "/var/lib/iris"))
                 try:
-                    peer_policy.unassign_device(
-                        os.path.join(state_dir, "peer-policy.json"),
-                        os.path.join(state_dir, "peer-policy.lkg.json"),
-                        did, actor=actor, now=time.time())
-                except Exception:
+                    role_cleanup = role_coordinator().retire_device(did, actor)
+                except role_management.RoleManagementError as exc:
+                    self._audit(
+                        "device_delete", "device", action="delete", target=did,
+                        actor=actor, result="fail",
+                        detail="secret revoke applied; role cleanup failed: %s"
+                        % exc.code)
+                    self._json(exc.status, exc.result)
+                    return
+                if role_cleanup["policy_degraded"]:
                     degraded.append("policy")
-                deleted = fleet.delete(did)
+                deleted = role_cleanup["deleted"]
                 # Purge catalog-side state (assignment, heartbeat record,
                 # telemetry history, seen-report ledger, pending pull) even when
                 # the fleet row was already gone — a deleted-and-re-added device

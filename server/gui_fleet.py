@@ -29,6 +29,22 @@ class FleetStateError(RuntimeError):
     connection-level handler gives catalog.StateFileError -- mirrored here,
     on purpose, for the identical reason."""
 
+
+class FleetPartialWriteError(FleetStateError):
+    """A grouped write failed after zero or more shards reached durable state."""
+
+    def __init__(self, message, results, stats=None):
+        self.results = dict(results)
+        failed = {device_id: outcome.get("error", "fleet write failed")
+                  for device_id, outcome in self.results.items()
+                  if not outcome.get("ok")}
+        applied = sum(1 for outcome in self.results.values()
+                      if outcome.get("ok"))
+        self.result = {"applied": applied, "failed": failed}
+        if stats is not None:
+            self.result["stats"] = dict(stats)
+        super().__init__(message)
+
 _CSV_V2_OLD_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
                     "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
                     "inband_vlan", "ios_ssh_host", "model", "platform"]
@@ -37,12 +53,14 @@ _CSV_V2_OLD_COLS = ["device_id", "device_ip", "management_type", "iris_vlan",
 # _CSV_V2_OLD_COLS, so an export/CSV from before this field existed still
 # imports unchanged -- see import_csv's v2_headers.
 _CSV_V2_PRE_SVI_IGP_COLS = _CSV_V2_OLD_COLS[:-1] + ["vpg_number", "nat_interface", "platform"]
-CSV_V2_COLS = _CSV_V2_PRE_SVI_IGP_COLS[:-1] + ["svi_igp", "platform"]
+_CSV_V2_PRE_ROLE_COLS = _CSV_V2_PRE_SVI_IGP_COLS[:-1] + ["svi_igp", "platform"]
+CSV_V2_COLS = _CSV_V2_PRE_ROLE_COLS[:-1] + ["role", "platform"]
 _LEGACY_COLS = ["device_id", "device_ip", "vlan", "svi_ip", "svi_mask",
                 "guest_ip", "model", "platform"]
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$")
 _INTERFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,63}$")
+_ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _C8K_RE = re.compile(r"^C8[0-9]{3}", re.IGNORECASE)
 _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
 
@@ -130,6 +148,20 @@ def _svi_igp(value):
     return value
 
 
+def _role(value):
+    """Normalize the declared policy role; blank is canonical unassigned."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("role must be a string or null")
+    if value != value.strip():
+        raise ValueError("role must not contain surrounding whitespace")
+    if value and not _ROLE_RE.fullmatch(value):
+        raise ValueError(
+            "role must be 1-32 lowercase letters, numbers, dot, underscore, or hyphen")
+    return value
+
+
 def _static_network(ip, mask, gateway, prefix):
     ip = _ipv4(ip, prefix + "_ip")
     mask = _mask(mask, prefix + "_mask")
@@ -146,12 +178,18 @@ def validate_record(record, allow_legacy=False):
     """Normalize a safe v2 record. Legacy data is only accepted when explicit."""
     if not isinstance(record, dict):
         raise ValueError("device record must be an object")
+    raw_role = record.get("role")
     result = {key: _text(value) for key, value in record.items() if value is not None}
     did = result.get("device_id", "")
     if not _ID_RE.fullmatch(did):
         raise ValueError("device_id must contain only letters, numbers, dot, underscore, or hyphen")
     secrets_store.validate_device_id(did)
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
+    role = _role(raw_role)
+    if role:
+        result["role"] = role
+    else:
+        result.pop("role", None)
     management_type = result.get("management_type", "")
     if management_type == "legacy_routed" and allow_legacy:
         return result
@@ -299,6 +337,11 @@ def _legacy_like(record):
                          "underscore, or hyphen")
     secrets_store.validate_device_id(result["device_id"])
     result["device_ip"] = _ipv4(result.get("device_ip"), "device_ip")
+    role = _role(record.get("role"))
+    if role:
+        result["role"] = role
+    else:
+        result.pop("role", None)
     result["management_type"] = "legacy_routed"
     return result
 
@@ -451,6 +494,12 @@ class FleetStore:
             if (old_router != new_router or old_xr != new_xr) and \
                     "platform" not in record:
                 merged.pop("platform", None)
+        # ``None`` means "leave unchanged" for ordinary partial fields, but an
+        # explicitly present blank/null role is the role API's clear operation.
+        # Remove the prior key before the usual non-None overlay and let both
+        # validators retain their canonical blank-is-unassigned normalization.
+        if "role" in record and record.get("role") in (None, ""):
+            merged.pop("role", None)
         merged.update({key: value for key, value in record.items() if value is not None})
         # Full v2 validation applies only when the record actually carries a
         # classified management type (Console form, CSV v2, adoption). Bare
@@ -581,7 +630,14 @@ class FleetStore:
             return normalized
 
         ids = [_text(did) for did in device_ids]
-        self._devices.update_many(ids, merge)
+        try:
+            self._devices.update_many(ids, merge)
+        except Exception as exc:
+            self._complete_grouped_intentions(ids, results, merge)
+            live = self._live_grouped_results(ids, results)
+            if any(outcome["ok"] for outcome in live.values()):
+                self._bump_revision()
+            raise FleetPartialWriteError(str(exc), live) from exc
         # One bump per CALL, not per device: the counter is a "did the fleet
         # change" signal, not a per-row tally (import_csv has always bumped
         # once per call the same way), and bumping it once keeps this call's
@@ -593,6 +649,78 @@ class FleetStore:
             self._bump_revision()
         return results
 
+    def bulk_set_roles(self, role_by_device):
+        """Apply per-device role declarations in one grouped fleet mutation.
+
+        Unlike :meth:`bulk_upsert`, each device can receive a different role;
+        this is the CSV/coordinator seam.  Missing devices are reported and
+        skipped, explicit blank/``None`` clears the declaration, and the fleet
+        revision advances once when at least one row changes successfully.
+        """
+        self._ensure_revision_readable()
+        requested = dict(role_by_device or {})
+        ids = [_text(device_id) for device_id in requested]
+        results = {}
+
+        def merge(device_id, previous):
+            if previous is None:
+                results[device_id] = {"ok": False, "error": "no such device"}
+                return None
+            try:
+                normalized = self._merge_record(
+                    previous, {"device_id": device_id,
+                               "role": requested[device_id]})
+            except ValueError as exc:
+                results[device_id] = {"ok": False, "error": str(exc)}
+                return None
+            results[device_id] = {"ok": True, "device": normalized}
+            return normalized
+
+        try:
+            self._devices.update_many(ids, merge)
+        except Exception as exc:
+            self._complete_grouped_intentions(ids, results, merge)
+            live = self._live_grouped_results(ids, results)
+            if any(outcome["ok"] for outcome in live.values()):
+                self._bump_revision()
+            raise FleetPartialWriteError(str(exc), live) from exc
+        if any(outcome["ok"] for outcome in results.values()):
+            self._bump_revision()
+        return results
+
+    def _complete_grouped_intentions(self, device_ids, intended, merge):
+        """Build expected records for shards update_many never visited."""
+        for device_id in dict.fromkeys(device_ids):
+            if device_id in intended:
+                continue
+            try:
+                merge(device_id, self.get_device(device_id))
+            except Exception:
+                intended[device_id] = {"ok": False,
+                                       "error": "fleet write failed"}
+
+    def _live_grouped_results(self, device_ids, intended):
+        """Re-read grouped-write outcomes so a late shard error is exact."""
+        live = {}
+        for device_id in dict.fromkeys(device_ids):
+            expected = intended.get(device_id, {}).get("device")
+            if expected is None:
+                live[device_id] = {
+                    "ok": False,
+                    "error": intended.get(device_id, {}).get(
+                        "error", "fleet write failed")}
+                continue
+            try:
+                actual = self.get_device(device_id)
+            except Exception:
+                actual = None
+            if actual == expected:
+                live[device_id] = {"ok": True, "device": actual}
+            else:
+                live[device_id] = {"ok": False,
+                                   "error": "fleet write failed"}
+        return live
+
     def delete(self, device_id):
         self._ensure_revision_readable()
         existed = self._devices.delete(device_id)
@@ -600,11 +728,12 @@ class FleetStore:
             self._bump_revision()
         return existed
 
-    def import_csv(self, text):
-        """Import v2 (named-header) or a legacy routed CSV. Legacy rows are
-        classified ``legacy_routed`` and never inferred as inband. Returns
-        {imported, new, updated, skipped} where skipped counts comment, blank,
-        and header lines. All-or-nothing: any bad row raises before writing."""
+    def parse_csv(self, text):
+        """Parse and validate an inventory CSV without reading or writing state.
+
+        The role coordinator uses this pure preview to validate every declared
+        role and select the safe fleet/policy write order before phase one.
+        """
         skipped = 0
         header = None
         data_rows = []
@@ -619,13 +748,15 @@ class FleetStore:
                 continue
             data_rows.append(row)
         if header is None:
-            return {"imported": 0, "new": 0, "updated": 0, "skipped": skipped}
+            return {"records": [], "skipped": skipped, "header": None,
+                    "legacy": False}
         # The pre-router v2 header (_CSV_V2_OLD_COLS, no vpg_number/nat_interface
         # columns) and the pre-svi_igp v2 header (_CSV_V2_PRE_SVI_IGP_COLS, no
         # svi_igp column) both still import unchanged; the retired
         # network_attachment alias header is gone -- an old exported CSV
         # using it is rejected below like any other unknown header.
-        v2_headers = (CSV_V2_COLS, _CSV_V2_OLD_COLS, _CSV_V2_PRE_SVI_IGP_COLS)
+        v2_headers = (CSV_V2_COLS, _CSV_V2_PRE_ROLE_COLS,
+                      _CSV_V2_PRE_SVI_IGP_COLS, _CSV_V2_OLD_COLS)
         legacy = header in (_LEGACY_COLS, _LEGACY_COLS[:-1], _LEGACY_COLS[:-2])
         if header not in v2_headers and not legacy:
             raise ValueError("CSV must use the v2 named header: %s" % ",".join(CSV_V2_COLS))
@@ -653,6 +784,18 @@ class FleetStore:
                                  "row %d" % (index, record["device_id"],
                                              seen_at))
             records.append(record)
+        return {"records": records, "skipped": skipped, "header": header,
+                "legacy": legacy}
+
+    def import_parsed_csv(self, parsed):
+        """Apply a :meth:`parse_csv` result, preserving non-CSV state.
+
+        CSV is add/change-only for roles.  Both a pre-role header and a blank
+        role in the current header retain the existing declaration; explicit
+        role removal belongs to the role API/CLI.
+        """
+        records = [dict(record) for record in parsed.get("records", [])]
+        skipped = int(parsed.get("skipped", 0))
         # Every row above is fully parsed and validated (schema, IP/mask,
         # management-type field isolation, duplicate device_id) BEFORE any
         # storage is touched -- the "all-or-nothing" the docstring promises
@@ -667,11 +810,13 @@ class FleetStore:
         # keyed_state already accepted (a corrupt shard used to mean a
         # corrupt WHOLE fleet.json blocking every device; now it means the
         # devices in that one shard).
-        new = updated = 0
+        new = updated = roles_cleared = 0
         by_id = {record["device_id"]: record for record in records}
+        intended = {}
+        existed = {}
 
         def merge(did, previous):
-            nonlocal new, updated
+            nonlocal new, updated, roles_cleared
             record = dict(by_id[did])
             if previous is not None:
                 updated += 1
@@ -699,14 +844,59 @@ class FleetStore:
                        if isinstance(previous, dict) else None)
             if profile and not record.get("credential_profile_id"):
                 record["credential_profile_id"] = profile
+            prior_role = (previous.get("role")
+                          if isinstance(previous, dict) else None)
+            incoming_role = record.get("role")
+            if prior_role and not incoming_role:
+                record["role"] = prior_role
+            # This should remain zero under the carry-forward above.  Count
+            # the actual stored outcome so a future replacement-merge change
+            # cannot silently weaken the guarantee while still reporting 0.
+            if prior_role and not record.get("role"):
+                roles_cleared += 1
+            intended[did] = {"ok": True, "device": record}
+            existed[did] = previous is not None
             return record
 
         if records:
             self._ensure_revision_readable()
-            self._devices.update_many(list(by_id), merge)
+            ids = list(by_id)
+            try:
+                self._devices.update_many(ids, merge)
+            except Exception as exc:
+                # update_many intentionally retains earlier shard commits.
+                # Reconstruct expectations for an unvisited shard from its
+                # still-live row, then compare every requested full record.
+                for did in ids:
+                    if did in intended:
+                        continue
+                    try:
+                        previous = self.get_device(did)
+                        intended[did] = {
+                            "ok": True, "device": merge(did, previous)}
+                    except Exception:
+                        intended[did] = {"ok": False,
+                                         "error": "fleet write failed"}
+                live = self._live_grouped_results(ids, intended)
+                applied = {did for did, outcome in live.items()
+                           if outcome["ok"]}
+                if applied:
+                    self._bump_revision()
+                partial_stats = {
+                    "imported": len(applied),
+                    "new": sum(1 for did in applied if not existed.get(did)),
+                    "updated": sum(1 for did in applied if existed.get(did)),
+                    "skipped": skipped,
+                    "roles_cleared": 0}
+                raise FleetPartialWriteError(
+                    str(exc), live, stats=partial_stats) from exc
             self._bump_revision()
         return {"imported": len(records), "new": new, "updated": updated,
-                "skipped": skipped}
+                "skipped": skipped, "roles_cleared": roles_cleared}
+
+    def import_csv(self, text):
+        """Parse then apply an inventory CSV; invalid input writes nothing."""
+        return self.import_parsed_csv(self.parse_csv(text))
 
     @staticmethod
     def _export_row(record):
@@ -746,9 +936,9 @@ class FleetStore:
             "# default (none) for that device; every other management type must leave it blank.",
             "# Uncomment and edit the example rows below to import your devices.",
             ",".join(CSV_V2_COLS),
-            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,guestshell",
-            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,guestshell",
-            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,iox",
-            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router",
-            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,xr-appmgr",
+            "# edge-routed,192.0.2.10,routed,666,192.0.2.9,255.255.255.252,192.0.2.10,255.255.255.252,192.0.2.9,,,C9300-48UXM,,,,,guestshell",
+            "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,,guestshell",
+            "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,,iox",
+            "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router",
+            "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,,xr-appmgr",
         ]) + "\n"

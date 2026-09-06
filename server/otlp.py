@@ -81,6 +81,8 @@ def build_log_record(event):
     mapped = {
         "event_id": event.get("event_id"),
         "principal": principal,
+        "device_role": event.get("device_role")
+            if ptype == "device" else None,
         "info_hash": event.get("info_hash"),
         "role": role,
         "ip": event.get("ip"),
@@ -545,6 +547,9 @@ def build_tracker_record(event):
         ("otel.log.name", "iris.tracker.peer"),
         (_SCHEMA_ATTR, 2),
         ("iris.principal", _enrich_str(event.get("principal"))),
+        ("iris.device.role", _enrich_str(event.get("device_role")))
+            if str(event.get("principal") or "").startswith("device:")
+            else ("iris.device.role", None),
         ("iris.torrent.info_hash", _enrich_str(event.get("info_hash"))),
         ("iris.peer.role", _enrich_str(event.get("role"))),
         ("network.peer.address", _enrich_str(event.get("ip"))),
@@ -571,6 +576,9 @@ def build_peer_rate_record(row):
         ("otel.log.name", "iris.swarm.peer_rate"),
         (_SCHEMA_ATTR, 2),
         ("iris.principal", _enrich_str(row.get("principal"))),
+        ("iris.device.role", _enrich_str(row.get("device_role")))
+            if str(row.get("principal") or "").startswith("device:")
+            else ("iris.device.role", None),
         ("iris.torrent.info_hash", _enrich_str(row.get("info_hash"))),
         ("iris.image.id", _enrich_str(row.get("image_id"))),
         ("network.peer.address", _enrich_str(row.get("ip"))),
@@ -611,6 +619,8 @@ def build_peer_bytes_record(row):
         ("iris.image.id", _enrich_str(row.get("image_id"))),
         ("network.peer.address", _enrich_str(row.get("ip"))),
         ("iris.device.id", _enrich_str(row.get("device_id"))),
+        ("iris.device.role", _enrich_str(row.get("device_role")))
+            if row.get("device_id") else ("iris.device.role", None),
         ("iris.transfer.peer_sent_bytes",
          _enrich_int(row.get("peer_sent_bytes"))),
         ("iris.transfer.peer_sent_delta_bytes",

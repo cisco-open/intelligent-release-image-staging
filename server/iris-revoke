@@ -11,10 +11,9 @@ Usage:
 """
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import peer_policy     # noqa: E402
+import role_management # noqa: E402
 import secretfs       # noqa: E402
 import secrets_store  # noqa: E402
 
@@ -78,9 +77,9 @@ def main(argv=None):
     # never unrevoke it. A failure here is reported as a degraded (nonzero)
     # outcome while the revoke stays applied.
     try:
-        peer_policy.unassign_device(
-            policy_path, lkg_path, device_id,
-            actor="iris-revoke", now=time.time())
+        role_management.RoleCoordinator(
+            None, policy_path, lkg_path).clear_assignment_for_revoke(
+                device_id, actor="iris-revoke")
     except Exception as exc:
         print("warning: revoke applied but policy cleanup failed "
               "(device stays derived-denied): %s" % exc, file=sys.stderr)

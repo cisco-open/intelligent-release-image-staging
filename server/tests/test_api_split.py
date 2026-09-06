@@ -84,6 +84,15 @@ def test_bff_probe_body_matches_content_length_without_extra_crlf(
         server.server_close()
 
 
+def test_bulk_role_uses_the_supported_fleet_body_cap_on_the_bff():
+    """A 10,000-id role request is the same bounded shape as bulk credential;
+    the state-free tier must accept the 2 MiB request the state owner accepts."""
+    assert gui_server._body_limit(
+        "/internal/v1/devices/bulk-role") == 2 * 1024 * 1024
+    assert gui_server._body_limit(
+        "/internal/v1/devices/bulk-role") > gui_server._MAX_BODY
+
+
 class _NoSessionApp:
     def session_info(self, sid):
         if sid == "valid":

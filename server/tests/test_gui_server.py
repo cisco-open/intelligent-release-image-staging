@@ -1592,9 +1592,9 @@ def test_csv_import_export(tmp_path):
                          headers={"Cookie": ck})
         assert st == 200 and "text/csv" in hd.get("Content-Type", "")
         assert b.decode().splitlines()[0] == \
-            ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
-             "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
-             "vpg_number,nat_interface,svi_igp,platform")
+                ("device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,"
+                 "app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,"
+                 "vpg_number,nat_interface,svi_igp,role,platform")
         assert "d9,10.9.9.1" in b.decode()
     finally:
         stop()
@@ -4150,8 +4150,8 @@ def test_setup_status_route_returns_documented_shape(tmp_path, monkeypatch):
         assert st["admin"]["username"] == "admin"
         pkgs = st["packages"]
         assert set(("state", "items", "remedy")) <= set(pkgs)
-        # +1: the IOx tars plus the IOS-XR agent RPM (iris-xr.rpm), Wave C.
-        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 1
+        # +2: the IOS-XR RPM plus the verified Guest Shell agent bundle.
+        assert len(pkgs["items"]) == len(setup_status.IOX_PACKAGES) + 2
         for item in pkgs["items"]:
             assert "name" in item and "state" in item
     finally:
@@ -5583,7 +5583,8 @@ def test_csv_import_route_stats_and_detail(tmp_path):
                         raw=csv_in.encode())
         assert st == 200
         body = json.loads(b)
-        assert body == {"imported": 2, "new": 1, "updated": 1, "skipped": 2}
+        assert body == {"imported": 2, "new": 1, "updated": 1, "skipped": 2,
+                        "roles_cleared": 0}
         ev = [e for e in _read_audit_lines(audit_path)
               if e.get("event") == "device_csv_import"][0]
         assert ev["detail"] == \
@@ -10605,6 +10606,234 @@ def test_devices_peer_filter_uses_quarantine_assignments(tmp_path):
         assert body["total"] == 1 and body["devices"][0]["device_id"] == "nq1"
     finally:
         stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 declared device roles: coordinated API writes and filter parity
+# ---------------------------------------------------------------------------
+
+def _define_device_role(cat, name="boat", restricted=True, **extra):
+    import peer_policy
+    definition = {"restricted": restricted, "peers": [name]}
+    definition.update(extra)
+    return peer_policy.define_role(
+        os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"),
+        name, definition, actor="test", now=1.0)
+
+
+def _loaded_peer_policy(cat):
+    import peer_policy
+    return peer_policy.load_policy(
+        os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"))
+
+
+def test_device_role_and_bulk_role_routes_coordinate_fleet_and_policy(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/d1/role",
+                        {"role": "boat"}, headers=hh)
+        assert st == 200, b
+        assert fleet.get_device("d1")["role"] == "boat"
+        assert _loaded_peer_policy(cat).roles.role_of["d1"] == "boat"
+        before = _loaded_peer_policy(cat).document
+        st, _, b = _req(host, port, "POST", "/api/devices/bulk-role",
+                        {"device_ids": ["d1", "d2"], "role": "boat"},
+                        headers=hh)
+        assert st == 200, b
+        body = json.loads(b)
+        assert body["applied"] == 2 and body["role_drift"]["count"] == 0
+        after = _loaded_peer_policy(cat).document
+        assert after["revision"] == before["revision"] + 1
+        assert len(after["operation_outbox"]) == \
+            len(before["operation_outbox"]) + 1
+    finally:
+        stop()
+
+
+def test_device_role_routes_refuse_unknown_role_before_either_write(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        ck, csrf = _auth(host, port)
+        before = fleet.snapshot(), _loaded_peer_policy(cat).document
+        st, _, b = _req(
+            host, port, "POST", "/api/devices/d1/role", {"role": "missing"},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 422
+        assert json.loads(b)["error"] == "role_not_found"
+        assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+    finally:
+        stop()
+
+
+def test_device_role_ingress_rejects_nonstring_and_surrounding_whitespace(
+        tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        before = fleet.snapshot(), _loaded_peer_policy(cat).document
+        for value in (123, " boat", "boat\t"):
+            st, _, body = _req(
+                host, port, "POST", "/api/devices/d1/role",
+                {"role": value}, headers=headers)
+            assert st == 400, body
+            assert json.loads(body)["error"] == "bad_role"
+        st, _, body = _req(
+            host, port, "POST", "/api/devices",
+            {"device_id": "new", "device_ip": "10.0.0.9", "role": 123},
+            headers=headers)
+        assert st == 400, body
+        assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+    finally:
+        stop()
+
+
+def test_generic_device_post_and_csv_import_with_roles_are_coordinated(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _define_device_role(cat, restricted=False)
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "role": "boat"}, headers=hh)
+        assert st == 200, b
+        assert _loaded_peer_policy(cat).roles.role_of["d1"] == "boat"
+
+        row = fleet.get_device("d1")
+        text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+            ",".join(str(row.get(key, ""))
+                     for key in gui_fleet.CSV_V2_COLS) + "\n"
+        before = _loaded_peer_policy(cat).document["revision"]
+        st, _, b = _req(host, port, "POST", "/api/devices/import-csv",
+                        raw=text.encode(), headers=dict(hh, **{
+                            "Content-Type": "text/csv"}))
+        assert st == 200, b
+        assert json.loads(b)["roles_cleared"] == 0
+        # An unchanged role import does not manufacture a membership event.
+        assert _loaded_peer_policy(cat).document["revision"] == before
+    finally:
+        stop()
+
+
+def test_role_compile_failure_returns_partial_and_bounded_drift(
+        tmp_path, monkeypatch):
+    import peer_policy
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        monkeypatch.setattr(
+            peer_policy, "commit_mutation",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                peer_policy.OperationBacklogFull("full")))
+        st, _, b = _req(
+            host, port, "POST", "/api/devices/d1/role", {"role": "boat"},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        body = json.loads(b)
+        assert st == 503 and body["partial"] is True
+        assert body["role_drift"] == {
+            "count": 1, "device_ids": ["d1"], "truncated": False}
+        assert fleet.get_device("d1")["role"] == "boat"
+    finally:
+        stop()
+
+
+def test_device_delete_cleans_role_membership_and_device_qos(tmp_path):
+    import peer_policy
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        _define_device_role(cat)
+        auth_path = os.path.join(cat.state_dir, "peer-policy.json")
+        lkg_path = os.path.join(cat.state_dir, "peer-policy.lkg.json")
+
+        def seed(candidate):
+            roles = candidate["roles"]
+            roles["role_of"]["d1"] = "boat"
+            roles["qos_device"]["d1"] = {"max_peers": 4}
+        peer_policy.commit_mutation(
+            auth_path, lkg_path, "seed", "d1", "test", 2, seed)
+        ck, csrf = _auth(host, port)
+        st, _, b = _req(
+            host, port, "DELETE", "/api/devices/d1",
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, b
+        doc = _loaded_peer_policy(cat).document
+        assert "d1" not in doc.get("assignments", {})
+        assert "d1" not in doc["roles"]["role_of"]
+        assert "d1" not in doc["roles"]["qos_device"]
+    finally:
+        stop()
+
+
+def test_devices_role_filter_matches_exact_role_and_unassigned(tmp_path):
+    host, port, (_, fleet, _, _cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "role": "boat"})
+        fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+        ck, _ = _auth(host, port)
+        for value, expected in (("boat", "d1"), ("__none", "d2")):
+            st, _, b = _req(host, port, "GET", "/api/devices?role=" + value,
+                            headers={"Cookie": ck})
+            body = json.loads(b)
+            assert st == 200 and body["total"] == 1
+            assert body["devices"][0]["device_id"] == expected
+    finally:
+        stop()
+
+
+def test_declared_role_filter_has_server_and_client_parity():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="dev-filter-role"' in html
+    assert '<option value="__none">— no role —</option>' in html
+    assert 'role: val(\'dev-filter-role\')' in js
+    assert "role: 'role'" in js
+    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
+    predicate = predicate.split("\n  }", 1)[0]
+    assert "f.role" in predicate and "d.role" in predicate
+    assert "Object.keys(" in js.split("function syncDeviceFilterOptions()", 1)[1]
+    assert ".roles || {}).members" in js
+
+
+def test_role_filter_facet_is_complete_when_role_is_absent_from_current_page(
+        tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        _define_device_role(cat, "alpha", restricted=False)
+        _define_device_role(cat, "zeta", restricted=True)
+        for index in range(201):
+            fleet.upsert({"device_id": "d%03d" % index,
+                          "device_ip": "10.0.%d.%d" %
+                          (index // 250, index % 250 + 1),
+                          "role": "zeta" if index == 200 else "alpha"})
+        ck, _ = _auth(host, port)
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?limit=200&offset=0",
+            headers={"Cookie": ck})
+        page = json.loads(raw)
+        assert st == 200 and len(page["devices"]) == 200
+        assert all(row.get("role") != "zeta" for row in page["devices"])
+        st, _, raw = _req(host, port, "GET", "/api/peer-policy",
+                          headers={"Cookie": ck})
+        assert st == 200
+        assert set(json.loads(raw)["roles"]["members"]) == {"alpha", "zeta"}
+    finally:
+        stop()
+
 
 
 def test_devices_status_filter_matches_every_key_deviceStatus_can_produce(tmp_path):

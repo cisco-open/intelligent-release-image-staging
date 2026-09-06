@@ -1,0 +1,6 @@
+role,restricted,peers,origin,nets,on_stale,max_peers,per_peer_bps,fanout,seed_up_bps,seed_down_bps,leech_up_bps,leech_down_bps,overall_up_bps,overall_down_bps,max_concurrent,request_peer_speed_limit_bps,announce_min_interval_s,numwant,handout_budget,catalog_tick_s,telemetry_every_ticks,telemetry_pause
+# Copy this file, remove the example comments, and run iris-role import --dry-run first.
+# Lists in peers and nets use semicolons. Include the role itself in peers.
+# Rates use bytes/second; *_s fields use seconds. Blank cells inherit defaults.
+# boat,true,boat;fiber,true,10.20.0.0/16,keep,10,12500000,1,,,,,,,,51200,60,50,0,60,1,false
+# fiber,true,fiber;boat,true,10.30.0.0/16,keep,10,12500000,1,,,,,,,,51200,60,50,0,60,1,false

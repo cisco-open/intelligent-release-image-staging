@@ -98,7 +98,7 @@
   // picking. Filter state lives in the DOM controls, not in the row data,
   // so the periodic re-render never clears it.
   //
-  // Issue #112: the six column filters and the status filter now have
+  // Issue #112: the seven column filters and the status filter now have
   // SERVER-SIDE parity (gui_server.py's _row_matches_extra_filters mirrors
   // deviceMatchesFilters below condition-for-condition) -- a prerequisite
   // for paging the table, because a page filtered only on what the server
@@ -138,6 +138,7 @@
       cred: val('dev-filter-cred'),
       telemetry: val('dev-filter-telemetry'),
       peer: val('dev-filter-peer'),
+      role: val('dev-filter-role'),
       status: val('dev-filter-status')
     };
   }
@@ -147,7 +148,8 @@
   // filter added to deviceFilterState() above can never be forgotten here.
   function deviceFilterQuery(f) {
     var names = { q: 'q', managementType: 'management_type', platform: 'platform',
-                  cred: 'cred', telemetry: 'telemetry', peer: 'peer', status: 'status' };
+                  cred: 'cred', telemetry: 'telemetry', peer: 'peer',
+                  role: 'role', status: 'status' };
     var parts = [];
     Object.keys(names).forEach(function (key) {
       if (f[key]) parts.push(names[key] + '=' + encodeURIComponent(f[key]));
@@ -598,6 +600,10 @@
     if (f.peer) {
       var q = peerPolicyAssigned(d.device_id) ? 'quarantined' : 'not-quarantined';
       if (q !== f.peer) return false;
+    }
+    if (f.role) {
+      var role = d.role || '';
+      if (f.role === '__none' ? role !== '' : role !== f.role) return false;
     }
     if (f.status) {
       // "offline" is a modifier on top of whatever the cell says (a device can
@@ -1319,22 +1325,39 @@
   // from a slow /api/v1/credentials response.
   function syncDeviceFilterOptions() {
     var sel = document.getElementById('dev-filter-cred');
-    if (!sel) return;
-    var keep = sel.value;
-    sel.innerHTML = ['<option value="">Credential: any</option>',
-                     '<option value="__none">— none —</option>']
-      .concat(credOpts.map(function (c) {
-        return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+    if (sel) {
+      var keep = sel.value;
+      sel.innerHTML = ['<option value="">Credential: any</option>',
+                       '<option value="__none">— none —</option>']
+        .concat(credOpts.map(function (c) {
+          return '<option value="' + esc(c.id) + '">' + esc(c.id) + '</option>';
+        })).join('');
+      sel.value = keep;
+      if (sel.value !== keep) sel.value = '';
+    }
+    var roleSel = document.getElementById('dev-filter-role');
+    if (!roleSel) return;
+    var keepRole = roleSel.value;
+    var roles = Object.keys(
+      (((peerPolicy || {}).roles || {}).members || {})).sort();
+    if (keepRole && keepRole !== '__none' && roles.indexOf(keepRole) === -1) {
+      roles.push(keepRole);
+      roles.sort();
+    }
+    roleSel.innerHTML = ['<option value="">Role: any</option>',
+                         '<option value="__none">— no role —</option>']
+      .concat(roles.map(function (role) {
+        return '<option value="' + esc(role) + '">' + esc(role) + '</option>';
       })).join('');
-    sel.value = keep;
-    if (sel.value !== keep) sel.value = '';
+    roleSel.value = keepRole;
   }
 
-  // The four filter fields living inside the <details id="more-filters">
+  // The five filter fields living inside the <details id="more-filters">
   // disclosure panel (density pass, Task 8) -- Search/Agent
   // install/Status stay above the fold and are not counted here.
   var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
-                          'dev-filter-telemetry', 'dev-filter-peer'];
+                          'dev-filter-telemetry', 'dev-filter-peer',
+                          'dev-filter-role'];
   function updateMoreFiltersSummary() {
     // Magnetic Filter bar > Anatomy fixes the overflow button's format as
     // "<icon> + Filters", so the label lives in its own span and the icon
@@ -2684,7 +2707,7 @@
       '<option value="__attention">Needs attention (any)</option>';
   })();
   ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+   'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
    'dev-filter-status'].forEach(function (id) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -2696,7 +2719,7 @@
     if (!clear) return;
     clear.addEventListener('click', function () {
       ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
-       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer',
+       'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
        'dev-filter-status'].forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.value = '';

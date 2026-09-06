@@ -74,7 +74,8 @@ def _body_limit(target):
         return _MAX_OFFLINE_TAR
     if path == "/internal/v1/devices/import-csv":
         return _MAX_CSV
-    if path == "/internal/v1/devices/bulk-credential":
+    if path in ("/internal/v1/devices/bulk-credential",
+                "/internal/v1/devices/bulk-role"):
         return _MAX_BULK_DEVICE_IDS
     return _MAX_BODY
 

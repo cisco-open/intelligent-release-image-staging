@@ -187,7 +187,7 @@ def test_svi_igp_csv_roundtrip(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ("isis-edge,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
-           "255.255.255.252,10.0.0.2,,,C9300,,,isis,guestshell")
+           "255.255.255.252,10.0.0.2,,,C9300,,,isis,,guestshell")
     assert fs.import_csv(header + "\n" + row + "\n")["imported"] == 1
     assert fs.get_device("isis-edge")["svi_igp"] == "isis"
     out = fs.export_csv()
@@ -568,9 +568,9 @@ def test_import_export_csv_roundtrip(tmp_path):
     header = ",".join(gui_fleet.CSV_V2_COLS)
     csv_in = (header + "\n"
               "# a comment line\n"
-              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"
-              "edge,10.0.0.5,inband,,,,10.0.0.6,255.255.255.0,10.0.0.1,120,,C9300,,,,guestshell\n"
-              "r1,192.0.2.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,router\n")
+              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"
+              "edge,10.0.0.5,inband,,,,10.0.0.6,255.255.255.0,10.0.0.1,120,,C9300,,,,,guestshell\n"
+              "r1,192.0.2.10,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router\n")
     stats = fs.import_csv(csv_in)
     assert stats["imported"] == 3 and stats["new"] == 3 and stats["updated"] == 0
     assert stats["skipped"] == 2                       # header + comment line
@@ -594,10 +594,11 @@ def test_import_csv_stats_new_updated_skipped(tmp_path):
     csv_in = (header + "\n"
               "# comment\n"
               "\n"
-              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"
-              "d2,10.0.0.5,routed,777,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,guestshell\n")
+              "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"
+              "d2,10.0.0.5,routed,777,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,,guestshell\n")
     stats = fs.import_csv(csv_in)
-    assert stats == {"imported": 2, "new": 1, "updated": 1, "skipped": 3}
+    assert stats == {"imported": 2, "new": 1, "updated": 1, "skipped": 3,
+                     "roles_cleared": 0}
     assert fs.get_device("d1")["device_ip"] == "10.0.0.1"     # overwrite applied
 
 
@@ -605,7 +606,7 @@ def test_import_csv_rejects_bad_rows_atomically(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     # a populated but invalid row (bad IP) must abort the whole import
-    bad = "d1,not-an-ip,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell"
+    bad = "d1,not-an-ip,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell"
     try:
         fs.import_csv(header + "\n" + bad + "\n")
         assert False, "expected ValueError"
@@ -802,8 +803,8 @@ def test_import_csv_rejects_xr_host_row_with_app_ip_atomically(tmp_path):
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
     good = ("d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,"
-            "255.255.255.252,10.0.0.2,,,C9300,,,,guestshell")
-    bad = "xr1,10.0.0.9,xr-host,,,,192.0.2.99,,,,,8201,,,,xr-appmgr"
+            "255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell")
+    bad = "xr1,10.0.0.9,xr-host,,,,192.0.2.99,,,,,8201,,,,,xr-appmgr"
     with pytest.raises(ValueError, match="app_ip"):
         fs.import_csv(header + "\n" + good + "\n" + bad + "\n")
     assert fs.list_devices() == []   # atomic: the good row is rejected too
@@ -1044,11 +1045,92 @@ def test_import_csv_rejects_duplicate_device_rows_atomically(tmp_path):
     duplicate in the sheet was never surfaced."""
     fs = _fs(tmp_path)
     header = ",".join(gui_fleet.CSV_V2_COLS)
-    row_a = "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell"
-    row_b = "d1,10.0.0.9,routed,667,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,guestshell"
+    row_a = "d1,10.0.0.1,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell"
+    row_b = "d1,10.0.0.9,routed,667,10.0.0.6,255.255.255.252,10.0.0.5,255.255.255.252,10.0.0.6,,,C9300,,,,,guestshell"
     with pytest.raises(ValueError, match=r"data row 2 repeats device_id d1 from data row 1"):
         fs.import_csv("\n".join([header, row_a, row_b]) + "\n")
     assert fs.list_devices() == []                 # all-or-nothing
+
+
+# ---------------------------------------------------------------------------
+# Device role declaration and CSV-v2 lineage (role/ACL/QoS Phase 0)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("record", [
+    dict(_ROUTED, role="Boat"),
+    dict(_ROUTED, role=123),
+    dict(_ROUTED, role=" boat"),
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": "bad role"},
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": 123},
+    {"device_id": "legacy-1", "device_ip": "10.0.0.8", "role": "boat\t"},
+    dict(_ROUTED, role="x" * 33),
+])
+def test_role_is_validated_on_classified_and_legacy_paths(tmp_path, record):
+    with pytest.raises(ValueError, match="role"):
+        _fs(tmp_path).upsert(record)
+
+
+def test_role_blank_is_canonical_unassigned_and_partial_merge_carries_role(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+    assert fs.get_device("d1")["role"] == "boat"
+    fs.upsert({"device_id": "d1", "role": "", "model": None})
+    cleared = fs.get_device("d1")
+    assert "role" not in cleared
+    assert cleared["model"] == "C9300-48UXM"
+
+
+def test_csv_role_lineage_accepts_all_four_named_headers(tmp_path):
+    headers = [
+        gui_fleet._CSV_V2_OLD_COLS,
+        gui_fleet._CSV_V2_PRE_SVI_IGP_COLS,
+        gui_fleet._CSV_V2_PRE_ROLE_COLS,
+        gui_fleet.CSV_V2_COLS,
+    ]
+    for index, cols in enumerate(headers):
+        fs = gui_fleet.FleetStore(str(tmp_path / str(index)))
+        row = dict(_ROUTED, device_id="d%d" % index)
+        text = ",".join(cols) + "\n" + \
+            ",".join(str(row.get(col, "")) for col in cols) + "\n"
+        assert fs.import_csv(text)["imported"] == 1
+
+
+def test_csv_pre_role_and_current_blank_preserve_existing_role(tmp_path):
+    for index, cols in enumerate((gui_fleet._CSV_V2_PRE_ROLE_COLS,
+                                  gui_fleet.CSV_V2_COLS)):
+        fs = gui_fleet.FleetStore(str(tmp_path / str(index)))
+        fs.upsert(dict(_ROUTED, role="boat"))
+        row = dict(_ROUTED, model="C9300-48UXM")
+        row["role"] = ""
+        text = ",".join(cols) + "\n" + \
+            ",".join(str(row.get(col, "")) for col in cols) + "\n"
+        stats = fs.import_csv(text)
+        assert fs.get_device("d1")["role"] == "boat"
+        assert stats["roles_cleared"] == 0
+
+
+def test_csv_current_header_adds_and_changes_role(tmp_path):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    first = dict(_ROUTED, role="boat")
+    second = dict(_ROUTED, role="fiber")
+    for row, expected in ((first, "boat"), (second, "fiber")):
+        text = header + "\n" + \
+            ",".join(str(row.get(col, "")) for col in gui_fleet.CSV_V2_COLS) + "\n"
+        stats = fs.import_csv(text)
+        assert fs.get_device("d1")["role"] == expected
+        assert stats["roles_cleared"] == 0
+
+
+def test_csv_parse_preview_is_pure(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    before = fs.snapshot()
+    parsed = fs.parse_csv(fs.export_csv())
+    assert parsed["records"][0]["role"] == "boat"
+    assert fs.snapshot() == before
+    assert [row["device_id"] for row in fs.list_devices()] == ["d1"]
 
 
 def test_corrupt_device_shard_fails_closed_and_is_left_intact(tmp_path):
@@ -1078,7 +1160,7 @@ def test_corrupt_device_shard_fails_closed_and_is_left_intact(tmp_path):
     for write in (lambda: fs.upsert({"device_id": "d1", "device_ip": "10.0.0.5"}),
                   lambda: fs.delete("d1"),
                   lambda: fs.import_csv(",".join(gui_fleet.CSV_V2_COLS) + "\n"
-                                        + "d1,10.0.0.7,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,guestshell\n"),
+                                        + "d1,10.0.0.7,routed,666,10.0.0.2,255.255.255.252,10.0.0.1,255.255.255.252,10.0.0.2,,,C9300,,,,,guestshell\n"),
                   lambda: fs.get_device("d1"),
                   lambda: fs.list_devices(),
                   lambda: fs.snapshot()):
