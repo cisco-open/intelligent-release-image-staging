@@ -40,6 +40,7 @@ import types
 from collections.abc import Mapping
 
 import peer_endpoints
+import reconciler_status
 
 SCHEMA = 1
 MAX_ACLS = 64
@@ -55,6 +56,16 @@ RESERVED_ROLE_NAMES = frozenset(
 
 _ACL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+# IPv4Network accepts bare addresses, prefix lengths (including zero padding),
+# and contiguous dotted netmasks/hostmasks. Preserve the supplied valid text.
+_ROLE_NET_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+ROLE_NET_MAX_PREFIX_DIGITS = 32
+_ROLE_NET_MASKS = sorted({str(mask) for prefix in range(33)
+    for mask in (ipaddress.IPv4Network("0.0.0.0/%d" % prefix).netmask,
+                 ipaddress.IPv4Network("0.0.0.0/%d" % prefix).hostmask)})
+ROLE_NET_PATTERN = (r"^(?:" + _ROLE_NET_OCTET + r"\.){3}" + _ROLE_NET_OCTET
+    + r"(?:/(?:(?=[0-9]{1,%d}$(?![\s\S]))0*(?:[0-9]|[12][0-9]|3[0-2])|" % ROLE_NET_MAX_PREFIX_DIGITS
+    + "|".join(mask.replace(".", r"\.") for mask in _ROLE_NET_MASKS) + r"))?$(?![\s\S])")
 _ACTIONS = ("permit", "deny")
 _MATCH_TYPES = ("device", "service", "host", "cidr", "any", "role")
 
@@ -350,24 +361,39 @@ def _qos_layers(doc, device_id):
     return role, definition, layers
 
 
-def _compile_qos_layers(role, definition, layers):
-    effective = dict(QOS_DEFAULTS)
+def _compile_qos_layers(role, definition, layers, sources=None):
+    effective = {key: {"value": value, "source": "builtin"}
+                 for key, value in QOS_DEFAULTS.items()}
     if role is not None and definition.get("restricted", False):
-        effective["on_stale"] = "keep"
+        effective["on_stale"] = {"value": "keep", "source": "role:%s" % role}
     derived = {key: False for key in PER_TORRENT_RATE_KEYS}
-    for layer in layers:
-        effective.update(layer)
+    for index, layer in enumerate(layers):
+        source = sources[index] if sources is not None else "builtin"
+        for key, value in layer.items():
+            effective[key] = {"value": value, "source": source}
         for key in PER_TORRENT_RATE_KEYS:
             if key in layer:
                 derived[key] = False
-            elif "per_peer_bps" in layer:
+            elif "per_peer_bps" in layer or ("fanout" in layer and derived[key]):
                 derived[key] = True
-                effective[key] = (effective["per_peer_bps"] *
-                                  effective["fanout"])
-            elif "fanout" in layer and derived[key]:
-                effective[key] = (effective["per_peer_bps"] *
-                                  effective["fanout"])
-    return effective
+                effective[key] = {
+                    "value": effective["per_peer_bps"]["value"] *
+                             effective["fanout"]["value"],
+                    "source": source,
+                    "derived_from": {
+                        name: dict(effective[name])
+                        for name in ("per_peer_bps", "fanout")}}
+    return effective if sources is not None else {
+        key: row["value"] for key, row in effective.items()}
+
+
+def explain_qos(doc, device_id):
+    """Compile values and provenance using the same merge as enforcement."""
+    role, definition, layers = _qos_layers(doc, device_id)
+    sources = ["global", "role:%s" % role, "device:%s" % device_id]
+    if "on_stale" in definition:
+        sources.insert(2, "role:%s" % role)
+    return _compile_qos_layers(role, definition, layers, sources=sources)
 
 
 def compile_qos(doc, device_id):
@@ -482,12 +508,7 @@ def _validate_roles(roles):
         if not isinstance(nets, list):
             raise PolicyError("bad role nets")
         for net in nets:
-            if not isinstance(net, str):
-                raise PolicyError("bad role net")
-            try:
-                ipaddress.IPv4Network(net, strict=False)
-            except (ipaddress.AddressValueError, ValueError):
-                raise PolicyError("bad role net")
+            validate_role_net(net)
         if "on_stale" in definition \
                 and definition["on_stale"] not in ("keep", "defaults"):
             raise PolicyError("bad on_stale")
@@ -594,6 +615,10 @@ def validate_document(doc, warning_sink=None):
     outbox = doc.get("operation_outbox")
     if not isinstance(outbox, list) or len(outbox) > OUTBOX_CAP:
         raise PolicyError("bad operation_outbox")
+    try:
+        reconciler_status.validate_ack_epoch(doc.get("operation_ack_epoch"))
+    except ValueError as exc:
+        raise PolicyError("bad operation_ack_epoch") from exc
     if "roles" in doc:
         _validate_roles(doc["roles"])
     if warning_sink is not None:
@@ -1052,6 +1077,12 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
             "revision": candidate["revision"],
             "action": action, "target": target, "actor": actor,
             "created_at": float(now)})
+        # Every committed snapshot gets a branch-unique acknowledgement epoch,
+        # including direct writes without supplied status. Restoring an exact
+        # predecessor and repeating an action must not recreate the old epoch.
+        # Like event_id/revision, this bookkeeping is excluded from confirmation.
+        candidate["operation_ack_epoch"] = hashlib.sha256(
+            candidate["operation_outbox"][-1]["event_id"].encode()).hexdigest()[:32]
         validate_document(candidate)
 
         if precommit is not None:
@@ -1096,6 +1127,16 @@ def _ensure_roles(doc):
     return roles
 
 
+def validate_role_net(value):
+    """Validate the shared wire grammar without rewriting valid policy text."""
+    if not isinstance(value, str) or not re.fullmatch(ROLE_NET_PATTERN, value):
+        raise PolicyError("bad role net")
+    try:
+        return ipaddress.IPv4Network(value, strict=False)
+    except ValueError as exc:
+        raise PolicyError("bad role net") from exc
+
+
 def _ordered_peers(name, peers):
     return [name] + sorted(peer for peer in set(peers) if peer != name)
 
@@ -1110,16 +1151,18 @@ def _put_role(candidate, name, definition):
     if not isinstance(defs, dict):
         raise PolicyError("bad role defs")
 
-    supplied_peers = definition.get("peers")
-    if supplied_peers is None:
-        supplied_peers = [name]
+    supplied_peers = definition.get("peers", [name])
     if not isinstance(supplied_peers, list):
         raise PolicyError("bad role peers")
     if name not in supplied_peers:
         raise PolicyError("role peers must contain itself",
                           code="role_isolated", role=name)
+    seen = set()
     for peer in supplied_peers:
         validate_role_name(peer, "bad peer role name")
+        if peer in seen:
+            raise PolicyError("duplicate role peer")
+        seen.add(peer)
         if peer != name and peer not in defs:
             raise PolicyError("peer references unknown role")
     definition["peers"] = _ordered_peers(name, supplied_peers)
@@ -1371,7 +1414,7 @@ def _qos_policy_content(doc):
 def _token_policy_content(doc):
     return {
         key: value for key, value in doc.items()
-        if key not in ("revision", "operation_outbox")}
+        if key not in ("revision", "operation_outbox", "operation_ack_epoch")}
 
 
 def _role_pair_permitted(doc, left, right):
@@ -1579,6 +1622,13 @@ def confirm_blast_radius(prior, candidate, threshold, token):
         preview.confirm_token, token)
 
 
+def _ack_parts(acknowledgement):
+    if isinstance(acknowledgement, dict):
+        return (acknowledgement.get("last_operation_exported_revision"),
+                acknowledgement.get("operation_ack_epoch"))
+    return acknowledgement, None
+
+
 def effective_acked(doc, acked_revision):
     """Sanitize an outbox ack watermark against the document it is applied to.
 
@@ -1593,10 +1643,16 @@ def effective_acked(doc, acked_revision):
     acknowledged and the entries re-export. A non-int or negative watermark, or a
     document with no usable revision, fails safe the same way.
     """
+    acked_revision, epoch = _ack_parts(acked_revision)
     if type(acked_revision) is not int or acked_revision < 0:
         return 0
     revision = doc.get("revision") if isinstance(doc, dict) else None
     if type(revision) is not int:
+        return 0
+    # Legacy scalar/no-epoch pairs remain compatible until the first mutation.
+    # Thereafter only a tracker acknowledgement for the current snapshot epoch
+    # can prune. Old status cannot age into trust after consecutive commits.
+    if epoch != doc.get("operation_ack_epoch"):
         return 0
     return 0 if acked_revision > revision else acked_revision
 

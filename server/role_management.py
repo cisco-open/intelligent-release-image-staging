@@ -208,6 +208,8 @@ class RoleCoordinator:
             value = self.acked_revision_fn()
         except Exception:
             return 0
+        if isinstance(value, dict):
+            return dict(value)
         return value if type(value) is int and value >= 0 else 0
 
     def role_drift(self):
@@ -247,7 +249,7 @@ class RoleCoordinator:
                 raise RoleManagementError(
                     "role is shadowed by an explicit assignment",
                     code="role_shadowed_by_assignment", status=409,
-                    device_id=device_id, assignment=assignment)
+                    device_id=device_id, assignment=assignment, role=role)
             normalized[device_id] = role
         return normalized, failed
 
@@ -343,7 +345,7 @@ class RoleCoordinator:
                     peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
                 raise peer_policy.PolicyError(
                     "confirmation required", code="confirmation_required",
-                    confirm_token=current.confirm_token)
+                    **RoleCoordinator._blast_details(current))
         return check
 
     def _translate_policy_error(self, exc, partial=False, fallback_ids=(),
@@ -444,12 +446,18 @@ class RoleCoordinator:
             if dry_run or require_confirmation:
                 candidate = policy.document
                 if policy_mapping:
+                    captured = []
+                    def capture(prior, proposed):
+                        captured.append(peer_policy.blast_radius(
+                            prior, proposed, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD))
                     candidate = self._commit_mapping(
-                        policy_mapping, actor,
-                        expected_revision=classified_revision, dry_run=True)
-                blast = peer_policy.blast_radius(
-                    policy.document, candidate,
-                    peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
+                        policy_mapping, actor, expected_revision=classified_revision,
+                        dry_run=True, precommit=capture)
+                    blast = captured[0]
+                else:
+                    blast = peer_policy.blast_radius(
+                        policy.document, candidate,
+                        peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
             if dry_run:
                 return {"ok": True, "applied": len(mapping), "failed": failed,
                         "partial": False, "revision": policy.document["revision"],
@@ -465,6 +473,7 @@ class RoleCoordinator:
                     raise RoleManagementError(
                         "confirmation required", code="confirmation_required",
                         status=428, **self._blast_details(blast))
+            if require_confirmation:
                 guard = self._confirmation_guard(confirm_token)
 
             policy_first = bool(policy_mapping) and direction == "relax"
@@ -498,6 +507,16 @@ class RoleCoordinator:
                                              "failed": failed,
                                              "role_drift": drift}) from None
             else:
+                # Refuse capacity/CAS/candidate errors before Fleet-first writes.
+                # The real commit still rechecks under its policy lock: a direct
+                # writer racing after this preview retains partial classification.
+                if policy_mapping:
+                    try:
+                        self._commit_mapping(policy_mapping, actor,
+                            expected_revision=classified_revision,
+                            dry_run=True, precommit=guard)
+                    except Exception as exc:
+                        self._translate_policy_error(exc, fallback_ids=mapping)
                 try:
                     outcomes = self._write_fleet_roles(mapping)
                 except Exception as exc:
@@ -822,6 +841,16 @@ class RoleCoordinator:
             except Exception as exc:
                 self._translate_policy_error(exc)
 
+    def set_qos(self, qos, actor, **kwargs):
+        """Serialize role-scoped QoS with all fleet/role writers."""
+        with secrets_store.store_lock(self.lock_path):
+            try:
+                return peer_policy.set_qos(
+                    self.auth_path, self.lkg_path, qos, actor=actor,
+                    now=self.now_fn(), acked_revision=self._acked(), **kwargs)
+            except Exception as exc:
+                self._translate_policy_error(exc)
+
     def delete_role(self, name, actor, **kwargs):
         with secrets_store.store_lock(self.lock_path):
             _revision, rows = self.fleet.snapshot()
@@ -832,7 +861,10 @@ class RoleCoordinator:
                 raise RoleManagementError(
                     "role is in use", code="role_in_use", status=422,
                     role=name, member_count=len(declared),
-                    device_ids=declared[:DRIFT_ID_LIMIT],
+                    referring_roles=sorted(other for other, definition in
+                        self._load().document.get("roles", {}).get("defs", {}).items()
+                        if other != name and name in definition.get("peers", [other])),
+                    referring_schedules=[], device_ids=declared[:DRIFT_ID_LIMIT],
                     truncated=len(declared) > DRIFT_ID_LIMIT)
             try:
                 return peer_policy.delete_role(

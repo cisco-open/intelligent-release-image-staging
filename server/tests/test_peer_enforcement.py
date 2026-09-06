@@ -143,9 +143,9 @@ class TestNonsecretError:
         status = peer_enforcement.build_status(
             state="degraded", aria_session_id="s", desired_hash="h",
             applied_revision=1, desired_ip_count=1, now=1.0,
-            last_error="rpc_timeout")
+            last_error="peer_blocklist_apply_failed")
         peer_enforcement.write_status(path, status)
-        assert _read(path)["last_error"] == "rpc_timeout"
+        assert _read(path)["last_error"] == "peer_blocklist_apply_failed"
 
     def test_conflicts_default_empty(self):
         status = peer_enforcement.build_status(
@@ -156,6 +156,46 @@ class TestNonsecretError:
 
 
 class TestGuiReader:
+    def test_final_repair_ack_epoch_validation(self, path):
+        valid = peer_enforcement.build_status("enforced", "s", "h", None, 0, 10,
+            operation_ack_epoch="a" * 32, last_operation_exported_revision=2)
+        peer_enforcement.write_status(path, valid)
+        assert peer_enforcement.read_status(path) == valid
+        for invalid in ([], {}, True, "", "old", "a" * 31):
+            peer_enforcement.write_status(path, dict(valid, operation_ack_epoch=invalid))
+            assert peer_enforcement.read_status(path) is None
+
+    def test_status_all_source_codes_roundtrip(self, path):
+        import reconciler_status
+        for code in reconciler_status.PEER_ERROR_CODES:
+            status = peer_enforcement.build_status("degraded", "s", "h", None, 0, 10, last_error=code)
+            peer_enforcement.write_status(path, status)
+            assert peer_enforcement.read_status(path) == status
+
+    @pytest.mark.parametrize("bad", [
+        {"schema": 2}, {"last_error": "PermissionError"},
+        {"last_error": "abc123deadbeef"}, {"desired_ip_count": -1},
+        {"conflicts": [{"reason": []}]}, {"updated_at": float("nan")},
+        {"last_effect": {"removed_peers": -1}},
+    ])
+    def test_status_semantic_unit_rejects_malformed_watermark(self, path, bad):
+        status = peer_enforcement.build_status(
+            "enforced", "session", "hash", None, 0, 10,
+            last_operation_exported_revision=2)
+        status.update(bad)
+        peer_enforcement.write_status(path, status)
+        assert peer_enforcement.read_status(path) is None
+
+    def test_status_enforced_null_revision_and_future_fields(self, path):
+        status = peer_enforcement.build_status("enforced", "s", "h", None, 0, 10)
+        peer_enforcement.write_status(path, dict(status, future="secret"))
+        assert peer_enforcement.read_status(path) == status
+
+    def test_status_rejects_exception_class_at_constructor(self):
+        with pytest.raises(ValueError):
+            peer_enforcement.build_status("degraded", "s", "h", None, 0, 10,
+                                          last_error="PermissionError")
+
     def test_read_status_roundtrip(self, path):
         status = peer_enforcement.build_status(
             state="enforced", aria_session_id="s", desired_hash="h",

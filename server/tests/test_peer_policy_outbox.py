@@ -35,6 +35,24 @@ def _read(path):
         return json.load(f)
 
 
+def _ack(doc, revision=None):
+    return {"last_operation_exported_revision": doc["revision"] if revision is None else revision,
+            "operation_ack_epoch": doc.get("operation_ack_epoch")}
+
+
+def test_final_repair_legacy_ack_compatibility_and_epoch_migration(paths):
+    auth, lkg = paths
+    legacy = _read(auth)
+    assert "operation_ack_epoch" not in legacy
+    assert peer_policy.effective_acked(legacy, legacy["revision"]) == legacy["revision"]
+    assert peer_policy.effective_acked(legacy, _ack(legacy)) == legacy["revision"]
+    _assign(auth, lkg, "device")
+    current = _read(auth)
+    assert peer_policy.effective_acked(current, current["revision"]) == 0
+    assert peer_policy.effective_acked(current, _ack(current)) == current["revision"]
+    assert peer_policy.effective_acked(current, dict(_ack(current), operation_ack_epoch="f" * 32)) == 0
+
+
 class TestOutboxShape:
     def test_no_singular_last_operation_field(self, paths):
         auth, lkg = paths
@@ -78,7 +96,7 @@ class TestOrderedExport:
         _assign(auth, lkg, "iris8kv-1")
         _assign(auth, lkg, "iris8kv-2")
         doc = _read(auth)
-        pending = peer_policy.pending_exports(doc, exported_revision=2)
+        pending = peer_policy.pending_exports(doc, exported_revision=_ack(doc, 2))
         assert [e["revision"] for e in pending] == [3]
 
     def test_reexport_after_crash_same_event_ids(self, paths):
@@ -101,7 +119,7 @@ class TestAckPrune:
         # next mutation prunes entries at/below the acked watermark
         peer_policy.commit_mutation(
             auth, lkg, action="assign", target="iris8kv-4", actor="a",
-            now=1.0, acked_revision=3,
+            now=1.0, acked_revision=_ack(_read(auth), 3),
             mutate=lambda d: d["assignments"].__setitem__("iris8kv-4",
                                                           "quarantine"))
         outbox = _read(auth)["operation_outbox"]
@@ -269,7 +287,7 @@ class TestImpossibleAckWatermark:
         _assign(auth, lkg, "iris8kv-2")
         peer_policy.commit_mutation(
             auth, lkg, action="assign", target="iris8kv-3", actor="a",
-            now=1.0, acked_revision=3,
+            now=1.0, acked_revision=_ack(_read(auth), 3),
             mutate=lambda d: d["assignments"].__setitem__("iris8kv-3",
                                                           "quarantine"))
         assert [e["revision"] for e in _read(auth)["operation_outbox"]] == [4]
@@ -279,7 +297,7 @@ class TestImpossibleAckWatermark:
         auth, lkg = paths
         _assign(auth, lkg, "iris8kv-1")
         doc = _read(auth)
-        assert peer_policy.pending_exports(doc, doc["revision"]) == []
+        assert peer_policy.pending_exports(doc, _ack(doc)) == []
 
     @pytest.mark.parametrize("bad", [-1, "306", True, None, 3.5])
     def test_junk_watermark_fails_safe_to_zero(self, bad):

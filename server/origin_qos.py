@@ -13,19 +13,20 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
 import types
 
 import peer_policy
+import reconciler_status as status_codes
 
 SCHEMA = 1
 STATES = ("enforced", "degraded", "rpc_unavailable")
 GLOBAL_OPTION_KEYS = frozenset(("max-overall-upload-limit",))
 DOWNLOAD_OPTION_KEYS = frozenset(("max-upload-limit", "bt-max-peers"))
 _GID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_ERROR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 DesiredState = collections.namedtuple(
     "DesiredState",
@@ -91,11 +92,11 @@ def apply_desired(aria, desired, session_id):
     """
     if not session_id:
         return ApplyOutcome(False, False, False, 0,
-                            "AriaSessionUnavailable")
+                            status_codes.ARIA_SESSION_UNAVAILABLE)
     try:
         aria.set_global_options(dict(desired.global_options))
-    except Exception as exc:
-        return ApplyOutcome(True, False, False, 0, type(exc).__name__)
+    except Exception:
+        return ApplyOutcome(True, False, False, 0, status_codes.ORIGIN_GLOBAL_APPLY_FAILED)
 
     applied = 0
     last_error = None
@@ -103,9 +104,9 @@ def apply_desired(aria, desired, session_id):
         try:
             aria.set_download_options(gid, dict(desired.download_options))
             applied += 1
-        except Exception as exc:
+        except Exception:
             if last_error is None:
-                last_error = type(exc).__name__
+                last_error = status_codes.ORIGIN_DOWNLOAD_APPLY_FAILED
     return ApplyOutcome(
         True, last_error is None, True, applied, last_error)
 
@@ -117,11 +118,11 @@ def _count(name, value):
 
 
 def validate_error_code(value):
-    """Return a bare non-address-bearing error code, or reject the value."""
-    if value is not None and (
-            not isinstance(value, str) or not _ERROR_RE.fullmatch(value)):
-        raise OriginQosError("bad last_error")
-    return value
+    """Validate the source-owned origin failure vocabulary."""
+    try:
+        return status_codes.validate_error_code(value, status_codes.ORIGIN_ERROR_CODES)
+    except ValueError as exc:
+        raise OriginQosError("bad last_error") from exc
 
 
 def build_status(state, aria_session_id, desired_hash, global_option_count,
@@ -147,8 +148,8 @@ def build_status(state, aria_session_id, desired_hash, global_option_count,
             not isinstance(desired_hash, str) or not desired_hash):
         raise OriginQosError("bad desired_hash")
     last_error = validate_error_code(last_error)
-    if isinstance(now, bool) or not isinstance(now, (int, float)):
-        raise OriginQosError("now must be numeric")
+    if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+        raise OriginQosError("now must be finite and nonnegative")
     if state == "enforced" and (
             not aria_session_id or not desired_hash
             or global_count != len(GLOBAL_OPTION_KEYS)
@@ -202,11 +203,29 @@ def write_status(path, status):
         _atomic_write_json(path, status)
 
 
+def parse_status(value):
+    """Validate a complete record, retaining only canonical known fields."""
+    try:
+        if not isinstance(value, dict) or type(value["schema"]) is not int or value["schema"] != SCHEMA:
+            return None
+        updated = value["updated_at"]
+        if type(updated) not in (int, float) or not math.isfinite(updated) or updated < 0:
+            return None
+        checked = build_status(**{key: value[key] for key in (
+            "state", "aria_session_id", "desired_hash", "global_option_count",
+            "target_download_count", "applied_download_count", "last_error")},
+            now=value["last_reconciled_at"])
+        checked["updated_at"] = float(updated)
+        return checked
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
 def read_status(path):
-    """Return the parsed status dict, or ``None`` when missing or corrupt."""
+    """Return a semantically validated canonical record, else ``None``."""
     try:
         with open(path) as handle:
             data = json.load(handle)
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return parse_status(data)

@@ -336,11 +336,39 @@ def test_settings_and_optional_success_shapes_match_runtime():
 
 
 def test_swarm_contract_uses_real_source_grouped_snapshot_shapes():
+    import telemetry
+    import management_api
+    import auth
+    import peer_policy
+    from peer_registry import PeerRegistry
+    from openapi_schema_validator import OAS32Validator
+    registry = PeerRegistry()
+    for index, kind in enumerate(("device", "service", "legacy")):
+        registry.announce("abc", "peer" + str(index), "192.0.2." + str(index + 1),
+                          6881, left=10,
+                          principal=auth.Principal(kind, "d1" if kind == "device" else "seeder"))
+    policy_doc = peer_policy.base_document()
+    policy_doc["assignments"]["d1"] = "quarantine"
+    policy = peer_policy.PolicyResult(policy_doc, True, True, peer_policy.compile_roles(policy_doc))
+    snapshot = telemetry.Telemetry(registry, policy_info=lambda: policy).swarm_snapshot()
+    device = next(row for row in snapshot["images"][0]["peers"] if row["device_id"] == "d1")
+    assert device["peer_policy"]["decision"] == "deny"
+    assert device["peer_policy"]["assignment"] == "quarantine"
+    service = next(row for row in registry.snapshot()["abc"] if row["principal_type"] == "service")
+    service_row = telemetry._peer_row(service, None, {}, {}, {}, {}, None, None, set(), set(), 10)
+    OAS32Validator(openapi_contract._swarm_peer_schema()).validate(service_row)
     doc = _load()
     for path in ("/api/v1/swarm", "/internal/v1/swarm", "/swarm"):
         media = doc["paths"][path]["get"]["responses"]["200"][
             "content"]["application/json"]
         whole = media["examples"]["whole"]["value"]
+        OAS32Validator(media["schema"]).validate(snapshot)
+        assert whole["images"][0]["peers"][0]["tracker"]["principal_type"] == "device"
+        if path != "/swarm":
+            page = management_api._swarm_page(json.dumps(snapshot), 1, 0)
+            assert page["peers_total"] == 2 and page["peers_limit"] == 1
+            assert len(page["images"][0]["peers"]) == 1
+            OAS32Validator(media["schema"]).validate(page)
         assert set(whole) == {"now", "server", "images"}
         assert set(whole["server"]) == {"host", "server_observation"}
         assert set(whole["images"][0]) == {
@@ -506,3 +534,42 @@ def test_image_publish_job_contract_covers_every_runtime_phase_shape():
         assert set(failed["required"]) == {
             "outcome", "image_state", "detail"}
         assert "matched" not in failed["properties"]
+
+
+def test_openapi_role_qos_mutations_require_cas_and_preview():
+    spec = openapi_contract.build_document()
+    for suffix, method in (("/peer-policy/roles/{name}", "put"),
+                           ("/peer-policy/roles/{name}", "delete"),
+                           ("/peer-policy/qos", "put"),
+                           ("/devices/{device_id}/role", "post"),
+                           ("/devices/bulk-role", "post")):
+        for prefix in ("/api/v1", "/internal/v1"):
+            operation = spec["paths"][prefix + suffix][method]
+            assert {"409", "412", "422", "428"} <= set(operation["responses"])
+            parameters = {p["name"]: p for p in operation["parameters"]}
+            assert parameters["If-Match"]["required"] is True
+            assert "dry_run" in parameters
+    assert "/api/v1/devices/{device_id}/qos" not in spec["paths"]
+
+
+def test_policy_contract_exact_business_unions_compose_tier_failures():
+    spec = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        def codes(suffix, method, status):
+            return set(spec["paths"][prefix + suffix][method]["responses"][str(status)]["x-iris-problem-codes"])
+        operations = set(openapi_contract.POLICY_MUTATIONS) | {
+            ("GET", "/peer-policy"), ("GET", "/peer-policy/roles"),
+            ("GET", "/peer-policy/explain"), ("GET", "/devices/{device_id}/effective-qos")}
+        for method, suffix in operations:
+            assert codes(suffix, method.lower(), 401) == {"console-session-required", "management-authentication-required"}
+        assert codes("/peer-policy/roles/{name}", "put", 422) == {"invalid_policy", "invalid_policy_request"}
+        assert codes("/peer-policy/roles/{name}", "put", 409) == {"role_isolated", "role_reserved_name", "revision_conflict", "operation_backlog_full"}
+        assert codes("/peer-policy/qos", "put", 404) == {"route-not-found", "role_not_found"}
+        assert codes("/devices/{device_id}/effective-qos", "get", 404) == {"route-not-found", "device_not_found"}
+        assert codes("/peer-policy/explain", "get", 422) == {"principal_unresolvable"}
+        assert codes("/peer-policy/qos", "put", 409) == {"revision_conflict", "operation_backlog_full", "role_reserved_name"}
+        assert "fleet_write_failed" not in codes("/peer-policy/explain", "get", 503)
+        if prefix == "/api/v1":
+            assert "management-api-unavailable" in codes("/peer-policy/qos", "put", 503)
+        schema = spec["paths"][prefix + "/peer-policy"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema["properties"]["roles_supported"] == {"type": "boolean", "const": True}

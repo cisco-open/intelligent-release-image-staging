@@ -1628,7 +1628,9 @@ class TestPeerPolicyEnforcementFacts:
         row = self._row(self._hub(policy=policy))
         assert row["peer_policy"] == {
             "decision": "permit", "matched_seq": None,
-            "assignment": None, "quarantined": False, "fail_closed": False}
+            "assignment": None, "quarantined": False, "fail_closed": False,
+            "effective_acl": None, "acl_source": "none", "role": None,
+            "role_unknown": False, "role_shadowed_by": None}
 
     def test_quarantine_assignment_surfaces_decision_and_status(self):
         import peer_policy
@@ -4019,3 +4021,46 @@ def test_a_hub_with_no_lifecycle_store_omits_the_families_rather_than_zeroing(
     assert not [p for p in exports[-1]
                 if p["name"].startswith("iris.transfer.lifecycle.")]
     assert "iris_transfer_lifecycle_" not in hub.metrics_text()
+
+
+def test_role_policy_fact_uses_loaded_compiler_and_never_permits_error(monkeypatch):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"defs": {"boat": {"restricted": True, "peers": ["boat"]}},
+                    "role_of": {"d1": "boat"}}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, False, False, compiled)
+    original = peer_policy.evaluate
+    def evaluate(*args, **kwargs):
+        assert kwargs["compiled"] is compiled
+        return original(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "evaluate", evaluate)
+    row = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert row["role"] == "boat"
+    assert row["assignment"] is None
+    assert row["effective_acl"] == row["acl_source"] == "role:boat"
+    def broken(*args, **kwargs):
+        raise RuntimeError("private path")
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    row = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert row is None or row["decision"] != "permit"
+
+
+@pytest.mark.parametrize("assignment", ["quarantine", "manual"])
+def test_policy_contract_fail_closed_exception_preserves_assignment(monkeypatch, assignment):
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"defs": {"boat": {"restricted": True}}, "role_of": {"d1": "boat"}}
+    doc["assignments"]["d1"] = assignment
+    doc["acls"]["manual"] = {"rules": []}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, True, True, compiled)
+    def broken(*args, **kwargs):
+        raise RuntimeError("private")
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    fact = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
+    assert fact["decision"] == "deny" and fact["matched_seq"] is None
+    assert fact["assignment"] == assignment
+    assert fact["quarantined"] == (assignment == "quarantine")
+    assert fact["role"] == "boat"
+    assert fact["role_shadowed_by"] == (None if assignment == "quarantine" else "boat")

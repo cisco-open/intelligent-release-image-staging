@@ -15,11 +15,205 @@ import re
 
 import api_problem
 import api_routes
+import peer_policy
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
-                  416, 422, 429, 500, 502, 503)
+                  416, 422, 428, 429, 500, 502, 503)
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
+POLICY_MUTATIONS = {
+    ("PUT", "/peer-policy/roles/{name}"),
+    ("DELETE", "/peer-policy/roles/{name}"),
+    ("PUT", "/peer-policy/qos"),
+    ("POST", "/devices/{device_id}/role"),
+    ("POST", "/devices/bulk-role"),
+}
+
+
+def _policy_mutation(route):
+    return (route.method, _resource_suffix(route)) in POLICY_MUTATIONS
+
+
+def _policy_business_errors(route):
+    """Business refusals by the exact handler branch, excluding tier guards."""
+    key = (route.method, _resource_suffix(route))
+    specific = {
+        ("GET", "/peer-policy"): {},
+        ("GET", "/peer-policy/roles"): {503: ("policy_unavailable",)},
+        ("GET", "/peer-policy/explain"): {
+            422: ("principal_unresolvable",), 503: ("policy_unavailable",)},
+        ("GET", "/devices/{device_id}/effective-qos"): {
+            404: ("device_not_found",), 503: ("policy_unavailable",)},
+        ("PUT", "/peer-policy/roles/{name}"): {
+            409: ("role_reserved_name", "role_isolated"),
+            413: ("payload-too-large",),
+            422: ("invalid_policy",)},
+        ("DELETE", "/peer-policy/roles/{name}"): {
+            404: ("role_not_found",), 409: ("role_reserved_name", "role_in_use"),
+            413: ("payload-too-large",), 422: ("invalid_policy",)},
+        ("PUT", "/peer-policy/qos"): {
+            404: ("role_not_found",), 409: ("role_reserved_name",),
+            413: ("payload-too-large",), 422: ("invalid_policy",)},
+        ("POST", "/devices/{device_id}/role"): {
+            404: ("device_not_found", "role_not_found"),
+            409: ("role_reserved_name", "role_shadowed_by_assignment"),
+            422: ("bad_role", "invalid_policy", "incomparable_role_change"),
+            503: ("fleet_write_failed",)},
+        ("POST", "/devices/bulk-role"): {
+            404: ("role_not_found",),
+            409: ("role_reserved_name", "role_shadowed_by_assignment"),
+            422: ("bad_role", "invalid_policy", "incomparable_role_change", "mixed_role_direction"),
+            503: ("fleet_write_failed",)},
+    }.get(key)
+    if specific is None or route.service not in ("console", "management"):
+        return None
+    result = dict(specific)
+    if _policy_mutation(route):
+        for status, codes in {
+                409: ("revision_conflict", "operation_backlog_full"),
+                412: ("precondition_failed",), 422: ("invalid_policy_request",),
+                428: ("precondition_required", "confirmation_required"),
+                503: ("policy_unavailable",)}.items():
+            result[status] = result.get(status, ()) + codes
+    return result
+
+
+def _policy_errors(route):
+    business = _policy_business_errors(route)
+    if business is None:
+        return None
+    errors = {status: set(codes) for status, codes in business.items()}
+    common = {401: {"console-session-required"},
+              404: {"route-not-found"}, 503: {"service-unavailable"}}
+    # The proxy can forward a rejected mounted tier credential as well.
+    common[401].add("management-authentication-required")
+    if route.method in MUTATIONS:
+        common[403] = {"csrf-validation-failed"}
+    if route.method == "POST":
+        common[400] = {"invalid-request"}  # body length / unsupported idempotency
+        common[413] = {"payload-too-large"}
+    if route.service == "console":
+        common.setdefault(400, set()).add("invalid-content-length")
+        if route.method == "GET":
+            common[400].add("request-body-not-supported")
+        common[411] = {"content-length-required"}
+        common[413] = {"payload-too-large"}
+        common[503].add("management-api-unavailable")
+    for status, codes in common.items():
+        errors.setdefault(status, set()).update(codes)
+    return {status: tuple(sorted(codes)) for status, codes in errors.items()}
+
+
+def _qos_schema(scope):
+    """Use the policy validator's closed grammar; every layer key is optional."""
+    properties = {}
+    for key, scopes in peer_policy._QOS_SCOPES.items():
+        if scope not in scopes:
+            continue
+        if key == "telemetry_pause":
+            value = {"type": "boolean"}
+        elif key == "on_stale":
+            value = {"type": "string", "enum": ["keep", "defaults"]}
+        else:
+            minimum, maximum = peer_policy._QOS_RANGES[key]
+            value = {"type": "integer", "minimum": minimum, "maximum": maximum}
+            if key in peer_policy._RATE_KEYS:
+                value["anyOf"] = [{"const": 0}, {"minimum": peer_policy._MIN_RATE_BPS}]
+            if key == "catalog_tick_s":
+                value["multipleOf"] = 60
+        properties[key] = value
+    return {"type": "object", "properties": properties,
+            "additionalProperties": False,
+            "description": "Replace this layer with any supported subset; an empty object clears it. Cross-field and restricted-role semantics are validated by the policy transaction."}
+
+
+def _role_name_schema():
+    return {"type": "string", "pattern": peer_policy._ROLE_NAME_RE.pattern,
+            "not": {"enum": sorted(peer_policy.RESERVED_ROLE_NAMES)}}
+
+
+def _role_definition_schema():
+    return {"type": "object", "additionalProperties": False, "properties": {
+        "restricted": {"type": "boolean"}, "origin": {"type": "boolean"},
+        "peers": {"type": "array", "items": _role_name_schema(),
+                  "minItems": 1, "maxItems": peer_policy.MAX_ROLE_PEERS,
+                  "uniqueItems": True, "x-iris-selfPeerRequired": True,
+                  "description": "Must contain the role's {name} path value; missing self returns 409 role_isolated."},
+        "nets": {"type": "array", "items": {"type": "string",
+            "pattern": peer_policy.ROLE_NET_PATTERN,
+            "description": "IPv4 address, CIDR or dotted netmask/hostmask. A decimal prefix allows at most %d digits, including leading zeroes; valid spelling is preserved." % peer_policy.ROLE_NET_MAX_PREFIX_DIGITS}},
+        "on_stale": {"type": "string", "enum": ["keep", "defaults"]},
+        "qos": _qos_schema("role")}}
+
+
+def _swarm_peer_schema():
+    """Explicit source-grouped tracker identity variants from telemetry._peer_row."""
+    variants = []
+    for kind in ("device", "service", "legacy"):
+        tracker = {"type": "object", "additionalProperties": False,
+            "required": ["principal_type", "role", "left", "last_seen", "progress"],
+            "properties": {
+                "principal_type": {"const": kind},
+                "role": {"enum": ["seeder", "leecher"]},
+                "left": {"type": ["integer", "null"]},
+                "last_seen": {"type": ["number", "null"]},
+                "progress": {"type": ["number", "null"], "minimum": 0, "maximum": 1}}}
+        properties = {"ip": {"type": "string"}, "port": {"type": "integer"},
+                      "tracker": tracker}
+        required = ["ip", "port", "tracker"]
+        if kind == "legacy":
+            tracker["properties"]["participant_class"] = {"type": "string"}
+            properties.update(device_id={"type": "null"},
+                warning={"const": "legacy_unattributed"}, quarantine_available={"const": False})
+        else:
+            tracker["properties"]["principal_id"] = {"type": "string"}
+            tracker["required"].append("principal_id")
+            for name in ("device_observation", "server_observation", "latest_report",
+                         "peer_policy", "peer_enforcement"):
+                properties[name] = {"type": "object"}
+            if kind == "device":
+                required.append("device_id")
+                properties["device_id"] = {"type": "string"}
+                for name in ("model", "current_image_id", "stage_state"):
+                    properties[name] = {"type": "string"}
+                for name in ("staged_image_ids", "errored_image_ids"):
+                    properties[name] = {"type": "array", "items": {"type": "string"}}
+        variants.append({"type": "object", "additionalProperties": False,
+                         "required": required, "properties": properties})
+    return {"oneOf": variants}
+
+
+def _blast_example():
+    return {"member_delta": 1, "origin_access_lost": 0,
+            "empty_permitted_sets": 0, "role_pairs_stopped": 0,
+            "qos_changed": False, "requires_confirmation": True,
+            "confirm_token": "candidate-bound-sha256"}
+
+
+def _policy_write_example():
+    return {"ok": True, "revision": 5, "candidate_revision": 5,
+            "dry_run": True, **_blast_example()}
+
+
+def _qos_example():
+    # Representative final/derived values include each key in the shared grammar.
+    import peer_policy
+    doc = peer_policy.base_document()
+    doc["roles"] = {"qos_default": {"per_peer_bps": 20000}}
+    qos = peer_policy.explain_qos(doc, "edge-01")
+    qos["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
+                         constraint_source="pinned-aria2-client")
+    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
+                                         constraint_source="pinned-aria2-client")
+    qos["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
+    return qos
+
+
+def _explain_side(device_id):
+    return {"principal": {"type": "device", "id": device_id}, "role": "boat",
+            "acl_source": "role:boat", "acl_name": "role:boat",
+            "decision": "permit", "matched_seq": 10,
+            "role_unknown": False, "role_shadowed_by": None}
 
 
 def _ref(name):
@@ -55,8 +249,11 @@ def _schema_for_example(example, title, required=None, field="",
             return {"type": ["boolean", "null"]}
         if field in ("record",):
             return {"type": ["object", "null"]}
+        if field == "last_reconciled_at":
+            return {"type": ["number", "null"]}
         if field in ("limit", "certs", "at", "matched", "mismatched",
-                     "not_in_feed", "finished_at", "rc"):
+                     "not_in_feed", "finished_at", "rc", "issued_revision",
+                     "matched_seq", "applied_revision"):
             return {"type": ["integer", "null"]}
         return {"type": ["string", "null"]}
     if isinstance(example, str):
@@ -150,6 +347,10 @@ def _problem_variants(route, status):
         if status == 503 and suffix == "/status":
             return (("telemetry-status-unavailable",
                      "Telemetry status unavailable"),)
+    policy_errors = _policy_errors(route)
+    if policy_errors is not None:
+        return tuple((code, code.replace("_", " ").replace("-", " ").capitalize())
+                     for code in policy_errors[status])
     if route.service in ("console", "management"):
         if status == 503 and route.path == \
                 "/internal/v1/console-certificate":
@@ -221,6 +422,9 @@ def _problem_response(route, status):
             "schema": {"type": "string"},
             "example": challenge,
         }
+    business_errors = _policy_business_errors(route)
+    if business_errors is not None and status in business_errors:
+        response.setdefault("headers", {})["ETag"] = {"schema": {"type": "string"}}
     return response
 
 
@@ -254,6 +458,16 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
+    if _policy_mutation(route):
+        params.append({"name": "dry_run", "in": "query", "required": False,
+            "description": "1 previews the locked candidate without persistence; 0 commits after required confirmation.",
+            "schema": {"type": "integer", "enum": [0, 1]}, "example": 1})
+    if suffix == "/peer-policy/explain":
+        params.extend({"name": key, "in": "query", "required": True,
+            "description": "Bare device ID, device:<id>, or service:seeder. Requires one fresh, unambiguous durable IPv4 attribution; no inventory-IP fallback.",
+            "schema": {"type": "string"}, "example": value}
+            for key, value in (("a", "edge-01"), ("b", "service:seeder")))
+
     if route.service in ("console", "management") and suffix == "/devices":
         params.extend([
             {"name": "limit", "in": "query", "required": False,
@@ -463,6 +677,15 @@ def _resource_suffix(route):
 # handler actually requires.  ``required_body`` is false only for operations
 # whose established v1 wire form permits an empty body.
 _JSON_REQUESTS = {
+    "/peer-policy/roles/{name}": ({"restricted": True, "peers": ["boat"],
+        "origin": True, "nets": [], "on_stale": "keep", "qos": {},
+        "confirm_token": "candidate-bound-sha256"}, (), True),
+    "/peer-policy/qos": ({"qos": {"numwant": 25}, "role": "boat",
+        "confirm_token": "candidate-bound-sha256"}, ("qos",), True),
+    "/devices/{device_id}/role": ({"role": "boat",
+        "confirm_token": "candidate-bound-sha256"}, ("role",), True),
+    "/devices/bulk-role": ({"device_ids": ["edge-01", "edge-02"], "role": "boat",
+        "confirm_token": "candidate-bound-sha256"}, ("device_ids", "role"), True),
     "/peer-policy/quarantine/{device_id}": (
         {"quarantined": True, "if_revision": 4},
         ("quarantined", "if_revision"), True),
@@ -544,6 +767,10 @@ _JSON_REQUESTS = {
 
 
 def _request_body(route):
+    if route.method == "DELETE" and _policy_mutation(route):
+        return {"required": False, "content": {"application/json": _media(
+            {"type": "object", "properties": {"confirm_token": {"type": ["string", "null"]}},
+             "additionalProperties": False}, {"confirm_token": "candidate-bound-sha256"})}}
     if route.method not in ("POST", "PUT", "PATCH"):
         return None
     path = route.path
@@ -596,6 +823,19 @@ def _request_body(route):
     # silently accepted as alternate credentials.
     if suffix in ("/login", "/setup") or path.endswith("/authorizations"):
         schema["additionalProperties"] = False
+    if _policy_mutation(route):
+        schema["additionalProperties"] = False
+        schema["properties"]["confirm_token"]["type"] = ["string", "null"]
+        if suffix == "/peer-policy/roles/{name}":
+            schema["properties"].update(_role_definition_schema()["properties"])
+        if suffix == "/peer-policy/qos":
+            schema["properties"]["qos"] = _qos_schema("global")
+            schema["allOf"] = [{"if": {"required": ["role"], "properties": {
+                "role": {"type": "string"}}}, "then": {"properties": {"qos": _qos_schema("role")}}}]
+        if "role" in schema["properties"]:
+            schema["properties"]["role"]["type"] = ["string", "null"]
+        if "device_ids" in schema["properties"]:
+            schema["properties"]["device_ids"].update(minItems=1, maxItems=10000)
     return {"required": required_body,
             "content": {"application/json": _media(schema, example)}}
 
@@ -605,12 +845,37 @@ def _json_success_example(route):
     suffix = _resource_suffix(route)
 
     exact = {
+        "/peer-policy/roles": {"revision": 4, "degraded": False, "fail_closed": False,
+            "roles": {"boat": {"restricted": True, "peers": ["boat"], "origin": True}}},
+        "/peer-policy/roles/{name}": _policy_write_example(),
+        "/peer-policy/qos": _policy_write_example(),
+        "/devices/{device_id}/role": {**_policy_write_example(), "partial": False,
+            "applied": 1, "failed": {}, "direction": "tighten",
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
+        "/devices/bulk-role": {**_policy_write_example(), "partial": False,
+            "applied": 2, "failed": {}, "direction": "tighten",
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
+        "/devices/{device_id}/effective-qos": {"revision": 4, "degraded": False,
+            "fail_closed": False, "device_id": "edge-01",
+            "delivery_state": "pre-instructions", "qos": _qos_example()},
+        "/peer-policy/explain": {"revision": 4, "degraded": False,
+            "fail_closed": False, "a": _explain_side("edge-01"),
+            "b": _explain_side("edge-02"), "mutual": True},
         "/peer-policy": {
             "schema": 1, "revision": 4, "degraded": False,
             "fail_closed": False,
             "quarantine": {"reserved": True,
                            "description": "reserved policy value"},
             "quarantine_assignments": ["edge-02"],
+            "roles_supported": True, "roles_present": True,
+            "roles": {"defined": 1, "restricted": 1, "members": {"boat": 2}},
+            "role_drift": {"count": 0, "device_ids": [], "truncated": False},
+            "outbox": {"unacknowledged": 1, "capacity": 256},
+            "origin_qos": {"state": None, "global_option_count": 0,
+                "target_download_count": 0, "applied_download_count": 0,
+                "last_reconciled_at": None, "last_error": None},
+            "fleet_rollup": {"issued_revision": None, "applied": {},
+                "states": {"pre-instructions": 2}},
             "enforcement": {"state": None, "stale": False,
                             "desired_ip_count": 1, "conflict_count": 0}},
         "/peer-policy/quarantine/{device_id}": {
@@ -725,9 +990,10 @@ def _json_success_example(route):
             "images": [{
                 "image": "image.bin", "info_hash": "00" * 20,
                 "total_bytes": 1048576, "seeders": 1, "leechers": 0,
-                "peers": [{"principal_type": "device",
-                            "principal_id": "edge-01",
-                            "ip": "192.0.2.10", "port": 6881}]}]},
+                "peers": [{"device_id": "edge-01", "ip": "192.0.2.10", "port": 6881,
+                           "tracker": {"principal_type": "device", "principal_id": "edge-01",
+                                       "role": "seeder", "left": 0, "last_seen": 1788470400.0,
+                                       "progress": 1.0}}]}]},
         "/telemetry/health": {
             "ok": True,
             "otlp_export": {"state": "healthy", "signals": {}}},
@@ -1114,6 +1380,7 @@ def _success(route):
                 "type": ["string", "null"]}
         normal_schema["properties"]["images"]["items"]["properties"][
             "total_bytes"] = {"type": ["integer", "null"]}
+        normal_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
         empty_schema = {"type": "object", "maxProperties": 0}
         if route.service == "telemetry":
             variants = [normal_schema, empty_schema]
@@ -1134,6 +1401,7 @@ def _success(route):
                     "type": ["string", "null"]}
             paged_schema["properties"]["images"]["items"]["properties"][
                 "total_bytes"] = {"type": ["integer", "null"]}
+            paged_schema["properties"]["images"]["items"]["properties"]["peers"]["items"] = _swarm_peer_schema()
             paged_schema["properties"]["peers_limit"] = {
                 "type": ["integer", "null"]}
             unavailable_schema = _schema_for_example(
@@ -1253,13 +1521,57 @@ def _success(route):
         event = schema["properties"]["events"]["items"]
         event["required"] = [name for name in event["required"]
                              if name != "category"]
+    if suffix == "/peer-policy/explain":
+        for side in ("a", "b"):
+            properties = schema["properties"][side]["properties"]
+            for key in ("role", "acl_name", "role_shadowed_by"):
+                properties[key]["type"] = ["string", "null"]
+            properties["matched_seq"]["type"] = ["integer", "null"]
+            properties["principal"]["properties"]["type"]["enum"] = ["device", "service"]
+    if suffix == "/peer-policy/roles":
+        schema["properties"]["roles"] = {"type": "object",
+            "propertyNames": _role_name_schema(), "additionalProperties": _role_definition_schema()}
+    if suffix == "/peer-policy":
+        schema["properties"]["roles_supported"]["const"] = True
+        schema["properties"]["roles"]["properties"]["members"] = {
+            "type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+        schema["properties"]["fleet_rollup"]["properties"]["issued_revision"] = {"type": "null"}
+    if suffix == "/devices/{device_id}/effective-qos":
+        for row in schema["properties"]["qos"]["properties"].values():
+            row["required"] = [key for key in row["required"] if key != "derived_from"]
+    if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
+        optional = {"candidate_revision", *_blast_example()}
+        schema["required"] = [key for key in schema["required"] if key not in optional]
+    if _policy_mutation(route) and route.method != "POST":
+        example["member_delta"] = 0
+        if suffix == "/peer-policy/qos":
+            example["qos_changed"] = True
+        else:
+            example["role_pairs_stopped"] = 1
+    if _policy_mutation(route):
+        schema["properties"]["confirm_token"]["type"] = ["string", "null"]
     response = {"description": route.summary + " response",
                 "content": {"application/json": _media(
                     schema, example)}}
+    if _policy_mutation(route):
+        no_confirmation = dict(example, confirm_token=None, requires_confirmation=False,
+            member_delta=0, origin_access_lost=0, empty_permitted_sets=0,
+            role_pairs_stopped=0, qos_changed=False)
+        media = response["content"]["application/json"]
+        media.pop("example")
+        media["examples"] = {
+            "confirmationRequired": {"value": example},
+            "noConfirmation": {"value": no_confirmation}}
+        if route.method == "POST":
+            noop = {key: value for key, value in no_confirmation.items()
+                    if key not in {"candidate_revision", *_blast_example()}}
+            noop.update(dry_run=False, direction="neutral")
+            media["examples"]["unchangedMembership"] = {"value": noop}
     if suffix == "/devices" and route.method == "GET":
         response["headers"] = {"ETag": {
             "schema": {"type": "string"}, "example": '"iris-fleet-7"'}}
-    if suffix == "/peer-policy":
+    if suffix in ("/peer-policy", "/peer-policy/roles", "/peer-policy/explain",
+                  "/devices/{device_id}/effective-qos") or _policy_mutation(route):
         response["headers"] = {"ETag": {
             "schema": {"type": "string"},
             "example": '"iris-peer-policy-4"'}}
@@ -1307,6 +1619,10 @@ def _operation(route):
     path_exception = _resource_path_exception(route)
     if path_exception is not None:
         op["x-iris-v1-resource-path-exception"] = path_exception
+    if _policy_mutation(route):
+        op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
+            "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
+            "schema": {"type": "string"}, "example": '\"iris-peer-policy-4\"'})
     if route.path.endswith("/peer-policy/quarantine/{device_id}"):
         op["parameters"].append({
             "name": "If-Match", "in": "header", "required": False,
@@ -1318,6 +1634,10 @@ def _operation(route):
         op["requestBody"] = body
     success_status, success = _success(route)
     op["responses"][success_status] = success
+    if route.method == "DELETE" and _policy_mutation(route):
+        op["responses"]["200"]["description"] = "Dry-run candidate and confirmation preview"
+        op["responses"]["204"] = {"description": "Role deleted; no body",
+            "headers": {"ETag": {"schema": {"type": "string"}}}}
     if route.service == "artifact":
         op["responses"]["304"] = {
             "description": "Artifact has not changed since If-Modified-Since"}
@@ -1362,6 +1682,9 @@ def _error_statuses(route):
     an unbounded OpenAPI ``default`` response.
     """
     suffix = _resource_suffix(route)
+    policy_errors = _policy_errors(route)
+    if policy_errors is not None:
+        return tuple(sorted(policy_errors))
     if suffix == "/healthz":
         return ()
     if suffix == "/readyz":
@@ -1429,6 +1752,10 @@ def _error_statuses(route):
         statuses.update((408, 409, 502))
     if suffix in ("/image-verification/refresh",):
         statuses.update((409, 502))
+    if _policy_mutation(route):
+        statuses.update((409, 412, 422, 428))
+    if suffix in ("/peer-policy/explain", "/devices/{device_id}/effective-qos"):
+        statuses.add(422)
     if suffix in ("/peer-policy/quarantine/{device_id}",):
         statuses.update((409, 412, 422))
     if suffix in ("/images/import", "/images/{image_id}",
@@ -1517,9 +1844,9 @@ def _resource_path_exception(route):
          "image lifecycle action"),
         (r"^/image-verification/(?:offline|refresh)$",
          "verification job action"),
-        (r"^/devices/(?:import-csv|bulk-credential)$",
+        (r"^/devices/(?:import-csv|bulk-credential|bulk-role)$",
          "fleet batch action"),
-        (r"^/devices/\{device_id\}/(?:assign|credential|platform|forget-host-key|request-report|adopt|onboard|undeploy)$",
+        (r"^/devices/\{device_id\}/(?:role|effective-qos|assign|credential|platform|forget-host-key|request-report|adopt|onboard|undeploy)$",
          "device workflow action"),
         (r"^/onboard/(?:jobs/\{job_id\}/abort|cancel-queued)$",
          "onboarding job control"),

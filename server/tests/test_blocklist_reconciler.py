@@ -240,6 +240,13 @@ class FakeAria:
 
 
 class TestCanonicalHash:
+    def test_status_error_uses_operation_code(self):
+        class Aria(FakeAria):
+            def set_blocklist(self, ips):
+                raise PermissionError("secret")
+        outcome = br.apply_blocklist(Aria(), [], True)
+        assert outcome.last_error == "peer_blocklist_apply_failed"
+
     def test_hash_stable_regardless_of_input_order(self):
         h1 = br.canonical_hash(["10.0.0.2", "10.0.0.1"])
         h2 = br.canonical_hash(["10.0.0.1", "10.0.0.2"])

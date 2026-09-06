@@ -859,3 +859,20 @@ class TestBlastRadius:
 
         assert peer_policy.load_policy(auth, lkg).document == before
         assert peer_policy.lkg_ring_revisions(lkg) == []
+
+
+def test_qos_explanation_shares_derivation_and_source_precedence():
+    doc = _boat_doc(qos={"fanout": 3}, device_qos={"seed_up_bps": 90000})
+    doc["roles"]["qos_default"] = {"per_peer_bps": 20000}
+    before = copy.deepcopy(doc)
+    explanation = peer_policy.explain_qos(doc, "boat-1")
+    assert {key: row["value"] for key, row in explanation.items()} == \
+        peer_policy.compile_qos(doc, "boat-1")
+    assert explanation["leech_down_bps"] == {
+        "value": 60000, "source": "role:boat", "derived_from": {
+            "per_peer_bps": {"value": 20000, "source": "global"},
+            "fanout": {"value": 3, "source": "role:boat"}}}
+    assert explanation["seed_up_bps"] == {
+        "value": 90000, "source": "device:boat-1"}
+    assert explanation["on_stale"] == {"value": "keep", "source": "role:boat"}
+    assert doc == before

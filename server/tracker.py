@@ -31,6 +31,7 @@ import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
 import origin_qos as _origin_qos
+import reconciler_status as _status_codes
 import secrets_store
 import telemetry
 from peer_registry import PeerRegistry, INTERVAL, NUMWANT_CAP
@@ -1060,11 +1061,11 @@ class TrackerReconciler:
     def _note_pass_failure(self, exc):
         # Force the next bare poll to run (the deadline is the cheapest lever
         # that does not pretend to know the RPC state), then try to say so in
-        # the status file. Only the exception TYPE is recorded: an RPC error's
-        # text can embed the secret.
+        # the status file. Source-owned codes never include exception data.
         self._next_maintenance = None
         try:
             prior = _peer_enforcement.read_status(self._enforcement_path) or {}
+            policy = _peer_policy.load_policy(*self._policy_paths)
             count = prior.get("desired_ip_count", 0)
             status = _peer_enforcement.build_status(
                 state="degraded",
@@ -1074,18 +1075,19 @@ class TrackerReconciler:
                 desired_ip_count=count if isinstance(count, int)
                 and not isinstance(count, bool) else 0,
                 now=self._now(),
-                last_operation_exported_revision=prior.get(
-                    "last_operation_exported_revision", 0),
+                last_operation_exported_revision=_peer_policy.effective_acked(
+                    policy.document, prior),
+                operation_ack_epoch=policy.document.get("operation_ack_epoch"),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error=type(exc).__name__,
+                last_error=_status_codes.PEER_RECONCILE_FAILED,
                 mutual_origin=_peer_enforcement.mutual_origin_from_status(
                     prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
         except Exception:
             pass
         if self._qos_enabled:
-            self._write_origin_qos_failure(type(exc).__name__)
+            self._write_origin_qos_failure(_status_codes.ORIGIN_RECONCILE_FAILED)
 
     def _write_origin_qos_failure(self, error):
         """Best-effort degraded QoS status preserving only validated scalars."""
@@ -1253,11 +1255,12 @@ class TrackerReconciler:
                 desired_hash=prior.get("desired_hash"),
                 applied_revision=prior.get("applied_revision"),
                 desired_ip_count=prior.get("desired_ip_count", 0), now=now,
-                last_operation_exported_revision=prior.get(
-                    "last_operation_exported_revision", 0),
+                last_operation_exported_revision=_peer_policy.effective_acked(
+                    policy.document, prior),
+                operation_ack_epoch=policy.document.get("operation_ack_epoch"),
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
-                last_error="EndpointStoreError",
+                last_error=_status_codes.ENDPOINT_STORE_UNAVAILABLE,
                 mutual_origin=_peer_enforcement.mutual_origin_from_status(
                     prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
@@ -1302,8 +1305,8 @@ class TrackerReconciler:
                 if outcome is not None:
                     outcome = outcome._replace(
                         success=False,
-                        last_error=("AriaSessionChanged" if session
-                                    else "AriaSessionUnavailable"))
+                        last_error=(_status_codes.ARIA_SESSION_CHANGED if session
+                                    else _status_codes.ARIA_SESSION_UNAVAILABLE))
             qos_status = self._finish_origin_qos(
                 now, session, session_stable, desired_qos, qos_outcome,
                 qos_error)
@@ -1315,9 +1318,13 @@ class TrackerReconciler:
         # 5) Export the policy operation outbox (revision order, ack-gated).
         #    Read the prior ack watermark once (centralized) and carry it
         #    forward so a status-only / non-operation pass can never reset it.
-        acked = self._read_acked_revision()
+        acked = {"last_operation_exported_revision": self._read_acked_revision(policy),
+                 "operation_ack_epoch": policy.document.get("operation_ack_epoch")}
         exported_rev = self._export_outbox(policy, acked, status)
         status["last_operation_exported_revision"] = exported_rev
+        epoch = policy.document.get("operation_ack_epoch")
+        if epoch is not None:
+            status["operation_ack_epoch"] = epoch
 
         _peer_enforcement.write_status(self._enforcement_path, status)
         qos_status_written = True
@@ -1363,15 +1370,15 @@ class TrackerReconciler:
         targets = self._take_qos_targets()
         if targets is None:
             self._qos_rpc_ok = False
-            return None, None, "TargetDiscoveryUnavailable"
+            return None, None, _status_codes.TARGET_DISCOVERY_UNAVAILABLE
         try:
             desired = _origin_qos.build_desired(policy.document, targets)
-        except Exception as exc:
+        except Exception:
             self._qos_rpc_ok = False
-            return None, None, type(exc).__name__
+            return None, None, _status_codes.ORIGIN_DESIRED_STATE_FAILED
         if policy.fail_closed:
             self._qos_rpc_ok = False
-            return desired, None, "PolicyFailClosed"
+            return desired, None, _status_codes.POLICY_FAIL_CLOSED
         force = (self._qos_last_hash is None
                  or session != self._qos_last_session
                  or self._qos_rpc_ok is not True
@@ -1395,13 +1402,13 @@ class TrackerReconciler:
             last_error = outcome.last_error
 
         if not session_stable:
-            last_error = ("AriaSessionChanged" if session
-                          else "AriaSessionUnavailable")
+            last_error = (_status_codes.ARIA_SESSION_CHANGED if session
+                          else _status_codes.ARIA_SESSION_UNAVAILABLE)
             state = "degraded" if session else "rpc_unavailable"
             self._qos_rpc_ok = False
         elif preparation_error is not None:
             state = ("rpc_unavailable"
-                     if preparation_error == "TargetDiscoveryUnavailable"
+                     if preparation_error == _status_codes.TARGET_DISCOVERY_UNAVAILABLE
                      or not session else "degraded")
             self._qos_rpc_ok = False
         elif outcome is not None and outcome.success:
@@ -1506,15 +1513,17 @@ class TrackerReconciler:
             conflicts=conflicts, last_effect=last_effect, last_error=last_error,
             mutual_origin=mutual_origin)
 
-    def _read_acked_revision(self):
-        """The single, centralized source of the persisted outbox ack watermark
-        (``last_operation_exported_revision``). Every status write must carry a
-        value ``>=`` this so a later non-operation pass can never reset the
-        watermark downward (spec §7/§13). Missing/corrupt status => 0."""
+    def _read_acked_revision(self, policy=None):
+        """Reduce validated status against the exact policy snapshot for a pass.
+
+        A history/epoch mismatch or future revision contributes zero, including
+        when a failure or no-work pass subsequently persists this watermark.
+        """
         prior = _peer_enforcement.read_status(self._enforcement_path)
         if not prior:
             return 0
-        return prior.get("last_operation_exported_revision", 0) or 0
+        policy = policy or _peer_policy.load_policy(*self._policy_paths)
+        return _peer_policy.effective_acked(policy.document, prior)
 
     def _export_outbox(self, policy, acked, status):
         """Export outbox entries with revision > the acked revision, in revision
@@ -1522,6 +1531,7 @@ class TrackerReconciler:
         queue acceptance. On either failure the prior ``acked`` watermark is
         retained and the persisted event ids replay next pass / restart."""
         entries = _peer_policy.pending_exports(policy.document, acked)
+        acked = _peer_policy.effective_acked(policy.document, acked)
         if not entries:
             return acked
         if self._audit_export is None:

@@ -1268,8 +1268,14 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         tracker_status = peer_enforcement.build_status(
             "pending", None, None, 1, 3, 10,
             last_operation_exported_revision=2,
-            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99"}],
-            last_effect={"disconnected_peers": 1})
+            operation_ack_epoch=doc["operation_ack_epoch"],
+            conflicts=[{"reason": "shared_permit_deny", "ipv4": "10.0.0.99",
+                        "permitted_principal_type": "service",
+                        "permitted_principal_id": "seeder",
+                        "denied_principal_type": "device",
+                        "denied_principal_id": "d1",
+                        "global_block_applied": False}],
+            last_effect={"disconnected_peers": 1, "removed_peers": 0})
         # A GUI reader must not blindly expose future/untrusted status fields.
         tracker_status["raw_ips"] = ["10.0.0.99"]
         peer_enforcement.write_status(
@@ -1330,13 +1336,12 @@ def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(tmp_path)
         assert view["enforcement"]["mutual_origin"] == {
             "mode": "preflight", "newly_denied_device_count": 2,
         }
+        # A syntactically valid file with an impossible enforced state is
+        # neutral as a unit; redaction cannot leave a false success claim.
         assert view["origin_qos"] == {
-            "state": "enforced",
-            "global_option_count": 1,
-            "target_download_count": 2,
-            "applied_download_count": 2,
-            "last_reconciled_at": 1000.0,
-            "last_error": None,
+            "state": None, "global_option_count": 0,
+            "target_download_count": 0, "applied_download_count": 0,
+            "last_reconciled_at": None, "last_error": None,
         }
         body = raw.decode()
         for forbidden in ("preflight-a", "preflight-b", "endpoint_ips",
@@ -10637,15 +10642,22 @@ def test_device_role_and_bulk_role_routes_coordinate_fleet_and_policy(tmp_path):
         _define_device_role(cat)
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        hh["If-Match"] = gui_server._revision_etag(
+            "peer-policy", _loaded_peer_policy(cat).document["revision"])
+        preview = json.loads(_req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                                  {"role": "boat"}, headers=hh)[2])
         st, _, b = _req(host, port, "POST", "/api/devices/d1/role",
-                        {"role": "boat"}, headers=hh)
+                        {"role": "boat", "confirm_token": preview["confirm_token"]}, headers=hh)
         assert st == 200, b
         assert fleet.get_device("d1")["role"] == "boat"
         assert _loaded_peer_policy(cat).roles.role_of["d1"] == "boat"
         before = _loaded_peer_policy(cat).document
+        hh["If-Match"] = gui_server._revision_etag("peer-policy", before["revision"])
+        body = {"device_ids": ["d1", "d2"], "role": "boat"}
+        preview = json.loads(_req(host, port, "POST", "/api/devices/bulk-role?dry_run=1",
+                                  body, headers=hh)[2])
         st, _, b = _req(host, port, "POST", "/api/devices/bulk-role",
-                        {"device_ids": ["d1", "d2"], "role": "boat"},
-                        headers=hh)
+                        dict(body, confirm_token=preview["confirm_token"]), headers=hh)
         assert st == 200, b
         body = json.loads(b)
         assert body["applied"] == 2 and body["role_drift"]["count"] == 0
@@ -10665,8 +10677,9 @@ def test_device_role_routes_refuse_unknown_role_before_either_write(tmp_path):
         before = fleet.snapshot(), _loaded_peer_policy(cat).document
         st, _, b = _req(
             host, port, "POST", "/api/devices/d1/role", {"role": "missing"},
-            headers={"Cookie": ck, "X-CSRF-Token": csrf})
-        assert st == 422
+            headers={"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                     gui_server._revision_etag("peer-policy", before[1]["revision"])})
+        assert st == 404
         assert json.loads(b)["error"] == "role_not_found"
         assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
     finally:
@@ -10682,11 +10695,12 @@ def test_device_role_ingress_rejects_nonstring_and_surrounding_whitespace(
         ck, csrf = _auth(host, port)
         headers = {"Cookie": ck, "X-CSRF-Token": csrf}
         before = fleet.snapshot(), _loaded_peer_policy(cat).document
+        headers["If-Match"] = gui_server._revision_etag("peer-policy", before[1]["revision"])
         for value in (123, " boat", "boat\t"):
             st, _, body = _req(
                 host, port, "POST", "/api/devices/d1/role",
                 {"role": value}, headers=headers)
-            assert st == 400, body
+            assert st == 422, body
             assert json.loads(body)["error"] == "bad_role"
         st, _, body = _req(
             host, port, "POST", "/api/devices",
@@ -10734,15 +10748,21 @@ def test_role_compile_failure_returns_partial_and_bounded_drift(
         fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
         _define_device_role(cat)
         ck, csrf = _auth(host, port)
-        monkeypatch.setattr(
-            peer_policy, "commit_mutation",
-            lambda *_a, **_kw: (_ for _ in ()).throw(
-                peer_policy.OperationBacklogFull("full")))
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                   gui_server._revision_etag("peer-policy", _loaded_peer_policy(cat).document["revision"])}
+        preview = json.loads(_req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                                  {"role": "boat"}, headers=headers)[2])
+        original = peer_policy.commit_mutation
+        def fail_real_commit(*args, **kwargs):
+            if kwargs.get("dry_run"):
+                return original(*args, **kwargs)
+            raise peer_policy.OperationBacklogFull("full")
+        monkeypatch.setattr(peer_policy, "commit_mutation", fail_real_commit)
         st, _, b = _req(
-            host, port, "POST", "/api/devices/d1/role", {"role": "boat"},
-            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+            host, port, "POST", "/api/devices/d1/role",
+            {"role": "boat", "confirm_token": preview["confirm_token"]}, headers=headers)
         body = json.loads(b)
-        assert st == 503 and body["partial"] is True
+        assert st == 409 and body["partial"] is True
         assert body["role_drift"] == {
             "count": 1, "device_ids": ["d1"], "truncated": False}
         assert fleet.get_device("d1")["role"] == "boat"
@@ -11006,3 +11026,469 @@ def test_swarm_page_params_are_rejected_not_defaulted(tmp_path):
         assert st == 400
     finally:
         stop()
+
+
+@pytest.fixture
+def role_api(tmp_path):
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+    fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2"})
+    _define_device_role(cat)
+    ck, csrf = _auth(host, port)
+    headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+
+    def request(method, path, body=None, match=True):
+        hh = dict(headers)
+        if match:
+            hh["If-Match"] = (gui_server._revision_etag(
+                "peer-policy", _loaded_peer_policy(cat).document["revision"])
+                if match is True else match)
+        status, response_headers, raw = _req(
+            host, port, method, path, body, headers=hh)
+        return status, response_headers, json.loads(raw) if raw else None
+
+    yield request, fleet, cat
+    stop()
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("PUT", "/api/peer-policy/roles/fiber", {"restricted": False}),
+    ("DELETE", "/api/peer-policy/roles/boat", None),
+    ("PUT", "/api/peer-policy/qos", {"qos": {"numwant": 25}}),
+    ("POST", "/api/devices/d1/role", {"role": "boat"}),
+    ("POST", "/api/devices/bulk-role", {"device_ids": ["d1"], "role": "boat"}),
+])
+def test_role_qos_routes_require_exact_strong_cas(role_api, method, path, body):
+    request, fleet, cat = role_api
+    before = fleet.snapshot(), _loaded_peer_policy(cat).document
+    status, headers, problem = request(method, path, body, match=False)
+    assert status == 428
+    assert problem["code"] == "precondition_required"
+    assert problem["type"].endswith("#precondition_required")
+    current = gui_server._revision_etag("peer-policy", before[1]["revision"])
+    assert headers["ETag"] == current
+    for supplied in ('*', 'W/' + current, current + ', ' + current,
+                     '"iris-peer-policy-0"'):
+        status, headers, problem = request(method, path, body, match=supplied)
+        assert status == 412
+        assert problem["type"].endswith("#precondition_failed")
+        assert headers["ETag"] == current
+    assert (fleet.snapshot(), _loaded_peer_policy(cat).document) == before
+
+
+def test_role_qos_preview_confirmation_and_delete(role_api):
+    from pathlib import Path
+    request, fleet, cat = role_api
+    request("GET", "/api/peer-policy")
+    def snapshot():
+        return {str(p.relative_to(cat.state_dir)): p.read_bytes()
+                for p in Path(cat.state_dir).rglob('*')
+                if p.is_file() and not p.name.endswith('.lock')}
+    before = snapshot()
+    status, headers, preview = request("PUT", "/api/peer-policy/qos?dry_run=1",
+                                       {"qos": {"numwant": 25}})
+    assert status == 200
+    assert snapshot() == before
+    assert preview["dry_run"] and preview["qos_changed"]
+    assert preview["requires_confirmation"]
+    assert all(preview[key] == 0 for key in (
+        "member_delta", "origin_access_lost", "empty_permitted_sets",
+        "role_pairs_stopped"))
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 {"qos": {"numwant": 25}, "confirm": True})
+    assert status in (422, 428)
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 {"qos": {"numwant": 24},
+                                  "confirm_token": preview["confirm_token"]})
+    assert status == 428 and problem["code"] == "confirmation_required"
+    status, headers, committed = request("PUT", "/api/peer-policy/qos",
+        {"qos": {"numwant": 25}, "confirm_token": preview["confirm_token"]})
+    assert status == 200
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    assert request("PUT", "/api/peer-policy/roles/empty",
+                   {"restricted": False})[0] == 200
+    status, _, preview = request("DELETE", "/api/peer-policy/roles/empty?dry_run=1")
+    assert status == 200
+    status, headers, body = request("DELETE", "/api/peer-policy/roles/empty",
+                                    {"confirm_token": preview["confirm_token"]})
+    assert status == 204 and body is None and "ETag" in headers
+
+
+def test_role_policy_view_and_effective_qos(role_api):
+    request, fleet, cat = role_api
+    for i in range(12):
+        fleet.upsert({"device_id": "drift%02d" % i,
+                      "device_ip": "10.1.0.%d" % (i + 1), "role": "boat"})
+    status, _, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    assert view["roles_present"] is True
+    assert view["roles"] == {"defined": 1, "restricted": 1,
+                              "members": {"boat": 0}}
+    assert view["role_drift"] == {"count": 12,
+        "device_ids": ["drift%02d" % i for i in range(10)], "truncated": True}
+    assert view["outbox"] == {"unacknowledged": 1, "capacity": 256}
+    assert view["fleet_rollup"] == {"issued_revision": None, "applied": {},
+                                   "states": {"pre-instructions": 14}}
+    assert "10.1.0." not in json.dumps(view)
+    status, _, qos = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200 and qos["delivery_state"] == "pre-instructions"
+    assert qos["qos"]["numwant"]["source"] == "builtin"
+    assert qos["qos"]["numwant"]["effective_ceiling"] == 50
+    assert qos["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+    assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
+    assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
+    assert request("GET", "/api/devices/missing/effective-qos")[0] == 404
+
+
+def test_role_explain_requires_current_unambiguous_typed_endpoints(role_api):
+    import auth
+    import peer_endpoints
+    request, fleet, cat = role_api
+    path = os.path.join(cat.state_dir, "peer-endpoints.json")
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=d2")[0] == 422
+    for device_id, ip in (("d1", "192.0.2.1"), ("d2", "192.0.2.2")):
+        peer_endpoints.record_endpoint(path, auth.Principal("device", device_id),
+                                       ip, 6881, time.time())
+    status, _, result = request("GET", "/api/peer-policy/explain?a=device:d1&b=d2")
+    assert status == 200 and result["mutual"] is True
+    assert result["a"]["principal"] == {"type": "device", "id": "d1"}
+    assert result["a"]["acl_source"] == "none"
+    assert "192.0.2." not in json.dumps(result)
+    assert request("GET", "/api/peer-policy/explain?a=legacy:d1&b=d2")[0] == 422
+    peer_endpoints.record_endpoint(path, auth.Principal("device", "d2"),
+                                   "192.0.2.1", 6881, time.time())
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=d2")[0] == 422
+
+
+@pytest.mark.parametrize("name", ["default", "quarantine", "origin", "seeder", "legacy"])
+def test_role_reserved_problem_identity(role_api, name):
+    request, _, _ = role_api
+    status, _, problem = request("PUT", "/api/peer-policy/roles/" + name,
+                                 {"restricted": False})
+    assert status == 409
+    assert problem["code"] == "role_reserved_name"
+    assert problem["type"].endswith("#role_reserved_name")
+
+
+def test_role_locked_race_backlog_and_invalid_qos(role_api, monkeypatch):
+    import peer_policy
+    request, fleet, cat = role_api
+    original = peer_policy.commit_mutation
+    def racing(*args, **kwargs):
+        raise peer_policy.RevisionConflict(99)
+    monkeypatch.setattr(peer_policy, "commit_mutation", racing)
+    status, headers, problem = request("PUT", "/api/peer-policy/qos",
+                                       {"qos": {"numwant": 25}})
+    assert status == 409 and problem["code"] == "revision_conflict"
+    assert headers["ETag"] == '"iris-peer-policy-99"'
+    def backlog(*args, **kwargs):
+        raise peer_policy.OperationBacklogFull("private path")
+    monkeypatch.setattr(peer_policy, "commit_mutation", backlog)
+    status, _, problem = request("PUT", "/api/peer-policy/qos", {"qos": {}})
+    assert status == 409 and problem["code"] == "operation_backlog_full"
+    assert problem["capacity"] == 256 and "private" not in json.dumps(problem)
+    monkeypatch.setattr(peer_policy, "commit_mutation", original)
+    for qos in ({"numwant": -1}, {"catalog_tick_s": 61}, {"http_rate": 123}):
+        status, _, problem = request("PUT", "/api/peer-policy/qos", {"qos": qos})
+        assert status == 422
+        assert problem["type"].endswith("#" + problem["code"])
+
+
+def test_role_single_bulk_confirm_and_shadow(role_api):
+    import peer_policy
+    request, fleet, cat = role_api
+    path = "/api/devices/bulk-role"
+    body = {"device_ids": ["d2", "missing", "d1"], "role": "boat"}
+    status, _, preview = request("POST", path + "?dry_run=1", body)
+    assert status == 200 and preview["requires_confirmation"]
+    assert preview["failed"] == {"missing": "no such device"}
+    assert not fleet.get_device("d1").get("role")
+    status, _, problem = request("POST", path, body)
+    assert status == 428 and problem["code"] == "confirmation_required"
+    status, headers, result = request("POST", path,
+        dict(body, confirm_token=preview["confirm_token"]))
+    assert status == 200 and result["applied"] == 2
+    assert result["failed"] == {"missing": "no such device"}
+    assert request("POST", "/api/devices/missing/role", {"role": "boat"})[0] == 404
+    assert request("POST", "/api/devices/d1/role", {"role": "unknown"})[0] == 404
+    status, _, problem = request("DELETE", "/api/peer-policy/roles/boat")
+    assert status == 409 and problem["member_count"] == 2
+    assert problem["referring_roles"] == []
+    def assign(doc):
+        doc["acls"]["manual"] = {"rules": [{"seq": 17, "action": "deny",
+                                               "match": {"type": "any"}}]}
+        doc["assignments"]["d1"] = "manual"
+    peer_policy.commit_mutation(os.path.join(cat.state_dir, "peer-policy.json"),
+        os.path.join(cat.state_dir, "peer-policy.lkg.json"), action="assign",
+        target="d1", actor="test", now=1, mutate=assign)
+    for path, body in (("/api/devices/d1/role", {"role": "boat"}),
+                       ("/api/devices/bulk-role", {"device_ids": ["d1"], "role": "boat"})):
+        status, _, problem = request("POST", path, body)
+        assert status == 409 and problem["code"] == "role_shadowed_by_assignment"
+        assert request("POST", path, dict(body, allow_shadow=True))[0] == 422
+
+
+def test_role_explain_loaded_roles_shadow_quarantine_and_fail_closed(role_api, monkeypatch):
+    import auth
+    import peer_policy
+    import peer_endpoints
+    request, fleet, cat = role_api
+    endpoints = os.path.join(cat.state_dir, "peer-endpoints.json")
+    for kind, did, ip in (("device", "d1", "192.0.2.1"),
+                          ("device", "d2", "192.0.2.2"),
+                          ("service", "seeder", "192.0.2.3")):
+        peer_endpoints.record_endpoint(endpoints, auth.Principal(kind, did), ip, 6881, time.time())
+    doc = _loaded_peer_policy(cat).document
+    doc["roles"]["role_of"] = {"d1": "boat", "d2": "boat"}
+    compiled = peer_policy.compile_roles(doc)
+    policy = peer_policy.PolicyResult(doc, False, False, compiled)
+    original = peer_policy.evaluate_for
+    seen = []
+    def evaluate(*args, **kwargs):
+        assert kwargs["compiled"] is policy.roles
+        seen.append(args[1].id)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "evaluate_for", evaluate)
+    monkeypatch.setattr(peer_policy, "load_policy", lambda *_: policy)
+    status, _, result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")
+    assert status == 200 and result["mutual"] and seen == ["d1", "d2"]
+    assert result["a"]["matched_seq"] == 10
+    assert result["a"]["acl_name"] == "role:boat"
+    assert result["a"]["role_shadowed_by"] is None
+    assert request("GET", "/api/peer-policy/explain?a=d1&b=service:seeder")[2]["a"]["matched_seq"] == 20
+    doc["acls"]["manual"] = {"rules": [{"seq": 17, "action": "deny",
+                        "match": {"type": "cidr", "value": "192.0.2.0/24"}}]}
+    doc["assignments"]["d1"] = "manual"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert not result["mutual"]
+    assert result["a"]["acl_name"] == "manual" and result["a"]["matched_seq"] == 17
+    assert result["a"]["role_shadowed_by"] == "boat"
+    doc["assignments"]["d1"] = "quarantine"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert result["a"]["role_shadowed_by"] is None
+    assert result["a"]["acl_name"] == "quarantine" and result["a"]["decision"] == "deny"
+    doc["assignments"].clear()
+    doc["roles"]["role_of"]["d1"] = "missing"
+    policy = policy._replace(roles=peer_policy.compile_roles(doc))
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert result["a"]["role_unknown"] is True
+    assert result["a"]["decision"] == "deny" and result["a"]["matched_seq"] == 40
+    policy = policy._replace(fail_closed=True, degraded=True)
+    result = request("GET", "/api/peer-policy/explain?a=d1&b=d2")[2]
+    assert not result["mutual"]
+    assert all(result[side]["decision"] == "deny" and result[side]["matched_seq"] is None
+               for side in ("a", "b"))
+
+
+def test_role_policy_view_effective_outbox_and_status_redaction(role_api):
+    request, _, cat = role_api
+    status_path = os.path.join(cat.state_dir, "peer-enforcement.json")
+    with open(status_path, "w") as stream:
+        json.dump({"last_operation_exported_revision": 999,
+                   "last_error": "10.0.0.8", "conflicts": [{"reason": "device:private"}]}, stream)
+    view = request("GET", "/api/peer-policy")[2]
+    assert view["outbox"]["unacknowledged"] == 1
+    assert "10.0.0.8" not in json.dumps(view) and "device:private" not in json.dumps(view)
+    with open(status_path, "w") as stream:
+        json.dump({"last_operation_exported_revision": view["revision"]}, stream)
+    assert request("GET", "/api/peer-policy")[2]["outbox"]["unacknowledged"] == 1
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": True})[0] == 200
+    current = _loaded_peer_policy(cat).document
+    assert len(current["operation_outbox"]) == 2
+    peer_enforcement.write_status(status_path, peer_enforcement.build_status(
+        "enforced", "s", "h", None, 0, time.time(),
+        last_operation_exported_revision=current["revision"],
+        operation_ack_epoch=current.get("operation_ack_epoch")))
+    view = request("GET", "/api/peer-policy")[2]
+    assert view["enforcement"]["state"] == "enforced"
+    assert view["outbox"]["unacknowledged"] == 0
+    assert request("PUT", "/api/peer-policy/roles/copper", {"restricted": True})[0] == 200
+    assert len(_loaded_peer_policy(cat).document["operation_outbox"]) == 1
+
+
+def test_role_put_normalizes_reciprocal_edges_and_reports_isolation(role_api):
+    request, _, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    for query in ("", "?dry_run=1"):
+        status, _, problem = request("PUT", "/api/peer-policy/roles/boat" + query,
+                                     {"restricted": True, "peers": ["boat", "boat"]})
+        assert status == 422 and problem["code"] == "invalid_policy"
+        assert _loaded_peer_policy(cat).document == before
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": True})[0] == 200
+    definition = {"restricted": True, "peers": ["boat", "fiber"],
+                  "nets": ["192.0.2.1", "192.0.2.1/024", "192.0.2.1/255.255.255.0",
+                           "192.0.2.1/0.0.0.255"]}
+    status, _, preview = request("PUT", "/api/peer-policy/roles/boat?dry_run=1", definition)
+    assert status == 200
+    status, _, _ = request("PUT", "/api/peer-policy/roles/boat",
+                           dict(definition, confirm_token=preview["confirm_token"]))
+    assert status == 200
+    assert _loaded_peer_policy(cat).document["roles"]["defs"]["fiber"]["peers"] == ["fiber", "boat"]
+    assert _loaded_peer_policy(cat).document["roles"]["defs"]["boat"]["nets"] == definition["nets"]
+    status, _, problem = request("PUT", "/api/peer-policy/roles/boat",
+                                 {"restricted": True, "peers": []})
+    assert status == 409 and problem["code"] == "role_isolated"
+
+
+def test_role_qos_confirmation_expires_after_another_revision(role_api):
+    request, _, _ = role_api
+    body = {"qos": {"numwant": 25}}
+    status, _, preview = request("PUT", "/api/peer-policy/qos?dry_run=1", body)
+    assert status == 200
+    assert request("PUT", "/api/peer-policy/roles/fiber", {"restricted": False})[0] == 200
+    status, _, problem = request("PUT", "/api/peer-policy/qos",
+                                 dict(body, confirm_token=preview["confirm_token"]))
+    assert status == 428 and problem["code"] == "confirmation_required"
+
+
+def test_role_mutation_preserves_failure_audit_and_preview_is_read_only(tmp_path):
+    host, port, (_, fleet, _, cat), audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+        _define_device_role(cat)
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf, "If-Match":
+                   gui_server._revision_etag("peer-policy", _loaded_peer_policy(cat).document["revision"])}
+        def events():
+            with open(audit_path) as stream:
+                return [json.loads(line) for line in stream if line.strip()]
+        before = events()
+        assert _req(host, port, "POST", "/api/devices/d1/role?dry_run=1",
+                    {"role": "boat"}, headers=headers)[0] == 200
+        assert events() == before
+        assert _req(host, port, "POST", "/api/devices/d1/role",
+                    {"role": "unknown"}, headers=headers)[0] == 404
+        row = events()[-1]
+        assert row["event"] == "device_role_change" and row["result"] == "fail"
+        assert row["target"] == "d1" and "role_not_found" in row["detail"]
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("filename,payload", [
+    ("peer-enforcement.json", {"state": "enforced", "last_reconciled_at": 1}),
+    ("peer-enforcement.json", {"conflicts": [{"reason": []}]}),
+    ("peer-enforcement.json", {"conflicts": [{"reason": {}}]}),
+    ("peer-enforcement.json", {"last_error": "abc123deadbeef"}),
+    ("origin-qos.json", {"state": "enforced", "global_option_count": 0,
+                         "target_download_count": 2, "applied_download_count": 2}),
+    ("origin-qos.json", {"state": [], "last_error": "abc123deadbeef"}),
+])
+def test_policy_contract_invalid_auxiliary_status_is_neutral(role_api, filename, payload):
+    request, _, cat = role_api
+    with open(os.path.join(cat.state_dir, filename), "w") as stream:
+        json.dump(payload, stream)
+    status, _, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    key = "origin_qos" if filename == "origin-qos.json" else "enforcement"
+    assert view[key]["state"] is None
+    assert view[key]["last_error"] is None
+    assert "abc123deadbeef" not in json.dumps(view)
+
+
+def test_policy_contract_roles_capability_is_independent_of_presence(tmp_path):
+    host, port, _, stop = _serve_full(tmp_path)
+    try:
+        cookie, _ = _auth(host, port)
+        status, _, raw = _req(host, port, "GET", "/api/peer-policy", headers={"Cookie": cookie})
+        view = json.loads(raw)
+        assert status == 200 and view["roles_supported"] is True
+        assert view["roles_present"] is False
+    finally:
+        stop()
+
+
+def test_policy_contract_live_success_and_request_schemas(role_api):
+    from openapi_schema_validator import OAS32Validator
+    import openapi_contract
+    request, _, cat = role_api
+    spec = openapi_contract.build_document()
+    cases = [
+        ("PUT", "/api/peer-policy/roles/new?dry_run=1", "/peer-policy/roles/{name}", {"restricted": False}),
+        ("DELETE", "/api/peer-policy/roles/boat?dry_run=1", "/peer-policy/roles/{name}", {}),
+        ("PUT", "/api/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {"max_peers": 4}}),
+        ("PUT", "/api/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {}}),
+        ("POST", "/api/devices/d1/role?dry_run=1", "/devices/{device_id}/role", {"role": None}),
+        ("POST", "/api/devices/bulk-role?dry_run=1", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),
+        ("POST", "/api/devices/d1/role?dry_run=1", "/devices/{device_id}/role", {"role": "boat"}),
+        ("POST", "/api/devices/d1/role", "/devices/{device_id}/role", {"role": None}),
+        ("POST", "/api/devices/bulk-role", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),
+    ]
+    for method, path, suffix, body in cases:
+        operation = spec["paths"]["/api/v1" + suffix][method.lower()]
+        OAS32Validator(operation["requestBody"]["content"]["application/json"]["schema"]).validate(body)
+        status, _, payload = request(method, path, body)
+        assert status == 200, payload
+        schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        OAS32Validator(schema).validate(payload)
+
+
+@pytest.mark.parametrize("origin", [False, True])
+def test_policy_contract_complete_auxiliary_semantics_and_known_errors(role_api, origin):
+    import origin_qos
+    request, _, cat = role_api
+    if origin:
+        base = origin_qos.build_status("enforced", "session", "hash", 1, 2, 2, 1000)
+        filename, key = "origin-qos.json", "origin_qos"
+        mutations = [{"global_option_count": 0}, {"applied_download_count": 3},
+                     {"target_download_count": True}]
+    else:
+        base = peer_enforcement.build_status("enforced", "session", "hash", 2, 3, 1000)
+        filename, key = "peer-enforcement.json", "enforcement"
+        mutations = [{"desired_ip_count": -1}, {"applied_revision": True},
+                     {"conflicts": [{"reason": []}]}]
+    def view(payload):
+        with open(os.path.join(cat.state_dir, filename), "w") as stream:
+            json.dump(payload, stream)
+        status, _, result = request("GET", "/api/peer-policy")
+        assert status == 200
+        return result[key]
+    assert view(base)["state"] == "enforced"
+    error = "origin_reconcile_failed" if origin else "peer_reconcile_failed"
+    degraded = dict(base, state="degraded", last_error=error)
+    assert view(degraded)["last_error"] == error
+    mutations += [{"aria_session_id": None}, {"desired_hash": None},
+                  {"last_reconciled_at": float("nan")},
+                  {"state": "degraded", "last_error": "abc123deadbeef"},
+                  {"state": []}, {"last_error": {}}]
+    for change in mutations:
+        projected = view(dict(base, **change))
+        assert projected["state"] is None, change
+        assert projected["last_error"] is None, change
+
+
+def test_policy_contract_actual_reads_confirmed_qos_and_role_definition(role_api):
+    import auth
+    import peer_endpoints
+    import openapi_contract
+    from openapi_schema_validator import OAS32Validator
+    request, _, cat = role_api
+    spec = openapi_contract.build_document()
+    def check(method, path, pattern, body=None):
+        operation = spec["paths"]["/api/v1" + pattern][method.lower()]
+        if body is not None:
+            OAS32Validator(operation["requestBody"]["content"]["application/json"]["schema"]).validate(body)
+        status, headers, payload = request(method, "/api" + path, body)
+        assert status == 200, payload
+        OAS32Validator(operation["responses"]["200"]["content"]["application/json"]["schema"]).validate(payload)
+        assert "ETag" in headers
+        return payload
+    definition = {"restricted": False, "peers": ["complete"], "origin": True,
+                  "nets": ["192.0.2.0/24"], "on_stale": "defaults", "qos": {}}
+    preview = check("PUT", "/peer-policy/roles/complete?dry_run=1", "/peer-policy/roles/{name}", definition)
+    check("PUT", "/peer-policy/roles/complete", "/peer-policy/roles/{name}",
+          dict(definition, confirm_token=preview["confirm_token"]))
+    check("GET", "/peer-policy", "/peer-policy")
+    check("GET", "/peer-policy/roles", "/peer-policy/roles")
+    check("GET", "/devices/d1/effective-qos", "/devices/{device_id}/effective-qos")
+    for did, address in (("d1", "192.0.2.1"), ("d2", "192.0.2.2")):
+        peer_endpoints.record_endpoint(os.path.join(cat.state_dir, "peer-endpoints.json"),
+                                      auth.Principal("device", did), address, 6881, time.time())
+    check("GET", "/peer-policy/explain?a=d1&b=d2", "/peer-policy/explain")
+    preview = check("PUT", "/peer-policy/qos?dry_run=1", "/peer-policy/qos", {"qos": {"max_peers": 4}})
+    assert preview["requires_confirmation"]
+    check("PUT", "/peer-policy/qos", "/peer-policy/qos",
+          {"qos": {"max_peers": 4}, "confirm_token": preview["confirm_token"]})

@@ -820,3 +820,238 @@ def test_unsupported_methods_authenticate_first_across_services(tmp_path):
         catalog_server.server_close()
         tracker_server.shutdown()
         tracker_server.server_close()
+
+
+@pytest.mark.parametrize("method,suffix", [
+    ("GET", "/peer-policy/roles"), ("PUT", "/peer-policy/roles/boat"),
+    ("DELETE", "/peer-policy/roles/boat"), ("PUT", "/peer-policy/qos"),
+    ("POST", "/devices/d1/role"), ("POST", "/devices/bulk-role"),
+    ("GET", "/devices/d1/effective-qos"), ("GET", "/peer-policy/explain"),
+])
+def test_role_qos_routes_map_both_tiers(method, suffix):
+    assert api_routes.console_to_management(method, "/api/v1" + suffix) == \
+        "/internal/v1" + suffix
+    assert api_routes.management_to_legacy(method, "/internal/v1" + suffix) == \
+        "/api" + suffix
+
+
+@pytest.fixture
+def policy_tiers(tmp_path, monkeypatch):
+    import gui_app
+    import gui_fleet
+    import peer_policy
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    fleet = gui_fleet.FleetStore(str(tmp_path / "state"))
+    store = catalog.CatalogStore(str(tmp_path / "state"))
+    fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+    auth_path = os.path.join(store.state_dir, "peer-policy.json")
+    lkg_path = os.path.join(store.state_dir, "peer-policy.lkg.json")
+    peer_policy.define_role(auth_path, lkg_path, "boat", {"restricted": True}, "test", 1)
+    cert, key = _certificate(tmp_path, "role-contract")
+    token = tmp_path / "tier-token"
+    _write_secret(token, "t" * 64)
+    management = management_api.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, catalog=store, certfile=str(cert),
+        keyfile=str(key), management_token_file=str(token))
+    _thread(management)
+    monkeypatch.setenv("IRIS_GUI_ALLOW_PLAINTEXT", "1")
+    console = gui_server.make_server("127.0.0.1", 0,
+        "https://localhost:%d" % management.server_address[1], str(token), str(cert))
+    _thread(console)
+    headers = {}
+    def request(tier, method, suffix, body=None, duplicates=False,
+                authorized=True, declared_length=None, match=True):
+        conn = (http.client.HTTPSConnection("127.0.0.1", management.server_address[1],
+                    context=ssl._create_unverified_context(), timeout=3)
+                if tier == "management" else http.client.HTTPConnection(
+                    "127.0.0.1", console.server_address[1], timeout=3))
+        raw = json.dumps(body).encode() if body is not None else b""
+        outgoing = dict(headers) if authorized else {}
+        if tier == "management":
+            outgoing["Authorization"] = "Bearer " + "t" * 64
+        if match:
+            outgoing["If-Match"] = management_api._revision_etag("peer-policy",
+                peer_policy.load_policy(auth_path, lkg_path).document["revision"])
+        conn.putrequest(method, ("/internal/v1" if tier == "management" else "/api/v1") + suffix)
+        for key, value in outgoing.items():
+            conn.putheader(key, value)
+        if duplicates:
+            conn.putheader("If-Match", outgoing["If-Match"])
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(len(raw) if declared_length is None else declared_length))
+        conn.endheaders(raw if declared_length is None else None)
+        response = conn.getresponse()
+        data = response.read()
+        result = response.status, dict(response.getheaders()), json.loads(data) if data else None
+        conn.close()
+        return result
+    status, response_headers, login = request("console", "POST", "/login",
+        {"username": "admin", "password": "pw"})
+    assert status == 200
+    headers.update(Cookie=response_headers["Set-Cookie"].split(";", 1)[0])
+    headers["X-CSRF-Token"] = login["csrf"]
+    yield request, fleet, store
+    console.shutdown(); console.server_close()
+    management.shutdown(); management.server_close()
+
+
+@pytest.mark.parametrize("method,suffix,body", [
+    ("PUT", "/peer-policy/roles/new", {"restricted": False}),
+    ("DELETE", "/peer-policy/roles/boat", {}),
+    ("PUT", "/peer-policy/qos", {"qos": {"max_peers": 4}}),
+    ("POST", "/devices/d1/role", {"role": "boat"}),
+    ("POST", "/devices/bulk-role", {"role": "boat", "device_ids": ["d1"]}),
+])
+def test_policy_contract_duplicate_match_rejected_at_both_tiers(policy_tiers, method, suffix, body):
+    import peer_policy
+    request, fleet, store = policy_tiers
+    def snapshot():
+        return fleet.snapshot(), peer_policy.load_policy(
+            os.path.join(store.state_dir, "peer-policy.json"),
+            os.path.join(store.state_dir, "peer-policy.lkg.json")).document
+    before = snapshot()
+    for tier in ("management", "console"):
+        status, headers, problem = request(tier, method, suffix + "?dry_run=1", body, duplicates=True)
+        assert status == 412, (tier, problem)
+        assert problem["code"] == "precondition_failed"
+        assert headers["ETag"] == management_api._revision_etag("peer-policy", before[1]["revision"])
+        status, _, problem = request(tier, method, suffix, duplicates=True,
+                                      authorized=False, declared_length=4096)
+        assert status == 401 and problem["code"] == "console-session-required"
+    assert snapshot() == before
+
+
+def test_policy_contract_live_problem_status_code_type_and_headers(policy_tiers):
+    from openapi_schema_validator import OAS32Validator
+    import openapi_contract
+    request, _, _ = policy_tiers
+    spec = openapi_contract.build_document()
+    cases = [
+        ("GET", "/peer-policy/explain?a=d1&b=d1", "/peer-policy/explain", None, {}, 422, "principal_unresolvable"),
+        ("GET", "/devices/missing/effective-qos", "/devices/{device_id}/effective-qos", None, {}, 404, "device_not_found"),
+        ("PUT", "/peer-policy/qos", "/peer-policy/qos", {"qos": {}, "role": "missing"}, {}, 404, "role_not_found"),
+        ("PUT", "/peer-policy/qos", "/peer-policy/qos", {"qos": {"numwant": -1}}, {}, 422, "invalid_policy"),
+        ("PUT", "/peer-policy/qos", "/peer-policy/qos", None, {"declared_length": 65537}, 413, "payload-too-large"),
+        ("PUT", "/peer-policy/qos", "/peer-policy/qos", {"qos": {}}, {"match": False}, 428, "precondition_required"),
+    ]
+    for tier in ("management", "console"):
+        prefix = "/internal/v1" if tier == "management" else "/api/v1"
+        for method, suffix, pattern, body, options, expected, code in cases:
+            status, headers, payload = request(tier, method, suffix, body, **options)
+            assert (status, payload["code"]) == (expected, code)
+            response = spec["paths"][prefix + pattern][method.lower()]["responses"][str(status)]
+            assert payload["code"] in response["x-iris-problem-codes"]
+            assert payload["type"] == api_problem.TYPE_BASE + payload["code"]
+            schema = response["content"]["application/problem+json"]["schema"]
+            if "$ref" in schema:
+                schema = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+            OAS32Validator(schema).validate(payload)
+            if "ETag" in headers:
+                assert "ETag" in response.get("headers", {})
+
+
+@pytest.mark.parametrize("method,suffix,template,body", [
+    ("GET", "/peer-policy/roles", "/peer-policy/roles", None),
+    ("GET", "/peer-policy/explain?a=d1&b=d1", "/peer-policy/explain", None),
+    ("GET", "/devices/d1/effective-qos", "/devices/{device_id}/effective-qos", None),
+    ("PUT", "/peer-policy/roles/boat", "/peer-policy/roles/{name}", {"restricted": True}),
+    ("DELETE", "/peer-policy/roles/boat", "/peer-policy/roles/{name}", {}),
+    ("PUT", "/peer-policy/qos", "/peer-policy/qos", {"qos": {}}),
+    ("POST", "/devices/d1/role", "/devices/{device_id}/role", {"role": None}),
+    ("POST", "/devices/bulk-role", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),
+    ("GET", "/peer-policy", "/peer-policy", None),
+])
+def test_final_repair_late_session_uses_exact_problem(policy_tiers, monkeypatch, method, suffix, template, body):
+    import gui_app
+    import openapi_contract
+    request, _, _ = policy_tiers
+    original = gui_app.GuiApp.session_info
+    spec = openapi_contract.build_document()
+    for tier in ("management", "console"):
+        calls = []
+        allowed = 2 if tier == "console" and method != "GET" else 1
+        def recheck(app, sid):
+            calls.append(sid)
+            return original(app, sid) if len(calls) <= allowed else None
+        with monkeypatch.context() as patch:
+            patch.setattr(gui_app.GuiApp, "session_info", recheck)
+            status, _, problem = request(tier, method, suffix, body)
+        assert len(calls) == allowed + 1
+        assert status == 401 and problem["code"] == "console-session-required"
+        assert problem["type"].endswith("#console-session-required")
+        prefix = "/internal/v1" if tier == "management" else "/api/v1"
+        assert set(spec["paths"][prefix + template][method.lower()]["responses"]["401"]["x-iris-problem-codes"]) == {
+            "console-session-required", "management-authentication-required"}
+
+
+def test_final_repair_null_peers_refuses_both_tiers_without_state(policy_tiers):
+    from pathlib import Path
+    request, fleet, store = policy_tiers
+    def state():
+        return {str(p.relative_to(store.state_dir)): p.read_bytes()
+                for p in Path(store.state_dir).rglob("*") if p.is_file() and not p.name.endswith(".lock")}
+    before = state()
+    for tier in ("management", "console"):
+        for query in ("", "?dry_run=1"):
+            status, _, problem = request(tier, "PUT", "/peer-policy/roles/boat" + query,
+                                          {"restricted": True, "peers": None})
+            assert status == 422 and problem["code"] == "invalid_policy"
+            assert state() == before
+
+
+def test_final_repair_future_status_view_catchup(policy_tiers):
+    from pathlib import Path
+    import peer_policy
+    import peer_enforcement
+    import peer_endpoints
+    import tracker
+    request, _, store = policy_tiers
+    auth_path = str(Path(store.state_dir) / "peer-policy.json")
+    lkg_path = str(Path(store.state_dir) / "peer-policy.lkg.json")
+    status_path = str(Path(store.state_dir) / "peer-enforcement.json")
+    doc = peer_policy.load_policy(auth_path, lkg_path).document
+    old = peer_enforcement.build_status("enforced", "s", "h", None, 0, 1000,
+        last_operation_exported_revision=doc["revision"] + 2,
+        operation_ack_epoch=doc.get("operation_ack_epoch"))
+    peer_enforcement.write_status(status_path, old)
+    old_bytes = Path(status_path).read_bytes()
+    for index, name in enumerate(("fiber", "copper", "mesh")):
+        tier = "management" if index % 2 else "console"
+        assert request(tier, "PUT", "/peer-policy/roles/" + name, {"restricted": True})[0] == 200
+        for read_tier in ("management", "console"):
+            view = request(read_tier, "GET", "/peer-policy")[2]
+            assert view["outbox"]["unacknowledged"] == index + 2
+            assert view["enforcement"]["last_operation_exported_revision"] == 0
+        assert Path(status_path).read_bytes() == old_bytes
+    class Aria:
+        def get_session_id(self): return "s"
+        def set_blocklist(self, ips): return {}
+    rec = tracker.TrackerReconciler((auth_path, lkg_path),
+        str(Path(store.state_dir) / "peer-endpoints.json"), status_path, Aria(),
+        peer_endpoints.PendingEndpointQueue(), lambda: [], lambda: set(),
+        audit_export=lambda entries: None, now=lambda: 1001)
+    rec.run_once()
+    assert request("console", "GET", "/peer-policy")[2]["outbox"]["unacknowledged"] == 0
+    assert request("management", "PUT", "/peer-policy/roles/last", {"restricted": True})[0] == 200
+    assert len(peer_policy.load_policy(auth_path, lkg_path).document["operation_outbox"]) == 1
+
+
+def test_policy_contract_browser_transport_and_tier_auth_codes(policy_tiers, monkeypatch):
+    import openapi_contract
+    request, _, _ = policy_tiers
+    spec = openapi_contract.build_document()
+    operation = spec["paths"]["/api/v1/peer-policy/qos"]["put"]
+    with monkeypatch.context() as patch:
+        def unavailable(*args):
+            raise gui_server.ConsoleConfigurationError("private")
+        patch.setattr(gui_server, "_tls_client_context", unavailable)
+        status, headers, problem = request("console", "PUT", "/peer-policy/qos", {"qos": {}})
+        assert status == 503 and problem["code"] == "management-api-unavailable"
+        assert problem["code"] in operation["responses"]["503"]["x-iris-problem-codes"]
+        assert headers["Retry-After"] == "1" and "private" not in json.dumps(problem)
+    with monkeypatch.context() as patch:
+        patch.setattr(gui_server, "_token_pair", lambda *args: ("invalid", None))
+        status, _, problem = request("console", "PUT", "/peer-policy/qos", {"qos": {}})
+        assert status == 401 and problem["code"] == "management-authentication-required"
+        assert problem["code"] in operation["responses"]["401"]["x-iris-problem-codes"]

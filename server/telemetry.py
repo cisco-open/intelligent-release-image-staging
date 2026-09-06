@@ -2183,17 +2183,33 @@ def _peer_policy_fact(policy, principal_type, device_id, ipv4):
         return None
     fail_closed = bool(getattr(policy, "fail_closed", False))
     principal = auth.Principal(principal_type, device_id)
-    try:
-        decision, matched_seq = _peer_policy.evaluate(doc, principal, ipv4)
-    except Exception:
-        decision, matched_seq = ("permit", None)
+    compiled = policy.roles
     assignment = doc.get("assignments", {}).get(device_id)
+    role = compiled.role_of.get(device_id) if compiled is not None else None
+    unknown = bool(compiled is not None and
+                   compiled.acl_by_role.get(role, {}).get("role_unknown"))
+    name, source = None, "none"
+    try:
+        name = _peer_policy.effective_acl_name(doc, principal, compiled=compiled)
+        source = _peer_policy.acl_source(doc, principal, compiled=compiled)
+        decision, matched_seq = _peer_policy.evaluate(
+            doc, principal, ipv4, compiled=compiled)
+    except Exception:
+        # Failure of enrichment cannot erase the known raw intent. The closed
+        # policy still denies; without that fact an error yields no permission.
+        if not fail_closed:
+            return None
+        decision, matched_seq = "deny", None
     return {
         "decision": "deny" if fail_closed else decision,
-        "matched_seq": matched_seq,
+        "matched_seq": None if fail_closed else matched_seq,
         "assignment": assignment,
         "quarantined": assignment == _peer_policy.RESERVED_QUARANTINE,
         "fail_closed": fail_closed,
+        "effective_acl": name, "acl_source": source, "role": role,
+        "role_unknown": unknown,
+        "role_shadowed_by": role if role and assignment is not None and
+            assignment != _peer_policy.RESERVED_QUARANTINE else None,
     }
 
 

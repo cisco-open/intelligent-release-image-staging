@@ -62,6 +62,43 @@ def _policy(auth_path, lkg_path):
     return peer_policy.load_policy(auth_path, lkg_path)
 
 
+@pytest.mark.parametrize("direction", ["tighten", "relax", "neutral"])
+@pytest.mark.parametrize("bulk", [False, True])
+def test_final_repair_backlog_preflight_preserves_fleet(tmp_path, direction, bulk):
+    from pathlib import Path
+    fleet = _fleet(tmp_path, 2)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True}), ("open", {"restricted": False})])
+    manager = _manager(tmp_path, fleet)
+    ids = ["d00", "d01"] if bulk else ["d00"]
+    if direction == "relax":
+        manager.set_roles(dict.fromkeys(ids, "boat"), actor="test")
+    target = "boat" if direction == "tighten" else "open"
+    doc = _policy(auth_path, lkg_path).document
+    doc["revision"] = 300
+    doc["operation_ack_epoch"] = "a" * 32
+    doc["operation_outbox"] = [dict(doc["operation_outbox"][0], revision=i + 1,
+                                    event_id="%016x" % i) for i in range(peer_policy.OUTBOX_CAP)]
+    Path(auth_path).write_text(json.dumps(doc))
+    manager.acked_revision_fn = lambda: {"last_operation_exported_revision": 400,
+                                       "operation_ack_epoch": "a" * 32}
+    def state():
+        return {str(p): p.read_bytes() for p in tmp_path.rglob("*")
+                if p.is_file() and not p.name.endswith(".lock")}
+    before = state()
+    with pytest.raises(_module().RoleManagementError) as caught:
+        if bulk:
+            manager.set_roles(dict.fromkeys(ids, target), actor="test")
+        else:
+            manager.set_role(ids[0], target, actor="test")
+    assert caught.value.code == "operation_backlog_full"
+    assert caught.value.partial is False
+    assert state() == before
+    with pytest.raises(peer_policy.OperationBacklogFull):
+        manager.set_roles(dict.fromkeys(ids, target), actor="test", dry_run=True)
+    assert state() == before
+
+
 def test_role_transaction_lock_is_outer_to_fleet_and_policy(tmp_path,
                                                             monkeypatch):
     fleet = _fleet(tmp_path)
@@ -129,9 +166,13 @@ def test_add_or_tighten_declares_before_policy_and_reports_failed_phase2(
     auth_path, lkg_path = _write_roles(tmp_path, [
         ("boat", {"restricted": True, "peers": ["boat"]})])
 
+    real_commit = peer_policy.commit_mutation
     def fail(*_args, **_kwargs):
+        if _kwargs.get("dry_run"):
+            assert fleet.get_device("d00").get("role") is None
+            return real_commit(*_args, **_kwargs)
         assert fleet.get_device("d00")["role"] == "boat"
-        raise peer_policy.OperationBacklogFull("full")
+        raise OSError("injected policy write failure after Fleet")
 
     monkeypatch.setattr(peer_policy, "commit_mutation", fail)
     with pytest.raises(_module().RoleManagementError) as caught:
@@ -831,3 +872,33 @@ def test_quarantine_waiting_on_retirement_rechecks_device_under_outer_lock(
     live = _policy(auth_path, lkg_path).document
     assert fleet.get_device("d00") is None
     assert "d00" not in live["assignments"]
+
+
+def test_role_confirmation_capture_runs_inside_policy_transaction(tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    coordinator = _module().RoleCoordinator(fleet, auth_path, lkg_path)
+    original = peer_policy.commit_mutation
+    inside = []
+    original_blast = peer_policy.blast_radius
+    def blast(*args, **kwargs):
+        assert inside, "preview must use the locked transaction candidate"
+        return original_blast(*args, **kwargs)
+    def commit(*args, **kwargs):
+        hook = kwargs.get("precommit")
+        assert hook is not None
+        def checked(prior, candidate):
+            inside.append(True)
+            try:
+                hook(prior, candidate)
+            finally:
+                inside.pop()
+        kwargs["precommit"] = checked
+        return original(*args, **kwargs)
+    monkeypatch.setattr(peer_policy, "commit_mutation", commit)
+    monkeypatch.setattr(peer_policy, "blast_radius", blast)
+    preview = coordinator.set_role("d1", "boat", "test", dry_run=True)
+    assert preview["requires_confirmation"]
+    assert not fleet.get_device("d1").get("role")

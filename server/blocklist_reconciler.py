@@ -34,6 +34,7 @@ import hashlib
 import ipaddress
 
 import peer_policy
+import reconciler_status as status_codes
 
 DerivedSet = collections.namedtuple(
     "DerivedSet",
@@ -290,7 +291,7 @@ def apply_blocklist(aria, denied_ips, apply_empty, session_id=_SESSION_UNSET):
         return ApplyOutcome(
             applied=True, success=False, aria_session_id=session,
             desired_hash=desired_hash, applied_revision=None,
-            last_effect=None, last_error=type(exc).__name__)
+            last_effect=None, last_error=status_codes.PEER_BLOCKLIST_APPLY_FAILED)
 
     return ApplyOutcome(
         applied=True, success=True, aria_session_id=session,

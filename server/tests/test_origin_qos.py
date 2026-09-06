@@ -172,6 +172,54 @@ class TestDesiredState:
 
 
 class TestOriginQosStatus:
+    def test_status_all_source_codes_and_invalid_known_fields(self, tmp_path):
+        import reconciler_status
+        oq = _module()
+        path = str(tmp_path / "origin.json")
+        for code in reconciler_status.ORIGIN_ERROR_CODES:
+            status = oq.build_status("degraded", "s", "h", 0, 0, 0, 10, last_error=code)
+            oq.write_status(path, dict(status, future="private"))
+            assert oq.read_status(path) == status
+        for change in ({"schema": 2}, {"updated_at": float("inf")},
+                       {"last_reconciled_at": -1}, {"global_option_count": True},
+                       {"target_download_count": -1}, {"applied_download_count": 1},
+                       {"aria_session_id": []}, {"last_error": {}}, {"state": []}):
+            oq.write_status(path, dict(status, **change))
+            assert oq.read_status(path) is None
+
+    def test_status_desired_failure_uses_source_code(self, tmp_path, monkeypatch):
+        oq = _module()
+        rec, paths = _reconciler(tmp_path, FakeAria())
+        def fail(*args):
+            raise PermissionError("secret")
+        monkeypatch.setattr(oq, "build_desired", fail)
+        rec.run_once()
+        assert oq.read_status(paths["origin_qos"])["last_error"] == "origin_desired_state_failed"
+
+    @pytest.mark.parametrize("error", ["PermissionError", "sentinel_secret"])
+    def test_status_error_vocabulary_is_closed(self, tmp_path, error):
+        oq = _module()
+        with pytest.raises(ValueError):
+            oq.build_status("degraded", "s", "h", 0, 0, 0, 10, last_error=error)
+        status = oq.build_status("enforced", "s", "h", 1, 0, 0, 10)
+        status["last_error"] = error
+        path = str(tmp_path / "origin.json")
+        oq.write_status(path, status)
+        assert oq.read_status(path) is None
+
+    @pytest.mark.parametrize("global_failure", [True, False])
+    def test_status_writer_errors_are_semantic(self, global_failure):
+        oq = _module()
+        class Aria(FakeAria):
+            def set_global_options(self, options):
+                if global_failure:
+                    raise PermissionError("secret")
+            def set_download_options(self, gid, options):
+                raise PermissionError("secret")
+        outcome = oq.apply_desired(Aria(), oq.build_desired(_configured_doc(), ["gid"]), "s")
+        assert outcome.last_error == ("origin_global_apply_failed" if global_failure
+                                      else "origin_download_apply_failed")
+
     def _status(self, **overrides):
         values = {
             "state": "enforced",
@@ -236,8 +284,8 @@ class TestOriginQosStatus:
     def test_last_error_is_a_bare_safe_code(self, value):
         with pytest.raises((TypeError, ValueError)):
             self._status(state="degraded", last_error=value)
-        assert self._status(state="degraded", last_error="RuntimeError") \
-            ["last_error"] == "RuntimeError"
+        assert self._status(state="degraded", last_error="origin_reconcile_failed") \
+            ["last_error"] == "origin_reconcile_failed"
 
     def test_atomic_round_trip_and_corrupt_or_missing_read(self, tmp_path):
         oq = _module()
@@ -360,7 +408,7 @@ class TestReconcileLifecycle:
         assert first["state"] == "degraded"
         assert first["global_option_count"] == 1
         assert first["applied_download_count"] == expected_applied
-        assert first["last_error"] == "RuntimeError"
+        assert first["last_error"] == "origin_download_apply_failed"
         assert rec._qos_last_hash is None
 
         rec.run_once()
@@ -621,7 +669,7 @@ class TestPreflightReconcilerIntegration:
             "mode": "preflight", "newly_denied_device_count": 0,
             "newly_denied_device_ids": [],
         }
-        assert oq.read_status(paths["origin_qos"])["last_error"] == "RuntimeError"
+        assert oq.read_status(paths["origin_qos"])["last_error"] == "origin_reconcile_failed"
 
     def test_endpoint_store_failure_preserves_valid_prior_preflight(
             self, tmp_path, monkeypatch):

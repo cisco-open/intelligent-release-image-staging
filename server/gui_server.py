@@ -418,9 +418,15 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             for name, value in self.headers.items():
                 low = name.lower()
                 if low in _HOP_HEADERS or low in (
-                        "authorization", "content-length"):
+                        "authorization", "content-length", "if-match"):
                     continue
                 outgoing[name] = value
+            matches = self.headers.get_all("If-Match", [])
+            if matches:
+                # Preserve every conditional field across the dict-based hop.
+                # The state owner's exact-singleton guard rejects the combined
+                # list, including identical duplicates, with its current ETag.
+                outgoing["If-Match"] = ", ".join(matches)
             outgoing["Authorization"] = "Bearer " + token
             # Exactly one BFF-validated framing header crosses the tier hop.
             outgoing["Content-Length"] = str(request_length)

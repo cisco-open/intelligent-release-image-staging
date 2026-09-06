@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, parse_qs, urlsplit
 
 import audit
+import auth
 import audit_export
 import bounded_pool
 import bulkhash_refresh
@@ -1010,8 +1011,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def acked_revision():
             status = peer_enforcement.read_status(enforcement_path) or {}
-            value = status.get("last_operation_exported_revision", 0)
-            return value if type(value) is int and value >= 0 else 0
+            return status
 
         return role_management.RoleCoordinator(
             fleet, auth_path, lkg_path, now_fn=now_fn,
@@ -1029,8 +1029,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         conflicts = status.get("conflicts")
         if not isinstance(conflicts, list):
             conflicts = []
-        types = sorted({str(c.get("reason")) for c in conflicts
-                        if isinstance(c, dict) and isinstance(c.get("reason"), str)})
+        types = sorted({c["reason"] for c in conflicts
+                        if isinstance(c, dict) and isinstance(c.get("reason"), str) and c.get("reason") in
+                        {"shared_permit_deny"}})
         effect = status.get("last_effect")
         # Reconciler effects are aggregate counters. Do not pass through an
         # arbitrary tracker document (which could accidentally grow an address).
@@ -1063,10 +1064,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "conflict_count": len(conflicts), "conflict_types": types,
             "last_effect": safe_effect,
             "last_error": status.get("last_error")
-                if isinstance(status.get("last_error"), str) else None,
-            "last_operation_exported_revision": status.get("last_operation_exported_revision")
-                if isinstance(status.get("last_operation_exported_revision"), int)
-                and not isinstance(status.get("last_operation_exported_revision"), bool) else 0,
+                if isinstance(status.get("last_error"), str) and re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{0,63}", status["last_error"]) else None,
+            "last_operation_exported_revision": peer_policy.effective_acked(doc, status),
             "mutual_origin": {
                 "mode": preflight["mode"],
                 "newly_denied_device_count": preflight[
@@ -1097,9 +1097,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             "last_reconciled_at": origin_last_reconciled,
             "last_error": origin_last_error,
         }
-        compiled_roles = peer_policy.compile_roles(doc)
-        role_members = {name: len(device_ids) for name, device_ids in
-                        compiled_roles.members_by_role.items()}
+        compiled_roles = result.roles
+        role_members = {name: len(compiled_roles.members_by_role[name])
+                        for name in sorted(compiled_roles.members_by_role)}
+        rows = fleet.snapshot()[1] if fleet is not None else []
+        drift = (role_management.drift_report(fleet, result) if fleet is not None
+                 else {"count": 0, "device_ids": [], "truncated": False})
+        acked = peer_policy.effective_acked(doc, status)
+        pending = sum(event["revision"] > acked
+                      for event in doc.get("operation_outbox", []))
         return {"schema": doc.get("schema"), "revision": doc.get("revision"),
                 "degraded": result.degraded, "fail_closed": result.fail_closed,
                 "quarantine": {"reserved": True,
@@ -1107,7 +1113,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "quarantine_assignments": sorted(
                     device_id for device_id, acl in doc.get("assignments", {}).items()
                     if acl == peer_policy.RESERVED_QUARANTINE),
-                "roles": {"members": role_members},
+                "roles_supported": True,
+                "roles_present": doc.get("roles_present", False),
+                "roles": {"defined": len(role_members),
+                          "restricted": len(compiled_roles.restricted),
+                          "members": role_members},
+                "role_drift": drift,
+                "outbox": {"unacknowledged": pending,
+                           "capacity": peer_policy.OUTBOX_CAP},
+                "fleet_rollup": {"issued_revision": None, "applied": {},
+                    "states": {"pre-instructions": sum(
+                        isinstance(row, dict) and bool(row.get("device_id"))
+                        for row in rows)}},
                 "enforcement": enforcement, "origin_qos": origin_view}
 
     def quarantine_assignment_ids():
@@ -1188,6 +1205,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      "Route not found")
                     self.close_connection = True
                     return False
+                route = api_routes.match("management", self.command, self.path)
+                self._task7_session_contract = (self.command, route.path) in {
+                    ("GET", "/internal/v1/peer-policy"),
+                    ("GET", "/internal/v1/peer-policy/roles"),
+                    ("GET", "/internal/v1/peer-policy/explain"),
+                    ("GET", "/internal/v1/devices/{device_id}/effective-qos"),
+                    ("PUT", "/internal/v1/peer-policy/roles/{name}"),
+                    ("DELETE", "/internal/v1/peer-policy/roles/{name}"),
+                    ("PUT", "/internal/v1/peer-policy/qos"),
+                    ("POST", "/internal/v1/devices/{device_id}/role"),
+                    ("POST", "/internal/v1/devices/bulk-role"),
+                }
                 self.path = mapped
             # A background view poll (GET + "X-IRIS-Poll: 1", sent by app.js's
             # periodic refreshers) validates the session WITHOUT refreshing its
@@ -1670,6 +1699,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     pass
             return self.client_address[0]
 
+        def _session_refusal(self):
+            if getattr(self, "_task7_session_contract", False):
+                api_problem.send(self, 401, "console-session-required", "Console session required")
+            else:
+                self._json(401, {"error": "unauthorized"})
+
         def _require_session_csrf(self, unread_body=0):
             """Return the session info for a valid session+CSRF request, else send
             the error response and return None. *unread_body* is the declared
@@ -1679,7 +1714,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             info = app.session_info(self._sid())
             if info is None:
                 self._drain_body(unread_body)
-                self._json(401, {"error": "unauthorized"})
+                self._session_refusal()
                 return None
             if not _csrf_ok(self.headers.get("X-CSRF-Token", ""), info["csrf"]):
                 self._drain_body(unread_body)
@@ -1834,9 +1869,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             ("X-IRIS-Certificate-Source",
                              "custom" if override else "built-in")))
                 return
+            if path in ("/api/peer-policy/roles", "/api/peer-policy/explain") or (
+                    path.startswith("/api/devices/") and path.endswith("/effective-qos")):
+                self._policy_read(path)
+                return
             if path == "/api/peer-policy":
                 if app.session_info(self._sid()) is None:
-                    self._json(401, {"error": "unauthorized"}); return
+                    self._session_refusal(); return
                 view = policy_view()
                 self._json(200, view, extra_headers=[
                     ("ETag", _revision_etag("peer-policy", view["revision"]))])
@@ -2896,8 +2935,268 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+        def _policy_problem(self, status, code, revision=None, **details):
+            self._finish_idempotency(None)
+            for key in ("code", "type", "title", "status", "error"):
+                details.pop(key, None)
+            headers = list(getattr(self, "_response_headers", ()))
+            if revision is not None:
+                headers.append(("ETag", _revision_etag("peer-policy", revision)))
+                details["revision"] = revision
+            api_problem.send(self, status, code, code.replace("_", " ").capitalize(),
+                             headers=headers, error=code, **details)
+
+        def _policy_failure(self, exc, actor=None, dry_run=False):
+            auth_path, lkg_path, _ = policy_paths()
+            current = peer_policy.load_policy(auth_path, lkg_path)
+            revision = current.document["revision"]
+            details = {}
+            if isinstance(exc, role_management.RoleManagementError):
+                code, status, details = exc.code, exc.status, dict(exc.result)
+                revision = details.pop("revision", revision)
+            elif isinstance(exc, peer_policy.RevisionConflict):
+                code, status, revision = "revision_conflict", 409, exc.revision
+            elif isinstance(exc, peer_policy.OperationBacklogFull):
+                code, status = "operation_backlog_full", 409
+            elif isinstance(exc, peer_policy.PolicyError):
+                code, status, details = exc.code, 422, dict(exc.details)
+            else:
+                code, status = "policy_unavailable", 503
+            if code in ("role_in_use", "role_isolated", "role_reserved_name",
+                        "role_shadowed_by_assignment", "operation_backlog_full"):
+                status = 409
+            elif code in ("role_not_found", "unknown_role", "device_not_found"):
+                status = 404
+            elif code == "confirmation_required":
+                status = 428
+            elif code in ("policy_fail_closed", "policy_write_failed", "policy_error") or \
+                    isinstance(exc, peer_policy.PolicyDegradedError) or \
+                    current.degraded or current.fail_closed:
+                code, status = "policy_unavailable", 503
+            elif status == 400:
+                status = 422
+            if code == "operation_backlog_full":
+                details.update(policy_view()["outbox"])
+            if actor is not None and not dry_run:
+                path = urlsplit(self.path).path
+                if path == "/api/devices/bulk-role":
+                    event, target = "device_role_bulk_change", "roles"
+                elif path.startswith("/api/devices/") and path.endswith("/role"):
+                    event = "device_role_change"
+                    target = unquote(path[len("/api/devices/"):-len("/role")])
+                else:
+                    event, target = "peer_policy_change", path.rsplit("/", 1)[-1]
+                self._audit(event, "device", action="role", target=target,
+                            actor=actor, result="fail", detail=code)
+            self._policy_problem(status, code, revision, **details)
+
+        def _policy_mutation(self, path, actor, raw=None):
+            """All new policy writes share strong CAS and bounded JSON parsing."""
+            auth_path, lkg_path, _ = policy_paths()
+            loaded = peer_policy.load_policy(auth_path, lkg_path)
+            revision = loaded.document["revision"]
+            match = self.headers.get_all("If-Match", [])
+            if not match:
+                self._policy_problem(428, "precondition_required", revision)
+                return
+            if match != [_revision_etag("peer-policy", revision)]:
+                self._policy_problem(412, "precondition_failed", revision)
+                return
+            if loaded.degraded or loaded.fail_closed:
+                self._policy_problem(503, "policy_unavailable", revision)
+                return
+            dry_run = False
+            try:
+                qs = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(qs) - {"dry_run"} or qs.get("dry_run", ["0"]) not in (["0"], ["1"]):
+                    raise peer_policy.PolicyError("bad query", code="invalid_policy_request")
+                dry_run = qs.get("dry_run") == ["1"]
+                if raw is None:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                    if length < 0 or length > _MAX_BODY:
+                        self._policy_problem(413, "payload-too-large", revision)
+                        return
+                    raw = self.rfile.read(length) if length else b""
+                body = json.loads(raw) if raw else {}
+                if not isinstance(body, dict):
+                    raise ValueError("object required")
+                token = body.get("confirm_token")
+                if token is not None and not isinstance(token, str):
+                    raise ValueError("bad token")
+                preview = {}
+                def precommit(prior, candidate):
+                    blast = peer_policy.blast_radius(
+                        prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD)
+                    preview.update(role_management.RoleCoordinator._blast_details(blast))
+                    if not dry_run and not peer_policy.confirm_blast_radius(
+                            prior, candidate, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD, token):
+                        raise peer_policy.PolicyError("confirmation required",
+                            code="confirmation_required", **preview)
+                options = dict(expected_revision=revision, dry_run=dry_run,
+                               precommit=precommit)
+                coordinator = role_coordinator()
+                if path.startswith("/api/peer-policy/roles/"):
+                    name = unquote(path[len("/api/peer-policy/roles/"):])
+                    if self.command == "DELETE":
+                        if set(body) - {"confirm_token"}:
+                            raise ValueError("bad delete fields")
+                        committed = coordinator.delete_role(name, actor, **options)
+                    else:
+                        definition = {key: value for key, value in body.items()
+                                      if key != "confirm_token"}
+                        committed = coordinator.define_role(name, definition, actor, **options)
+                elif path == "/api/peer-policy/qos":
+                    if set(body) - {"qos", "role", "confirm_token"} or "qos" not in body:
+                        raise ValueError("bad qos fields")
+                    role = body.get("role")
+                    if role is not None:
+                        peer_policy.validate_role_name(role)
+                    committed = coordinator.set_qos(body["qos"], actor, role=role, **options)
+                else:
+                    bulk = path == "/api/devices/bulk-role"
+                    if set(body) - ({"device_ids", "role", "confirm_token"} if bulk
+                                   else {"role", "confirm_token"}) or "role" not in body:
+                        raise ValueError("bad role fields")
+                    ids = body.get("device_ids") if bulk else [unquote(
+                        path[len("/api/devices/"):-len("/role")])]
+                    if not isinstance(ids, list) or not ids or \
+                            len(ids) > peer_endpoints.SUPPORTED_DEVICES or not all(
+                                isinstance(did, str) and did and did == did.strip()
+                                and "/" not in did for did in ids):
+                        raise ValueError("bad device ids")
+                    role_options = dict(expected_revision=revision, dry_run=dry_run,
+                                        require_confirmation=True, confirm_token=token)
+                    if bulk:
+                        result = coordinator.set_roles(
+                            {did: body["role"] for did in sorted(set(ids))},
+                            actor=actor, **role_options)
+                    else:
+                        result = coordinator.set_role(ids[0], body["role"], actor=actor,
+                                                      **role_options)
+                    result_revision = result.get("candidate_revision", result["revision"]) \
+                        if dry_run else result["revision"]
+                    result["revision"] = result_revision
+                    if not dry_run:
+                        self._audit("device_role_bulk_change" if bulk else "device_role_change",
+                            "device", action="role", actor=actor,
+                            target="role:" + (body["role"] or "") if bulk else ids[0],
+                            result="ok" if result.get("ok") else "fail",
+                            detail="applied %d; failed %d" %
+                                (result["applied"], len(result.get("failed", {}))))
+                    self._json(200, result, extra_headers=[
+                        ("ETag", _revision_etag("peer-policy", result_revision))])
+                    return
+                result = {"ok": True, "revision": committed["revision"],
+                          "candidate_revision": committed["revision"],
+                          "dry_run": dry_run, **preview}
+                headers = [("ETag", _revision_etag("peer-policy", committed["revision"]))]
+                if not dry_run:
+                    self._audit("peer_policy_change", "device", actor=actor,
+                        action=self.command.lower(), target=path.rsplit("/", 1)[-1],
+                        detail="policy revision %d" % committed["revision"])
+                if self.command == "DELETE" and not dry_run:
+                    self._send(204, "application/json", b"", headers)
+                else:
+                    self._json(200, result, extra_headers=headers)
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                if isinstance(exc, peer_policy.PolicyError):
+                    self._policy_failure(exc, actor=actor, dry_run=dry_run)
+                else:
+                    self._policy_problem(422, "invalid_policy_request", revision)
+            except Exception as exc:
+                self._policy_failure(exc, actor=actor, dry_run=dry_run)
+
+        def _policy_read(self, path):
+            if app.session_info(self._sid()) is None:
+                self._session_refusal()
+                return
+            auth_path, lkg_path, _ = policy_paths()
+            policy = peer_policy.load_policy(auth_path, lkg_path)
+            doc, compiled = policy.document, policy.roles
+            revision = doc["revision"]
+            result = {"revision": revision, "degraded": policy.degraded,
+                      "fail_closed": policy.fail_closed}
+            try:
+                if path == "/api/peer-policy/roles":
+                    definitions = doc.get("roles", {}).get("defs", {})
+                    result["roles"] = {name: definitions[name] for name in sorted(definitions)}
+                elif path.endswith("/effective-qos"):
+                    did = unquote(path[len("/api/devices/"):-len("/effective-qos")])
+                    if fleet is None or fleet.get_device(did) is None:
+                        self._policy_problem(404, "device_not_found", revision)
+                        return
+                    qos = peer_policy.explain_qos(doc, did)
+                    # These are pinned aria2 client constraints, not tracker caps:
+                    # DefaultBtAnnounce.cc emits 50 or 0; the peerless leecher
+                    # overrides min interval with BtAnnounce's 2 minute default.
+                    qos["numwant"].update(effective_ceiling=min(qos["numwant"]["value"], 50),
+                        runtime_request_zero="disabled", constraint_source="pinned-aria2-client")
+                    qos["announce_min_interval_s"].update(peerless_leecher_floor_s=120,
+                        constraint_source="pinned-aria2-client")
+                    qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
+                                                heartbeat_always=True)
+                    result.update(device_id=did, qos=qos, delivery_state="pre-instructions")
+                else:
+                    qs = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                    if set(qs) != {"a", "b"} or any(len(qs[k]) != 1 for k in qs):
+                        raise ValueError("bad principals")
+                    endpoints = peer_endpoints.fresh_endpoints(os.path.join(
+                        policy_state_dir(), "peer-endpoints.json"), now_fn())
+                    owners = {}
+                    for key, row in endpoints.items():
+                        for endpoint in row["endpoints"]:
+                            owners.setdefault(endpoint["ipv4"], set()).add(key)
+                    def resolve(value):
+                        if value == "service:seeder":
+                            principal = auth.Principal("service", "seeder")
+                        else:
+                            did = value[len("device:"):] if value.startswith("device:") else value
+                            if ":" in did or not did or fleet is None or fleet.get_device(did) is None:
+                                raise ValueError("unresolved principal")
+                            principal = auth.Principal("device", did)
+                        key = peer_endpoints.principal_key(principal)
+                        addresses = {ep["ipv4"] for ep in endpoints.get(key, {}).get("endpoints", [])}
+                        if len(addresses) != 1:
+                            raise ValueError("ambiguous endpoint")
+                        address = next(iter(addresses))
+                        if owners[address] != {key}:
+                            raise ValueError("ambiguous attribution")
+                        return principal, address
+                    left, left_ip = resolve(qs["a"][0])
+                    right, right_ip = resolve(qs["b"][0])
+                    def side(owner, subject, subject_ip):
+                        decision, seq = peer_policy.evaluate_for(
+                            doc, owner, subject, subject_ip, compiled=compiled)
+                        role = compiled.role_of.get(owner.id) if owner.type == "device" else None
+                        assignment = doc.get("assignments", {}).get(owner.id) \
+                            if owner.type == "device" else None
+                        return {"principal": {"type": owner.type, "id": owner.id},
+                            "role": role,
+                            "acl_source": peer_policy.acl_source(doc, owner, compiled=compiled),
+                            "acl_name": peer_policy.effective_acl_name(doc, owner, compiled=compiled),
+                            "decision": "deny" if policy.fail_closed else decision,
+                            "matched_seq": None if policy.fail_closed else seq,
+                            "role_unknown": bool(compiled.acl_by_role.get(role, {}).get("role_unknown")),
+                            "role_shadowed_by": role if role and assignment is not None and
+                                assignment != peer_policy.RESERVED_QUARANTINE else None}
+                    result.update(a=side(left, right, right_ip), b=side(right, left, left_ip))
+                    result["mutual"] = all(result[key]["decision"] == "permit" for key in ("a", "b"))
+                self._json(200, result, extra_headers=[("ETag", _revision_etag("peer-policy", revision))])
+            except (ValueError, peer_endpoints.EndpointStoreError):
+                if path == "/api/peer-policy/explain":
+                    self._policy_problem(422, "principal_unresolvable", revision)
+                else:
+                    self._policy_problem(503, "policy_unavailable", revision)
+            except Exception:
+                self._policy_problem(503, "policy_unavailable", revision)
+
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            if path.startswith("/api/peer-policy/roles/") or path == "/api/peer-policy/qos":
+                info = self._require_session_csrf()
+                if info is not None:
+                    self._policy_mutation(path, "console:" + info["username"])
+                return
             quarantine_prefix = "/api/peer-policy/quarantine/"
             if path.startswith(quarantine_prefix):
                 info = self._require_session_csrf()
@@ -3746,60 +4045,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
             if path == "/api/devices/bulk-role":
-                if fleet is None:
-                    self._json(404, {"error": "not found"}); return
-                body = self._json_body(raw)
-                if body is None:
-                    return
-                ids = body.get("device_ids")
-                if not isinstance(ids, list) or not ids or not all(
-                        isinstance(device_id, str) and device_id for
-                        device_id in ids):
-                    self._json(400, {"error": "device_ids must be a "
-                                              "non-empty array of strings"})
-                    return
-                if len(ids) > peer_endpoints.SUPPORTED_DEVICES:
-                    self._json(400, {"error": "device_ids exceeds the "
-                                              "supported fleet size (%d)"
-                                              % peer_endpoints.SUPPORTED_DEVICES})
-                    return
-                if "role" not in body:
-                    self._json(400, {"error": "role is required"}); return
-                requested_role = body.get("role")
-                try:
-                    result = role_coordinator().set_roles(
-                        {device_id: requested_role for device_id in ids},
-                        actor=actor)
-                except role_management.RoleManagementError as exc:
-                    result = exc.result
-                    drift_ids = result.get("role_drift", {}).get(
-                        "device_ids", [])
-                    detail = ("role -> %s; fleet applied %d/%d, fleet failed "
-                              "%d; coordination failed: %s" % (
-                                  requested_role or "(cleared)",
-                                  result.get("applied", 0), len(ids),
-                                  len(result.get("failed", {})), exc.code))
-                    if drift_ids:
-                        detail += "; drift: " + ", ".join(drift_ids[:10])
-                    self._audit(
-                        "device_role_bulk_change", "device", action="role",
-                        target="role:%s" % (requested_role or ""), actor=actor,
-                        result="fail", detail=detail)
-                    self._json(exc.status, result); return
-                failed = result.get("failed", {})
-                detail = "role -> %s across %d/%d device(s)" % (
-                    requested_role or "(cleared)", result["applied"], len(ids))
-                if failed:
-                    named = sorted(failed.items())
-                    detail += "; refused: " + ", ".join(
-                        "%s (%s)" % item for item in named[:10])
-                    if len(named) > 10:
-                        detail += " (+%d more)" % (len(named) - 10)
-                self._audit(
-                    "device_role_bulk_change", "device", action="role",
-                    target="role:%s" % (requested_role or ""), actor=actor,
-                    result="ok" if result.get("ok") else "fail", detail=detail)
-                self._json(200, result); return
+                self._policy_mutation(path, actor, raw)
+                return
             if path == "/api/devices/bulk-credential":
                 # issue #125: the console's "Select all N matching devices"
                 # bulk action used to fire one /api/devices/<id>/credential
@@ -3860,37 +4107,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._json(200, {"ok": True, "applied": applied,
                                  "failed": failed}); return
             if path.startswith("/api/devices/") and path.endswith("/role"):
-                if fleet is None:
-                    self._json(404, {"error": "not found"}); return
-                did = unquote(path[len("/api/devices/"):-len("/role")])
-                if not did.strip():
-                    self._json(400, {"error": "bad device id"}); return
-                body = self._json_body(raw)
-                if body is None:
-                    return
-                if "role" not in body:
-                    self._json(400, {"error": "role is required"}); return
-                old = (fleet.get_device(did) or {}).get("role")
-                try:
-                    result = role_coordinator().set_role(
-                        did, body.get("role"), actor=actor)
-                except role_management.RoleManagementError as exc:
-                    fleet_applied = exc.result.get(
-                        "applied", 1 if exc.partial else 0)
-                    self._audit(
-                        "device_role_change", "device", action="role",
-                        target=did, actor=actor, result="fail",
-                        detail="role %s -> %s; fleet applied %d/1; refused: %s" % (
-                            old or "(none)", body.get("role") or "(none)",
-                            fleet_applied, exc.code))
-                    self._json(exc.status, exc.result); return
-                self._audit(
-                    "device_role_change", "device", action="role", target=did,
-                    actor=actor, result="ok" if result.get("ok") else "fail",
-                    detail="role %s -> %s; applied %d, failed %d" % (
-                        old or "(none)", body.get("role") or "(none)",
-                        result["applied"], len(result.get("failed", {}))))
-                self._json(200, result); return
+                self._policy_mutation(path, actor, raw)
+                return
             if path.startswith("/api/devices/") and path.endswith("/assign"):
                 did = unquote(path[len("/api/devices/"):-len("/assign")])
                 if not did.strip():
@@ -4506,6 +4724,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             if info is None:
                 return
             actor = "console:" + info["username"]
+            if path.startswith("/api/peer-policy/roles/"):
+                self._policy_mutation(path, actor)
+                return
             if path == "/api/settings/audit-export" and creds is not None:
                 spath = audit_export.settings_path(
                     os.environ.get("IRIS_STATE", "/var/lib/iris"))

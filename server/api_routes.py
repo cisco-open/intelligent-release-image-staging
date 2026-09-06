@@ -29,6 +29,14 @@ class Route:
 # required.  Path variables are exactly one encoded URL segment.
 _CONSOLE_RESOURCES = (
     ("GET", "/peer-policy", "Read peer policy"),
+    ("GET", "/peer-policy/roles", "List role definitions"),
+    ("PUT", "/peer-policy/roles/{name}", "Replace a role definition"),
+    ("DELETE", "/peer-policy/roles/{name}", "Delete a role definition"),
+    ("PUT", "/peer-policy/qos", "Replace global or role QoS"),
+    ("POST", "/devices/{device_id}/role", "Set a device role"),
+    ("POST", "/devices/bulk-role", "Set device roles in bulk"),
+    ("GET", "/devices/{device_id}/effective-qos", "Explain effective device QoS"),
+    ("GET", "/peer-policy/explain", "Explain mutual peer access"),
     ("PUT", "/peer-policy/quarantine/{device_id}", "Set device quarantine"),
     ("GET", "/audit", "List audit events"),
     ("GET", "/audit/histogram", "Read audit histogram"),
