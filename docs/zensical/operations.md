@@ -556,6 +556,8 @@ the readiness checks separate:
   permissions before restarting. The receipt lives at
   `$IRIS_RUN/served-bundle.json` (default `/run/iris/served-bundle.json`),
   independently of the artifacts mount so a read-only mount is visible.
+  Readiness also requires this server startup to have confirmed provisioning;
+  a previous success receipt cannot hide a failure to write the new receipt.
 - The card separately compares the certificate the live services present with
   the public `iris-catalog.pem` copy onboarding distributes. A missing copy or
   mismatch means new onboarding is not ready. Reconcile that served artifact;

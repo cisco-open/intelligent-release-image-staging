@@ -204,13 +204,20 @@ def package_readiness(path, name, kind, platform, remedy):
     return entry
 
 
-def served_bundle_readiness(artifacts_dir, status_path):
+def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
     """Bind the latest startup provisioning result to both served files."""
     entry = {"name": "iris-agent.tgz", "fingerprint": None, "built_at": None,
              "provenance": None, "state": "unknown",
              "remedy": "Rebuild the server image and restart after correcting the provisioning error.",
              "reason": "provisioning-unavailable",
              "detail": "Guest Shell bundle provisioning evidence is unavailable or invalid."}
+    # A receipt may survive a failed attempt to replace it. The supervisor's
+    # current startup outcome is independent of that filesystem evidence.
+    if startup_state != "ok":
+        entry.update(state="stale" if startup_state == "failed" else "unknown",
+                     reason="startup-provisioning-unconfirmed",
+                     detail="This server startup did not confirm Guest Shell bundle provisioning; inspect startup logs.")
+        return entry
     try:
         with open(status_path, "rb") as handle:
             raw = handle.read(4097)
@@ -304,7 +311,8 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
                  admin_username,
                  telemetry_override_endpoint=None, telemetry_override_enabled=None,
                  telemetry_env_endpoint="", telemetry_env_enabled=False,
-                 image_verification_last_run=None, provision_status_path=None):
+                 image_verification_last_run=None, provision_status_path=None,
+                 provision_startup_state=None):
     """Assemble the four-card setup status. Pure: all inputs are supplied."""
     reference = read_pem_fingerprint(served_cert_path)
     distributed = read_pem_fingerprint(distributed_cert_path)
@@ -317,7 +325,8 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         os.path.join(artifacts_dir, name), name, kind, platform, remedy)
         for name, kind, platform, remedy in _PACKAGE_SPECS]
     if provision_status_path is not None:
-        items.append(served_bundle_readiness(artifacts_dir, provision_status_path))
+        items.append(served_bundle_readiness(
+            artifacts_dir, provision_status_path, provision_startup_state))
 
     packages = {
         "state": _worst([i["state"] for i in items]),

@@ -95,7 +95,8 @@ check_guest_status() {
 import sys
 import setup_status
 status = setup_status.build_status(sys.argv[1], '', '', 'admin',
-                                  provision_status_path=sys.argv[2])
+                                  provision_status_path=sys.argv[2],
+                                  provision_startup_state="ok")
 item = next(row for row in status['packages']['items'] if row['name'] == 'iris-agent.tgz')
 assert item['state'] == sys.argv[3], item
 if sys.argv[3] != 'ok':
@@ -167,4 +168,57 @@ PYTHON
   check_guest_status unknown
   printf '{"format":"iris-served-bundle-v1","state":"pending"}\n' > "$TMP/run/served-bundle.json"
   check_guest_status stale
+}
+
+run_startup_provisioning() {
+  # Execute the actual startup block with the provisioner path redirected to
+  # this test's file fixture; no secrets setup or services are needed.
+  python3 - "$BATS_TEST_DIRNAME/../docker-entrypoint.sh" "$TMP/startup-block.sh" <<'PYTHON'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+start = text.index('# Self-provision the derivable served artifacts')
+end = text.index('if [ "${SKIP_SUPERVISE:-0}"', start)
+Path(sys.argv[2]).write_text(text[start:end])
+PYTHON
+  export IRIS_DEVICE_DIR="$DEVICE" IRIS_ARIA2="$TMP/aria2c"
+  export IRIS_ARIA2_SUMS="$TMP/aria2c.sha256" IRIS_RUN="$TMP/run"
+  export IRIS_CRT_SRC="$TMP/config/tls/crt.pem" IRIS_ARTIFACTS_DIR="$ART"
+  bash() {
+    if [ "$1" = /opt/iris/server/provision-served.sh ]; then
+      command bash "$PROV" "$ART"
+    else
+      command bash "$@"
+    fi
+  }
+  # Keep -e active: the provision failure must not terminate server startup.
+  set -e
+  source "$TMP/startup-block.sh"
+  PYTHONPATH="$BATS_TEST_DIRNAME/.." python3 - "$ART" "$TMP/run/served-bundle.json" "$1" <<'PYTHON'
+import os, sys
+import setup_status
+startup = os.environ.get('_IRIS_SERVED_BUNDLE_STARTUP')
+assert startup == sys.argv[3], startup
+status = setup_status.build_status(sys.argv[1], '', '', 'admin',
+                                  provision_status_path=sys.argv[2],
+                                  provision_startup_state=startup)
+item = next(row for row in status['packages']['items'] if row['name'] == 'iris-agent.tgz')
+assert item['state'] == ('ok' if startup == 'ok' else 'stale'), item
+PYTHON
+}
+
+@test "startup rejects an old successful receipt when the next receipt cannot be written" {
+  run_prov
+  cp "$TMP/run/served-bundle.json" "$TMP/prior-receipt.json"
+  chmod 500 "$TMP/run"
+  run run_startup_provisioning failed
+  chmod 700 "$TMP/run"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cmp "$TMP/prior-receipt.json" "$TMP/run/served-bundle.json"
+}
+
+@test "startup success overrides inherited failure and is exported with its receipt" {
+  export _IRIS_SERVED_BUNDLE_STARTUP=failed
+  run run_startup_provisioning ok
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }

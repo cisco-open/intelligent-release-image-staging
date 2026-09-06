@@ -272,7 +272,14 @@ mkdir -p "$IRIS_ARTIFACTS_DIR/staging" 2>/dev/null || true
 # bootstrap.sh, iris-catalog.pem) into the artifacts dir so a fresh deploy
 # doesn't fail onboarding on missing files. Best-effort (never blocks startup).
 # Both IOx tars and iris-xr.rpm still have to be built out of band.
-bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR" || true
+# This state belongs to this supervisor invocation, not an artifact receipt.
+# A failed attempt to write a new receipt must override an older success.
+export _IRIS_SERVED_BUNDLE_STARTUP=pending
+if bash /opt/iris/server/provision-served.sh "$IRIS_ARTIFACTS_DIR"; then
+  export _IRIS_SERVED_BUNDLE_STARTUP=ok
+else
+  export _IRIS_SERVED_BUNDLE_STARTUP=failed
+fi
 
 if [ "${SKIP_SUPERVISE:-0}" = "1" ]; then
   echo "iris entrypoint: secrets decrypted to $IRIS_RUN (SKIP_SUPERVISE=1, not launching services)"
