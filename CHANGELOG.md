@@ -11,6 +11,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- Accept incoming peers whose BitTorrent handshake arrives together with
+  protocol messages, preserving the buffered messages (issue #174).
+- Enforce the per-torrent peer admission cap for stalled downloads and
+  pending outbound connections in aria2c (issue #168).
+
 ### Security
 - Validate seeder credentials before writing aria2 configuration or sending
   tracker headers. Reject malformed credentials without exposing their values.

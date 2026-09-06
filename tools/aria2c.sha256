@@ -5,25 +5,25 @@
 # aria2c deliverable — handed in as a binary artifact.
 # NOT downloaded. NOT built during a normal IRIS build.
 #
-# Rebuilt 2026-09-04 from the corresponding source published in
-# tools/aria2c-build/ (the same recipe this repository ships for GPLv2 §3),
-# against OpenSSL 3.5.8. The previous binaries were built on OpenSSL 3.5.7,
-# which Alpine withdrew when 3.5.8 shipped; because OpenSSL is linked
-# STATICALLY into aria2c, an OS update cannot patch it, so the ten issues
-# fixed in 3.5.8 could only be cleared by rebuilding. None of them looked
-# reachable in IRIS's client-only usage (see issue #109), but this was the
-# last change window before the client is frozen for Cisco signing.
+# Rebuilt 2026-09-06 with tools/aria2c-build/ and patches 0001 through 0006.
+# Includes the hard peer admission cap (#168) and preservation of messages
+# coalesced with BitTorrent handshakes (#174), retaining OpenSSL 3.5.8.
+# Pinned GNU make enables GCC's existing parallel LTO during compilation.
+# Validated via wire/RPC regressions and real BitTorrent transfers:
+# Execution: native x86_64; aarch64 under QEMU. See tools/aria2c-build/README.md.
 #
 # aria2-next version : 2.5.6
 # source pin         : d4971f0e12322e2ffcdb1721911b7d5c6206d0e5
-# patches applied    : 4
+# patches applied    : 6
 #   - 0001-getpeers-keys-filter.patch
 #   - 0002-fix-uaf-peer-blocklist-disconnect.patch
 #   - 0003-fix-pkcs12-chain-type-confusion.patch
 #   - 0004-fix-ed2k-iterator-invalidation.patch
+#   - 0005-hard-bt-max-peers.patch
+#   - 0006-preserve-coalesced-bt-handshake.patch
 #
 # tools/get-aria2c.sh verifies the handed-in binary against these
 # checksums and FAILS CLOSED on a mismatch, so a stale client cannot
 # silently ship. Update this file only when adopting a new build.
-66663337b99b3d8e273801999a37820fa18f42713cfab4af57a3caefc957555f  x86_64
-ea5b905702ed3e5674cde1f5628ea86faa1365a69342a3806cafaf881f82fcfd  aarch64
+2ea81814b97f46bb4eec035b3482f9b6767ac9ca65e6cdb82c5166d3a9939d6f  x86_64
+8c4849a53dbb749c53eb6047592148809f74e3e3b9c8a7d48dbb10ca1d398141  aarch64

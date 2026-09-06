@@ -16,7 +16,7 @@ verified against `tools/aria2c.sha256`; see `tools/get-aria2c.sh`.
 
 1. **Upstream fork** — <https://github.com/AnInsomniacy/aria2-next> at commit
    `d4971f0e12322e2ffcdb1721911b7d5c6206d0e5`.
-2. **The four patches in this directory**, applied in numeric order.
+2. **The six patches in this directory**, applied in numeric order.
 3. **The build scripts** — [`tools/aria2c-build/`](../aria2c-build/README.md),
    published in this repository.
 
@@ -42,6 +42,8 @@ Which patches matter to IRIS:
 | `0002-fix-uaf-peer-blocklist-disconnect.patch` | Fixes a use-after-free when a blocked BitTorrent peer is disconnected | **Yes** — reachable in normal swarm operation with peer policy enforced |
 | `0003-fix-pkcs12-chain-type-confusion.patch` | Fixes a PKCS#12 chain type confusion in the OpenSSL TLS context | No — IRIS configures no `.p12` credential; upstream hardening, carried at no cost |
 | `0004-fix-ed2k-iterator-invalidation.patch` | Fixes iterator invalidation in the ed2k attribute handling | No — IRIS drives aria2c for BitTorrent and HTTP only |
+| `0005-hard-bt-max-peers.patch` | Enforces the peer cap for slow/stalled downloaders and bounds outbound batches, including pending dials | **Yes** — makes the configured per-torrent cap effective (issue #168) |
+| `0006-preserve-coalesced-bt-handshake.patch` | Preserves messages received alongside the BitTorrent handshake and processes them immediately | **Yes** — prevents valid incoming peers being dropped when TCP combines messages (issue #174) |
 
 ## Build
 

@@ -1,0 +1,53 @@
+diff --git a/src/DefaultBtMessageReceiver.cc b/src/DefaultBtMessageReceiver.cc
+index 3bd8dd3f..afdc5576 100644
+--- a/src/DefaultBtMessageReceiver.cc
++++ b/src/DefaultBtMessageReceiver.cc
+@@ -91,7 +91,7 @@ DefaultBtMessageReceiver::receiveHandshake(bool quickReply)
+               util::toHex(peerConnection_->getBuffer() + 28, INFO_HASH_LENGTH)
+                   .c_str()));
+     }
+-    if (peerConnection_->getBufferLength() ==
++    if (peerConnection_->getBufferLength() >=
+             BtHandshakeMessage::MESSAGE_LENGTH &&
+         peerConnection_->receiveHandshake(data, dataLength)) {
+       auto msg = messageFactory_->createHandshakeMessage(data, dataLength);
+diff --git a/src/PeerConnection.cc b/src/PeerConnection.cc
+index 71402143..da93e5fe 100644
+--- a/src/PeerConnection.cc
++++ b/src/PeerConnection.cc
+@@ -197,12 +197,11 @@ bool PeerConnection::receiveMessage(unsigned char* data, size_t& dataLength)
+ bool PeerConnection::receiveHandshake(unsigned char* data, size_t& dataLength,
+                                       bool peek)
+ {
+-  if (BtHandshakeMessage::MESSAGE_LENGTH < resbufLength_) {
+-    throw DL_ABORT_EX(
+-        "More than BtHandshakeMessage::MESSAGE_LENGTH bytes are buffered.");
+-  }
++  // The MSE/legacy handoff may already include subsequent wire messages.
++  // Read and return only the handshake, keeping those messages for later.
+   bool retval = true;
+-  size_t remaining = BtHandshakeMessage::MESSAGE_LENGTH - resbufLength_;
++  size_t remaining = BtHandshakeMessage::MESSAGE_LENGTH -
++                     std::min(BtHandshakeMessage::MESSAGE_LENGTH, resbufLength_);
+   if (remaining > 0) {
+     size_t temp = remaining;
+     readData(resbuf_.get() + resbufLength_, remaining, encryptionEnabled_);
+@@ -219,11 +218,16 @@ bool PeerConnection::receiveHandshake(unsigned char* data, size_t& dataLength,
+       retval = false;
+     }
+   }
+-  size_t writeLength = std::min(resbufLength_, dataLength);
++  size_t writeLength = std::min(
++      BtHandshakeMessage::MESSAGE_LENGTH, std::min(resbufLength_, dataLength));
+   std::copy_n(resbuf_.get(), writeLength, data);
+   dataLength = writeLength;
+   if (retval && !peek) {
+-    resbufLength_ = 0;
++    resbufLength_ -= BtHandshakeMessage::MESSAGE_LENGTH;
++    memmove(resbuf_.get(),
++            resbuf_.get() + BtHandshakeMessage::MESSAGE_LENGTH, resbufLength_);
++    resbufOffset_ = 0;
++    msgOffset_ = 0;
+   }
+   return retval;
+ }

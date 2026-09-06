@@ -1035,7 +1035,7 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `IRIS_TICK_BACKOFF_MAX` | `600` (seconds) | IOx, XR, Guest Shell, router | Cap on the exponential backoff applied after a tick's agent process fails outright. |
 | `IRIS_TICK_JITTER_MAX` | `8` (seconds) | Guest Shell, router | Bound (0..N-1, uniform) on the per-tick sleep `bootstrap.sh` takes before contacting the catalog. The EEM timer's own 60s period is unaffected — IOS owns that clock. |
 | `IRIS_RPC_PORT` | `6800` | IOx, XR | Local aria2 JSON-RPC port; integer 1–65535. It is persisted as `rpc_port`. |
-| `IRIS_MAX_PEERS` | `10` | IOx, XR | Per-torrent peer limit; integer 1–1000. It is persisted as `max_peers`. |
+| `IRIS_MAX_PEERS` | `10` | IOx, XR | Hard per-torrent peer admission limit (including pending outbound connections) in the patched aria2c; integer 1–1000. It is persisted as `max_peers`. |
 | `IRIS_MAX_CONCURRENT` | `100` | IOx, XR | aria2 concurrent-download ceiling; integer 1–1000. |
 | `CAF_APP_PERSISTENT_DIR` | `/data` | IOx only | CAF persistent root. The profile stages and keeps its work/config/state under `<root>/iris`; it must be an absolute path without `..`. XR neither reads nor accepts it as a storage selector. |
 | `IRIS_TARGET_FS` | unset (auto-detect) | IOx only | Optional IOS filesystem preference such as `sdflash:`. The prefix grammar is checked here and the agent still requires live proof that the filesystem is writable and is not `crashinfo:`. XR rejects the variable and always uses `harddisk:`. |

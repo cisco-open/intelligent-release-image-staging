@@ -19,7 +19,7 @@ source:
 | Item | Where |
 | --- | --- |
 | Upstream fork and exact commit | named in `../aria2c-patches/README.md` |
-| The four patches | `../aria2c-patches/*.patch` |
+| The six patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 
@@ -75,3 +75,75 @@ different toolchain, musl version or flag set produces different bytes. The
 checksum pins the exact artifact IRIS ships, not the recipe. If you adopt a
 binary you built yourself, update that file deliberately — never edit it to
 silence a mismatch, because the mismatch is the mechanism working.
+
+## Peer-cap regression checks
+
+Patch `0005-hard-bt-max-peers.patch` makes `bt-max-peers` an admission limit
+for seeders and leechers, regardless of download speed. Pending outbound
+connections reserve slots before dialing. Zero retains upstream's unlimited
+meaning. The limit is per torrent; inbound sockets cannot be attributed to a
+torrent until their handshake identifies it. Lowering a running torrent's
+limit stops new admissions but does not evict existing peers.
+
+The existing inactivity policy is unchanged: established peers disconnect
+at 30 seconds when neither side is interested, or at 60 seconds without
+receiving a piece message or block request. Keepalives do not reset this
+activity timer. These two thresholds are hardcoded in
+`DefaultBtInteractive::checkActiveInteraction`; the peer cap is tunable.
+Receiving block requests counts as activity even if that peer sends us no
+payload. For ordinary torrents, the outbound sweep runs every 10 seconds;
+available peers and speed/minimum-peer heuristics determine replacement.
+
+Run the isolated loopback tests against the exact deliverable:
+
+```bash
+python3 test-peer-cap.py out/x86_64/aria2c
+python3 test-peer-cap.py out/x86_64/aria2c --mixed
+python3 test-peer-cap.py out/x86_64/aria2c --runtime
+python3 test-transfer.py out/x86_64/aria2c
+```
+
+The cap test offers 18 peers to stalled downloads, checking inbound and
+outbound limits of 10 and 1, unlimited mode, and seeder admission. `--mixed`
+exercises concurrent inbound and outbound attempts. `--runtime` verifies live
+RPC changes from 1 to 5 to 2, including retention of existing peers on a decrease. `--baseline` instead
+expects an unpatched binary to exceed 10 on both paths. Add `--parallel` to
+run up to four isolated cases concurrently. Peers deliberately
+send only the handshake, then remain idle without providing data. The
+transfer check stages a generated 3.125 MiB payload between two real clients
+with a cap of one and verifies its SHA-256. All processes and data are local
+and temporary; no running Iris services are involved.
+
+Use the same commands with `out/aarch64/aria2c` on ARM64, or with a registered
+QEMU binfmt handler. Emulated checks verify behavior, not native performance.
+
+## Coalesced BitTorrent handshake regression
+
+Patch `0006-preserve-coalesced-bt-handshake.patch` accepts a handshake and
+subsequent messages delivered in the same TCP read. It consumes exactly the
+68-byte handshake, retains trailing bytes for message parsing, and handles
+an already buffered complete handshake immediately. Fragmented handshakes
+and the existing peer admission cap retain their behavior.
+
+The builder includes pinned GNU make alongside Ninja. GCC's existing
+`-flto=auto` requires make to run LTO workers concurrently; without it, GCC
+falls back to serial optimization. This adds a build tool and preserves the
+existing runtime dependency versions, optimization flags and static linking.
+
+Run the handshake regression against the exact binary:
+
+```bash
+python3 test-handshake.py out/x86_64/aria2c --log-dir out/issue-174-validation/handshake-x86_64
+```
+
+The six handshake layouts cover handshake-only control, a coalesced bitfield,
+multiple coalesced messages, a partial trailing message, and two fragmented
+handshake paths. Tests require completed handshakes and the expected RPC
+bitfield/interest/choke state, then verify unknown-infohash rejection and ten
+admitted coalesced peers with the eleventh rejected. `--baseline` expects the
+old stall/rejection and requires the five-patch binary (patches 0001–0005,
+without 0006), because its admission check still requires patch 0005. The
+four-patch binary is suitable for the peer-cap baseline, not this baseline.
+Results, console output and protocol traces are retained in the log directory.
+Use the aarch64 binary for ARM64 tests; a registered QEMU binfmt handler or
+`--runner qemu-aarch64-static` also works for emulated validation.

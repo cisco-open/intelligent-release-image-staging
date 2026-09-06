@@ -1,0 +1,68 @@
+diff --git a/src/ActivePeerConnectionCommand.cc b/src/ActivePeerConnectionCommand.cc
+index d201254e..59d38914 100644
+--- a/src/ActivePeerConnectionCommand.cc
++++ b/src/ActivePeerConnectionCommand.cc
+@@ -99,23 +99,11 @@ bool ActivePeerConnectionCommand::execute()
+          (maxUploadLimit == 0 ||
+           stat.calculateUploadSpeed() < maxUploadLimit * 0.8)) ||
+         // for leecher state
+-        (!pieceStorage_->downloadFinished() &&
++        (!pieceStorage_->downloadFinished() && btRuntime_->lessThanMaxPeers() &&
+          (stat.calculateDownloadSpeed() < thresholdSpeed ||
+           btRuntime_->lessThanMinPeers()))) {
+ 
+-      int numConnection = 0;
+-      if (pieceStorage_->downloadFinished()) {
+-        if (btRuntime_->getMaxPeers() > btRuntime_->getConnections()) {
+-          numConnection =
+-              std::min(numNewConnection_, btRuntime_->getMaxPeers() -
+-                                              btRuntime_->getConnections());
+-        }
+-      }
+-      else {
+-        numConnection = numNewConnection_;
+-      }
+-
+-      makeNewConnections(numConnection);
++      makeNewConnections(numNewConnection_);
+ 
+       if (btRuntime_->getConnections() == 0 &&
+           !pieceStorage_->downloadFinished()) {
+@@ -129,7 +117,10 @@ bool ActivePeerConnectionCommand::execute()
+ 
+ void ActivePeerConnectionCommand::makeNewConnections(int num)
+ {
+-  for (; num && peerStorage_->isPeerAvailable(); --num) {
++  // Constructors reserve a connection immediately, including pending dials.
++  // Recheck each slot and preserve max-peers=0 (unlimited).
++  for (; num && btRuntime_->lessThanMaxPeers() &&
++         peerStorage_->isPeerAvailable(); --num) {
+     cuid_t ncuid = e_->newCUID();
+     std::shared_ptr<Peer> peer = peerStorage_->checkoutPeer(ncuid);
+     // sanity check
+diff --git a/src/PeerReceiveHandshakeCommand.cc b/src/PeerReceiveHandshakeCommand.cc
+index c4361860..b482c36b 100644
+--- a/src/PeerReceiveHandshakeCommand.cc
++++ b/src/PeerReceiveHandshakeCommand.cc
+@@ -120,19 +120,8 @@ bool PeerReceiveHandshakeCommand::executeInternal()
+                    " Dropping connection.");
+       return true;
+     }
+-    NetStat& stat = downloadContext->getNetStat();
+-    const int maxDownloadLimit =
+-        downloadContext->getOwnerRequestGroup()->getMaxDownloadSpeedLimit();
+-    int thresholdSpeed =
+-        downloadContext->getOwnerRequestGroup()->getOption()->getAsInt(
+-            PREF_BT_REQUEST_PEER_SPEED_LIMIT);
+-    if (maxDownloadLimit > 0) {
+-      thresholdSpeed = std::min(maxDownloadLimit, thresholdSpeed);
+-    }
+-
+-    if ((!pieceStorage->downloadFinished() &&
+-         stat.calculateDownloadSpeed() < thresholdSpeed) ||
+-        btRuntime->lessThanMaxPeers()) {
++    // Admission is bounded for both seeders and slow/stalled leechers.
++    if (btRuntime->lessThanMaxPeers()) {
+       // TODO addPeer and checkoutPeer must be "atomic", in a sense
+       // that the added peer must be checked out.
+       if (peerStorage->addAndCheckoutPeer(getPeer(), getCuid())) {
