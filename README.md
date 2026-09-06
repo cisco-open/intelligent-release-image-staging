@@ -1,6 +1,10 @@
 # IRIS: Intelligent Release and Image Staging
 
-IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. It uses a private BitTorrent swarm, a catalog of approved image metadata, and a small device agent to move large images efficiently while keeping verification on the device.
+IRIS stages Cisco images and patches across a network before an operator performs any install or reload activity. A server container manages the catalog, private BitTorrent tracker, and origin seeder; a separate Console container provides the browser interface. One shared agent runs in Guest Shell or in the common IOx and IOS-XR device image.
+
+[Docker on one host](docs/zensical/getting-started.md) runs both server containers by default. You can also use [separate Docker hosts](docs/zensical/docker-hosts.md) or [Kubernetes](docs/zensical/kubernetes.md).
+
+The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image transfers use the private BitTorrent swarm; see [network ports and flows](docs/zensical/network-ports.md) for connectivity requirements.
 
 > IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
 
@@ -8,7 +12,7 @@ IRIS stages Cisco images and patches across a network before an operator perform
 
 ## Documentation
 
-The detailed manual now lives in the Zensical documentation tree:
+The detailed manual lives in the Zensical documentation tree:
 
 Start at the [documentation overview](docs/zensical/index.md), or jump to a section:
 
@@ -26,8 +30,9 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 **Deploy the server**
 
 - [Server](docs/zensical/server.md) — services, state, bootstrap, certificates
-- [Container deployments](docs/zensical/containers.md) — the Compose seed server and agent containers
-- [Kubernetes](docs/zensical/kubernetes.md) — optional single-replica manifests
+- [Container deployments](docs/zensical/containers.md) — server, Console, and shared device image
+- [Docker on separate hosts](docs/zensical/docker-hosts.md) — independent server and Console deployment
+- [Kubernetes](docs/zensical/kubernetes.md) — optional split server and Console manifests
 
 **Onboard devices**
 
@@ -42,10 +47,12 @@ Start at the [documentation overview](docs/zensical/index.md), or jump to a sect
 - [Operations](docs/zensical/operations.md) — day-two commands, backups, cleanup
 - [Observability](docs/zensical/observability.md) — metrics, swarm map, OTLP export
 - [Telemetry export](docs/zensical/telemetry-export.md) — peer-distribution accounting: origin versus peer bytes, per-device peer transfer records, and the limits of each figure
+- [Splunk setup](docs/zensical/splunk.md) — collector configuration, HTTPS event ingestion, dashboards, and troubleshooting
 
 **Reference and development**
 
 - [Reference](docs/zensical/reference.md) — environment variables, file layouts, APIs
+- [Problem type registry](docs/zensical/problems.md) — stable API error identifiers
 - [Validation](docs/zensical/validation.md) — test suites and the lab checklist
 - [Development](docs/zensical/development.md) — working on IRIS itself
 
@@ -55,11 +62,11 @@ The public website source is in [docs/](docs/index.html). The GitHub Pages workf
 
 | Area | Purpose |
 | --- | --- |
-| `server/` | Tracker, catalog, seeder, artifact server, console, telemetry, encrypted state, and server tests. |
+| `server/` | Stateful tracker/catalog/seeder/artifact/telemetry tier, stateless web Console, management API, encrypted state, and server tests. |
 | `device/` | Catalyst Guest Shell installer, EEM applets, bootstrap, agent code, and device tests. |
 | `device/iox/` | ARM64 and x86_64 IOx app packaging and install path for supported Cisco platforms. |
-| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
-| `kubernetes/` | Optional single-replica seed-server deployment with persistent storage. |
+| `device/xr/` | IOS-XR appmgr wrapper metadata, package-build support, and tests for the common device image. |
+| `kubernetes/` | Optional split server and stateless Console workloads with server-only persistent storage. |
 | `fleet/` | CSV templates for device inventory and image assignments. |
 | `tools/` | Operator helpers for agent bundles, per-device installers, assignments, torrents, and releases. |
 | `docs/` | Dynamic public website, Zensical documentation source, and importable Splunk and Grafana dashboards. |

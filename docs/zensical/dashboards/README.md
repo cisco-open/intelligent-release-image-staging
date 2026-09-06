@@ -27,24 +27,44 @@ IRIS serves the Prometheus text format at `/metrics` on port 9101:
 ```yaml
 scrape_configs:
   - job_name: iris
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/iris-observability-token
+    tls_config:
+      ca_file: /etc/prometheus/secrets/iris-catalog.pem
+      server_name: 203.0.113.10
     static_configs:
       - targets: ['203.0.113.10:9101']
 ```
 
-Two conditions gate that endpoint:
+The endpoint requires:
 
 * `IRIS_OBSERVABILITY=1` must be set. With telemetry off, `/metrics` answers
-  404 while the rest of the 9101 listener (`/healthz`, `/swarm`, `/swarmmap`)
-  keeps running — so Prometheus reads the target as **down** and the board
-  renders blank. That is telemetry being off, not a broken server. See
+  404 while the minimal probes and management-authenticated `/swarm` keep
+  running — so Prometheus reads the target as **down** and the board renders
+  blank. That is telemetry being off, not a broken server. See
   [observability](../observability.md).
-* `IRIS_METRICS_PORT` must not be empty or `0`, which disables the listener
-  entirely.
+* Keep the telemetry listener on port 9101 in the shipped deployment.
+  Disabling it with `IRIS_METRICS_PORT=0` also removes health and swarm routes,
+  breaks the server healthcheck, and prevents normal Console startup in
+  Compose. Use the export settings to turn off external telemetry instead.
+* The scraper must present the raw observability bearer from its mounted
+  `current` file and verify the TLS identity with the catalog CA. `server_name`
+  above must match a certificate IP or DNS SAN.
+
+On a Compose deployment, create that raw token with `umask 077`, export its
+host path as `IRIS_OBSERVABILITY_TOKEN_FILE_HOST`, and make it readable by uid
+`10001`; then mount the same file into Prometheus at the `credentials_file`
+path above. The optional
+`IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST` exists only for rotation. See
+[Telemetry export](../telemetry-export.md#turning-export-on) for the exact host
+commands.
 
 Scraping `/metrics` directly and remote-writing it from a collector are
 equally fine — the board only needs the series to reach Prometheus. If you take
 the collector route, note that the `metrics/iris9101` pipeline shown in
-[Telemetry export](../telemetry-export.md) exports to Splunk HEC: it must gain
+[Splunk Setup](../splunk.md) exports to Splunk HEC: it must gain
 a `prometheusremotewrite` exporter pointed at your Prometheus before the
 aggregate panels have any data.
 
@@ -73,8 +93,7 @@ on them.
 The three **gauges** are not cumulative and none of `rate()`, `irate()`,
 `increase()`, `deriv()` or `resets()` means anything on them:
 
-* `iris_peer_unattributed_bytes_total` keeps the historical `_total` suffix for
-  dashboard compatibility but is the difference of two counters,
+* `iris_peer_unattributed_bytes_total` is a gauge calculated from two counters,
   `max(0, origin − traced)`. It steps **down** every time a device is traced
   late; `rate()` reads that as a counter reset and invents a burst of untraced
   bytes exactly when tracing improved. Graph the value.
@@ -95,11 +114,10 @@ read while it is alive — a peer that connects, takes bytes and leaves between
 two samples can never be pinned to anyone. So the boards split origin sent into
 bytes **traced to a device** and bytes that stay **untraced**: sent for
 certain, recipient unknown. Untraced is a normal outcome, not a failure and not
-a lost byte. The metric names above are unchanged —
+a lost byte. In the metric names,
 `iris_peer_attributed_bytes_total` is the traced total,
 `iris_peer_unattributed_bytes_total` is the untraced residue, and
-`iris_swarm_peers_attributed` counts the edges with traced totals — so a query
-you have already written keeps working while the panel above it says *traced*.
+`iris_swarm_peers_attributed` counts the edges with traced totals.
 
 Per-peer and per-device detail is deliberately **not** in Prometheus — it would
 put unbounded peer identity into label cardinality. That detail arrives as OTLP
@@ -107,7 +125,8 @@ log records and is read from the event index (Splunk) or Loki (Grafana).
 
 ## Importing the Splunk view
 
-The view is Simple XML and expects two indexes:
+Configure both telemetry feeds using [Splunk Setup](../splunk.md) before
+importing the view. The view is Simple XML and expects two indexes:
 
 | Index | Type | Sourcetype | Read with |
 | --- | --- | --- | --- |
@@ -126,7 +145,7 @@ context, then paste the file contents as the view's XML source and save. The
 
 ```bash
 curl -sS -u "$SPLUNK_USER" \
-  https://203.0.113.20:8089/servicesNS/nobody/search/data/ui/views \
+  https://splunk.example.com:8089/servicesNS/nobody/search/data/ui/views \
   -d name=iris_swarm_p2p \
   --data-urlencode "eai:data@splunk-iris-swarm.xml"
 ```
@@ -137,7 +156,7 @@ existing view, `POST` to the view's own endpoint with just `eai:data` (no
 
 ```bash
 curl -sS -u "$SPLUNK_USER" \
-  https://203.0.113.20:8089/servicesNS/nobody/search/data/ui/views/iris_swarm_p2p \
+  https://splunk.example.com:8089/servicesNS/nobody/search/data/ui/views/iris_swarm_p2p \
   --data-urlencode "eai:data@splunk-iris-swarm.xml"
 ```
 
@@ -183,21 +202,26 @@ uid `iris-swarm-p2p`.
 **Eight panels select the Loki stream `{service_name="iris-tracker"}` — and
 that includes all three headline delivery stats** (*Delivered to the fleet*,
 *Delivered peer to peer*, *Peer share of delivery*), the per-edge detail
-tables, and the per-device peer share. The collector chapter in
-[Telemetry export](../telemetry-export.md) builds only the Splunk HEC legs, so
+tables, and the per-device peer share. The collector configuration in
+[Splunk Setup](../splunk.md) builds only the Splunk HEC legs, so
 a Grafana-only site must add a Loki exporter and a logs pipeline of its own:
 
 ```yaml
 exporters:
   otlphttp/loki:
-    logs_endpoint: http://203.0.113.30:3100/otlp/v1/logs
+    logs_endpoint: https://loki.example.com/otlp/v1/logs
 
 service:
   pipelines:
     logs/iris_loki:
-      receivers: [otlp]
+      receivers: [otlp/iris]
+      processors: [filter/iris_logs, batch]
       exporters: [otlphttp/loki]
 ```
+
+Use your Loki deployment's HTTPS ingest endpoint and configure the exporter
+with its required authentication and trusted CA. The receiver and processors
+above are defined in [Splunk Setup](../splunk.md).
 
 Two mapping facts the board's queries depend on, both applied by Loki's own
 OTLP ingest:

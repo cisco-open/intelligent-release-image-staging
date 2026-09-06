@@ -4,11 +4,13 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 import re
+import subprocess
 import threading
 import time
 from types import SimpleNamespace
 
 import catalog as catalog_mod
+import gui_fleet
 import deployment_records
 import gui_onboard
 import pytest
@@ -41,6 +43,11 @@ class _CredsSH(_Creds):
         _Creds.__init__(self, profs)
         self._sh = stage_host
     def stage_host_secrets(self): return self._sh
+
+
+class _CorruptFleet:
+    def get_device(self, _device_id):
+        raise gui_fleet.FleetStateError("corrupt fleet shard")
 
 
 def _wait(svc, job_id, timeout=3.0):
@@ -97,6 +104,13 @@ def _svc(run_fn, stage_host=None, **kw):
         fleet, creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="10.9.9.9",
         run_fn=run_fn, **kw)
+
+
+def test_forget_host_key_returns_error_when_fleet_shard_is_corrupt():
+    svc = _svc(lambda *_args, **_kwargs: 0)
+    svc.fleet = _CorruptFleet()
+
+    assert svc.forget_host_key("d1") == (False, "fleet state unavailable")
 
 
 def test_onboard_assembles_env_and_streams(tmp_path):
@@ -311,6 +325,95 @@ def test_build_env_honors_iris_artifacts_dir_env(monkeypatch):
     _dev, env = svc._build_env("d1")
     assert env["IRIS_STAGE_LOCAL"] == "1"
     assert env["IRIS_ARTIFACTS_DIR"] == "/custom/artifacts"
+
+
+def test_build_env_uses_service_artifact_and_certificate_paths(monkeypatch):
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", "/old/artifacts")
+    monkeypatch.setenv("IRIS_CATALOG_CA_FILE", "/old/iris-catalog.pem")
+    svc = _svc(lambda p, e, on: 0, artifacts_dir="/current/artifacts")
+    _dev, env = svc._build_env("d1", mint=False)
+    assert env["IRIS_ARTIFACTS_DIR"] == "/current/artifacts"
+    assert env["IRIS_CRT_FILE"] == "/fake/crt.pem"
+    assert "IRIS_CATALOG_CA_FILE" not in env
+
+
+@pytest.mark.parametrize("config,public,explicit,expected", [
+    (None, None, None, "/etc/iris/tls/crt.pem"),
+    ("", "", None, "/etc/iris/tls/crt.pem"),
+    ("/data/config", None, None, "/data/config/tls/crt.pem"),
+    ("/data/config", "", None, "/data/config/tls/crt.pem"),
+    ("/data/config", "/custom/public.pem", None, "/custom/public.pem"),
+    ("/data/config", "/custom/public.pem", "/explicit/public.pem",
+     "/explicit/public.pem"),
+])
+def test_public_certificate_follows_server_config(
+        monkeypatch, config, public, explicit, expected):
+    for name, value in (("IRIS_CONFIG", config), ("IRIS_CRT_PUBLIC", public)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    # IRIS_CERT includes the server private key and is never a device CA.
+    monkeypatch.setenv("IRIS_CERT", "/run/iris/tls/cert.pem")
+    svc = gui_onboard.OnboardService(_Fleet({}), _Creds({}), crt_public=explicit)
+    assert svc.crt_public == expected
+
+
+@pytest.mark.parametrize("platform,management_type,model", [
+    ("guestshell", "routed", "C9300"),
+    ("router", "router-routed", "C8000V"),
+    ("router", "router-nat", "C8000V"),
+    ("iox", "routed", "IE-3400"),
+    ("xr-appmgr", "xr-host", "8010"),
+])
+@pytest.mark.parametrize("device_log", [None, "on"])
+def test_kubernetes_environment_supports_every_installer_dry_run(
+        monkeypatch, tmp_path, platform, management_type, model, device_log):
+    config = tmp_path / "data" / "config"
+    certificate = config / "tls" / "crt.pem"
+    certificate.parent.mkdir(parents=True)
+    # Guest Shell/router dry-run output embeds this exact public file.
+    certificate.write_text("public-device-certificate-fixture\n")
+    monkeypatch.setenv("IRIS_CONFIG", str(config))
+    monkeypatch.delenv("IRIS_CRT_PUBLIC", raising=False)
+    monkeypatch.setenv("IRIS_LOG", "/data/log")
+    monkeypatch.setenv("IRIS_STATE", "/data/state")
+    monkeypatch.setenv("IRIS_SSH_LEGACY", "1")
+    monkeypatch.setenv("IRIS_CRT_FILE", "/stale/crt.pem")
+    monkeypatch.setenv("IRIS_CATALOG_CA_FILE", "/stale/catalog.pem")
+    monkeypatch.setenv("IRIS_ARTIFACTS_DIR", str(tmp_path / "data" / "artifacts"))
+    device = {
+        "device_id": "d1", "device_ip": "192.0.2.1", "platform": platform,
+        "management_type": management_type, "model": model,
+        "credential_profile_id": "lab", "vlan": "666", "svi_ip": "10.0.0.2",
+        "svi_mask": "255.255.255.252", "guest_ip": "10.0.0.3",
+        "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+        "app_gateway": "10.0.0.2", "vpg_number": "0",
+        "nat_interface": "GigabitEthernet1",
+    }
+    svc = gui_onboard.OnboardService(
+        _Fleet({"d1": device}),
+        _Creds({"lab": {"device_user": "admin", "device_pass": "test-only"}}),
+        host_ip="192.0.2.10", mint_fn=lambda did: "test-enrollment-token")
+    env_extra = {"IRIS_LOG": device_log} if device_log else None
+    dev, env = svc._build_env("d1", env_extra=env_extra)
+    _, script = svc._resolve("d1", dev, env)
+    assert env["IRIS_CRT_FILE"] == str(certificate)
+    assert "IRIS_CATALOG_CA_FILE" not in env
+    assert env.get("IRIS_LOG") == device_log
+    assert env["IRIS_STATE"] == "/data/state"  # persistent device SSH trust
+    assert env["IRIS_SSH_LEGACY"] == "1"
+    result = subprocess.run(["bash", script, "--dry-run"], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    if platform in ("guestshell", "router"):
+        assert certificate.read_text() in result.stdout
+    else:
+        assert "IRIS_LOG=%s" % (device_log or "off") in result.stdout
+    # The same filtering applies to teardown without minting enrollment.
+    _, teardown_env = svc._build_env("d1", mint=False, env_extra=env_extra)
+    assert teardown_env.get("IRIS_LOG") == device_log
+    assert teardown_env["CATALOG_TOKEN"] == ""
 
 
 def test_build_env_raises_without_management_type():

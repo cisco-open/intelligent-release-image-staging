@@ -4,18 +4,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# The container supervisors (device/iox/entrypoint.sh for IE3x00/C9k app
-# hosting, device/xr/entrypoint.sh for the Cisco 8000 appmgr container) own
+# The unified device/container/entrypoint.sh supervisor owns
 # aria2c by the exact PID of the child they launched: no pgrep, no pkill, no
-# process-name matching anywhere. That is what lets both images ship without
-# procps. Static shape checks here, plus a functional pass that drives the
-# REAL supervisor functions (extracted from each script) with a stub aria2c
+# process-name matching anywhere. Static shape checks here, plus a functional
+# pass that drives the REAL supervisor functions with a stub aria2c
 # under /bin/sh -- dash on Debian, the container's own /bin/sh.
 
 setup() {
   DEVICE="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-  ENTRYPOINTS="$DEVICE/iox/entrypoint.sh $DEVICE/xr/entrypoint.sh"
-  DOCKERFILES="$DEVICE/iox/Dockerfile $DEVICE/xr/Dockerfile"
+  ENTRYPOINTS="$DEVICE/container/entrypoint.sh"
+  DOCKERFILES="$DEVICE/container/Dockerfile"
   PROBE="$BATS_TEST_DIRNAME/aria2_supervision_probe.sh"
 }
 
@@ -49,21 +47,16 @@ _code() { sed 's/[[:space:]]*#.*$//' "$1"; }
   # from one claiming the opposite, and the first test in this file already
   # pins the property against the CODE, which is where it matters.
 
-  # Alpine's busybox already provides ps/top/free/uptime, so the XR image needs
-  # no package for them -- verified by running both images. Only the Debian IOx
-  # image was missing them, so only it carries procps.
+  # Alpine BusyBox provides ps/top/free/kill to both profiles; procps would be
+  # redundant. The supervisor itself remains independent of either toolset.
   # Backslash continuations are joined first: the package list sits on the
   # line AFTER `apt-get install`, so a plain grep would silently match the
   # command and never see the packages -- passing whatever the list said.
   _pkg_line() { sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$1"; }
 
-  run bash -c "$(declare -f _pkg_line); _pkg_line '$DEVICE/xr/Dockerfile' | grep -E '^RUN apk add'"
+  run bash -c "$(declare -f _pkg_line); _pkg_line '$DEVICE/container/Dockerfile' | grep -E '^RUN apk add'"
   [ "$status" -eq 0 ]
   [[ "$output" != *procps* ]]
-
-  run bash -c "$(declare -f _pkg_line); _pkg_line '$DEVICE/iox/Dockerfile' | grep -E 'apt-get install'"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *procps* ]]
 }
 
 @test "aria2c runs as a tracked child of PID 1 with daemon-equivalent stdio" {
@@ -144,7 +137,9 @@ STUB
 #!/bin/sh
 set -eu
 eval "$(awk '/^(proc_stat|aria2_alive|stop_aria2c|start_aria2c)\(\)/,/^}/' "$1")"
-ARIA2="$2"; RPC_PORT=6800; MAX_PEERS=10; STAGE_DIR="$3"; HOOK=""
+ARIA2="$2"; RPC_PORT=6800; MAX_PEERS=10; MAX_CONCURRENT=100; STAGE_DIR="$3"; HOOK=""
+ARIA2_CONF="$3/aria2.conf"
+TRACKER_CA="$3/iris-catalog.pem"
 IRIS_LOG="${IRIS_LOG:-off}"; LOG_FILE="$STAGE_DIR/aria2c.log"
 ARIA2_PID=""; ARIA2_START=""
 start_aria2c s1 >/dev/null
@@ -170,6 +165,10 @@ HARNESS
     # seeding its staged images does not re-hash them on every relaunch.
     run grep -qx -- '--bt-seed-unverified=true' "$argv"
     [ "$status" -eq 0 ] || { echo "--bt-seed-unverified lost in $ep"; cat "$argv"; return 1; }
+    run grep -qx -- "--ca-certificate=$BATS_TEST_TMPDIR/launch/iris-catalog.pem" "$argv"
+    [ "$status" -eq 0 ] || { echo "tracker CA pin lost in $ep"; cat "$argv"; return 1; }
+    run grep -qx -- '--check-certificate=true' "$argv"
+    [ "$status" -eq 0 ] || { echo "tracker certificate checking lost in $ep"; cat "$argv"; return 1; }
   done
 }
 
@@ -212,14 +211,11 @@ HARNESS
   done
 }
 
-@test "the IOx and XR aria2c launch lines stay byte-identical (including the log gating)" {
-  # Coupled invariant: both platforms share one aria2c launch shape. Compare
-  # the actual "$ARIA2" ... invocation, not the surrounding comments (which
-  # are allowed, and known, to differ in wording between the two files).
-  iox="$(sed -n '/^  "\$ARIA2" \\/,/2>&1 &$/p' "$DEVICE/iox/entrypoint.sh")"
-  xr="$(sed -n '/^  "\$ARIA2" \\/,/2>&1 &$/p' "$DEVICE/xr/entrypoint.sh")"
-  [ -n "$iox" ] || { echo "could not locate the IOx launch line"; return 1; }
-  [ "$iox" = "$xr" ] || { echo "IOx and XR launch lines diverged:"; diff <(echo "$iox") <(echo "$xr"); return 1; }
+@test "IOx and XR have exactly one canonical aria2c launch line" {
+  [ -f "$DEVICE/container/entrypoint.sh" ] || return 1
+  [ ! -e "$DEVICE/iox/entrypoint.sh" ] || return 1
+  [ ! -e "$DEVICE/xr/entrypoint.sh" ] || return 1
+  [ "$(grep -c '^  "\$ARIA2" \\' "$DEVICE/container/entrypoint.sh")" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -275,6 +271,16 @@ HARNESS
     [ "$status" -eq 0 ] || { echo "$ep condemned a healthy daemon: $output"; return 1; }
     [ "$output" -eq 2 ] || { echo "$ep made $output probes, expected 2"; return 1; }
   done
+}
+
+@test "RPC health probe keeps its secret out of curl argv" {
+  ep="$DEVICE/container/entrypoint.sh"
+  run _health_verdict "$ep" 0
+  [ "$status" -eq 0 ]
+  run grep -q 'sekrit' "$BATS_TEST_TMPDIR/health/log"
+  [ "$status" -ne 0 ]
+  run grep -q -- '--data-binary @-' "$BATS_TEST_TMPDIR/health/log"
+  [ "$status" -eq 0 ]
 }
 
 @test "a refused connection is condemned at once -- nothing is listening" {

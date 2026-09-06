@@ -5,8 +5,9 @@
 """Pure telemetry-report logic for the IRIS device agent (issue #13).
 
 Everything here is deterministic and side-effect free (single exception:
-build_report_v2 reads the IRIS_RUNTIME_MODE env var, mirroring cli_ssh.select_cli's
-runtime gate), so it is fully unit-testable off-box. All I/O — aria2 RPC
+build_report_v2 reads the IRIS_DEVICE_PLATFORM selector, plus the legacy
+IRIS_RUNTIME_MODE only on the no-selector Guest Shell path), so it is fully
+unit-testable off-box. All I/O — aria2 RPC
 sampling, the report POST, syslog — lives in iris_agent._telemetry_tick and
 CatalogClient. Stdlib only (no requests/psutil): the agent runs in Guest Shell
 (C9300) and an IOx container (IE-3400) where only the standard library exists.
@@ -986,8 +987,17 @@ def build_report_v2(cfg, state, img_id, event, now, transfer_id, report_id,
     else:
         stage_state = "staging"
     peer_rows, peers_total, truncated, saturated = _report_peer_rows_v2(tele)
-    runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
-                    or cfg.get("runtime_mode") or "guestshell")
+    device_platform = (os.environ.get("IRIS_DEVICE_PLATFORM")
+                       or cfg.get("device_platform") or "").strip()
+    if device_platform == "iox":
+        runtime_mode = "container"
+    elif device_platform == "xr-appmgr":
+        runtime_mode = "xr-container"
+    else:
+        # No selector is the legacy Guest Shell compatibility path. Retain its
+        # previous env > conf > default behavior byte-for-byte.
+        runtime_mode = (os.environ.get("IRIS_RUNTIME_MODE")
+                        or cfg.get("runtime_mode") or "guestshell")
     # Content-at-end bytes are a MEASUREMENT (aria2's tellStatus at the
     # completion tick) and are emitted only when one was taken. A completion
     # tick with no stats — an operator-staged image adopted in place (aria2

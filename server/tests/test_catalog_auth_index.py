@@ -21,7 +21,7 @@ def test_index_resolves_current_catalog_token_typed():
     now = 1_000_000
     store, val = _store_with_catalog(now)
     idx = secrets_store.build_catalog_auth_index(store)
-    principal, secret_name, record = idx[val]
+    principal, secret_name, record = secrets_store.credential_for(idx, val)
     assert principal == auth.Principal("device", "dev-1")
     assert secret_name == "catalog_token"
     assert record["value"] == val
@@ -38,7 +38,7 @@ def test_index_resolves_catalog_token_prev():
         "revoked": False,
     }
     idx = secrets_store.build_catalog_auth_index(store)
-    principal, secret_name, record = idx[prev_val]
+    principal, secret_name, record = secrets_store.credential_for(idx, prev_val)
     assert principal == auth.Principal("device", "dev-1")
     assert secret_name == "catalog_token_prev"
 
@@ -53,10 +53,10 @@ def test_index_covers_current_and_prev_across_devices():
         "value": p1, "created_at": now, "expires_at": now + 300,
         "revoked": False}
     idx = secrets_store.build_catalog_auth_index(store)
-    assert idx[v1][0] == auth.Principal("device", "dev-1")
-    assert idx[v2][0] == auth.Principal("device", "dev-2")
-    assert idx[p1][0] == auth.Principal("device", "dev-1")
-    assert idx[p1][1] == "catalog_token_prev"
+    assert secrets_store.credential_for(idx, v1)[0] == auth.Principal("device", "dev-1")
+    assert secrets_store.credential_for(idx, v2)[0] == auth.Principal("device", "dev-2")
+    assert secrets_store.credential_for(idx, p1)[0] == auth.Principal("device", "dev-1")
+    assert secrets_store.credential_for(idx, p1)[1] == "catalog_token_prev"
 
 
 def test_index_ignores_non_catalog_secrets():
@@ -65,8 +65,8 @@ def test_index_ignores_non_catalog_secrets():
     av = secrets_store.mint(store, "dev-1", "announce_token", now)
     cv = secrets_store.mint(store, "dev-1", "catalog_token", now)
     idx = secrets_store.build_catalog_auth_index(store)
-    assert cv in idx
-    assert av not in idx
+    assert secrets_store.credential_for(idx, cv) is not None
+    assert secrets_store.credential_for(idx, av) is None
 
 
 def test_index_raises_token_free_on_duplicate_ownership():

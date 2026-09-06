@@ -1,19 +1,14 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Post-install setup status: certificate fingerprinting, IOx package
-introspection, and the worst-of status roll-up (spec 2026-08-24)."""
-import io
+"""Post-install setup status: runtime trust and package provenance."""
+import hashlib
 import os
-import tarfile
 
 import setup_status
 
 # Two tiny self-signed certificates, generated once and pinned here so the
-# tests need no openssl and no network. These are REAL, well-formed
-# certificates: the XR rows read the certificate's own notBefore out of the
-# DER, so a hand-edited fixture whose declared lengths no longer match its
-# bytes (what used to live here) parses as garbage and can never be "ok".
+# live-vs-distributed trust tests need no openssl and no network.
 CERT_A = """-----BEGIN CERTIFICATE-----
 MIIBfTCCASKgAwIBAgITErjOyrGbWj2MCSGl3JsCCnYoIzAKBggqhkjOPQQDAjAU
 MRIwEAYDVQQDDAlpcmlzLXRlc3QwHhcNMjYwODMxMTUyMTMzWhcNMzYwODI4MTUy
@@ -44,30 +39,30 @@ V7H1BW7MTLUDQL27
 """
 
 
-def _make_iox_package(path, pem_text=None, with_artifacts=True):
-    """Build a minimal IOx-shaped package: an outer tar containing
-    artifacts.tar.gz, which in turn contains iris-catalog.pem."""
-    inner = io.BytesIO()
-    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
-        if pem_text is not None:
-            data = pem_text.encode()
-            info = tarfile.TarInfo("iris-catalog.pem")
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
-        junk = b"x" * 16
-        other = tarfile.TarInfo("agent/agent_config.py")
-        other.size = len(junk)
-        tf.addfile(other, io.BytesIO(junk))
-    blob = inner.getvalue()
-    with tarfile.open(path, mode="w") as outer:
-        meta = b"descriptor-schema-version: '2.8'\n"
-        mi = tarfile.TarInfo("package.yaml")
-        mi.size = len(meta)
-        outer.addfile(mi, io.BytesIO(meta))
-        if with_artifacts:
-            ai = tarfile.TarInfo("artifacts.tar.gz")
-            ai.size = len(blob)
-            outer.addfile(ai, io.BytesIO(blob))
+def _make_wrapper(path, kind="iox", platform="linux/arm64", payload=None,
+                  manifest=True, overrides=None):
+    """Write arbitrary wrapper bytes and their real adjacent provenance."""
+    path = os.fspath(path)
+    name = os.path.basename(path)
+    data = payload if payload is not None else ("wrapper:" + name).encode()
+    with open(path, "wb") as handle:
+        handle.write(data)
+    values = {
+        "format": "iris-device-wrapper-v1",
+        "wrapper_kind": kind,
+        "wrapper_file": name,
+        "wrapper_sha256": hashlib.sha256(data).hexdigest(),
+        "platform": platform,
+        "canonical_index_digest": "sha256:" + "1" * 64,
+        "canonical_archive_sha256": "2" * 64,
+        "canonical_source_sha256": "3" * 64,
+    }
+    values.update(overrides or {})
+    if manifest:
+        with open(path + ".manifest", "w") as handle:
+            for key, value in values.items():
+                handle.write("%s=%s\n" % (key, value))
+    return values
 
 
 def test_fingerprint_is_colon_separated_uppercase_sha256():
@@ -88,46 +83,69 @@ def test_read_pem_fingerprint_missing_file_is_none(tmp_path):
     assert setup_status.read_pem_fingerprint(str(tmp_path / "nope.pem")) is None
 
 
-def test_package_fingerprint_reads_the_baked_cert(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_iox_package(p, CERT_A)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert reason == ""
-    assert fp == setup_status.fingerprint_pem(CERT_A)
+def _readiness(path, kind="iox", platform="linux/arm64"):
+    return setup_status.package_readiness(
+        str(path), os.path.basename(path), kind, platform, "rebuild")
 
 
-def test_package_fingerprint_absent_file(tmp_path):
-    fp, reason = setup_status.package_fingerprint(str(tmp_path / "gone.tar"))
-    assert fp is None and reason == "absent"
+def test_package_readiness_binds_readable_bytes_to_provenance(tmp_path):
+    p = tmp_path / "iris-arm64.tar"
+    expected = _make_wrapper(p)
+    item = _readiness(p)
+    assert item["state"] == "ok"
+    assert item["provenance"]["canonical_index_digest"] == \
+        expected["canonical_index_digest"]
+    assert "contents and native signatures are not inspected" in item["detail"]
 
 
-def test_package_fingerprint_without_artifacts_member(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_iox_package(p, CERT_A, with_artifacts=False)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp is None and reason == "no-artifacts"
+def test_package_readiness_absent_and_empty_are_not_ok(tmp_path):
+    missing = _readiness(tmp_path / "iris-arm64.tar")
+    assert missing["state"] == "absent" and missing["reason"] == "absent"
+    p = tmp_path / "iris-arm64.tar"
+    p.write_bytes(b"")
+    empty = _readiness(p)
+    assert empty["state"] == "unknown" and empty["reason"] == "empty"
 
 
-def test_package_fingerprint_without_baked_cert(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_iox_package(p, None)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp is None and reason == "no-cert"
+def test_package_readiness_requires_an_adjacent_manifest(tmp_path):
+    p = tmp_path / "iris-arm64.tar"
+    _make_wrapper(p, manifest=False)
+    item = _readiness(p)
+    assert item["state"] == "unknown"
+    assert item["reason"] == "provenance-absent"
 
 
-def test_package_fingerprint_with_unparseable_cert(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_iox_package(p, "not a valid certificate at all")
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp is None and reason == "bad-cert"
+def test_package_readiness_rejects_malformed_or_duplicate_provenance(tmp_path):
+    p = tmp_path / "iris-arm64.tar"
+    _make_wrapper(p)
+    with open(str(p) + ".manifest", "a") as handle:
+        handle.write("wrapper_file=other.tar\n")
+    item = _readiness(p)
+    assert item["state"] == "unknown"
+    assert item["reason"] == "provenance-invalid"
 
 
-def test_package_fingerprint_unreadable_tar(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    with open(p, "wb") as f:
-        f.write(b"this is not a tar at all")
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp is None and reason == "unreadable"
+def test_package_readiness_detects_wrapper_changed_after_manifest(tmp_path):
+    p = tmp_path / "iris-arm64.tar"
+    _make_wrapper(p)
+    with open(p, "ab") as handle:
+        handle.write(b"signed-or-tampered-after-build")
+    item = _readiness(p)
+    assert item["state"] == "stale"
+    assert item["reason"] == "wrapper-digest-mismatch"
+
+
+def test_package_readiness_validates_kind_platform_and_digest_shapes(tmp_path):
+    cases = ({"wrapper_kind": "xr-appmgr"},
+             {"platform": "linux/amd64"},
+             {"canonical_source_sha256": "not-a-digest"})
+    for index, overrides in enumerate(cases):
+        p = tmp_path / ("case-%s.tar" % index)
+        _make_wrapper(p, overrides=overrides)
+        item = setup_status.package_readiness(
+            str(p), p.name, "iox", "linux/arm64", "rebuild")
+        assert item["state"] == "unknown"
+        assert item["reason"] == "provenance-invalid"
 
 
 # --- status assembly -------------------------------------------------------
@@ -137,15 +155,14 @@ def _artifacts(tmp_path, arm_pem, amd_pem, served_pem=CERT_A,
     d = tmp_path / "artifacts"
     d.mkdir()
     if arm_pem is not None:
-        _make_iox_package(str(d / "iris-arm64.tar"), arm_pem)
+        _make_wrapper(d / "iris-arm64.tar")
     if amd_pem is not None:
-        _make_iox_package(str(d / "iris-amd64.tar"), amd_pem)
+        _make_wrapper(d / "iris-amd64.tar", platform="linux/amd64")
     served = tmp_path / "cert.pem"
     served.write_text(served_pem)
     if xr:
-        # Contents are irrelevant -- setup_status never parses this file,
-        # only its existence and mtime (see _xr_package_item).
-        (d / "iris-xr.rpm").write_bytes(b"not-a-real-rpm")
+        _make_wrapper(d / "iris-xr.rpm", kind="xr-appmgr",
+                      platform="linux/amd64")
     # the copy handed to devices; defaults to matching the served cert
     (d / "iris-catalog.pem").write_text(
         distributed_pem if distributed_pem is not None else served_pem)
@@ -164,9 +181,7 @@ def _call(d, served, admin="admin",
 
 
 def test_all_ok(tmp_path):
-    # xr=True: a site WITH XR devices, package built fresh (its mtime, like
-    # every file this test just wrote, is >= the served cert's) -- the third
-    # row must not keep an otherwise-clean packages card from reading 'ok'.
+    # xr=True: all three wrappers have readable bytes and matching provenance.
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
     st = _call(d, served)
     assert st["admin"]["state"] == "ok"
@@ -281,10 +296,10 @@ def test_telemetry_export_disabled_is_not_ok_even_with_an_endpoint(tmp_path):
     assert st["telemetry"]["state"] == "unset"
 
 
-def test_stale_package_wins_over_ok_sibling(tmp_path):
-    # arm64 pins a DIFFERENT cert than the one served -> stale
-    other = CERT_B
-    d, served = _artifacts(tmp_path, other, CERT_A)
+def test_stale_provenance_wins_over_ok_sibling(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    with open(os.path.join(d, "iris-arm64.tar"), "ab") as handle:
+        handle.write(b"changed after provenance was written")
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
     by_name = {i["name"]: i for i in st["packages"]["items"]}
@@ -301,8 +316,9 @@ def test_absent_package_is_not_ok(tmp_path):
 
 
 def test_stale_outranks_absent(tmp_path):
-    other = CERT_B
-    d, served = _artifacts(tmp_path, other, None)   # one stale, one absent
+    d, served = _artifacts(tmp_path, CERT_A, None)
+    with open(os.path.join(d, "iris-arm64.tar"), "ab") as handle:
+        handle.write(b"changed after provenance was written")
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
 
@@ -313,6 +329,16 @@ def test_unreadable_served_cert_is_unknown_never_ok(tmp_path):
         d, str(tmp_path / "missing.pem"),
         os.path.join(d, "iris-catalog.pem"), "admin")
     assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reference_fingerprint"] is None
+
+
+def test_non_text_served_cert_is_unknown_never_an_unhandled_error(tmp_path):
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
+    with open(served, "wb") as handle:
+        handle.write(b"\xff\xfe corrupt certificate")
+    st = _call(d, served)
+    assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reason"] == "served-cert-unavailable"
     assert st["packages"]["reference_fingerprint"] is None
 
 
@@ -339,12 +365,11 @@ def test_distributed_cert_unavailable_is_unknown(tmp_path):
     assert st["packages"]["reason"] == "distributed-cert-unavailable"
 
 
-def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
-    """When one package is stale and distributed cert is missing, the stale
-    finding must not be masked by the unknown state from missing cert. Stale
-    is the more urgent fact: a rebuild is needed."""
-    other = CERT_B
-    d, served = _artifacts(tmp_path, other, CERT_A)  # arm64 stale, amd64 ok
+def test_stale_provenance_not_masked_by_missing_distributed_cert(tmp_path):
+    """A stale wrapper/manifest pair outranks unavailable runtime trust."""
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)
+    with open(os.path.join(d, "iris-arm64.tar"), "ab") as handle:
+        handle.write(b"changed after provenance was written")
     # Delete the distributed cert to simulate it being unavailable
     os.remove(os.path.join(d, "iris-catalog.pem"))
     st = _call(d, served)
@@ -356,23 +381,9 @@ def test_stale_package_not_masked_by_missing_distributed_cert(tmp_path):
 
 
 # --- device-packages card: the third row, iris-xr.rpm ----------------------
-#
-# Wave C (post-walk fix): the packages card only ever enumerated the two IOx
-# tars, so an operator with Cisco 8000 (IOS-XR) devices in scope had no
-# signal that iris-xr.rpm -- which bakes the catalog certificate in exactly
-# like the tars do, but can silently ship a stale agent the same way -- was
-# never checked at all. Unlike the tars, this module cannot parse the RPM's
-# internal layout (no rpm/cpio reader, stdlib only), so it can only compare
-# build TIME against the served certificate's own mtime, never pin the
-# certificate the RPM actually contains. Every state below is paired with an
-# assertion on the item's "detail" text, because that honesty caveat is the
-# entire point of doing this differently from the tars.
-
-_BASE_TIME = 1_700_000_000.0
-# CERT_A's own notBefore (UTCTime 260831152133Z = 2026-08-31 15:21:33 UTC).
-# The XR rows anchor on this rather than on any file's mtime: the certificate's
-# creation time is the only baseline a re-copy of the pem cannot move.
-_CERT_A_NOT_BEFORE = 1_788_189_693.0
+# All native wrappers use the same byte/provenance contract. The XR RPM no
+# longer needs a certificate-age approximation because no certificate is baked
+# into the canonical image.
 
 
 def test_xr_package_absent_is_neutral_and_claims_nothing_checked(tmp_path):
@@ -392,94 +403,62 @@ def test_xr_package_absent_is_neutral_and_claims_nothing_checked(tmp_path):
     assert "detail" not in xr
 
 
-def test_xr_package_ok_when_built_after_the_current_certificate(tmp_path):
-    """Built after the served certificate came into existence -- the best
-    available evidence (build time, not contents) that it was produced against
-    the live cert. 'ok' here must still say plainly that contents were never
-    inspected, unlike an IOx tar's genuine fingerprint match."""
+def test_xr_package_ok_when_bytes_match_its_provenance(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    os.utime(os.path.join(d, "iris-xr.rpm"),
-             (_CERT_A_NOT_BEFORE + 100, _CERT_A_NOT_BEFORE + 100))
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
     assert xr["state"] == "ok"
     assert xr["fingerprint"] is None
-    assert xr["built_at"] == int(_CERT_A_NOT_BEFORE + 100)
-    assert "not inspected" in xr["detail"]
-    assert "certificate" in xr["detail"].lower()
+    assert xr["built_at"] is not None
+    assert "native signatures are not inspected" in xr["detail"]
+    assert xr["provenance"]["canonical_index_digest"].startswith("sha256:")
     assert st["packages"]["state"] == "ok"
 
 
-def test_xr_package_stale_when_built_before_the_current_certificate(tmp_path):
-    """Built before the served certificate existed -- it may still pin
-    whatever certificate preceded a rotation. This must roll the whole
-    packages card up to 'stale', the same as a genuinely mismatched tar
-    fingerprint, even though only build time (never contents) was checked
-    here."""
+def test_xr_package_stale_when_bytes_no_longer_match_provenance(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    os.utime(os.path.join(d, "iris-xr.rpm"),
-             (_CERT_A_NOT_BEFORE - 100, _CERT_A_NOT_BEFORE - 100))
+    with open(os.path.join(d, "iris-xr.rpm"), "ab") as handle:
+        handle.write(b"changed")
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
     assert xr["state"] == "stale"
-    assert xr["built_at"] == int(_CERT_A_NOT_BEFORE - 100)
-    assert "not inspected" in xr["detail"]
+    assert xr["reason"] == "wrapper-digest-mismatch"
     assert st["packages"]["state"] == "stale"
 
 
-def test_xr_package_survives_a_restaged_certificate_file(tmp_path):
-    """The operator-reported false positive of 2026-08-31.
-
-    The certificate itself is old -- the RPM was built well after it -- but
-    the pem on disk is a STAGED COPY that a later bring-up re-wrote, so its
-    mtime now sits far in the future. Baselining on that mtime reported
-    'Needs rebuild' for an RPM built eleven minutes after the very certificate
-    it was accused of predating. Only the certificate's own notBefore is
-    immune, because no re-copy can move it."""
+def test_certificate_rotation_does_not_stale_iox_or_xr_packages(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    # RPM built after the cert was created: genuinely fresh.
-    os.utime(os.path.join(d, "iris-xr.rpm"),
-             (_CERT_A_NOT_BEFORE + 100, _CERT_A_NOT_BEFORE + 100))
-    # ...but the pem file was re-staged long afterwards.
-    restaged = _CERT_A_NOT_BEFORE + 10_000_000
-    os.utime(served, (restaged, restaged))
+    with open(served, "w") as handle:
+        handle.write(CERT_B)
+    with open(os.path.join(d, "iris-catalog.pem"), "w") as handle:
+        handle.write(CERT_B)
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
-    xr = by_name["iris-xr.rpm"]
-    assert xr["state"] == "ok"
+    assert {item["state"] for item in by_name.values()} == {"ok"}
     assert st["packages"]["state"] == "ok"
 
 
-def test_xr_package_unknown_when_the_certificate_has_no_readable_not_before(tmp_path):
-    """Governing rule: never report ok on missing evidence. A pem whose
-    notBefore cannot be parsed leaves no honest baseline, so the row degrades
-    to unknown rather than silently falling back to a file mtime -- the very
-    baseline that produced the false positive above."""
+def test_xr_package_unknown_without_provenance(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
-    with open(served, "w") as fh:
-        fh.write("-----BEGIN CERTIFICATE-----\nbm90YWNlcnQ=\n"
-                 "-----END CERTIFICATE-----\n")
+    os.remove(os.path.join(d, "iris-xr.rpm.manifest"))
     st = _call(d, served)
     by_name = {i["name"]: i for i in st["packages"]["items"]}
-    xr = by_name["iris-xr.rpm"]
-    assert xr["state"] == "unknown"
+    assert by_name["iris-xr.rpm"]["state"] == "unknown"
+    assert by_name["iris-xr.rpm"]["reason"] == "provenance-absent"
 
 
-def test_xr_package_unknown_when_served_cert_is_unreadable(tmp_path):
-    """No reference certificate to compare build time against -- same
-    'no-reference' reason the tars use in this situation, and the same
-    never-ok rule (governing rule: never report ok on missing evidence)."""
+def test_unreadable_served_cert_does_not_change_xr_item_readiness(tmp_path):
     d, served = _artifacts(tmp_path, CERT_A, CERT_A, xr=True)
     st = setup_status.build_status(
         d, str(tmp_path / "missing.pem"),
         os.path.join(d, "iris-catalog.pem"), "admin")
     by_name = {i["name"]: i for i in st["packages"]["items"]}
     xr = by_name["iris-xr.rpm"]
-    assert xr["state"] == "unknown"
-    assert xr["reason"] == "no-reference"
-    assert "could not be read" in xr["detail"]
+    assert xr["state"] == "ok"
+    assert st["packages"]["state"] == "unknown"
+    assert st["packages"]["reason"] == "served-cert-unavailable"
 
 
 def test_xr_package_carries_its_own_build_script_remedy(tmp_path):
@@ -502,8 +481,9 @@ def test_xr_package_absent_does_not_outrank_a_stale_tar(tmp_path):
     because the XR row also rolled up to a non-ok state -- the same
     worst-of guarantee test_stale_outranks_absent already pins for the two
     tars, now with a third, absent-by-default row in the mix."""
-    other = CERT_B
-    d, served = _artifacts(tmp_path, other, CERT_A)   # xr=False -> absent
+    d, served = _artifacts(tmp_path, CERT_A, CERT_A)  # xr=False -> absent
+    with open(os.path.join(d, "iris-arm64.tar"), "ab") as handle:
+        handle.write(b"changed after provenance was written")
     st = _call(d, served)
     assert st["packages"]["state"] == "stale"
 
@@ -524,7 +504,9 @@ def test_route_is_registered_and_session_gated():
     """The console route must exist and must sit behind the session check,
     like every other /api/settings read."""
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(here, "gui_server.py")).read()
+    # The state-owning route moved behind the Console BFF; inspect the
+    # management implementation, not the deliberately state-free proxy.
+    src = open(os.path.join(here, "management_api.py")).read()
     assert '"/api/settings/setup-status"' in src
     idx = src.index('"/api/settings/setup-status"')
     window = src[idx:idx + 400]
@@ -545,13 +527,13 @@ def test_console_has_a_setup_pane_wired_to_the_endpoint():
     assert 'id="nav-settings-setup"' in html
     assert 'id="settings-pane-setup"' in html
     assert "'setup'" in js                       # registered in the pane list
-    assert "'/api/settings/setup-status'" in js
+    assert "'/api/v1/settings/setup-status'" in js
 
 
 def test_setup_pane_explains_why_each_step_matters():
     """Each card carries operator-facing rationale, not just a status chip."""
     html = _webroot("index.html")
-    for phrase in ("pins this server", "Guest Shell", "published anywhere"):
+    for phrase in ("deployment-neutral", "current certificate", "published anywhere"):
         assert phrase.lower() in html.lower()
 
 
@@ -641,27 +623,37 @@ def test_mismatch_reason_gets_its_own_guidance_not_the_rebuild_remedy():
     # Wave C generalized this from a single card-level pkg.remedy (one
     # rebuild command for the whole card) to a per-ITEM remedy, because the
     # IOx tars and the new iris-xr.rpm row are rebuilt by two DIFFERENT
-    # scripts -- a cert rotation can leave both families stale at once, and
+        # scripts -- multiple package families can need repair at once, and
     # a single hardcoded command could no longer speak for the card. The
     # push must still require BOTH the outer mismatch-reason gate AND each
-    # item's own state being 'stale' (not merely non-ok); losing either
+        # item's own state being non-ready;
+    # losing either
     # half of this guard (e.g. falling back to "any non-ok item gets the
     # rebuild line", or dropping the outer mismatch gate) is exactly the
     # bug this test guards against.
     assert "if (pkg.reason !== 'served-vs-distributed-mismatch') {" in fn
-    assert "i.state === 'stale'" in fn
+    assert "i.state !== 'ok'" in fn
 
 
-def test_remedy_text_dedupes_and_joins_multiple_stale_remedies():
-    """A cert rotation can stale an IOx tar and iris-xr.rpm at once (both
-    bake the same certificate) -- their two DIFFERENT rebuild scripts must
-    both show up, deduplicated (two stale tars sharing REMEDY must not
+def test_remedy_text_dedupes_and_joins_multiple_package_remedies():
+    """Invalid IOx and XR provenance needs two DIFFERENT rebuild scripts.
+    Both must show up, deduplicated (two bad tars sharing REMEDY must not
     print the same command twice), joined into one line rather than one
     remedy silently winning over the other."""
     js = _webroot("app.js")
     fn = _setup_pkg_remedy_fn(js)
     assert "remedies.indexOf(i.remedy) === -1" in fn
     assert "remedies.join('; ')" in fn
+
+
+def test_absent_packages_show_complete_host_build_commands():
+    """A fresh lab's absent artifacts must not leave the remedy area blank."""
+    js = _webroot("app.js")
+    fn = _setup_pkg_remedy_fn(js)
+    assert "i.state !== 'ok'" in fn
+    assert setup_status.REMEDY == "tools/provision-iox-packages.sh"
+    assert setup_status.REMEDY_XR == \
+        "tools/build-xr-package.sh --out artifacts/"
 
 
 def test_distributed_cert_unavailable_reason_explains_itself():
@@ -835,14 +827,14 @@ def test_m37_configured_but_unrun_schedule_gets_its_own_wording():
     never-run config and a truly unconfigured one both resolve to "unset"
     from that field alone -- see its docstring). The console tells them
     apart using the schedule's own mode, fetched separately from
-    /api/settings/image-verification, and renders a distinct label rather
+    /api/v1/settings/image-verification, and renders a distinct label rather
     than conflating the two."""
     js = _webroot("app.js")
     assert "'Configured — no successful run yet'" in js
     assert "function fetchIvScheduleConfigured()" in js
     fn = js.split("function fetchIvScheduleConfigured() {", 1)[1].split(
         "\n  }", 1)[0]
-    assert "'/api/settings/image-verification'" in fn
+    assert "'/api/v1/settings/image-verification'" in fn
     assert "(iv.mode || 'off') !== 'off'" in fn
     item_fn = js.split("function setupItemChipHTML(key, state, ivScheduleConfigured) {", 1)[1].split(
         "\n  }", 1)[0]
@@ -896,154 +888,3 @@ def test_wizard_first_incomplete_step_skips_optional_items():
     first = js.split("function wizardFirstIncompleteStep(", 1)[1].split("\n  }", 1)[0]
     assert "required === false" in first
     assert "SETUP_ITEM_OPTIONAL[WIZARD_STEPS[i].key]" in first
-
-
-# ---------------------------------------------------------------------------
-# Package layouts as device/iox/build.sh REALLY lays them out (review finding
-# IRIS-12-001). The _make_iox_package fixture above is the pre-2026-09-02
-# shape (a bare pem in artifacts.tar.gz); the two shapes below are what the
-# skopeo docker-archive build produces, with and without the top-level
-# pinned-cert probe member build.sh re-adds next to rootfs.tar.
-# ---------------------------------------------------------------------------
-
-def _classic_rootfs(baked_pem, legacy_dirs=False):
-    """A classic docker-archive rootfs.tar: manifest.json + <cfg>.json +
-    plain layer tars (skopeo style `<digest>.tar` plus the legacy
-    `<id>/layer.tar` symlink, or docker-save style `<id>/layer.tar` files).
-    The pem lives ONLY inside a layer, at the path the Dockerfile bakes."""
-    import hashlib
-    import json
-
-    def tar_bytes(members):
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as t:
-            for name, data in members:
-                ti = tarfile.TarInfo(name)
-                ti.size = len(data)
-                t.addfile(ti, io.BytesIO(data))
-        return buf.getvalue()
-
-    sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
-    base = tar_bytes([("etc/os-release", b"ID=debian\n"),
-                      ("opt/iris/bin/aria2c", b"\x7fELF fake " * 64)])
-    top = tar_bytes([("opt/iris/iris-catalog.pem", baked_pem.encode()),
-                     ("opt/iris/agent/iris_agent.py", b"AGENT = 1\n")])
-    d_base, d_top = sha(base), sha(top)
-    id_base, id_top = sha(b"legacy" + d_base.encode()), sha(b"legacy" + d_top.encode())
-    config = json.dumps({"architecture": "arm64", "rootfs": {
-        "type": "layers", "diff_ids": ["sha256:" + d_base, "sha256:" + d_top]}}).encode()
-    layers = ([id_base + "/layer.tar", id_top + "/layer.tar"] if legacy_dirs
-              else [d_base + ".tar", d_top + ".tar"])
-    manifest = json.dumps([{"Config": sha(config) + ".json",
-                            "RepoTags": ["iris-iox:arm64"], "Layers": layers}]).encode()
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as t:
-        def add(name, data):
-            ti = tarfile.TarInfo(name)
-            ti.size = len(data)
-            t.addfile(ti, io.BytesIO(data))
-        add("manifest.json", manifest)
-        add("repositories", json.dumps({"iris-iox": {"arm64": id_top}}).encode())
-        add(sha(config) + ".json", config)
-        for lid, dig, blob in ((id_base, d_base, base), (id_top, d_top, top)):
-            add(lid + "/VERSION", b"1.0")
-            add(lid + "/json", json.dumps({"id": lid}).encode())
-            if legacy_dirs:
-                add(lid + "/layer.tar", blob)
-            else:
-                add(dig + ".tar", blob)
-                ti = tarfile.TarInfo(lid + "/layer.tar")
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = "../" + dig + ".tar"
-                t.addfile(ti)
-    return buf.getvalue()
-
-
-def _make_built_package(path, baked_pem, probe_pem=None, legacy_dirs=False):
-    """An outer IOx tar whose artifacts.tar.gz holds package.yaml + a classic
-    rootfs.tar (pem baked in a layer) and, when probe_pem is given, the
-    top-level iris-catalog.pem probe member -- exactly `ioxclient package .`
-    over build.sh's packaging directory."""
-    inner = io.BytesIO()
-    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
-        members = [("package.yaml", b"descriptor-schema-version: '2.8'\n"),
-                   ("rootfs.tar", _classic_rootfs(baked_pem, legacy_dirs))]
-        if probe_pem is not None:
-            members.append(("iris-catalog.pem", probe_pem.encode()))
-        for name, data in members:
-            ti = tarfile.TarInfo(name)
-            ti.size = len(data)
-            tf.addfile(ti, io.BytesIO(data))
-    blob = inner.getvalue()
-    with tarfile.open(path, mode="w") as outer:
-        for name, data in (("package.yaml", b"descriptor-schema-version: '2.8'\n"),
-                           ("artifacts.tar.gz", blob)):
-            ti = tarfile.TarInfo(name)
-            ti.size = len(data)
-            outer.addfile(ti, io.BytesIO(data))
-
-
-def test_package_fingerprint_reads_the_probe_member_build_sh_packages(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_built_package(p, CERT_A, probe_pem=CERT_A)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert reason == ""
-    assert fp == setup_status.fingerprint_pem(CERT_A)
-
-
-def test_package_fingerprint_falls_back_to_the_layer_baked_cert(tmp_path):
-    # a package built between the 2026-09-02 slimming and the probe member's
-    # restoration: no top-level pem, the cert only inside a layer tar. It
-    # used to read as "no-cert" -> unknown forever; it must report what it
-    # really pins.
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_built_package(p, CERT_B, probe_pem=None)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert reason == ""
-    assert fp == setup_status.fingerprint_pem(CERT_B)
-
-
-def test_package_fingerprint_layer_fallback_handles_docker_save_dirs(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_built_package(p, CERT_B, probe_pem=None, legacy_dirs=True)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert reason == ""
-    assert fp == setup_status.fingerprint_pem(CERT_B)
-
-
-def test_package_fingerprint_prefers_the_probe_member_over_the_layer(tmp_path):
-    # the probe member is the contract; a divergent layer copy is a build bug
-    # this reader is not in a position to adjudicate, so it reports the member
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_built_package(p, CERT_B, probe_pem=CERT_A)
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp == setup_status.fingerprint_pem(CERT_A)
-
-
-def test_package_fingerprint_no_cert_anywhere_in_a_classic_package(tmp_path):
-    p = str(tmp_path / "iris-arm64.tar")
-    _make_built_package(p, "not a certificate", probe_pem=None)
-    # the baked "pem" is present but unparseable -> bad-cert, not no-cert
-    fp, reason = setup_status.package_fingerprint(p)
-    assert fp is None and reason == "bad-cert"
-    # and a rootfs that carries no pem at all -> no-cert
-    inner = io.BytesIO()
-    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as rt:
-            data = b"[]"
-            ti = tarfile.TarInfo("manifest.json")
-            ti.size = len(data)
-            rt.addfile(ti, io.BytesIO(data))
-        data = buf.getvalue()
-        ti = tarfile.TarInfo("rootfs.tar")
-        ti.size = len(data)
-        tf.addfile(ti, io.BytesIO(data))
-    q = str(tmp_path / "iris-amd64.tar")
-    with tarfile.open(q, mode="w") as outer:
-        blob = inner.getvalue()
-        ti = tarfile.TarInfo("artifacts.tar.gz")
-        ti.size = len(blob)
-        outer.addfile(ti, io.BytesIO(blob))
-    fp, reason = setup_status.package_fingerprint(q)
-    assert fp is None and reason == "no-cert"

@@ -4,8 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for device/xr/{Dockerfile, entrypoint.sh} -- the XR appmgr agent
-# container image (agentinfo/plans/2026-08-28-xr-agent.md, Task 1). The
+# XR-profile tests for the one device/container image and entrypoint. The
 # container is activated with "--net=host -v /misc/disk1:/hostmount"; that
 # bind mount IS harddisk: (write-through hardware-proven, see
 # agentinfo/xr-support/LAB-RESULTS-2026-08-27.md), so there is no placement
@@ -13,8 +12,9 @@
 
 setup() {
   XR_DIR="$BATS_TEST_DIRNAME/.."
-  DOCKERFILE="$XR_DIR/Dockerfile"
-  ENTRYPOINT="$XR_DIR/entrypoint.sh"
+  CONTAINER_DIR="$XR_DIR/../container"
+  DOCKERFILE="$CONTAINER_DIR/Dockerfile"
+  ENTRYPOINT="$CONTAINER_DIR/entrypoint.sh"
   REPO="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
   ROOT="$BATS_TEST_TMPDIR/root"
   CONF="$ROOT/etc/iris/iris-agent.conf"
@@ -31,12 +31,13 @@ setup() {
 # the script exits right there instead of falling through into its infinite
 # aria2c/tick loop -- deterministic, no backgrounding or timeouts needed. We
 # only ever assert on the conf file written before that point.
-# IRIS_XR_SKIP_MOUNT_CHECK=1: the entrypoint refuses to run unless the stage
+# IRIS_CONTAINER_TESTING + IRIS_TEST_SKIP_MOUNT_CHECK: the entrypoint refuses
 # dir is a real mount (the harddisk: bind mount on a device); the suite
 # runs it against a plain temporary directory, so the check is bypassed
 # here and exercised on its own below.
 _run_entrypoint() {
-  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+    IRIS_CONTAINER_TESTING=1 IRIS_TEST_SKIP_MOUNT_CHECK=1 \
     IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" \
     "$@" \
     bash "$ENTRYPOINT"
@@ -47,18 +48,21 @@ _run_entrypoint() {
 # ---------------------------------------------------------------------------
 
 @test "entrypoint refuses a stage dir that is not a mounted filesystem" {
-  # A plain directory under the test tmpdir is on the same filesystem as
-  # the container root would be: no bind mount, so the entrypoint must stop
-  # before it creates anything or synthesizes a conf.
+  # /tmp can itself be a bind mount in a sandbox. A nonexistent direct child
+  # of / has no non-root mount ancestor on any host. This validation-only
+  # sentinel must be rejected before mkdir or conf synthesis; never create it.
+  unmounted="/__iris_xr_not_a_mount_${BASHPID}"
+  [ ! -e "$unmounted" ]
   run env -i PATH="$PATH" \
-    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE/not-a-mount" \
+    IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
+    IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$unmounted" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 IRIS_DEVICE_ID=8010-r1 \
     bash "$ENTRYPOINT"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not a mounted filesystem"* ]]
-  [[ "$output" == *"/misc/disk1:/hostmount"* ]]
-  [ ! -d "$STAGE/not-a-mount/iris-work" ]
+  [[ "$output" == *"harddisk:"* ]]
+  [ ! -e "$unmounted" ]
   [ ! -f "$CONF" ]
 }
 
@@ -74,6 +78,7 @@ _run_entrypoint() {
   done < <(awk '$2 != "/" && $2 !~ /^\/(proc|sys|dev)(\/|$)/ { print $2 }' /proc/mounts)
   [ -n "$probe" ] || skip "no writable non-root mount point visible in /proc/mounts"
   run env -i PATH="$PATH" \
+    IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
     IRIS_AGENT_CONF="$probe/iris-agent.conf" IRIS_STAGE_DIR="$probe" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 IRIS_DEVICE_ID=8010-r1 \
@@ -85,8 +90,8 @@ _run_entrypoint() {
 }
 
 @test "the mount check bypass is documented as test-only" {
-  grep -q 'IRIS_XR_SKIP_MOUNT_CHECK' "$ENTRYPOINT"
-  grep -q 'never set it on a device' "$ENTRYPOINT"
+  grep -q 'IRIS_TEST_SKIP_MOUNT_CHECK' "$ENTRYPOINT"
+  grep -q 'IRIS_CONTAINER_TESTING' "$ENTRYPOINT"
 }
 
 @test "entrypoint.sh has no syntax errors" {
@@ -94,15 +99,11 @@ _run_entrypoint() {
   [ "$status" -eq 0 ]
 }
 
-@test "entrypoint.sh does not reference CAF/IOx-specific paths" {
-  run grep -q 'CAF_APP_PERSISTENT_DIR' "$ENTRYPOINT"
+@test "xr-appmgr rejects the IOx SSH environment surface" {
+  _run_entrypoint IRIS_DEVICE_SSH_HOST=192.0.2.1
   [ "$status" -ne 0 ]
-  run grep -q 'IRIS_SHARE_DIR\|IRIS_SHARE_IOS_PATH' "$ENTRYPOINT"
-  [ "$status" -ne 0 ]
-  run grep -q 'IRIS_DEVICE_SSH_' "$ENTRYPOINT"
-  [ "$status" -ne 0 ]
-  run grep -q 'IRIS_RUNTIME_MODE\|runtime_mode' "$ENTRYPOINT"
-  [ "$status" -ne 0 ]
+  [[ "$output" == *"forbids IRIS_DEVICE_SSH_"* ]]
+  [ ! -f "$CONF" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -157,15 +158,15 @@ _run_entrypoint() {
   [[ "$output" == *"mode = xr"* ]]
 }
 
-@test "conf synthesis ignores an operator-supplied IRIS_TARGET_FS -- XR has no placement step" {
+@test "conf synthesis rejects IRIS_TARGET_FS instead of overriding XR storage" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
     IRIS_DEVICE_ID=8010-r1 \
     IRIS_TARGET_FS=sdflash:
-  run cat "$CONF"
-  [[ "$output" == *"target_fs = harddisk:"* ]]
-  [[ "$output" != *"sdflash:"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"forbids IRIS_TARGET_FS"* ]]
+  [ ! -f "$CONF" ]
 }
 
 @test "conf synthesis applies telemetry/rpc_port/max_peers env overrides" {
@@ -204,13 +205,13 @@ _run_entrypoint() {
   [ "$status" -eq 0 ]
 }
 
-@test "conf synthesis defaults catalog_ca to the baked-in cert path" {
+@test "conf synthesis uses the runtime certificate on the harddisk bind mount" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
     IRIS_DEVICE_ID=8010-r1
   run cat "$CONF"
-  [[ "$output" == *"catalog_ca = /opt/iris/iris-catalog.pem"* ]]
+  [[ "$output" == *"catalog_ca = $STAGE/iris-catalog.pem"* ]]
 }
 
 @test "conf synthesis writes device_model from the installer's env" {
@@ -268,6 +269,16 @@ _run_entrypoint() {
   [ "$status" -eq 0 ]
 }
 
+@test "conf synthesis rejects a token outside the strict header grammar" {
+  _run_entrypoint \
+    IRIS_CATALOG_URL=https://198.51.100.1:8443 \
+    'IRIS_CATALOG_TOKEN=literal\c-token' \
+    IRIS_DEVICE_ID=8010-r1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS_CATALOG_TOKEN contains unsafe characters"* ]]
+  [ ! -e "$CONF" ]
+}
+
 @test "entrypoint creates the iris-work subdir under the stage dir" {
   _run_entrypoint \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
@@ -283,7 +294,8 @@ _run_entrypoint() {
 # container-local path re-synthesizes from the activation env (the original
 # enrollment token) and 401s forever once that token is past its TTL.
 @test "conf defaults under iris-work/ on the persistent mount, not a container-local path" {
-  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+    IRIS_CONTAINER_TESTING=1 IRIS_TEST_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=tok123 \
@@ -295,7 +307,8 @@ _run_entrypoint() {
 @test "a conf synthesized at the default path survives a from-scratch container recreation" {
   # First boot: no conf anywhere, synthesize from the activation env (the
   # original enrollment token) at the default path.
-  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+    IRIS_CONTAINER_TESTING=1 IRIS_TEST_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=enrollment-token \
@@ -310,7 +323,8 @@ _run_entrypoint() {
   # ORIGINAL enrollment token, the only thing appmgr ever hands the
   # container), but the SAME persistent mount. dropped-conf-wins must see
   # the conf already at the default path and keep the rotated token.
-  run env -i PATH="$PATH" IRIS_XR_SKIP_MOUNT_CHECK=1 \
+  run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=xr-appmgr \
+    IRIS_CONTAINER_TESTING=1 IRIS_TEST_SKIP_MOUNT_CHECK=1 \
     IRIS_STAGE_DIR="$STAGE" \
     IRIS_CATALOG_URL=https://198.51.100.1:8443 \
     IRIS_CATALOG_TOKEN=enrollment-token \
@@ -374,7 +388,9 @@ EOF
 _run_entrypoint_real_reconcile_impl() {
   local outfile pid waited=0 secs=5
   outfile="$(mktemp)"
-  ( env -i PATH="$PATH" PYTHONPATH="$REPO/device/agent" IRIS_XR_SKIP_MOUNT_CHECK=1 \
+  ( env -i PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
+        IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
+        IRIS_TEST_SKIP_MOUNT_CHECK=1 \
         IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$STAGE" IRIS_TICK_SECONDS=1 \
         "$@" \
         bash "$ENTRYPOINT" >"$outfile" 2>&1 ) &
@@ -410,6 +426,14 @@ EOF
   chmod 600 "$CONF"
 }
 
+@test "real reconcile replaces the legacy baked certificate path before validating it" {
+  _drop_conf_missing_target_fs_and_stage_dir
+  printf '%s\n' 'catalog_ca = /opt/iris/iris-catalog.pem' >> "$CONF"
+  _run_entrypoint_real_reconcile
+  grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
+  ! grep -q '^catalog_ca = /opt/iris/iris-catalog.pem$' "$CONF"
+}
+
 @test "real reconcile: a dropped conf missing target_fs is force-corrected to harddisk:, not wiped by agent_config's IOx default" {
   _drop_conf_missing_target_fs_and_stage_dir
   _run_entrypoint_real_reconcile
@@ -437,21 +461,20 @@ EOF
   ! grep -iE '(TOKEN|PASS|SECRET)=' "$DOCKERFILE"
 }
 
-@test "Dockerfile does not install an SSH/CLI transport -- XR needs none" {
-  # Check only the actual package-install line (apk add on the Alpine base),
-  # not the explanatory comment above it (which names openssh-client/sshpass
-  # deliberately, to say why they are absent here unlike device/iox/Dockerfile).
+@test "shared Dockerfile carries the IOx SSH transport but XR cannot select it" {
+  # One image means the IOx transport is physically present. Runtime isolation
+  # is enforced by the platform selector tests above: xr-appmgr rejects every
+  # SSH credential variable before the agent starts.
   run grep -E '^RUN apk add' "$DOCKERFILE"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"openssh-client"* ]]
-  [[ "$output" != *"sshpass"* ]]
+  [[ "$output" == *"openssh-client"* ]]
+  [[ "$output" == *"sshpass"* ]]
 }
 
 @test "Dockerfile installs only the runtime packages the entrypoint needs" {
-  # curl (RPC health probe + peer-transfer hook) and ca-certificates; the
-  # aria2c supervisor owns its child by exact PID and /proc starttime (no
-  # pgrep/pkill anywhere -- test_aria2_supervision.bats pins that), so
-  # procps must NOT be pulled in, and nothing may be pip-installed.
+  # Alpine BusyBox supplies the four retained diagnostic commands
+  # (ps/top/free/kill), so procps would only duplicate them. Nothing may be
+  # pip-installed.
   run grep -E '^RUN apk add' "$DOCKERFILE"
   [ "$status" -eq 0 ]
   [[ "$output" == *"--no-cache"* ]]
@@ -461,13 +484,14 @@ EOF
   ! grep -qE '^RUN .*pip3? install' "$DOCKERFILE"
 }
 
-@test "Dockerfile is a multi-stage-free x86_64 build (no arch-pinned base image)" {
+@test "Dockerfile is a multi-stage-free multi-architecture build" {
   # Official python image on Alpine, pinned by INDEX digest (tag@sha256:...)
   # so a rebuild is reproducible; the tag stays for human readability.
   grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$DOCKERFILE"
   run grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$DOCKERFILE"
   [ "$status" -ne 0 ]
   [ "$(grep -c '^FROM ' "$DOCKERFILE")" -eq 1 ]
+  grep -q '^ARG TARGETARCH$' "$DOCKERFILE"
 }
 
 # ---------------------------------------------------------------------------
@@ -505,12 +529,13 @@ _stage_build_context() {
   cp "$REPO"/device/verify_image.py "$CTX/agent/verify_image.py"
   cp "$REPO/VERSION" "$CTX/agent/VERSION"
   # docker build only chmods this file, never executes it -- content is moot.
-  printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c"
-  chmod +x "$CTX/agent_bin/aria2c"
+  printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c-amd64"
+  printf '#!/bin/sh\nexit 0\n' > "$CTX/agent_bin/aria2c-arm64"
+  chmod +x "$CTX/agent_bin/aria2c-amd64" "$CTX/agent_bin/aria2c-arm64"
   # a throwaway self-signed cert stands in for the pinned catalog cert
   openssl req -x509 -newkey rsa:2048 -keyout "$CTX/key.pem" \
     -out "$CTX/iris-catalog.pem" -days 1 -nodes -subj "/CN=test-catalog" 2>/dev/null
-  cp "$DOCKERFILE" "$ENTRYPOINT" "$CTX/"
+  cp "$DOCKERFILE" "$ENTRYPOINT" "$CONTAINER_DIR/reconcile.sh" "$CTX/"
 }
 
 @test "the XR image builds" {

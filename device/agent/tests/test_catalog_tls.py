@@ -158,3 +158,32 @@ def test_build_deps_wires_the_fail_closed_context_without_a_nameerror(
     with pytest.raises(iris_agent.CatalogTLSConfigError):
         iris_agent.build_deps(cfg, conf_path)
     assert any("TLS-ERROR" in cmd for cmd in sent), sent
+
+
+@pytest.mark.parametrize(("platform", "expected_io_transfer"), [
+    (None, False),
+    ("iox", True),
+])
+def test_build_deps_returns_guestshell_and_iox_dependencies_without_nameerror(
+        monkeypatch, tmp_path, platform, expected_io_transfer):
+    """The shared selector wiring must survive construction on both XE paths."""
+    monkeypatch.delenv("IRIS_DEVICE_PLATFORM", raising=False)
+    monkeypatch.setattr(
+        cli_ssh, "select_cli",
+        lambda cfg: (lambda _cmd: "", lambda _cmds: None))
+    monkeypatch.setattr(iris_agent, "make_catalog_context",
+                        lambda _cfg, _error: None)
+    cfg = {
+        "catalog_url": "https://198.51.100.1:8443",
+        "catalog_token": "tok",
+        "device_id": "d1",
+        "rpc_port": "6800",
+        "rpc_secret": "rpc",
+        "stage_dir": str(tmp_path),
+    }
+    if platform is not None:
+        cfg["device_platform"] = platform
+
+    deps = iris_agent.build_deps(cfg, str(tmp_path / "iris-agent.conf"))
+
+    assert deps.io_transfer is expected_io_transfer

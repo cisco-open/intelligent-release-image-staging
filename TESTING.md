@@ -8,9 +8,9 @@ test suites and what to include when reporting a bug.
 The project has a Python test suite (pytest) and a shell test suite (bats). Run
 both before submitting a change.
 
-The Python suites need `pytest` and `PyYAML`, declared in
-`requirements-dev.txt` — the same file CI installs. `bats` comes from your
-package manager.
+Use Python 3.12 with the dependencies in `requirements-dev.txt`: `pytest`,
+`PyYAML`, and the OpenAPI 3.2 validator. CI installs the same file. `bats`
+comes from your package manager.
 
 ```
 python3 -m pip install -r requirements-dev.txt
@@ -44,21 +44,16 @@ depending on the machine it runs on.
 ### Capacity harness
 
 `server/tests/test_capacity_harness.py` is a repeatable mixed-workload
-capacity harness (issue #55): it seeds a synthetic fleet of N devices in its
-own temporary directory and drives the operations a real fleet drives
-concurrently — a tracker announce, a catalog heartbeat, a device policy read,
-a terminal report, a credential resolution, a fleet-wide bulk credential
-reassignment, and the console's own fleet projection (paged and unpaged) —
-then reports how the cost of each moves as N grows. It replaces the ad hoc,
-thrown-away scripts earlier scale work (#51–#53/#56/#58, the console paging
-work) used to get its numbers, so the next change to any of those hot paths
-has something that catches a regression instead of relying on someone
-re-measuring by hand. It also found issue #125 (`FleetStore`, the operator
-inventory, was the one store that migration missed) on its first run; the
-bulk-reassignment measurement is that fix's own regression coverage —
-`FleetStore.bulk_upsert`'s shard-write count stays bounded by
-`keyed_state.SHARD_COUNT` (256) however many devices are selected, where the
-old one-request-per-device path cost one shard write per device.
+capacity harness. It seeds a synthetic fleet of N devices in its own
+temporary directory and drives a tracker announce, a catalog heartbeat, a
+device policy read, a terminal report, a credential resolution, a fleet-wide
+bulk credential reassignment, and the Console's fleet projection (paged and
+unpaged). It reports how the cost of each changes as N grows.
+Credential checks run the actual catalog, tracker query and tracker bearer
+resolvers with accepted and unknown tokens. The harness counts index lookups
+and rejects fleet-wide scans during resolution.
+`FleetStore.bulk_upsert` writes at most `keyed_state.SHARD_COUNT` (256) shard
+files, however many devices are selected.
 
 A small, fast pair of sizes (50 and 500 devices) runs by default with every
 test suite, in a few seconds:
@@ -90,15 +85,14 @@ python3 server/tests/test_capacity_harness.py --sizes 100 1000 10000
 calls the real production function (or, for the console, drives the real
 `gui_server` HTTP handler end to end) against synthetic state shaped like the
 real thing — never a reimplementation of the logic under test. Wall-clock
-timings are reported for context but are **not** assertions: this is a
-shared build host that also runs the live IRIS lab server and real device
-traffic, so absolute milliseconds are noisy, and a number from one run is not
+timings are reported for context but are **not** assertions: other work on
+the build host affects absolute timings, and a number from one run is not
 comparable to a number from a different run, day, or machine — only the
 growth factor *within one run*, across its own sizes, is meaningful. The
 assertions that actually run are all deterministic counted work, in the
 style `server/tests/test_keyed_state_scaling.py` established: which shard
 file changed, how many rows a touched shard holds, how many credential-index
-builds a run of requests costs, how many bytes a console response carries.
+builds and lookups requests cost, how many bytes a console response carries.
 Not measured at all: concurrent load (every call in the harness runs
 sequentially, one at a time, never the thousands-of-devices-at-once shape a
 real fleet produces), process/thread/file-descriptor growth over time, and

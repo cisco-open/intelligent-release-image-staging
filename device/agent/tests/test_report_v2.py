@@ -35,12 +35,10 @@ def _state():
 
 
 def test_build_report_v2_exact_schema(monkeypatch):
-    # build_report_v2 reads IRIS_RUNTIME_MODE from the process environment
-    # (env > conf > "guestshell"), so the runtime_mode assertion below only
-    # holds when the variable is absent. The IOx image sets it to "container"
-    # in its Dockerfile, and this suite is run inside that image; control the
-    # variable here instead of inheriting whatever the runner has set. Same
-    # idiom as test_telemetry_report.py.
+    # No platform selector is the unchanged Guest Shell compatibility path,
+    # including its legacy IRIS_RUNTIME_MODE fallback. Keep this assertion
+    # independent from a developer's shell environment.
+    monkeypatch.delenv("IRIS_DEVICE_PLATFORM", raising=False)
     monkeypatch.delenv("IRIS_RUNTIME_MODE", raising=False)
     state = _state()
     rep = telemetry_report.build_report_v2(

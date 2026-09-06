@@ -26,6 +26,7 @@ nav = [
   { "Deploy the server" = [
     { "Server" = "server.md" },
     { "Container Deployments" = "containers.md" },
+    { "Docker on Separate Hosts" = "docker-hosts.md" },
     { "Kubernetes" = "kubernetes.md" },
   ] },
   { "Onboard devices" = [
@@ -39,9 +40,11 @@ nav = [
     { "Operations" = "operations.md" },
     { "Observability" = "observability.md" },
     { "Telemetry Export" = "telemetry-export.md" },
+    { "Splunk Setup" = "splunk.md" },
   ] },
   { "Reference and development" = [
     { "Reference" = "reference.md" },
+    { "Problem type registry" = "problems.md" },
     { "Validation" = "validation.md" },
     { "Development" = "development.md" },
   ] },

@@ -17,12 +17,13 @@ setup() {
 # Dry-run text pins
 # ---------------------------------------------------------------------------
 
-@test "dry-run renders the hardware-proven activate line with the three secrets" {
+@test "dry-run renders the hardware-proven activate line with its secret redacted" {
   # Rewritten (was pinned to the pre-#123/#124 opts string) to also cover the
   # bounded container-log driver and the IRIS_LOG env now on the line.
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=deadbeefcafe --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+  [[ "$output" == *'appmgr application iris activate type docker source iris-xr docker-run-opts "-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=https://192.0.2.20:8443 --env IRIS_CATALOG_TOKEN=<redacted> --env IRIS_DEVICE_ID=8010-r1 --env IRIS_MODEL= --env IRIS_VERSION= --env IRIS_TELEMETRY=on --env IRIS_TELEMETRY_STREAM=off --env IRIS_LOG=off"'* ]]
+  [[ "$output" != *'deadbeefcafe'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -93,12 +94,11 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
+  [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
   # XR commit IS the persisted state -- there is no running/startup split.
-  # (The dry-run header explicitly SAYS so, in prose, which is why this
-  # checks for the bare COMMAND line rather than the substring anywhere.)
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   if printf '%s\n' "$output" | grep -qE '^copy running-config startup-config$'; then
@@ -128,6 +128,48 @@ setup() {
   [[ "$output" == *"CATALOG_TOKEN must not contain a double quote"* ]]
 }
 
+@test "dry-run rejects appmgr/config injection across XR supplied fields" {
+  local name value
+  while IFS='|' read -r name value; do
+    run env "$name=$value" bash "$INSTALL" --dry-run
+    [ "$status" -ne 0 ] || { echo "$name unexpectedly accepted"; return 1; }
+    [[ "$output" != *$'\ncommit\nreload\n'* ]] || return 1
+  done <<'EOF'
+APPID|iris;commit
+SOURCE_NAME|iris-xr;commit
+DEVICE_IP|192.0.2.10;reload
+DEVICE_ID|8010-r1;reload
+MODEL|8201;reload
+IRIS_TELEMETRY|on;reload
+IRIS_TELEMETRY_STREAM|off;reload
+IRIS_LOG|on;reload
+XR_MIN_FREE_BYTES|2147483648;reload
+ACTIVATE_TIMEOUT|300;reload
+ACTIVATE_POLL|10;reload
+EOF
+}
+
+@test "dry-run rejects CR/LF without echoing the catalog credential" {
+  CATALOG_TOKEN=$'literal-secret\r\ncommit' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'literal-secret'* ]]
+  [[ "$output" != *$'\ncommit\n'* ]]
+}
+
+@test "dry-run rejects catalog URL userinfo without printing it" {
+  CATALOG_URL=https://user:literal-secret@192.0.2.20:8443 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without credentials"* ]]
+  [[ "$output" != *"literal-secret"* ]]
+}
+
+@test "dry-run rejects unsafe package paths before printing an scp command" {
+  XR_RPM_FILE=$'/tmp/iris-xr.rpm\nreload' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'scp push'* ]]
+}
+
 @test "real install without credentials fails through the friendly guard, not an unbound variable" {
   run env -u DEVICE_USER -u DEVICE_PASS bash "$INSTALL"
   [ "$status" -ne 0 ]
@@ -142,18 +184,29 @@ setup() {
   [[ "$output" == *"tools/build-xr-package.sh"* ]]
 }
 
+@test "real install requires a valid public catalog certificate before touching the device" {
+  rpm="$BATS_TEST_TMPDIR/iris-xr.rpm"
+  cert="$BATS_TEST_TMPDIR/not-a-cert.pem"
+  printf '%s\n' rpm > "$rpm"
+  printf '%s\n' 'not a certificate' > "$cert"
+  run env DEVICE_USER=admin DEVICE_PASS=pw XR_RPM_FILE="$rpm" \
+    IRIS_CRT_FILE="$cert" bash "$INSTALL"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid PEM certificate"* ]]
+  [[ "$output" != *"[1/5]"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # The commit-failure guard: every commit this script sends must ride
 # lab/xr-run.sh (which appends the show-configuration-failed/abort recovery),
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the installer opens no SSH session of its own other than the rpm scp push" {
-  # 'sshpass' appears exactly once in the source -- the scp push in step
-  # [2/5]. Every other device interaction goes through RUN(), which wraps
-  # lab/xr-run.sh.
+@test "the installer opens no SSH session of its own other than the two scp pushes" {
+  # One push carries the RPM and one carries the runtime certificate. Every
+  # other device interaction goes through RUN(), which wraps lab/xr-run.sh.
   count="$(grep -c 'sshpass' "$INSTALL")"
-  [ "$count" -eq 1 ]
+  [ "$count" -eq 2 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
 
@@ -238,11 +291,16 @@ STUB
 
   RPMFILE="$BATS_TEST_TMPDIR/iris-xr.rpm"
   echo "fake rpm bytes" > "$RPMFILE"
+  CRTFILE="$BATS_TEST_TMPDIR/iris-catalog.pem"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$BATS_TEST_TMPDIR/catalog.key" -out "$CRTFILE" \
+    -days 1 -subj '/CN=iris-test' >/dev/null 2>&1
 }
 
 _xr_install_run_live() {
   env PATH="$STUBDIR/bin:$PATH" DEVICE_USER=admin DEVICE_PASS=pw \
-    XR_RPM_FILE="$RPMFILE" ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-30}" \
+    XR_RPM_FILE="$RPMFILE" IRIS_CRT_FILE="$CRTFILE" \
+    ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-30}" \
     ACTIVATE_POLL="${ACTIVATE_POLL:-1}" \
     bash "$STUBDIR/device/xr-install.sh"
 }
@@ -251,7 +309,18 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   run _xr_install_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"'iris' is Up"* ]]
+  [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
+}
+
+@test "live: pushes the current certificate to the fixed harddisk path before activation" {
+  _xr_install_stub_setup
+  run _xr_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  grep -q "${CRTFILE} admin@192.0.2.10:/harddisk:/iris-catalog.pem" "$FAKE_COMMAND_LOG"
+  cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$cert_line" ] && [ -n "$activate_line" ]
+  [ "$cert_line" -lt "$activate_line" ]
 }
 
 @test "live: parses the running version out of its own preflight show version" {
@@ -326,7 +395,7 @@ _xr_install_run_live() {
   _xr_install_stub_setup
   FAKE_APP_UP_AFTER=3 ACTIVATE_TIMEOUT=30 ACTIVATE_POLL=1 run _xr_install_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"'iris' is Up"* ]]
+  [[ "${lines[${#lines[@]}-1]}" = "onboard complete: 192.0.2.10" ]]
 }
 
 @test "live: the RPM scp verifies the router's host key (never /dev/null known_hosts)" {

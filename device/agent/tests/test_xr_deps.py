@@ -23,6 +23,8 @@ import subprocess
 import tempfile
 import time as _time
 
+import pytest
+
 import iris_agent
 import telemetry_report
 import xr_deps
@@ -55,8 +57,10 @@ subprocess.run(
 def _cfg(mount, **extra):
     cfg = {"device_id": "8010-R1", "catalog_url": "https://10.0.0.1:8443",
            "catalog_token": "t", "stage_dir": str(mount),
-           "target_fs": "harddisk:", "mode": "xr", "rpc_port": "6800",
-           "rpc_secret": "s", "max_peers": "10", "catalog_ca": _CA_FILE,
+           "target_fs": "harddisk:", "device_platform": "xr-appmgr",
+           "mode": "xr", "rpc_port": "6800",
+           "rpc_secret": "s", "announce_token": "announce",
+           "max_peers": "10", "catalog_ca": _CA_FILE,
            "token_expires_at": str(int(_time.time()) + 604_800)}
     cfg.update(extra)
     return cfg
@@ -284,12 +288,12 @@ def _build(tmp_path, **extra):
 
 
 def test_build_deps_fills_every_field_of_the_deps_contract(tmp_path):
-    """All 27 fields, or run_once dies mid-tick on an attribute nobody
-    noticed was missing."""
+    """XR fills every shared field and leaves GuestShell-only probes unused."""
     _cfg_out, deps = _build(tmp_path)
-    assert len(iris_agent.Deps._fields) == 27
-    for field in iris_agent.Deps._fields:
+    assert len(iris_agent.Deps._fields) == 29
+    for field in iris_agent.Deps._fields[:-2]:
         assert getattr(deps, field) is not None, field
+    assert deps.root_file_size is None and deps.verify_root is None
 
 
 def test_build_deps_reports_the_xr_platform_facts(tmp_path):
@@ -354,16 +358,14 @@ def test_build_deps_model_version_env_fallback_matches_activation(tmp_path, monk
 
 
 def test_build_deps_labels_its_telemetry_runtime_mode(tmp_path):
-    """telemetry_report reads runtime_mode straight from cfg and defaults to
-    'guestshell'. An XR container reporting 'guestshell' would be a lie in
-    every report, so the builder stamps its own label."""
+    """An XR container must report the xr-container derived label."""
     cfg, _deps = _build(tmp_path)
     assert cfg["runtime_mode"] == "xr-container"
 
 
-def test_build_deps_keeps_an_operator_configured_runtime_mode(tmp_path):
+def test_build_deps_derives_runtime_mode_from_platform(tmp_path):
     cfg, _deps = _build(tmp_path, runtime_mode="xr-lab")
-    assert cfg["runtime_mode"] == "xr-lab"
+    assert cfg["runtime_mode"] == "xr-container"
 
 
 def test_build_deps_emit_writes_an_iris_syslog_line_and_never_raises(tmp_path, capsys):
@@ -430,12 +432,65 @@ def test_build_deps_refresh_rebinds_the_live_catalog_client(tmp_path):
     assert deps.catalog.token == "NEW"
 
 
+def test_aria_add_sends_announce_bearer_as_per_download_header(tmp_path, monkeypatch):
+    """The token rides loopback JSON-RPC, not aria2 argv or the torrent URL."""
+    _cfg_out, deps = _build(tmp_path, announce_token="tracker-token")
+    torrent = tmp_path / "image.torrent"
+    torrent.write_bytes(b"torrent")
+    captured = {}
+
+    class Response:
+        def read(self):
+            return b'{"jsonrpc":"2.0","id":"a","result":"gid"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(request, timeout=0):
+        captured.update(json.loads(request.data.decode()))
+        return Response()
+
+    monkeypatch.setattr(xr_deps.urllib.request, "urlopen", fake_urlopen)
+    deps.aria_add(str(torrent), str(tmp_path))
+    options = captured["params"][3]
+    assert options["header"] == ["Authorization: Bearer tracker-token"]
+    assert "tracker-token" not in captured["params"][0]
+
+
+def test_aria_add_fails_closed_without_announce_token(tmp_path, monkeypatch):
+    _cfg_out, deps = _build(tmp_path, announce_token="")
+    torrent = tmp_path / "image.torrent"
+    torrent.write_bytes(b"torrent")
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("RPC must not be called")
+
+    monkeypatch.setattr(xr_deps.urllib.request, "urlopen", forbidden)
+    with pytest.raises(iris_agent.TrackerAuthConfigError,
+                       match="tracker authorization"):
+        deps.aria_add(str(torrent), str(tmp_path))
+    assert called is False
+
+
+def test_tracker_header_is_container_only_and_guestshell_options_stay_legacy():
+    base = {"max_peers": "10", "announce_token": "tracker-token"}
+    legacy = iris_agent._aria_torrent_options(base, "/flash/guest-share/iris")
+    assert "header" not in legacy
+    iox = iris_agent._aria_torrent_options(
+        base, "/data/iris", require_tracker_bearer=True)
+    assert iox["header"] == ["Authorization: Bearer tracker-token"]
+
+
 # --- the dispatch in iris_agent.build_deps -------------------------------
 
-def test_iris_agent_build_deps_dispatches_xr_mode_to_this_module(tmp_path, monkeypatch):
-    """The one hook in iris_agent: conf `mode = xr` (written by
-    device/xr/entrypoint.sh) selects this builder. Every other mode keeps the
-    IOS-XE wiring untouched."""
+def test_iris_agent_build_deps_dispatches_xr_platform_to_this_module(tmp_path, monkeypatch):
+    """The one device-platform selector chooses the XR dependency builder."""
     seen = {}
 
     def fake(cfg, conf_path, state_path=None):
@@ -448,14 +503,28 @@ def test_iris_agent_build_deps_dispatches_xr_mode_to_this_module(tmp_path, monke
     assert seen["cfg"] is cfg
 
 
-def test_iris_agent_build_deps_leaves_other_modes_alone(monkeypatch):
-    """A conf without `mode = xr` must never reach the XR builder."""
+def test_absent_selector_retains_legacy_xr_mode_dispatch(monkeypatch):
+    seen = {}
+
+    def fake(cfg, conf_path, state_path=None):
+        seen["cfg"] = cfg
+        return "legacy-xr-deps"
+
+    monkeypatch.setattr(xr_deps, "build_deps", fake)
+    cfg = {"mode": "xr"}
+    assert iris_agent.build_deps(cfg, "/conf", "/state") == "legacy-xr-deps"
+    assert seen["cfg"] is cfg
+
+
+def test_iris_agent_build_deps_leaves_other_platforms_alone(monkeypatch):
+    """A non-XR device platform must never reach the XR builder."""
     def fake(*_a, **_k):
         raise AssertionError("XR builder called for a non-XR mode")
 
     monkeypatch.setattr(xr_deps, "build_deps", fake)
-    for mode in ("", "container", "guestshell", None):
-        cfg = {"mode": mode} if mode is not None else {}
+    for platform in ("", "iox", None):
+        cfg = ({"device_platform": platform}
+               if platform is not None else {})
         try:
             iris_agent.build_deps(cfg, "/conf", "/state")
         except Exception as exc:            # the IOS-XE wiring needs a device

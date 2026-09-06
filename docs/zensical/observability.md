@@ -6,43 +6,53 @@ SPDX-License-Identifier: Apache-2.0
 
 # Observability
 
-IRIS reports network progress from the point of view that matters most: whether each device has staged the approved image safely.
+IRIS reports device staging progress, tracker participation, and transfer
+measurements separately. A tracker seeder has the torrent bytes; the device's
+heartbeat reports whether verification and placement have finished.
+
+For collector configuration, Splunk indexes, and dashboard setup, see
+[Splunk Setup](splunk.md). The signal contracts and measurements are described
+below and in [Telemetry Export](telemetry-export.md).
 
 ## Always-on surfaces
 
 | Surface | Purpose |
 | --- | --- |
-| `/healthz` on port 9101 | Basic service health. |
-| `/swarm` on port 9101 | Machine-readable swarm and peer state — loopback peers only by default (the console proxies it); `IRIS_SWARM_PUBLIC=1` opens it. |
-| `/swarmmap` on port 9101 | Pointer to the console swarm view. |
+| `/healthz` and `/readyz` on port 9101 | Anonymous, non-disclosing liveness and readiness results over TLS. |
+| `/swarm` on port 9101 | Machine-readable swarm and peer state for the management tier; always requires its bearer token. |
+| `/status` on port 9101 | Exporter health for the management tier, protected by its bearer token. |
 | Console monitoring | Human-readable network, image, and audit state. |
 
 These stay on whenever the telemetry listener runs, regardless of the
-telemetry settings below. The one exception is `IRIS_METRICS_PORT` set to
-empty or `0`, which disables the listener entirely and takes `/healthz`,
-`/swarm`, and `/swarmmap` with it.
+telemetry settings below. Keep port 9101 enabled in the shipped deployment:
+the server healthcheck uses it, and Compose waits for server health before
+starting the Console. `IRIS_METRICS_PORT=0` removes the probes and swarm
+routes and breaks that default startup. A directly launched process also
+accepts an empty value to disable the listener; Compose substitutes 9101.
+Use the export settings below to turn external telemetry off while retaining
+local health and Console data.
 
 ## Running with telemetry off
 
-External telemetry is opt-in: leaving `IRIS_OBSERVABILITY` unset is the
-telemetry-off posture, and IRIS then makes no assumption that any
-observability stack exists — it emits OpenTelemetry (OTLP), and the operator
-chooses the collector and backend. Set it to `1` to turn the external surface on.
+External telemetry is opt-in. With no Console override, leaving
+`IRIS_OBSERVABILITY` unset disables both the Prometheus endpoint and OTLP export.
+Set it to `1` to enable `/metrics`, and configure `IRIS_OTLP_ENDPOINT` to send
+OTLP to a collector. The Console's **Settings → Telemetry** can override the
+OTLP endpoint and enabled flag at runtime; it does not change the Prometheus
+startup setting.
 [Telemetry variables](reference.md#telemetry-variables) has the exact semantics
 of that variable and of `IRIS_OTLP_ENDPOINT`.
 
-With telemetry off, `/metrics` is not served and answers 404, and nothing is
-pushed to a collector. Nothing else changes: the port 9101 listener still runs
-because `/healthz`, the loopback-gated `/swarm`, and the `/swarmmap` pointer
-live there, and the console's swarm view, image state, device reports, and
-audit log are unaffected — they read the catalog's own state, not the metrics
-pipeline. The startup log says which posture is in effect.
+With both export paths off, `/metrics` answers 404 after authentication and
+nothing is pushed to a collector. The TLS listener on port 9101
+still provides minimal probes and management-authenticated `/swarm`; the
+Console's swarm view, image state, device reports, and audit log are
+unaffected. The startup log says which posture is in effect.
 
 A Prometheus job left scraping `<server>:9101/metrics` in that posture therefore
-reads the IRIS target as down and renders an operator dashboard blank. That is
-telemetry being off, not a broken server. Either set `IRIS_OBSERVABILITY=1` or
-remove the scrape job. Use the console's Swarm tab for network state in the
-meantime.
+reads the IRIS target as down. Enable `IRIS_OBSERVABILITY=1` and restart the
+server to serve those metrics, or remove the scrape job. The Console's Swarm
+tab remains available for network state.
 
 ## Device reports
 
@@ -56,7 +66,14 @@ Device reports are useful for both current status and post-incident review. Typi
 | Verification | Hash checks, staged-copy byte-size confirmation, failure reason. |
 | Timing | Last poll, last report, and operation duration. |
 
-## Legacy participants
+Current assignments and the latest heartbeat can differ until the next agent
+poll. The Console shows an assigned image as pending until the device reports
+it. For multiple images, use `staged_image_ids` and `errored_image_ids`; the
+single `stage_state` describes the device's whole set. Current errors take
+precedence over older staged flags. The Swarm Map labels measurements by image
+and participant; an unavailable measurement is not a zero rate.
+
+## Unattributed participants
 
 A peer whose credential authenticates but cannot be attributed to a device or to
 the seeder service is typed `legacy`. It announces normally, is answered, and is
@@ -70,44 +87,33 @@ serving, but unattributed until the peer moves to the current credential.
 
 ### Reading `iris_legacy_announce_participants`
 
-`iris_legacy_announce_participants` only counts a `legacy` peer that is
-CURRENTLY authenticating: a credential must still pass the tracker's
-validity check to be counted at all. Past `IRIS_SEEDER_PREV_TTL` (the
-rotated-out overlap window) a device still on the old token can no longer
-authenticate, so it drops out of this gauge exactly like a fully migrated
-one would — `0` here means either "fully migrated" or "every un-migrated
-device just got locked out," and the gauge alone cannot tell you which.
+`iris_legacy_announce_participants` counts authenticated peers without an
+attributed device or seeder identity. An overlap token remains valid only for
+`IRIS_SEEDER_PREV_TTL`; after expiry, its announces are refused and its peer no
+longer appears in this gauge. A zero gauge therefore does not prove that all
+peers can authenticate.
 
-Cross-check `iris_tracker_announces_refused_total` and, specifically,
-`iris_tracker_announces_refused_expired_total`: the tracker counts every
-refused `/announce` or `/scrape`, with a separate bucket for a credential
-that was found and valid-shaped but simply timed out. A nonzero
-`..._refused_expired_total` alongside `iris_legacy_announce_participants 0`
-is the un-migrated-and-locked-out case; `0` on both is the genuinely
-migrated one.
+Check `iris_tracker_announces_refused_total` and
+`iris_tracker_announces_refused_expired_total` alongside it. These cumulative
+counters record refused announces and scrapes, including expired credentials.
+Compare changes during the same observation window to identify current failures.
 
 ## Event identity
 
-Telemetry reports carry their own identity. A v2 device report is minted with a
-`report_id` on the device and frozen before the first POST, so a retry after a
-crash sends the byte-identical report and the server stores it once.
-
-Legacy **v1** telemetry has no device-supplied identifier. Its event id is
-**stamped at ingest** by the server on receipt, so v1 records are still
-deduplicable downstream — but the id reflects when the hub received the event,
-not when the device observed it. Do not read a v1 event id as device-side
-evidence, and do not compare it with a v2 `report_id` as though they were minted
-the same way.
+The device creates a `report_id`; the report is frozen before its first POST.
+A retry after a crash sends the same report bytes and identifier, so the server
+stores it once. The exported `event.id` preserves that identity for downstream
+deduplication. Use the device observation timestamp for when the measurement
+was made; a report's ingest timestamp describes when the server received it.
 
 ## Transfer streaming
 
 Transfer streaming adds a live, fleet-scale view of in-flight transfers: which
 devices are pulling which image, how fast, from how many peers, and on what
-quality of link. It is strictly opt-in and ships dark.
+quality of link. It is off by default.
 
-Streaming adds **no new network flows** — live samples ride inside the
-heartbeat each device already sends, on the same TLS channel, port, and token.
-[Network ports](network-ports.md) is unchanged by this feature.
+Live samples travel in the device heartbeat over its authenticated HTTPS
+connection. See [Network ports](network-ports.md) for that connection.
 
 ### Enabling streaming
 
@@ -118,6 +124,7 @@ Streaming is controlled by the device conf key `telemetry_stream`
 | --- | --- |
 | Guest Shell / router | `TELEMETRY_STREAM=on` in the installer environment, or the console's *Telemetry streaming* checkbox. |
 | IOx | `IRIS_TELEMETRY_STREAM=on` at deploy time; a redeploy reconciles the persistent conf, so toggling takes effect. |
+| IOS-XR appmgr | `IRIS_TELEMETRY_STREAM=on` at deploy time, or the Console checkbox; re-onboard to apply a change. |
 
 Parsing is fail-closed: only an explicit `on`/`1`/`true`/`yes` enables it —
 anything else, including garbage, stays off. Streaming also requires the master
@@ -140,14 +147,8 @@ in its heartbeat, bounded server-side at 8 KB:
 | `aria` | `receive_bps`, `send_bps`, `completed_content_bytes`, `total_content_bytes`, `connections`, `status`. |
 | `peer_connections` | Up to 32 rows: `ip`, `port`, `send_bps`, `receive_bps`, `peer_client_name`, `progress`. Extra rows are truncated and flagged, not rejected. |
 
-The sample is transport-independent by design — it rides inside the heartbeat
-only because that is the current carrier — and carries an explicit schema
-version (`v`). Two versions are accepted today: the current agent sends only
-`v == 2` `telemetry_observation` envelopes, and `v == 1` `sample` objects are
-still accepted from agents that predate the bump (`phase`, `done_bytes`,
-`down_bps`/`up_bps`, `peers`, `tier`). Anything else is dropped the same way any
-other malformed field is dropped, silently and without ever failing the
-heartbeat.
+The agent sends `telemetry_observation` envelopes with schema `v == 2`.
+Malformed sample fields are dropped without failing the heartbeat.
 
 ### Cadence and tuning
 
@@ -160,7 +161,7 @@ Sampling adapts to link quality automatically:
 | `bad` | No samples (the terminal report tells the story later). |
 
 Fleet-wide tuning without redeploys goes through the console API:
-`POST /api/telemetry/stream` with `{"every": <1..60>, "pause": <bool>}`
+`POST /api/v1/telemetry/stream` with `{"every": <1..60>, "pause": <bool>}`
 stretches the cadence (`every` multiplies the interval in ticks) or pauses
 sampling entirely. Directives can only reduce volume — the hard ceiling is one
 sample per device per tick, and a stale directive reverts to defaults within
@@ -169,9 +170,10 @@ three ticks.
 ### The add-on guarantee
 
 Telemetry is an add-on: no telemetry condition can affect staging. Loss is
-silent in operation but visible in three places — the console's *Telemetry
-export* badge, the `/healthz` JSON (`otlp_export` block), and one audit entry
-per state transition (`otlp-export-degraded` / `otlp-export-recovered`).
+silent in operation but visible in the Console's *Telemetry export* badge and
+one audit entry per state transition (`otlp-export-degraded` /
+`otlp-export-recovered`). Anonymous `/healthz` deliberately exposes no export
+state.
 
 ### Metrics names (operator contract)
 
@@ -194,7 +196,7 @@ are contract:
 | `iris_telemetry_samples_rejected_total` | `iris.telemetry.samples.rejected` | `{sample}` | — (counter; no `_total` on the OTLP wire) |
 | `iris_telemetry_export_failures_total` | `iris.telemetry.export.failures` | `{error}` | `signal` = `logs` \| `metrics` |
 | `iris_telemetry_export_dropped_total` | `iris.telemetry.export.dropped` | `{record}` | `signal` = `logs` \| `metrics` |
-| `iris_telemetry_export_last_success_seconds` | — (Prometheus + `/healthz` only) | | |
+| `iris_telemetry_export_last_success_seconds` | — (Prometheus only; export health also available through authenticated `/status`) | | |
 | `iris_peer_policy_revision` | `iris.peer.policy.revision` | `1` | — |
 | `iris_peer_enforcement_applied_revision` | `iris.peer.enforcement.applied_revision` | `1` | — |
 | `iris_peer_enforcement_desired_ips` | `iris.peer.enforcement.desired_ips` | `{ip}` | — |
@@ -226,9 +228,7 @@ store is near the hard row limit; `dropped_unemitted` and `live_evicted` are
 non-zero only once it has been exceeded, which means lifecycle events are
 being discarded before they ever reach the queue — raise `MAX_PLANS`.
 `awaiting_report` counts plans this tracker has watched seed for which no
-terminal report bearing that plan's `transfer_id` has arrived (a fleet still
-running agents too old to adopt the server's plan sits there, visibly, instead
-of presenting as an absence of events). `unconfirmed` is the export backlog: a
+terminal report bearing that plan's `transfer_id` has arrived. `unconfirmed` is the export backlog: a
 steady non-zero value is a collector problem, not a fleet one, and
 `retired_undelivered` is where that backlog ends up if the outage outlasts the
 retention window — records that were queued, never acknowledged, and are now
@@ -249,24 +249,16 @@ holds a different value for.
     a **lower bound** on total swarm throughput: device-to-device reseed traffic
     never passes through the origin and is invisible to it.
 
-!!! warning "Metric names changed in 2026.08.22"
-    Several transfer metric families were retired and others renamed in this
-    release, and the OTLP names moved with them. The table above is the current
-    contract; dashboards and alerts built against an earlier release need
-    updating. The release entry in `CHANGELOG.md` lists the exact before-and-after.
-
-`IRIS_OTLP_DEVICE_METRICS` is still accepted so an existing deployment starts,
-but it no longer exports anything. The per-device gauges it used to enable were
-retired; device- and peer-labelled history now lives only in the OTLP log
-records, where it does not multiply metric cardinality.
+Device- and peer-labelled measurements are exported as OTLP log records.
+Aggregate metric families are listed in the table above.
 
 ### Log attributes (operator contract)
 
 Terminal per-device reports, tracker lifecycle events, peer-policy operations and
 measured peer rates and byte totals flow as OTLP logs with OpenTelemetry semantic-convention
 names. Event identity is the top-level `eventName` field:
-`iris.device.transfer.report` (v2 reports), `iris.device.report` (legacy v1
-reports), `iris.tracker.peer` (tracker lifecycle), `iris.transfer.lifecycle`
+`iris.device.transfer.report` (transfer reports), `iris.device.report`
+(report summary), `iris.tracker.peer` (tracker lifecycle), `iris.transfer.lifecycle`
 (server-side plan lifecycle), `iris.peer.policy`,
 `iris.swarm.peer_rate`, `iris.swarm.peer_bytes` (origin-side traced bytes)
 and `iris.device.peer_transfer_record` (device-side exact per-peer bytes).
@@ -276,7 +268,7 @@ Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.transfer.content_sha256.state`, `iris.transfer.ios_copy_verify.state`,
 `iris.transfer.completed_content_bytes`, `iris.transfer.peers_total`,
 `iris.device.observed_at`, and the observed peer addresses as a flat
-`network.peer.address` string array. `iris.device.report` (v1) carries a subset:
+`network.peer.address` string array. `iris.device.report` carries a subset:
 `device.id`, `iris.image.id`, `iris.report.event`, `iris.transfer.peers_total`,
 `network.peer.address`. `iris.tracker.peer`: `iris.principal`,
 `iris.torrent.info_hash`, `iris.peer.role`, `network.peer.address`.
@@ -294,12 +286,10 @@ Key attributes per event. `iris.device.transfer.report`: `device.id`,
 `iris.device.report_created_at` and, on a recovered promotion only,
 `iris.transfer.recovered_promotion`. That record is described in full below.
 
-The attributes `device.model.identifier`, `iris.link.tier`,
-`iris.transfer.throughput_avg`, `network.transport` and the structured
-`iris.transfer.peers` list were retired in this release; per-peer detail now
-lives in `iris.swarm.peer_rate` and the byte records described below. `iris.transfer.peers_total` still
-carries the exact distinct peer count, saturating at the device's 512-IP
-tracking cap; rows beyond the named cap are counted there, not listed.
+Per-peer detail is carried by `iris.swarm.peer_rate` and the byte records
+below. `iris.transfer.peers_total` carries the distinct peer count, saturating
+at the device's 512-IP tracking cap; rows beyond the named cap are counted
+there, not listed.
 
 ### Transfer lifecycle events
 
@@ -449,8 +439,8 @@ the server's marker unconditionally because the only thing it knows for certain
 about a device report is when it arrived.
 
 `iris.device.observed_at` and `iris.device.report_created_at` are the odd
-attributes out, and are deliberately unchanged from how
-`iris.device.transfer.report` already reports them: float epochs, on the
+attributes out. `iris.device.transfer.report` uses the same representation:
+float epochs, on the
 **device's** clock, being the end of the attesting report's measurement window
 and the moment that report was composed. They are a second clock. Show them,
 but never subtract either from the server instants above as though the clocks
@@ -476,9 +466,8 @@ Conditions 1 and 2 arrive together on one report and are latched as
 earliest attesting report**, which is when the server learned the checksum had
 verified, not when the device verified it. The device reports no verification
 instant, and its clock is not the server's, so nothing is back-dated to stand
-in for one. The same value therefore also ships as
-`iris.transfer.report_received_at`, the name that says what it is; the older
-name is kept because an exported attribute cannot be withdrawn.
+in for one. `iris.transfer.report_received_at` carries the same ingest
+timestamp as `iris.transfer.checksum_verified_at`.
 
 Read it against `iris.device.report_created_at` — the device's own clock for
 composing that report — to see how much **delivery latency** a plan-to-seed
@@ -512,17 +501,11 @@ popped outright on a `stopped` announce, and has its completion instant erased
 when a re-download begins. Requiring both to be visible in the same pass would
 let a vanishing peer row block the event permanently.
 
-The attesting report is not durable in itself either. The per-device report ring
-keeps only the newest five reports, shared by every image assigned to that
-device and every report kind, while the tracker re-reads it once per sample
-pass. A device finishing several images inside one agent tick — ten are
-assignable, and a flash-tight device posts a `seeding-only` report and then a
-`staging-complete` upgrade for each — pushes the earliest terminal report out of
-the ring before any pass has seen it. So the attestation is recorded at
-**ingest**, into `<state>/transfer-attestations.json`, one row per transfer, and
-the promotion pass reads that alongside the ring. Without it such a plan latched
-its seeder observation, never its checksum, and sat at `planned` with no
-`seeding_started` ever emitted — silently, and for good.
+The per-device report ring keeps the newest five reports across all assigned
+images and report kinds. IRIS also records the attestation at **ingest** in
+`<state>/transfer-attestations.json`, one row per transfer. The promotion pass
+reads both stores, so a terminal report rotating out of the ring does not
+remove its verification evidence.
 
 `iris.transfer.seeding_started_at` is then `max(checksum_verified_at,
 tracker_seeder_at, planned_at)` — the instant the **last** condition became
@@ -541,39 +524,39 @@ moment. It is latched once, before any record is built, and is never
 recomputed — so a replay after a crash carries the original value rather than a
 second, disagreeing one.
 
-#### Delivery: exactly once, with a stable identity
+#### Delivery and stable event identity
 
-Each event is emitted **once per plan**, and the markers are on disk, so a
-tracker restart does not re-emit an event that already shipped. This is
-stronger than the per-device report ring, which deliberately replays after a
-restart.
+`event.id` is derived from the plan: `<plan_id>.planned` and
+`<plan_id>.seeding_started`. Retries keep the same identity, and the export
+queue does not add a record whose id is already queued or in flight.
 
-`event.id` is derived from the plan — `<plan_id>.planned` and
-`<plan_id>.seeding_started` — never minted per emission. The two suffixes must
-differ, and do: the export queue refuses a key it is already carrying, so a
-shared id would make the second record vanish silently rather than fail
-loudly.
+The lifecycle store records queue acceptance in `emitted` and a successful
+send to the collector in `delivered`. With a destination configured, IRIS
+re-queues records that lack a delivery marker if they leave the bounded
+queue. A persisted delivery marker suppresses replay across server restarts.
+Collector acceptance does not prove that Splunk or another final destination
+has indexed the record.
 
-The guarantee degrades to **at-least-once** in two windows: a crash between the
-queue accepting a record and its marker landing on disk, and a lost or corrupt
-lifecycle state file. In the first the replayed record is byte-identical —
-`event.id` and every timestamp were latched before the emit — so it is a
-backend-side duplicate of a record you have already seen. Deduplicate on
-`event.id`.
+A crash after a successful send but before the delivery marker is saved can
+send the same record again. A failed marker write or recovered lifecycle
+store can also cause duplicates. Deduplicate on `event.id`; ordinary retries
+retain the latched timestamps, while a recovered promotion follows the rules
+below.
 
-The lifecycle state is *derived*: the plan ids live in the policy record, and
-deleting `<state>/transfer-lifecycle.json` costs only the markers. Every row
-rebuilds on the next pass with the same ids, and a bounded set of records is
-re-emitted under those same `event.id`s.
+Delivery is best-effort. Queue limits, lifecycle-store retention, and
+collector or backend failures can lose records. Check
+`iris_transfer_lifecycle_unconfirmed` for outstanding lifecycle events and
+`iris_transfer_lifecycle_retired_undelivered_total` for records retired without
+confirmed collector delivery. Neither a stable id nor a queue marker is an
+end-to-end delivery guarantee.
 
-Facts are latched whether or not OTLP export is switched on. Turning a
-destination on later publishes the plans that were already in flight, rather
-than losing their start instants.
+Facts are latched whether or not OTLP export is switched on. Enabling a
+destination publishes retained plans and their recorded start instants.
 
 #### Replays and recovered promotions
 
-The second window is the one that can carry a *different* value under an
-identical `event.id`, and it is worth understanding rather than filtering away.
+Recovering a lost lifecycle row can produce a different timestamp under the
+same `event.id`.
 
 Of the three inputs to `seeding_started_at`, two are durable outside the
 lifecycle store — `planned_at` lives in the policy record and
@@ -618,27 +601,19 @@ some other transfer's id — accepting one would mean publishing "seeding" on th
 strength of a checksum computed for a different transfer, which is the one
 guarantee this event exists to make.
 
-IRIS ships a single shared on-device agent, so this change is rolled fleet-wide
-with the agent bundle: a change under `device/agent/` requires a fresh Guest
-Shell bundle, **both** IOx tars and `iris-xr.rpm` before device rollout. Until a
-device has that bundle it mints its own transfer id and its plans emit `planned`
-and never `seeding_started` — silence, not a wrong answer.
+The agent uses the assignment's `transfer_id` in its terminal report.
+`tools/apply-assignments.sh` is idempotent for an unchanged assignment.
 
-Standing assignments made before this release carry no plan at all until they
-are applied once more, and emit nothing until then;
-`tools/apply-assignments.sh` is idempotent for images that already carry a
-plan.
-
-Two further cases where a plan legitimately stays at `planned` forever:
+A plan also remains unconfirmed in these cases:
 
 * **The assignment was withdrawn while the device was still verifying.** A
   terminal report for an image no longer in the device's approved set is
   refused at ingest, so the checksum condition can never be met. The plan is
   cancelled on the next pass and shows planned-never-seeded. The bytes may well
   have landed; the server simply never received the attestation.
-* **The device announces on a legacy or rotated-out seeder credential.** Such a
+* **The device announces with a credential that has no device identity.** Such a
   peer is authenticated but unattributed — it resolves to a `legacy` principal
-  with no device identity (see [Legacy participants](#legacy-participants)) — so
+  with no device identity (see [Unattributed participants](#unattributed-participants)) — so
   it can never satisfy condition 3. This is intentional: an unattributed
   announce is not evidence about a named device.
 
@@ -671,13 +646,10 @@ epoch on both records, and an attribute that ships once can never be withdrawn.
 
 ### Per-peer bytes (and what they do not cover)
 
-Earlier releases said per-peer byte counts were impossible, because aria2 1.37
-exposed only instantaneous per-peer rates and any byte figure built from them
-would be derived rather than measured. That is no longer the client we ship:
-aria2-next 2.5.6 keeps a **cumulative per-peer session counter** of its own
-(`aria2.getPeers` → `downloaded` / `uploaded`), so a byte total can now be read
-rather than integrated. Two records carry it, and they measure different things
-— never sum them together.
+The device's aria2 client exposes cumulative per-peer session counters through
+`aria2.getPeers` (`downloaded` and `uploaded`). IRIS exports the device capture
+and the origin sampler as separate records. They describe overlapping traffic
+from different observation points; do not sum the two record families.
 
 `iris.device.peer_transfer_record` is the exact one, emitted once per peer per completed
 device transfer. An `--on-bt-download-complete` hook on the device reads the
@@ -756,10 +728,9 @@ what a future bump will require.
 | Symptom | First place to look |
 | --- | --- |
 | Device never appears | Installer output, artifact server reachability, catalog trustpoint, enrollment token expiry. |
-| Download does not start | Tracker port, announce key, seeder port, device route to server. |
+| Download does not start | Tracker port and authentication (Bearer header for IOx/XR, query token for Guest Shell), seeder port, device route to server. |
 | Download stalls | Swarm view, peer count, seeder availability, storage capacity. |
 | Verification fails | Catalog hash, file name, staged-copy byte size, image integrity. |
 | Console stale | Telemetry health, catalog service logs, device report interval. |
 | Prometheus target down, dashboard blank | `IRIS_OBSERVABILITY` — unset means `/metrics` answers 404 by design; then check reachability to port 9101. |
-| `403` on `:9101/swarm` | Swarm data is console-gated by design: use the console's Swarm tab, the authenticated `GET /api/swarm`, or `docker compose -f server/docker-compose.yml exec iris curl -s http://127.0.0.1:9101/swarm` (`kubectl exec` on Kubernetes). `IRIS_SWARM_PUBLIC=1` reopens remote access. |
-
+| `401` on `:9101/swarm` | Swarm data is management-tier only by design. Use the Console's Swarm tab or its authenticated `GET /api/v1/swarm`; do not expose or manually reuse the internal bearer. |

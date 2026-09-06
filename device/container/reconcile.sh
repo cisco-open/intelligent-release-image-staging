@@ -2,14 +2,29 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# Deploy-time env must win over a persistent conf on redeploy (same operator
-# intent as the TARGET_FS reconcile in entrypoint.sh): without this, toggling
+# Deploy-time env must win over a persistent conf on redeploy: without this, toggling
 # telemetry/telemetry_stream via console redeploy silently would not take on
 # any device with an existing conf. Sourceable for bats. Expects $CONF; uses
 # $PYTHONPATH when set (tests), the container agent path otherwise.
 reconcile_conf_key() {
   key="$1"; val="$2"
   [ -n "$val" ] || return 0
+  PYTHONPATH="${PYTHONPATH:-/opt/iris/agent}" python3 - "$CONF" "$key" "$val" <<'PY'
+import sys
+import agent_config
+path, key, val = sys.argv[1:]
+cfg = agent_config.load(path)
+if cfg.get(key) != val:
+    cfg[key] = val
+    agent_config.write_conf(path, cfg)
+PY
+}
+
+# Image/platform facts also reconcile when the desired value is empty. This is
+# distinct from an optional operator knob, where an absent environment value
+# means "leave persisted configuration alone".
+reconcile_conf_fact() {
+  key="$1"; val="$2"
   PYTHONPATH="${PYTHONPATH:-/opt/iris/agent}" python3 - "$CONF" "$key" "$val" <<'PY'
 import sys
 import agent_config

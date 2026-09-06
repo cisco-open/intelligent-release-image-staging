@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Publish an IOS-XE image into the IRIS catalog and seeder.
-sha256 → private .torrent (token in announce URL) → info_hash → catalog → seed.
+sha256 → private .torrent (token-free announce URL) → info_hash → catalog → seed.
 Server does NOT check the Cisco signature (no cli module off-box): authenticity
 is settled before publish, and the device's check is the agent's sha256 of the
 staged file against this catalog entry (spec §6). Nothing on the box re-hashes
@@ -25,7 +25,9 @@ import urllib.request
 
 import bencode
 import catalog as catalog_mod
+from seeder_auth import announce_authorization_header
 import secrets_store
+import tracker_announce
 import torrent_personalize
 
 _SUFFIXES = (".SPA.bin", ".bin")
@@ -81,13 +83,10 @@ def digests_file(path, chunk=1 << 20):
 
 
 def make_torrent(image_path, tracker_url, out_path):
-    """Build a PRIVATE torrent (no DHT/PEX) whose announce URL carries the token.
+    """Build a PRIVATE torrent whose announce URL contains no credential.
 
-    mktorrent only accepts the announce URL on argv, and CalledProcessError
-    renders the whole argv in its str(). That exception must therefore never
-    escape: a failure is reported as the exit status alone (no chained
-    context either -- a traceback would print the original). A partial
-    output file is removed so nothing re-seeds it."""
+    A partial output file is removed on failure so nothing re-seeds it."""
+    tracker_url = tracker_announce.validate(tracker_url)
     if os.path.exists(out_path):
         os.remove(out_path)
     try:
@@ -130,17 +129,11 @@ def tracker_announce_base():
     """The token-free tracker announce base, derived exactly the way the
     catalog's per-device personalization and the rotation CLI derive it:
     IRIS_TRACKER_ANNOUNCE if set, else IRIS_HOST_IP + IRIS_TRACKER_PORT
-    (default 6969, the port tracker.py listens on). None when neither is
-    known. Keeping the three in step is what makes the canonical (seeder)
-    announce reach the same tracker the devices are told to announce to."""
-    base = os.environ.get("IRIS_TRACKER_ANNOUNCE")
-    if base:
-        return base
-    host_ip = os.environ.get("IRIS_HOST_IP")
-    if not host_ip:
-        return None
-    return "http://%s:%s/announce" % (
-        host_ip, os.environ.get("IRIS_TRACKER_PORT") or "6969")
+    (default 6969, the port tracker.py listens on). Missing or unsafe config
+    raises rather than falling back to plaintext. Keeping the three in step is
+    what makes the canonical (seeder) announce reach the same tracker the
+    devices are told to announce to."""
+    return tracker_announce.resolve(os.environ)
 
 
 def _with_query(base, param, value):
@@ -148,37 +141,19 @@ def _with_query(base, param, value):
 
 
 def default_tracker_url():
-    """Build the tracker URL from what the server already knows: the announce
-    base (tracker_announce_base) + the seeder's announce token from the broker
-    secrets store (decrypted to /run/iris/secrets.json at container start).
-    Falls back to the retired tokens.txt for pre-broker installs."""
+    """Return the token-free tracker URL; authentication is an HTTP header."""
     base = tracker_announce_base()
-    if not base:
-        return None
-    # Preferred: the secrets-broker store. The seeder is a pseudo-device whose
-    # announce_token is the private-tracker key (secrets_store schema). New
-    # canonical torrents carry the IRIS credential in a dedicated
-    # `announce_token=` query parameter (spec §6), distinct from aria2's own
-    # BEP-style `key=` (which aria2 appends itself) so the two never collide.
-    # We read the CURRENT seeder announce token only — never a rotated-out
-    # `announce_token_previous` value.
+    return base
+
+
+def default_announce_header():
+    """Return the seeder Bearer header, loaded from tmpfs and never logged."""
     secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
     try:
         store = secrets_store.load(secrets_path)
         tok = store.get("seeder", {}).get("announce_token", {}).get("value")
-        if tok:
-            return _with_query(base, "announce_token", tok)
+        return announce_authorization_header(tok)
     except Exception:
-        pass
-    # Production no longer creates tokens.txt; retain this dead fallback solely
-    # for test_default_tracker_url_legacy_tokens_fallback compatibility coverage.
-    try:
-        with open(os.environ.get("IRIS_TOKENS", "/etc/iris/tokens.txt")) as f:
-            for line in f:
-                s = line.strip()
-                if s and not s.startswith("#"):
-                    return _with_query(base, "key", s)
-    except OSError:
         pass
     return None
 
@@ -220,10 +195,14 @@ def add_torrent_rpc(torrent_bytes, image_dir, rpc_url=None, rpc_secret=None):
     # bt-seed-unverified=true: the torrent was just generated FROM this exact
     # file, so seed it as-is without re-hashing (avoids re-checking ~1.2 GB and
     # the "complete file but no .aria2 control file -> won't seed" trap).
+    announce_header = default_announce_header()
+    if not announce_header:
+        raise RuntimeError("seeder announce credential unavailable")
     params = [base64.b64encode(torrent_bytes).decode(),
               [],
               {"dir": image_dir, "seed-ratio": "0.0",
-               "bt-seed-unverified": "true"}]
+               "bt-seed-unverified": "true",
+               "header": [announce_header]}]
     return _rpc_call(rpc_url, rpc_secret, "aria2.addTorrent", params)
 
 
@@ -252,32 +231,30 @@ def resume_torrent_rpc(torrent_path, image_dir, info_hash=None,
     from. Used by catalog.CatalogStore.release_quarantine.
 
     Before the add, the canonical file's outer announce is re-synced to the
-    CURRENT seeder credential (*tracker_url*, default default_tracker_url()):
-    a torrent that sat out an announce rotation while quarantined still
-    carries the rotated-out token, and a seeder announcing with it would be
-    refused by the tracker -- the same silent no-origin stall the release is
-    meant to end. Only the outer announce moves; the raw ``info`` span, and
-    so the info hash every device policy references, is byte-identical
-    (torrent_personalize asserts it). An already-active torrent is left
-    alone rather than handed to aria2 as a duplicate info hash. Returns the
-    new GID, or None when it was already active. Raises on RPC error; no
+    token-free tracker base (*tracker_url*, default default_tracker_url()).
+    The seeder's current credential is supplied separately as an HTTP header
+    by :func:`add_torrent_rpc`. Only the outer announce moves; the raw ``info``
+    span, and therefore the info hash every device policy references, remains
+    byte-identical (torrent_personalize asserts it). An already-active torrent
+    is left alone rather than handed to aria2 as a duplicate info hash. Returns
+    the new GID, or None when it was already active. Raises on RPC error; no
     URL or token is ever placed in an exception."""
     with open(torrent_path, "rb") as f:
         data = f.read()
-    tracker_url = tracker_url or default_tracker_url()
-    if tracker_url:
-        synced = torrent_personalize.personalize(data, tracker_url)
-        if synced != data:
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(torrent_path) or ".",
-                                       prefix=".resync-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(synced)
-                os.replace(tmp, torrent_path)
-            except Exception:
-                _unlink_quiet(tmp)
-                raise
-            data = synced
+    tracker_url = tracker_announce.validate(
+        tracker_url or default_tracker_url())
+    synced = torrent_personalize.personalize(data, tracker_url)
+    if synced != data:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(torrent_path) or ".",
+                                   prefix=".resync-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(synced)
+            os.replace(tmp, torrent_path)
+        except Exception:
+            _unlink_quiet(tmp)
+            raise
+        data = synced
     info_hash = info_hash or torrent_info_hash(torrent_path)
     rpc_url, rpc_secret = _rpc_endpoint(rpc_url, rpc_secret)
     if _active_gid(rpc_url, rpc_secret, info_hash) is not None:
@@ -350,11 +327,13 @@ def main(argv=None):
     ap.add_argument("--tracker-url", default=os.environ.get(
         "IRIS_TRACKER_URL"))
     args = ap.parse_args(argv)
-    if not args.tracker_url:
-        args.tracker_url = default_tracker_url()
-    if not args.tracker_url:
+    try:
+        args.tracker_url = tracker_announce.validate(args.tracker_url) \
+            if args.tracker_url else default_tracker_url()
+    except ValueError:
         print("error: can't determine the tracker URL — set IRIS_HOST_IP (docker "
-              "compose does this) or pass --tracker-url", file=sys.stderr)
+              "compose does this) or pass a token-free HTTPS --tracker-url",
+              file=sys.stderr)
         return 2
     if shutil.which("mktorrent") is None:
         print("error: mktorrent not installed (apt install mktorrent)",

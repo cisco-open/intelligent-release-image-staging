@@ -6,9 +6,9 @@
 
 @test "install waits for IOx readiness and reports meaningful app state" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  run grep -F 'waiting for IOx app-hosting service (CAF/Dockerd)' "$install"
+  run grep -F 'waiting for IOx services' "$install"
   [ "$status" -eq 0 ]
-  run grep -F "app-hosting has not reported '\$APPID' yet" "$install"
+  run grep -F "waiting for app: \$APPID" "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -18,7 +18,7 @@
   [ "$status" -eq 0 ]
   run grep -F 'clear_partial_app_config' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'partial app-hosting configuration has been removed' "$install"
+  run grep -F 'Partial app configuration removed' "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -32,7 +32,7 @@
   install="$BATS_TEST_DIRNAME/../install.sh"
   run grep -F 'copy running-config startup-config' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'startup-config saved' "$install"
+  run grep -F 'onboard complete: $DEVICE_IP' "$install"
   [ "$status" -eq 0 ]
 }
 
@@ -93,11 +93,33 @@ setup() {
   [[ "$output" == *"vlan 666"* ]] && [[ "$output" == *"interface Vlan666"* ]]
 }
 
+@test "dry-run preserves run-opt structure without printing credentials" {
+  CATALOG_TOKEN=literal-catalog-secret DEVICE_SSH_PASS=literal-device-secret \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'IRIS_CATALOG_TOKEN=<redacted>'* ]]
+  [[ "$output" == *'IRIS_DEVICE_SSH_PASS=<redacted>'* ]]
+  [[ "$output" != *'literal-catalog-secret'* ]]
+  [[ "$output" != *'literal-device-secret'* ]]
+}
+
+@test "package destination values are validated before use" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    PKG='../escape.tar' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PKG must be a safe basename"* ]]
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    PKG_FS='flash:;reload' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"PKG_FS must be an IOS filesystem prefix"* ]]
+}
+
 # --- C9k share-mount transfer (Route B): the app-hosting SSD share is bind-
 # mounted into the container so the agent lands its scratch at disk speed and
 # placement is an IOS-internal copy — no scp, no punt path, no CoPP cap. ---
 
-@test "share dry-run renders the bind-mount run-opts and the share env" {
+@test "share dry-run renders the bind mount and its matching container/IOS paths" {
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
@@ -109,17 +131,29 @@ setup() {
   [[ "$output" == *"mkdir usbflash1:iox_host_data_share"* ]]
 }
 
+@test "share dry-run preserves a validated alternate host/IOS path pair" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb2/iris-alt \
+    SHARE_IOS_PATH=usbflash2:iris-alt \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"'* ]]
+  [[ "$output" == *'run-opts 13 "-e IRIS_SHARE_IOS_PATH=usbflash2:iris-alt"'* ]]
+  [[ "$output" == *'run-opts 14 "-v /vol/usb2/iris-alt:/mnt/share"'* ]]
+  [[ "$output" == *'mkdir usbflash2:iris-alt'* ]]
+}
+
 @test "share run-opts render INSIDE the app-hosting docker block (before end)" {
   # app-hosting silently ignores run-opts rendered after the block's `end`,
   # so the mount would vanish while every substring gate still passed —
-  # assert the line that immediately follows run-opts 13 (the last one,
-  # renumbered from 12 when run-opts 10 "-e IRIS_LOG=..." was added ahead of
+  # assert the line that immediately follows run-opts 14 (the last one,
+  # after the unified selector and target override were added ahead of
   # the SHARE block) is `end`.
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
     SHARE_IOS_PATH=usbflash1:iox_host_data_share \
     run bash "$INSTALL" --dry-run
-  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 13' | tail -1)"
+  after="$(printf '%s\n' "$output" | grep -A1 'run-opts 14' | tail -1)"
   [ "$after" = "end" ]
 }
 
@@ -137,18 +171,89 @@ setup() {
   [ "$status" -ne 0 ] && [[ "$output" == *"SHARE_IOS_PATH"* ]]
 }
 
-@test "IOx install retries app-hosting verification disable until it succeeds" {
+@test "alternate share paths reject traversal and IOS command separators" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/../escape SHARE_IOS_PATH=usbflash1:escape \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHARE_HOST_PATH must be a safe absolute path"* ]]
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iris SHARE_IOS_PATH='usbflash1:iris;reload' \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SHARE_IOS_PATH must be a safe IOS filesystem path"* ]]
+}
+
+@test "dry-run rejects CLI and config injection across IOx supplied fields" {
+  local name value
+  while IFS='|' read -r name value; do
+    run env VLAN=666 SVI_IP=192.0.2.9 \
+      SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 "$name=$value" \
+      bash "$INSTALL" --dry-run
+    [ "$status" -ne 0 ] || { echo "$name unexpectedly accepted"; return 1; }
+    [[ "$output" != *$'\nreload\n'* ]] || return 1
+  done <<'EOF'
+APP_INTF|AppGigabitEthernet1/1;reload
+VLAN|666;reload
+SVI_IP|192.0.2.9;reload
+SVI_MASK|255.0.255.0
+GUEST_IP|192.0.2.10;reload
+GW_IP|192.0.2.9;reload
+CPU|400;reload
+MEM|768;reload
+DISK|2048;reload
+IOS_SSH_HOST|192.0.2.9;reload
+IRIS_TELEMETRY|on;reload
+IRIS_TELEMETRY_STREAM|off;reload
+SHARE_HOST_PATH|/vol/usb1/../escape
+EOF
+}
+
+@test "dry-run rejects CR/LF before rendering supplied secrets" {
+  CATALOG_TOKEN=$'literal-secret\r\nend' \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'literal-secret'* ]]
+  [[ "$output" != *$'\nend\n'* ]]
+}
+
+@test "dry-run rejects catalog URL userinfo without printing it" {
+  CATALOG_URL=https://user:literal-secret@192.0.2.20:8443 \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without credentials"* ]]
+  [[ "$output" != *"literal-secret"* ]]
+}
+
+@test "IOx install selects verification from package signing markers" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  run grep -F 'app-hosting verification disable' "$install"
+  run grep -F 'verification_action=disable' "$install"
   [ "$status" -eq 0 ]
-  run grep -F 'disabled successfully' "$install"
+  run grep -F 'verification_action=enable' "$install"
   [ "$status" -eq 0 ]
+  run grep -F 'package.sign' "$install"
+  [ "$status" -eq 0 ]
+  run grep -F 'package.cert' "$install"
+  [ "$status" -eq 0 ]
+}
+
+@test "IOx install delivers the public certificate after activation and before start" {
+  install="$BATS_TEST_DIRNAME/../install.sh"
+  data_line="$(grep -n 'app-hosting data appid %s copy' "$install" | head -1 | cut -d: -f1)"
+  activate_line="$(grep -n '^activate_out=' "$install" | head -1 | cut -d: -f1)"
+  start_line="$(grep -n '^start_out=' "$install" | head -1 | cut -d: -f1)"
+  [ -n "$data_line" ] && [ -n "$activate_line" ] && [ -n "$start_line" ]
+  [ "$activate_line" -lt "$data_line" ]
+  [ "$data_line" -lt "$start_line" ]
+  grep -q 'Successfully copied file' "$install"
 }
 
 # --- operator-facing PREREQ checks (2026-08-20 incident: an IE-3400 lost `ip
 # routing` on re-image; onboarding "succeeded" while the app's VLAN traffic had
 # no L3 path out — silent, invisible, hours to diagnose). Static assertions
-# prove the PREREQ lines and commands are present and land before step [2/9];
+# prove the PREREQ lines and commands are present and land before step [3/7];
 # the stub-backed tests below prove the pass/fail/warn behavior itself. ---
 
 @test "install checks ip routing before applying any config (PREREQ, routed only)" {
@@ -178,10 +283,10 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "PREREQ checks land before step [2/9] applies IOx networking" {
+@test "PREREQ checks land before step [3/7] applies IOx networking" {
   install="$BATS_TEST_DIRNAME/../install.sh"
-  pre_line="$(grep -n '^echo "\[pre\] prerequisite checks' "$install" | head -1 | cut -d: -f1)"
-  step2_line="$(grep -n '^echo "\[2/9\]' "$install" | head -1 | cut -d: -f1)"
+  pre_line="$(grep -n '^echo "\[1/7\] check prerequisites' "$install" | head -1 | cut -d: -f1)"
+  step2_line="$(grep -n '^echo "\[3/7\]' "$install" | head -1 | cut -d: -f1)"
   [ -n "$pre_line" ] && [ -n "$step2_line" ] && [ "$pre_line" -lt "$step2_line" ]
 }
 
@@ -193,7 +298,7 @@ setup() {
 
 _iox_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
+  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox" "$STUBDIR/artifacts" "$STUBDIR/bin"
   cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
 #!/usr/bin/env bash
 cmds="$(cat)"
@@ -244,12 +349,19 @@ case "$cmds" in
     ;;
 esac
 case "$cmds" in
+  *"app-hosting verification enable"*)
+    echo "App hosting verification enabled successfully"
+    ;;
+esac
+case "$cmds" in
   *"show app-hosting list"*)
     echo "App id                                   State"
     echo "---------------------------------------------------------"
     # unset FAKE_APP_STATE == no app installed (the default for every test
     # that never gets as far as the lifecycle)
-    if [ -n "${FAKE_APP_STATE:-}" ]; then
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ] && [ -s "$FAKE_LIFECYCLE_FILE" ]; then
+      echo "iris                                     $(cat "$FAKE_LIFECYCLE_FILE")"
+    elif [ -n "${FAKE_APP_STATE:-}" ]; then
       echo "iris                                     ${FAKE_APP_STATE}"
     else
       echo "No App found"
@@ -263,23 +375,63 @@ case "$cmds" in
 esac
 case "$cmds" in
   *"app-hosting install appid"*)
+    [ -z "${FAKE_LIFECYCLE_FILE:-}" ] || echo DEPLOYED > "$FAKE_LIFECYCLE_FILE"
     echo "Installing package 'flash:iris-arm64.tar' for 'iris'. Use 'show app-hosting list' for progress."
     ;;
 esac
 case "$cmds" in
+  *"app-hosting data appid iris copy"*)
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ]; then
+      if [ "$(cat "$FAKE_LIFECYCLE_FILE")" != ACTIVATED ] || [ "${FAKE_CA_COPY_FAILURE:-0}" = 1 ]; then
+        echo '% Error: application data unavailable; app must be ACTIVATED'
+        exit 0
+      fi
+      touch "$FAKE_LIFECYCLE_FILE.ca"
+    fi
+    echo "Successfully copied file /flash/iris-catalog.pem to iris as iris-catalog.pem"
+    ;;
+esac
+case "$cmds" in
   *"app-hosting activate appid"*)
+    [ -z "${FAKE_LIFECYCLE_FILE:-}" ] || echo ACTIVATED > "$FAKE_LIFECYCLE_FILE"
     # The second line is deliberately one the success-path grep filter drops,
     # so a test can tell an unfiltered dump from a filtered one.
     echo "sw1#app-hosting activate appid iris"
     echo "${FAKE_ACTIVATE_DETAIL:-% Error: activation is still loading the app image}"
     ;;
 esac
+case "$cmds" in
+  *"app-hosting start appid"*)
+    if [ -n "${FAKE_LIFECYCLE_FILE:-}" ] && [ -f "$FAKE_LIFECYCLE_FILE.ca" ]; then
+      echo RUNNING > "$FAKE_LIFECYCLE_FILE"
+    fi
+    ;;
+  *"copy running-config startup-config"*) echo '[OK]' ;;
+esac
 exit 0
 STUB
   chmod +x "$STUBDIR/lab/device-run.sh"
+  cat > "$STUBDIR/lab/iris-ssh-policy.sh" <<'STUB'
+iris_ssh_policy() { IRIS_SSH_OPTS=(); }
+iris_ssh_cleanup() { :; }
+STUB
+  cat > "$STUBDIR/bin/sshpass" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$STUBDIR/bin/sshpass"
   ln -s "$BATS_TEST_DIRNAME/../install.sh" "$STUBDIR/device/iox/install.sh"
+  mkdir -p "$BATS_TEST_TMPDIR/package"
+  printf '%s\n' 'descriptor-schema-version: "2.7"' > "$BATS_TEST_TMPDIR/package/package.yaml"
+  tar -cf "$STUBDIR/artifacts/iris-arm64.tar" \
+    -C "$BATS_TEST_TMPDIR/package" package.yaml
   CRTFILE="$BATS_TEST_TMPDIR/crt.pem"
-  echo "-----BEGIN CERTIFICATE-----fake-----END CERTIFICATE-----" > "$CRTFILE"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$BATS_TEST_TMPDIR/catalog.key" -out "$CRTFILE" \
+    -days 1 -subj '/CN=iris-test' >/dev/null 2>&1
+  export PATH="$STUBDIR/bin:$PATH"
+  export IRIS_ARTIFACTS_DIR="$STUBDIR/artifacts"
+  export DEVICE_USER=test DEVICE_PASS=test
 }
 
 # same portable timeout wrapper as device/tests/test_device_install.bats: the
@@ -319,6 +471,57 @@ _iox_env() {
     EXPECTED_DEVICE_IDENTITY=FOC1234TEST "$@"
 }
 
+@test "unsigned package disables verification while signed package enables it" {
+  _iox_stub_setup
+  run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"signature policy: unsigned"* ]]
+
+  printf '%s\n' signature > "$BATS_TEST_TMPDIR/package/package.sign"
+  tar -cf "$STUBDIR/artifacts/iris-arm64.tar" \
+    -C "$BATS_TEST_TMPDIR/package" package.yaml package.sign
+  run _iox_env bash "$STUBDIR/device/iox/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"signature policy: signed"* ]]
+}
+
+@test "invalid catalog certificate is rejected before device teardown" {
+  _iox_stub_setup
+  command_log="$BATS_TEST_TMPDIR/cert-failure-commands.log"
+  : > "$command_log"
+  printf '%s\n' 'not a certificate' > "$CRTFILE"
+  run _iox_env FAKE_COMMAND_LOG="$command_log" bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not a valid PEM certificate"* ]]
+  [ ! -s "$command_log" ]
+}
+
+_iox_fast_lifecycle() {
+  _iox_stub_setup
+  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/bin/sleep"
+  chmod +x "$STUBDIR/bin/sleep"
+  export FAKE_LIFECYCLE_FILE="$BATS_TEST_TMPDIR/lifecycle-state"
+  export FAKE_COMMAND_LOG="$BATS_TEST_TMPDIR/lifecycle-commands"
+}
+
+@test "certificate delivery succeeds when application data requires ACTIVATED state" {
+  _iox_fast_lifecycle
+  run _iox_env bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_LIFECYCLE_FILE")" = RUNNING ]
+  [ -f "$FAKE_LIFECYCLE_FILE.ca" ]
+  [[ "$output" == *"onboard complete: 192.0.2.10"* ]]
+}
+
+@test "failed application data copy leaves the activated IRIS app unstarted" {
+  _iox_fast_lifecycle
+  run _iox_env FAKE_CA_COPY_FAILURE=1 bash "$STUBDIR/device/iox/install.sh"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$FAKE_LIFECYCLE_FILE")" = ACTIVATED ]
+  run grep -F 'app-hosting start appid iris' "$FAKE_COMMAND_LOG"
+  [ "$status" -ne 0 ]
+}
+
 @test "ip routing missing: real run exits non-zero with the PREREQ line" {
   _iox_stub_setup
   run _iox_env FAKE_IP_ROUTING=no bash "$STUBDIR/device/iox/install.sh"
@@ -336,7 +539,7 @@ _iox_env() {
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
 }
 
-@test "ip routing present: real run proceeds past the check to step [2/9]" {
+@test "ip routing present: real run proceeds past the check to step [3/7]" {
   _iox_stub_setup
   iox_run_with_timeout 12 env DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 \
     STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x VLAN=666 SVI_IP=192.0.2.9 \
@@ -344,7 +547,7 @@ _iox_env() {
     MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=FOC1234TEST FAKE_IP_ROUTING=yes \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "no IOx partition: real run exits non-zero with the PREREQ line" {
@@ -364,7 +567,7 @@ _iox_env() {
     FAKE_CLOCK_LINE="14:23:07.512 UTC Thu Aug 20 2018" \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" == *"PREREQ WARNING: device clock is 2018"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "unparseable device clock: the optional probe must not abort the install" {
@@ -379,7 +582,7 @@ _iox_env() {
     FAKE_CLOCK_LINE="% Clock is not set" \
     bash "$STUBDIR/device/iox/install.sh"
   [[ "$output" != *"PREREQ WARNING"* ]]
-  [[ "$output" == *"[2/9]"* ]]
+  [[ "$output" == *"[3/7]"* ]]
 }
 
 @test "failing PREREQ aborts before the existing app is torn down" {
@@ -429,11 +632,11 @@ _iox_env() {
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     ACTIVATE_TIMEOUT=abc run bash "$INSTALL" --dry-run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ACTIVATE_TIMEOUT must be a whole number of seconds"* ]]
+  [[ "$output" == *"ACTIVATE_TIMEOUT must be an integer from 1 to 86400"* ]]
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     STATE_POLL=0 run bash "$INSTALL" --dry-run
   [ "$status" -eq 2 ]
-  [[ "$output" == *"STATE_POLL must be greater than zero"* ]]
+  [[ "$output" == *"STATE_POLL must be an integer from 1 to 86400"* ]]
 }
 
 @test "activation timeout honours the budget, dumps the unfiltered IOS reply, and keeps the app for a resumable retry" {
@@ -450,8 +653,8 @@ _iox_env() {
   [[ "$output" == *"activation is still loading the app image"* ]]
   [[ "$output" == *"Last observed state: DEPLOYED"* ]]
   # and the operator is told the retry is possible without an undeploy
-  [[ "$output" == *"LEFT IN PLACE"* ]]
-  [[ "$output" == *"resumable retry"* ]]
+  [[ "$output" == *"Activation may still be running"* ]]
+  [[ "$output" == *"retry onboarding"* ]]
 }
 
 @test "activation timeout leaves the app-hosting config on the device" {
@@ -463,7 +666,7 @@ _iox_env() {
     FAKE_APP_STATE=DEPLOYED ACTIVATE_TIMEOUT=2 STATE_POLL=1 \
     bash "$STUBDIR/device/iox/install.sh"
   [ "$status" -ne 0 ]
-  # the teardown in [1/9] is expected; a SECOND removal after the activate
+  # the teardown in [2/7] is expected; a SECOND removal after the activate
   # wait is not, so count them
   run grep -c 'no app-hosting appid iris' "$COMMAND_LOG"
   [ "$status" -eq 0 ]

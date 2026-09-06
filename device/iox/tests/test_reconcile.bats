@@ -14,7 +14,7 @@ telemetry = on
 telemetry_stream = off
 EOF
   export PYTHONPATH="$BATS_TEST_DIRNAME/../../agent"
-  source "$BATS_TEST_DIRNAME/../reconcile.sh"
+  source "$BATS_TEST_DIRNAME/../../container/reconcile.sh"
 }
 
 teardown() { rm -rf "$TMPDIR_T"; }
@@ -39,7 +39,7 @@ teardown() { rm -rf "$TMPDIR_T"; }
 
 @test "entrypoint synthesizes telemetry_stream defaulting off" {
   grep -q 'telemetry_stream = \${IRIS_TELEMETRY_STREAM:-off}' \
-    "$BATS_TEST_DIRNAME/../entrypoint.sh"
+    "$BATS_TEST_DIRNAME/../../container/entrypoint.sh"
 }
 
 @test "a stale agent_version in a persistent conf is overwritten" {
@@ -55,13 +55,11 @@ teardown() { rm -rf "$TMPDIR_T"; }
 }
 
 @test "entrypoint reconciles agent_version from the baked VERSION file" {
-  grep -q 'reconcile_conf_key agent_version' "$BATS_TEST_DIRNAME/../entrypoint.sh"
+  grep -q 'reconcile_conf_key agent_version' "$BATS_TEST_DIRNAME/../../container/entrypoint.sh"
 }
 
-@test "entrypoint synthesizes catalog_ca defaulting to the baked-in cert path" {
-  # #12 fail-closed fix: every entrypoint must hand a real, non-empty
-  # catalog_ca to a first-boot conf, or a fresh container would immediately
-  # hit make_catalog_context's refusal instead of a verified connection.
-  grep -q 'catalog_ca = \${IRIS_CATALOG_CA:-/opt/iris/iris-catalog.pem}' \
-    "$BATS_TEST_DIRNAME/../entrypoint.sh"
+@test "entrypoint synthesizes catalog_ca from the runtime-delivered certificate" {
+  entrypoint="$BATS_TEST_DIRNAME/../../container/entrypoint.sh"
+  grep -q 'CATALOG_CA="\$CAF_APP_APPDATA_DIR/iris-catalog.pem"' "$entrypoint"
+  grep -q 'catalog_ca = \${CATALOG_CA}' "$entrypoint"
 }

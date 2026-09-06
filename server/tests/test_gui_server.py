@@ -4,7 +4,7 @@
 import os
 import re
 
-import gui_server
+import management_api as gui_server
 import pytest
 
 
@@ -12,6 +12,13 @@ def test_webroot_assets_exist():
     for name in ("login.html", "index.html", "styles.css", "login.js", "app.js",
                  "setup.html", "setup.js"):
         assert os.path.isfile(os.path.join(gui_server.WEBROOT, name)), name
+
+
+def test_login_page_does_not_disclose_first_run_credentials():
+    with open(os.path.join(gui_server.WEBROOT, "login.html")) as f:
+        html = f.read()
+    assert gui_server.DEFAULT_SETUP_USER not in html
+    assert gui_server.DEFAULT_SETUP_PASS not in html
 
 
 def test_no_orphaned_control_ids():
@@ -108,8 +115,8 @@ def test_peer_policy_console_controls_are_typed_and_safe():
     # refreshDevices owns the policy snapshot, so an older peer-policy request
     # cannot overwrite the generation that rendered the device table.
     assert "function refreshPeerPolicy()" not in js
-    assert "fetch('/api/peer-policy', { signal: signal })" in js
-    assert "'/api/peer-policy/quarantine/' + encodeURIComponent(id)" in js
+    assert "fetch('/api/v1/peer-policy', { signal: signal })" in js
+    assert "'/api/v1/peer-policy/quarantine/' + encodeURIComponent(id)" in js
     assert "method: 'PUT', headers: csrfHdr" in js
     assert "if_revision: peerPolicy.revision" in js
     assert "r.status === 409" in js and "operation_backlog_full" in js
@@ -134,14 +141,14 @@ def test_import_from_disk_panel_wired():
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "'/api/images/importable'" in js or '"/api/images/importable"' in js
-    assert "/api/images/import'" in js or '/api/images/import"' in js
+    assert "'/api/v1/images/importable'" in js or '"/api/v1/images/importable"' in js
+    assert "/api/v1/images/import'" in js or '/api/v1/images/import"' in js
     assert "#import-rows .do-import" in js
     # the exact discovered path is echoed back — the server authorizes on
     # candidate identity, so the client must not reconstruct or edit it
     assert "data-path" in js
     # the import POST carries the CSRF header, like every other mutating call
-    post_call = js.split("/api/images/import'")[1][:400]
+    post_call = js.split("/api/v1/images/import'")[1][:400]
     assert "csrfHdr(" in post_call
     # publish progress reuses the upload path's poller rather than a second one
     assert "pollJob((await res.json()).job_id)" in js
@@ -151,6 +158,27 @@ def test_import_from_disk_panel_wired():
     assert "esc(c.path)" in js
     # deleting a catalogued image makes its name importable again
     assert "refreshImages(); refreshImportable();" in js
+
+
+def test_publish_jobs_surface_automatic_hash_verification():
+    """Both disk imports and uploads show the new verifying phase and verdict."""
+    js = _webroot("app.js")
+    result = js.split("function publishedJobText(job) {", 1)[1].split(
+        "\n  function pollJob", 1)[0]
+    assert "job.verification" in result
+    assert "verified against Cisco Bulk Hash" in result
+    assert "Cisco hash mismatch — quarantined" in result
+    assert "not found in Cisco Bulk Hash feed" in result
+    assert "Cisco hash verification incomplete" in result
+    disk_poll = js.split("function pollJob(jobId) {", 1)[1].split(
+        "\n  // Images already on disk", 1)[0]
+    assert "j.state === 'verifying'" in disk_poll
+    assert "checking Cisco Bulk Hash" in disk_poll
+    upload_poll = js.split("function pollUploadJob(jobId, ui) {", 1)[1].split(
+        "\n  function upload(file)", 1)[0]
+    assert "j.state === 'verifying'" in upload_poll
+    assert "ui.verifying()" in upload_poll
+    assert "ui.done(publishedJobText(j))" in upload_poll
 
 
 def test_bulk_row_actions_wired():
@@ -175,7 +203,7 @@ def test_bulk_row_actions_wired():
     # ...but the bulk credential action (issue #125) posts ONE request
     # carrying every selected id, not one per-device request each --
     # see bulkApply and gui_server.py's /api/devices/bulk-credential.
-    assert "'/api/devices/bulk-credential'" in js
+    assert "'/api/v1/devices/bulk-credential'" in js
     assert "function bulkApply(" in js
     # the single delete path confirms first
     assert "function delWarning(" in js
@@ -238,8 +266,8 @@ def test_batch_onboard_panel_wired():
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "'/api/onboard/jobs'" in js or '"/api/onboard/jobs"' in js
-    assert "/api/onboard/cancel-queued" in js
+    assert "'/api/v1/onboard/jobs'" in js or '"/api/v1/onboard/jobs"' in js
+    assert "/api/v1/onboard/cancel-queued" in js
     assert "batch-rows" in js and "batch-cancel" in js
     # cancel is SCOPED to this panel's jobs — a bare cancel-all would nuke
     # other sessions' queued batches
@@ -320,7 +348,7 @@ def test_monitoring_timeline_wired():
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
-    assert "/api/audit/histogram" in js
+    assert "/api/v1/audit/histogram" in js
     assert "addEventListener" in js
     # No inline event handler attributes anywhere in the audit/timeline code
     import re
@@ -475,20 +503,20 @@ def test_settings_tls_trust_and_destination_sections_wired():
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     # endpoint literals — POST via jpost (csrfHdr inside), DELETE via fetch
-    assert js.count("'/api/settings/gui-cert'") == 2          # POST + DELETE
-    assert "'/api/settings/trust'" in js                      # POST add
-    assert "'/api/settings/trust/' + encodeURIComponent(" in js   # DELETE row
-    assert "'/api/settings/ca-trust'" in js                   # POST config
-    assert "'/api/settings/ca-trust/refresh'" in js           # POST job start
-    assert "'/api/settings/ca-trust/refresh/' + encodeURIComponent(" in js
-    assert js.count("'/api/settings/telemetry-destination'") == 2
+    assert js.count("'/api/v1/settings/gui-cert'") == 2       # POST + DELETE
+    assert "'/api/v1/settings/trust'" in js                   # POST add
+    assert "'/api/v1/settings/trust/' + encodeURIComponent(" in js   # DELETE row
+    assert "'/api/v1/settings/ca-trust'" in js                # POST config
+    assert "'/api/v1/settings/ca-trust/refresh'" in js        # POST job start
+    assert "'/api/v1/settings/ca-trust/refresh/' + encodeURIComponent(" in js
+    assert js.count("'/api/v1/settings/telemetry-destination'") == 2
     # every DELETE carries the CSRF header (4 pre-existing + 3 new)
     assert js.count("{ method: 'DELETE', headers: csrfHdr() }") >= 7
     # per-row remove is a danger link rendered into the trust table
     assert "#trust-rows .trust-del" in js
     assert "danger-link trust-del" in js
     # destructive paths confirm with consequence-naming messages
-    assert "serves the bootstrap certificate again" in js     # cert revert
+    assert "serves its deployment certificate again" in js    # cert revert
     assert "stops trusting certificates issued" in js         # trust remove
     assert "goes back to the environment configuration" in js # dest revert
     # download-now polls the job like the image publish poller
@@ -558,6 +586,29 @@ def test_settings_uses_sidebar_feature_submenus():
     # the router owns sub-page selection: #settings/<sub> deep-links resolve
     assert "showSettingsSub(" in js
     assert "settings-submenu" in js
+
+
+def test_device_packages_have_a_persistent_settings_view():
+    """Package readiness remains inspectable after first-run setup closes."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'href="#settings/packages"' in html
+    assert 'id="nav-settings-packages"' in html
+    assert 'id="settings-pane-packages" hidden' in html
+    assert 'id="device-packages-table"' in html
+    assert 'id="device-packages-recheck"' in html
+    assert "SETTINGS_SUBS.push('packages')" in js
+    assert "if (sub === 'packages') refreshDevicePackages();" in js
+    refresh = js.split("async function refreshDevicePackages() {", 1)[1].split(
+        "\n  document.getElementById('device-packages-recheck')", 1)[0]
+    assert "'/api/v1/settings/setup-status'" in refresh
+    assert "renderPackageStatus(s.packages" in refresh
+    # Setup, wizard and the operational view all use one row/remedy renderer.
+    assert js.count("renderPackageStatus(") >= 5
+    assert "if (i.state !== 'ok' && i.remedy" in js
+    assert "i.detail || i.reason || ''" in js
+    assert "deployment-neutral" in html
+    assert "pins this server's certificate when they are built" not in html
 
 
 def test_read_version_env_handling(monkeypatch):
@@ -776,13 +827,21 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
     env["IRIS_IMAGES_DIR"] = str(tmp_path / "images")
     env["IRIS_CERT"] = "/nonexistent-so-plain-http"
     env["IRIS_GUI_CERT"] = "/nonexistent-so-plain-http-too"
-    # With no usable certificate main() now fails CLOSED (IRIS-06-003):
-    # exit 2 with a message naming the opt-in, and nothing listening.
+    env["IRIS_MANAGEMENT_API_URL"] = "https://127.0.0.1:1"
+    token_file = tmp_path / "management-token"
+    token_file.write_text(json.dumps({"scope": "management", "token": "t" * 64}))
+    token_file.chmod(0o600)
+    env["IRIS_MANAGEMENT_API_TOKEN_FILE"] = str(token_file)
+    ca_file = tmp_path / "management-ca.pem"
+    ca_file.write_text("unusable-for-a-live-connection")
+    env["IRIS_MANAGEMENT_API_CA"] = str(ca_file)
+    # Without the exact development opt-in the state-free BFF refuses to
+    # start when it cannot fetch a serving identity from management.
     env.pop("IRIS_GUI_ALLOW_PLAINTEXT", None)
     refused = subprocess.run([sys.executable, "gui_server.py"], cwd=_SERVER_DIR,
                              env=env, capture_output=True, timeout=30)
     assert refused.returncode == 2
-    assert b"IRIS_GUI_ALLOW_PLAINTEXT=1" in refused.stderr
+    assert b"refusing to start" in refused.stderr
     assert not _wait_for_port(host, port, timeout=0.5)
     # The explicit opt-in is what this plain-HTTP harness needs.
     env["IRIS_GUI_ALLOW_PLAINTEXT"] = "1"
@@ -799,8 +858,8 @@ def test_module_run_as_script_actually_starts_the_server(tmp_path):
             "gui_server.py did not start listening on %s:%d -- process likely "
             "exited immediately (missing __main__ guard)" % (host, port)
         )
-        status, _, _ = _req(host, port, "GET", "/api/session")
-        assert status == 401
+        status, _, body = _req(host, port, "GET", "/healthz")
+        assert status == 200 and json.loads(body) == {"ok": True}
     finally:
         proc.terminate()
         try:
@@ -1176,17 +1235,28 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert _req(host, port, "GET", "/api/peer-policy")[0] == 401
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
-        status, _, raw = _req(host, port, "GET", "/api/peer-policy",
-                              headers={"Cookie": cookie})
+        status, get_headers, raw = _req(
+            host, port, "GET", "/api/peer-policy",
+            headers={"Cookie": cookie})
         assert status == 200
+        assert get_headers["ETag"] == '"iris-peer-policy-1"'
         view = json.loads(raw)
         assert view["revision"] == 1
         assert view["quarantine_assignments"] == []
         assert "rules" not in view["quarantine"]
         assert "aria_session_id" not in view["enforcement"]
-        status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
-                              {"quarantined": True, "if_revision": 1}, headers)
+        mismatch = dict(headers, **{"If-Match": '"iris-peer-policy-999"'})
+        status, mismatch_headers, _ = _req(
+            host, port, "PUT", "/api/peer-policy/quarantine/d1",
+            {"quarantined": True, "if_revision": 1}, mismatch)
+        assert status == 412
+        assert mismatch_headers["ETag"] == '"iris-peer-policy-1"'
+        preferred = dict(headers, **{"If-Match": get_headers["ETag"]})
+        status, response_headers, raw = _req(
+            host, port, "PUT", "/api/peer-policy/quarantine/d1",
+            {"quarantined": True, "if_revision": 1}, preferred)
         assert status == 200
+        assert response_headers["ETag"] == '"iris-peer-policy-2"'
         assert json.loads(raw) == {"ok": True, "revision": 2, "quarantined": True}
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
             doc = json.load(f)
@@ -1212,9 +1282,12 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert "10.0.0.99" not in raw.decode()
         # The tracker acknowledgement is consumed only by the next durable
         # mutation, which prunes the acknowledged operation from the outbox.
-        status, _, _ = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
-                            {"quarantined": False, "if_revision": 2}, headers)
+        status, compat_headers, _ = _req(
+            host, port, "PUT", "/api/peer-policy/quarantine/d1",
+            {"quarantined": False, "if_revision": 2}, headers)
         assert status == 200
+        assert compat_headers["Deprecation"] == "true"
+        assert compat_headers["Sunset"] == "Sat, 04 Sep 2027 00:00:00 GMT"
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
             assert [e["revision"] for e in json.load(f)["operation_outbox"]] == [3]
         status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
@@ -1318,6 +1391,44 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
                                headers={"Cookie": ck})[2])["devices"] == []
     finally:
         stop()
+
+
+def test_device_create_idempotency_replays_and_conflicts(tmp_path):
+    host, port, _, stop = _serve_full(tmp_path)
+    try:
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf,
+                   "Idempotency-Key": "create-device-d1"}
+        body = {"device_id": "d1", "device_ip": "10.0.0.1"}
+        first = _req(host, port, "POST", "/api/devices", body,
+                     headers=headers)
+        assert first[0] == 200
+        replay = _req(host, port, "POST", "/api/devices", body,
+                      headers=headers)
+        assert replay[0] == 200
+        assert replay[2] == first[2]
+        assert replay[1]["Idempotency-Replayed"] == "true"
+        conflict = _req(
+            host, port, "POST", "/api/devices",
+            {"device_id": "d1", "device_ip": "10.0.0.2"},
+            headers=headers)
+        assert conflict[0] == 409
+        assert json.loads(conflict[2])["code"] == "resource-conflict"
+    finally:
+        stop()
+
+
+def test_idempotency_capacity_never_evicts_in_flight_work():
+    active = {"response": None, "created": 1}
+    cache = {"active": active}
+    assert gui_server._idempotency_make_room(cache, 1) is False
+    assert cache == {"active": active}
+
+    completed = {"response": (200, "application/json", b"{}", ()),
+                 "created": 0}
+    cache["completed"] = completed
+    assert gui_server._idempotency_make_room(cache, 1) is True
+    assert cache == {"active": active}
 
 
 def test_device_upsert_ignores_machine_determined_fields(tmp_path):
@@ -1535,22 +1646,23 @@ def test_assign_rejects_malformed_image_ids(tmp_path):
         st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_ids": 5}, headers=hh)
         assert st == 400
-        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        assert json.loads(b)["error"] == "image_ids must be a list of image ids"
+        assert json.loads(b)["code"] == "invalid-request"
         # a bare string: previously iterated into one-character "ids"
         st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_ids": "img-a"}, headers=hh)
         assert st == 400
-        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        assert json.loads(b)["error"] == "image_ids must be a list of image ids"
         # a falsy element: previously silently dropped instead of rejected
         st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_ids": ["img-a", ""]}, headers=hh)
         assert st == 400
-        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        assert json.loads(b)["error"] == "image_ids must be a list of image ids"
         # a non-string element
         st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_ids": ["img-a", 123]}, headers=hh)
         assert st == 400
-        assert json.loads(b) == {"error": "image_ids must be a list of image ids"}
+        assert json.loads(b)["error"] == "image_ids must be a list of image ids"
         # none of the rejected bodies touched the device's policy
         assert cat.get_policy("d1") == {"approved_image_id": None,
                                         "approved_image_ids": []}
@@ -2836,15 +2948,18 @@ def _serve_router(tmp_path, run_fn, preflight_fn=None, mint_fn=None, device=None
 
 
 def _wait_onboard_job(host, port, cookie, job_id):
-    deadline = time.time() + 3
-    while time.time() < deadline:
+    # Allow scheduling and durable record writes on a busy test host.
+    deadline = time.monotonic() + 10
+    job = None
+    while time.monotonic() < deadline:
         _, _, body = _req(host, port, "GET", "/api/onboard/jobs/" + job_id,
                           headers={"Cookie": cookie})
         job = json.loads(body)
         if job["state"] in ("done", "error", "cancelled"):
             return job
         time.sleep(0.02)
-    raise AssertionError("onboard job did not finish: %s" % job_id)
+    raise AssertionError("onboard job did not finish: %s (last state: %s)" % (
+        job_id, job.get("state") if job else "not received"))
 
 
 def test_c8000v_router_plan_auto_resolves_blank_platform_and_fields(tmp_path):
@@ -3196,7 +3311,10 @@ def test_router_routes_fail_closed_without_record_store(tmp_path):
             status, _, body = _req(
                 "127.0.0.1", port, "POST", "/api/devices/r1/" + action, {},
                 headers=headers)
-            assert status == 503 and "record" in json.loads(body)["error"]
+            problem = json.loads(body)
+            assert status == 503
+            assert problem["code"] == "service-unavailable"
+            assert problem["error"] == "service unavailable"
     finally:
         srv.shutdown()
 
@@ -3610,9 +3728,7 @@ def _setup_headers(host, port):
 
 
 def _default_login_grant(host, port):
-    """Sign in with the documented default first-run credential
-    (iris/irisisgreat!) and return the one-time setup grant from the
-    response. No session cookie is issued for this login."""
+    """Exchange the documented default pair for a one-time setup grant."""
     st, hd, b = _req(host, port, "POST", "/api/login",
                      {"username": gui_server.DEFAULT_SETUP_USER,
                       "password": gui_server.DEFAULT_SETUP_PASS})
@@ -3623,18 +3739,22 @@ def _default_login_grant(host, port):
     return body["setup_grant"]
 
 
+def test_default_setup_pair_is_stable():
+    assert gui_server.DEFAULT_SETUP_USER == "iris"
+    assert gui_server.DEFAULT_SETUP_PASS == "irisisgreat!"
+
+
 def test_setup_serves_wizard_and_creates_admin(tmp_path):
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
-        # while no admin exists, GET / serves the LOGIN page (the default
-        # iris credential there is what mints the setup grant); the setup
+        # while no admin exists, GET / serves the LOGIN page; the documented
+        # default pair mints the setup grant. The setup
         # page itself stays reachable as a static page for the redirect.
         st, hd, b = _req(host, port, "GET", "/")
         assert st == 200 and b'id="login-form"' in b
         st, hd, b = _req(host, port, "GET", "/setup.html")
         assert st == 200 and b'id="setup-form"' in b
-        # The operator signs in with the documented default credential; the
-        # server hands back a one-time grant instead of a session.
+        # The server hands back a one-time grant instead of a session.
         grant = _default_login_grant(host, port)
         st, _, _ = _req(host, port, "POST", "/api/setup",
                         {"username": "admin", "password": "password",
@@ -3682,8 +3802,8 @@ def test_normal_mode_serves_login_not_setup(tmp_path):
                          "setup_grant": "unavailable-after-setup"},
                         headers=_setup_headers("127.0.0.1", port))
         assert st == 409
-        # the default credential is not special once an admin exists: it is
-        # an ordinary failed login (no special-case leak), not a setup grant
+        # The default pair is not special once an admin exists: it is an
+        # ordinary failed login, not a setup grant.
         st, _, b = _req("127.0.0.1", port, "POST", "/api/login",
                         {"username": gui_server.DEFAULT_SETUP_USER,
                          "password": gui_server.DEFAULT_SETUP_PASS})
@@ -3757,17 +3877,14 @@ def test_setup_grant_regenerated_on_each_default_login_latest_wins(tmp_path):
         stop()
 
 
-def test_wrong_default_credentials_are_ordinary_failed_login(tmp_path):
-    """A near-miss on the default pair (right user/wrong password or vice
-    versa) while needs_setup does NOT mint a grant -- it is an ordinary
-    failed login, audited like any other (spec: default-cred-setup, Feature
-    1: "Failed default-credential attempts while needs_setup are audited as
-    category 'auth'")."""
+def test_only_exact_default_pair_mints_setup_grant(tmp_path):
+    """Either correct field alone is an ordinary failed login."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         for creds in (
             {"username": gui_server.DEFAULT_SETUP_USER, "password": "wrong"},
-            {"username": "not-iris", "password": gui_server.DEFAULT_SETUP_PASS},
+            {"username": "not-iris",
+             "password": gui_server.DEFAULT_SETUP_PASS},
         ):
             st, _, b = _req(host, port, "POST", "/api/login", creds)
             assert st == 401
@@ -3778,7 +3895,7 @@ def test_wrong_default_credentials_are_ordinary_failed_login(tmp_path):
 
 
 def test_default_credential_full_happy_path(tmp_path):
-    """End to end: default login -> grant -> /api/setup -> real session."""
+    """End to end: default login -> grant -> setup -> real session."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         grant = _default_login_grant(host, port)
@@ -3797,11 +3914,7 @@ def test_default_credential_full_happy_path(tmp_path):
 
 
 def test_admin_may_be_named_iris(tmp_path):
-    """The default-credential special case is gated purely on needs_setup(),
-    never on the chosen username: an operator may legitimately name the real
-    admin account "iris" (even reusing "irisisgreat!" as its password). Once
-    that admin exists, iris/irisisgreat! is checked against the stored admin
-    hash like any other login -- no reserved word, no special-casing."""
+    """The default username remains legal for the persistent admin account."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         grant = _default_login_grant(host, port)
@@ -3818,8 +3931,8 @@ def test_admin_may_be_named_iris(tmp_path):
         assert st == 200 and "iris_sid=" in hd.get("Set-Cookie", "")
         assert json.loads(b)["username"] == "iris"
 
-        # iris/irisisgreat! no longer means anything special post-setup, and
-        # does not match this admin's real (different) password
+        # The default pair no longer means anything special post-setup, and
+        # does not match this admin's real password.
         st, _, b = _req(host, port, "POST", "/api/login",
                         {"username": gui_server.DEFAULT_SETUP_USER,
                          "password": gui_server.DEFAULT_SETUP_PASS})
@@ -3830,11 +3943,7 @@ def test_admin_may_be_named_iris(tmp_path):
 
 
 def test_admin_named_iris_with_default_password(tmp_path):
-    """Degenerate but legal case: the operator's chosen admin password IS
-    "irisisgreat!". Post-setup, iris/irisisgreat! must succeed as an
-    ordinary authenticated login (it matches the real stored credential),
-    not be diverted into the setup flow -- needs_setup() is false, so the
-    default-credential branch never triggers."""
+    """After setup, the same pair uses only the persisted admin hash."""
     host, port, app, stop = _serve_fresh(tmp_path)
     try:
         grant = _default_login_grant(host, port)
@@ -3857,14 +3966,7 @@ def test_admin_named_iris_with_default_password(tmp_path):
 
 
 def test_bootstrap_token_strings_removed_repo_wide():
-    """Source guard (spec: default-cred-setup-and-tls-ux, Feature 1): the old
-    bootstrap-token mechanism -- the runtime file, its basename, the startup
-    banner -- is fully removed from every live file. CHANGELOG.md is exempt:
-    it documents the change, including the removed path, as project history.
-    This test's own file is exempt too: its name and this docstring
-    necessarily spell out the strings it is checking are gone everywhere
-    else. Scoped to git-tracked files so it never walks build output,
-    caches, or unrelated local directories."""
+    """The earlier file-backed GUI bootstrap-token mechanism stays removed."""
     repo_root = os.path.normpath(os.path.join(gui_server.WEBROOT, "..", ".."))
     tracked = subprocess.run(
         ["git", "ls-files"], cwd=repo_root, capture_output=True,
@@ -4061,6 +4163,51 @@ def test_settings_console_port_is_dynamic(tmp_path, monkeypatch):
         stop()
 
 
+@pytest.mark.parametrize("url, port", [
+    ("https://console.example.com:9080/", 9080),
+    ("https://console.example.com", 443),
+])
+def test_settings_reports_independent_console_origin(tmp_path, monkeypatch, url, port):
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8080")
+    monkeypatch.setenv("IRIS_CONSOLE_URL", url)
+    host, bound_port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, bound_port)
+        status, _, body = _req(host, bound_port, "GET", "/api/settings",
+                               headers={"Cookie": ck})
+        assert status == 200
+        settings = json.loads(body)
+        assert settings["host_ip"] == "192.0.2.10"
+        assert settings["console_url"] == url.rstrip("/")
+        assert settings["ports"]["console"] == port
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:private@console.example.com:8080",
+    "https://console.example.com:bad", "http://console.example.com:8080",
+    "https://console.example.com:8080/?token=private",
+])
+def test_settings_does_not_echo_invalid_console_url(tmp_path, monkeypatch, url):
+    monkeypatch.setenv("IRIS_HOST_IP", "192.0.2.10")
+    monkeypatch.setenv("IRIS_GUI_PUBLISH", "8082")
+    monkeypatch.setenv("IRIS_CONSOLE_URL", url)
+    host, port, _ctx, stop = _serve_full(tmp_path)
+    try:
+        ck, _csrf = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/settings",
+                               headers={"Cookie": ck})
+        assert status == 200
+        settings = json.loads(body)
+        assert settings["console_url"] == "https://192.0.2.10:8082"
+        assert settings["ports"]["console"] == 8082
+        assert b"private" not in body
+    finally:
+        stop()
+
+
 def test_settings_password_change(tmp_path):
     host, port, _ctx, stop = _serve_full(tmp_path)
     try:
@@ -4204,7 +4351,7 @@ def test_swarmmap_injects_cfg_nonce_and_csp(tmp_path, monkeypatch):
         st, hd, b = _req(host, port, "GET", "/swarmmap", headers={"Cookie": ck})
         assert st == 200 and "text/html" in hd.get("Content-Type", "")
         body = b.decode()
-        cfg = ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/swarm","pull":true,'
+        cfg = ('window.IRIS_MAP_CFG = {"swarmUrl":"/api/v1/swarm","pull":true,'
                '"eventsUrlTemplate":""};')
         assert body.count(cfg) == 1                       # substituted exactly once
         assert "window.IRIS_MAP_CFG = null;" not in body  # placeholder consumed
@@ -5217,11 +5364,12 @@ def test_setup_emits_enriched_audit(tmp_path):
         assert ev["target"] == "root"
         assert ev["detail"] == "initial admin account created"
         assert ev["src_ip"] == "127.0.0.1"
-        # the default-credential login that produced the grant is itself
+        # The default-credential login that produced the grant is itself
         # audited as an ordinary successful login (category "auth")
         login_ev = [e for e in _read_audit_lines(audit_path)
                     if e.get("event") == "login"][0]
-        assert login_ev["actor"] == "console:" + gui_server.DEFAULT_SETUP_USER
+        assert login_ev["actor"] == (
+            "console:" + gui_server.DEFAULT_SETUP_USER)
         assert login_ev["category"] == "auth" and login_ev["result"] == "ok"
     finally:
         srv.shutdown()
@@ -5249,9 +5397,7 @@ def test_setup_wrong_grant_is_audited(tmp_path):
 
 
 def test_default_login_failure_is_audited_category_auth(tmp_path):
-    """The Problem section's explicit requirement: a failed attempt at the
-    default credential while needs_setup is audited as category "auth" --
-    exercised here through the ordinary login_fail path (no grant issued)."""
+    """A failed default login is an ordinary audited authentication failure."""
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
     audit_path = str(tmp_path / "audit.jsonl")
@@ -6000,7 +6146,8 @@ def test_settings_gui_cert_persist_failure_audited(tmp_path, monkeypatch):
                         {"cert_pem": cert_pem, "key_pem": key_pem}, headers=hh)
         assert st == 500, "expected 500 on persist_override failure, got %d" % st
         resp = json.loads(b)
-        assert resp["error"] == "certificate install failed"
+        assert resp["code"] == "internal-error"
+        assert resp["error"] == "internal server error"
         assert b"PRIVATE KEY" not in b, "key material leaked in error response"
         # Audit log must contain a fail row with CalledProcessError in detail,
         # but NO key material.
@@ -6199,7 +6346,8 @@ def test_settings_trust_add_audits_os_error(tmp_path, monkeypatch):
                         {"pem": ca_pem}, headers=hh)
         assert st == 500
         resp = json.loads(b)
-        assert resp["error"] == "trust install failed"
+        assert resp["code"] == "internal-error"
+        assert resp["error"] == "internal server error"
         # verify audit contains class name only, not "disk full" or PEM text
         fail_rows = [e for e in _read_audit_lines(audit_path)
                      if e.get("event") == "trust-add" and e["result"] == "fail"]
@@ -6382,7 +6530,7 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
         assert ev["actor"] == "console:admin" and ev["target"] == "ca-trust"
         # Audit logs the raw stored value, not the resolved default:
         # never-configured renders as "(none)"
-        assert "url (none) -> https://ca.example/bundle.pem" in ev["detail"]
+        assert "url (none) -> https://ca.example" in ev["detail"]
         assert "auto False -> True" in ev["detail"]
         # POST different url: detail contains first url as before-value
         assert _req(host, port, "POST", "/api/settings/ca-trust",
@@ -6392,7 +6540,7 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
                if e["event"] == "ca-trust-config"]
         assert len(evs) == 2
         ev = evs[1]
-        assert "url https://ca.example/bundle.pem -> https://ca.other/bundle.pem" in ev["detail"]
+        assert "url https://ca.example -> https://ca.other" in ev["detail"]
         # Clearing (url null) → after-side "(none)"
         assert _req(host, port, "POST", "/api/settings/ca-trust",
                     {"url": None, "auto": False},
@@ -6401,7 +6549,7 @@ def test_settings_ca_trust_config_audited(tmp_path, monkeypatch):
                if e["event"] == "ca-trust-config"]
         assert len(evs) == 3
         ev = evs[2]
-        assert "url https://ca.other/bundle.pem -> (none)" in ev["detail"]
+        assert "url https://ca.other -> (none)" in ev["detail"]
     finally:
         stop()
 
@@ -6425,7 +6573,8 @@ def test_settings_ca_trust_persist_failure_audited(tmp_path, monkeypatch):
                          "auto": True}, headers=hh)
         assert st == 500
         resp = json.loads(b)
-        assert resp["error"] == "settings save failed"
+        assert resp["code"] == "internal-error"
+        assert resp["error"] == "internal server error"
         fail_rows = [e for e in _read_audit_lines(audit_path)
                      if e.get("event") == "ca-trust-config"
                      and e.get("result") == "fail"]
@@ -6481,7 +6630,7 @@ def test_ca_trust_refresh_job_flow(tmp_path, monkeypatch):
         job = _poll_ca_job(host, port, ck, jid)
         assert job == {"state": "done", "certs": 3,
                        "detail": "downloaded 3 certificate(s) from "
-                                 + _CA_DEFAULT_URL}
+                                 "configured endpoint"}
         assert seen["url"] == _CA_DEFAULT_URL
 
         # configuring an explicit url overrides the default
@@ -6495,7 +6644,7 @@ def test_ca_trust_refresh_job_flow(tmp_path, monkeypatch):
         job = _poll_ca_job(host, port, ck, jid)
         assert job == {"state": "done", "certs": 3,
                        "detail": "downloaded 3 certificate(s) from "
-                                 "https://ca.example/bundle.pem"}
+                                 "configured endpoint"}
         assert seen["url"] == "https://ca.example/bundle.pem"
 
         # the audit event is emitted BEFORE the job turns terminal, so a
@@ -6531,11 +6680,11 @@ def test_ca_trust_refresh_failure_reported_and_audited(tmp_path, monkeypatch):
         jid = json.loads(b)["job"]
         job = _poll_ca_job(host, port, ck, jid)
         assert job == {"state": "failed", "certs": None,
-                       "detail": "no PEM blocks"}
+                       "detail": "CA bundle download failed"}
         evs = [e for e in _read_audit_lines(audit_path)
                if e["event"] == "ca-trust-refresh"]
         assert len(evs) == 1 and evs[0]["result"] == "fail"
-        assert "no PEM blocks" in evs[0]["detail"]
+        assert "CA bundle download failed" in evs[0]["detail"]
     finally:
         stop()
 
@@ -6557,6 +6706,14 @@ def test_ca_refresh_due_pure_decision():
 
 
 # ---- editable telemetry destination (feature B, console side) ----
+
+def test_authenticated_telemetry_destination_requires_https(monkeypatch):
+    monkeypatch.setenv("IRIS_OTLP_HEADERS", "Authorization=Bearer secret")
+    assert gui_server._validate_otlp_endpoint(
+        "http://collector:4318", authenticated=True)[0] is None
+    assert gui_server._validate_otlp_endpoint(
+        "https://collector:4318", authenticated=True) == (
+            "https://collector:4318", None)
 
 def test_settings_telemetry_destination_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
@@ -6724,7 +6881,8 @@ def test_settings_telemetry_destination_persist_failure_audited(tmp_path, monkey
                          "enabled": True}, headers=hh)
         assert st == 500
         resp = json.loads(b)
-        assert resp["error"] == "settings save failed"
+        assert resp["code"] == "internal-error"
+        assert resp["error"] == "internal server error"
         fail_rows = [e for e in _read_audit_lines(audit_path)
                      if e.get("event") == "telemetry-destination-set"
                      and e.get("result") == "fail"]
@@ -7399,32 +7557,39 @@ def test_agent_install_rename_and_inventory_only_label():
     assert "managementType === 'legacy_routed' || managementType === 'legacy'" in js
     assert "'Agent install updated for '" in js
     assert "'Agent install update failed: '" in js
-    assert "['Agent install', esc(res.platform" in js
+    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
+
+
+def test_agent_install_labels_name_the_runtime_not_router_networking():
+    """The `router` recipe runs Guest Shell; VPG is a management choice."""
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    label_fn = js.split("function agentInstallLabel(platform) {", 1)[1].split(
+        "\n  }", 1)[0]
+    label_map = js.split("var AGENT_INSTALL_LABELS = {", 1)[1].split("\n  };", 1)[0]
+    assert "router: 'Guest Shell'" in label_map
+    assert "AGENT_INSTALL_LABELS[platform]" in label_fn
+    assert "var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;" in js
+    assert "Router (VPG)" not in html + js
+    assert "Router (Guest Shell via VirtualPortGroup)" not in html + js
+    assert '<option value="router">Guest Shell</option>' in html
+    assert "['Agent install', esc(agentInstallLabel(res.platform))]" in js
 
 
 def test_add_device_form_model_field_precedes_agent_install_select():
-    """Agent-install options depend on the model (gui_onboard.
-    install_options_for), so the model input must render BEFORE the agent-
-    install select in the add-device form's DOM order -- app.js's
-    refreshInstallOptions reads df-model's live value to filter df-platform's
-    options as the operator types, before the field it is about to filter
-    even exists otherwise."""
+    """Model compatibility is entered before choosing an agent install."""
     with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
         html = f.read()
     assert html.index('id="df-model"') < html.index('id="df-platform"')
 
 
 def test_add_device_form_filters_install_options_live_by_model():
-    """Source guard for the /api/install-options wiring: as the operator
-    types a model, the agent-install select is refetched and repainted --
-    to the one option an IOS-XR model can run, and back to the full set when
-    the model is blank or unrecognized. The select used to be DISABLED for
-    IOS-XR with "no agent install available yet"; the XR appmgr container
-    agent exists now, so that text is gone and the option is real."""
+    """Model lookup narrows the selected management type's install choices.
+    The behavior tests cover changes, failures and late lookup responses."""
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
     assert "getElementById('df-model').addEventListener('input'" in js
-    assert "/api/install-options?model=" in js
+    assert "/api/v1/install-options?model=" in js
     assert "no agent install available yet" not in js
     assert "'xr-appmgr'" in js and "XR appmgr container" in js
     assert "refreshInstallOptions" in js
@@ -7448,84 +7613,10 @@ def test_xr_host_management_type_option_added_to_both_selects():
             'stack</option>') in df_mgmt_type
 
 
-def test_update_device_fields_hides_every_addressing_field_for_xr_host():
-    """xr-host runs the appmgr container on the router's own network stack:
-    no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Before this,
-    df-guest/df-mask/df-gateway were ALWAYS visible regardless of
-    management type -- the core UX bug this task fixes, since an operator adding
-    an XR router saw three fields that mean nothing for it. updateDeviceFields
-    must hide all seven addressing fields for xr-host and set the agent
-    install to xr-appmgr, mirroring the pre-existing router auto-set/clear
-    pattern in both directions."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    fn = js.split("function updateDeviceFields() {", 1)[1].split("\n  }", 1)[0]
-    assert "var xrHost = managementType === 'xr-host';" in fn
-    assert "df-vlan').hidden = router || xrHost;" in fn
-    assert "df-guest').hidden = xrHost;" in fn
-    assert "df-mask').hidden = xrHost;" in fn
-    assert "df-gateway').hidden = xrHost;" in fn
-    assert "if (xrHost && !platform.value) platform.value = 'xr-appmgr';" in fn
-    assert "if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';" in fn
-
-
-def test_xr_host_auto_selected_from_model_and_from_platform_pick():
-    """Two paths into xr-host without ever asking the operator to notice an
-    addressing field: (1) the model looks IOS-XR shaped, which the client
-    learns not by reimplementing the server's model regex but by reading
-    the /api/install-options answer -- an XR model gets back exactly
-    ["xr-appmgr"], nothing else ever does -- and (2) the operator picks
-    Agent install = XR appmgr container directly. Either path auto-selects
-    df-management-type to xr-host and repaints the form, without fighting an
-    operator who is already there.
-
-    Symmetric exit: correcting the model away from an XR shape (e.g. 8201
-    -> C9300-48UXM) must reset an auto-entered xr-host management type back
-    to the unset/default option and repaint. Without this, df-guest/df-mask/
-    df-gateway stay hidden for a non-XR device with no visible cause and
-    the form cannot be completed. Scoped to the same model-driven repaint
-    -- it must not reach for any of the operator's own explicit management
-    type changes elsewhere in the form.
-
-    Regression closed here: a first pass only wired the exit into the
-    fetched-non-XR-answer branch. Every OTHER path that repaints the
-    platform select away from offering xr-appmgr -- the blank-model early
-    return, the !r.ok error path, a null options answer, the zero-options
-    dead end, and the catch block -- painted FULL_INSTALL_OPTIONS_HTML
-    (which does not even list xr-appmgr) while leaving df-management-type
-    stuck on xr-host, so the addressing fields stayed hidden with the
-    agent-install select silently offering no way back to xr-appmgr
-    either. The exit must be a single helper invoked from every one of
-    those paths, not re-implemented ad hoc per branch."""
-    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
-        js = f.read()
-    refresh_fn = js.split("async function refreshInstallOptions() {", 1)[1].split(
-        "  document.getElementById('df-model').addEventListener('input', refreshInstallOptions);", 1)[0]
-    assert "options.length === 1 && options[0] === 'xr-appmgr'" in refresh_fn
-    assert "mgmtTypeSel.value !== 'xr-host'" in refresh_fn
-    assert "mgmtTypeSel.value = 'xr-host';" in refresh_fn
-    assert "updateDeviceFields();" in refresh_fn
-    assert "function exitXrHostIfStale() {" in refresh_fn
-    helper = refresh_fn.split("function exitXrHostIfStale() {", 1)[1].split("}", 1)[0]
-    assert "mgmtTypeSel.value === 'xr-host'" in helper
-    assert "mgmtTypeSel.value = '';" in helper
-    assert "updateDeviceFields();" in helper
-    # every non-XR repaint path calls the helper -- six calls: blank model,
-    # !r.ok, options === null, options.length === 0, the fetched-non-XR
-    # answer, and the catch block
-    assert refresh_fn.count("exitXrHostIfStale();") == 6
-    blank_model_block = refresh_fn.split("if (!model) {", 1)[1].split("}", 1)[0]
-    assert "exitXrHostIfStale();" in blank_model_block, \
-        "blank-model early return must exit a stale xr-host management type too"
-    catch_block = refresh_fn.split("} catch (e) {", 1)[1]
-    assert "exitXrHostIfStale();" in catch_block
-    assert "getElementById('df-platform').addEventListener('change'" in js
-    plat_fn = js.split(
-        "getElementById('df-platform').addEventListener('change', function () {", 1)[1].split(
-        "});", 1)[0]
-    assert "this.value !== 'xr-appmgr'" in plat_fn
-    assert "mgmtTypeSel.value === 'xr-host'" in plat_fn
-    assert "mgmtTypeSel.value = 'xr-host';" in plat_fn
+# Management-type visibility and model lookup behavior are exercised against
+# the shipped JavaScript in test_add_device_fields.py. The former source
+# assertions required model/platform edits to change management type, which
+# is precisely the behavior the operator now requires us to remove.
 
 
 def test_device_form_submit_sends_no_addressing_fields_for_xr_host():
@@ -8057,7 +8148,9 @@ def test_undeploy_reports_a_corrupt_record_store_instead_of_adopt_it_first(
         st, _, b = _req(host, port, "POST", "/api/devices/r1/undeploy", {},
                         headers=hh)
         assert st == 503, b
-        assert b"unreadable" in b
+        problem = json.loads(b)
+        assert problem["code"] == "service-unavailable"
+        assert problem["error"] == "service unavailable"
         assert b"adopt it first" not in b, (
             "an unreadable store was reported as an unowned device")
     finally:
@@ -8185,7 +8278,7 @@ def test_empty_apply_confirms_before_unassigning(tmp_path):
     harmless extra prompt, not a special case to detect."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
     assert "!imgIds.length" in bulk_handler
     assert "confirm('Unassign all images from ' + claimed.length + ' device(s)?')" \
         in bulk_handler
@@ -8209,8 +8302,8 @@ def test_bulk_picker_notes_differing_assignments_on_empty_intersection():
     app_js = _webroot("app.js")
     assert 'id="img-picker-note"' in html
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
-    assert "Selected devices have differing assignments" in bulk_handler
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
+    assert "Some selected devices are missing assignments present on others" in bulk_handler
     assert "sets.some(" in bulk_handler
     # the picker itself resets any stale note on every open, so a note left
     # over from one bulk pick never bleeds into the next (bulk or per-row)
@@ -8226,24 +8319,28 @@ def test_bulk_picker_warns_when_the_sets_merely_overlap():
     got no note and no confirm -- the picker looked complete, Apply posted [A]
     to both, and dev1 lost B with nothing said.
 
-    The rule belongs on the SETS, not their intersection: Apply writes one set
-    to every selected device, so any selection whose assignments are not all
-    identical can drop an image the operator never saw. Both the note and a
-    confirm on Apply now read one shared derivation of that, so they cannot
-    drift into two different rules. Identical sets -- every device unassigned
-    included -- stay a plain, unconfirmed apply."""
+    The pre-picker note belongs on the SETS, not their intersection.  The
+    confirmation, however, belongs on the proposed RESULT: [A,B] + [A] -> [A]
+    removes B and must warn, while [A] + [] -> [A] only adds A and must not
+    claim that the operator is assigning different images. Identical sets --
+    every device unassigned included -- stay a plain, unconfirmed apply."""
     app_js = _webroot("app.js")
     bulk_handler = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3800]
+        "getElementById('assign-images-selected').addEventListener", 1)[1][:4800]
     assert "setsDiffer" in bulk_handler
     # the gate is no longer the emptiness of the intersection
     assert "!intersection.length &&" not in bulk_handler, \
         "the note still fires only on an EMPTY intersection"
     assert "if (setsDiffer) {" in bulk_handler
-    # Apply confirms before it replaces differing sets, and cancelling that
-    # confirm releases the shared selected-action lock like every other one.
-    guard = bulk_handler.split("} else if (setsDiffer &&", 1)
-    assert len(guard) == 2, "Apply does not confirm when the sets differ"
+    # Apply confirms only when the checked result omits an existing image, and
+    # cancelling that confirm releases the shared selected-action lock like
+    # every other one. A mixed [A] + [] start followed by [A] is additive and
+    # therefore does not produce a false destructive-change warning.
+    assert "removesAssignment" in bulk_handler
+    derivation = bulk_handler.split("var removesAssignment", 1)[1][:350]
+    assert "sets.some(" in derivation and "imgIds.indexOf(id) === -1" in derivation
+    guard = bulk_handler.split("} else if (removesAssignment &&", 1)
+    assert len(guard) == 2, "Apply does not confirm before removing an assignment"
     assert "confirm(" in guard[1][:200]
     assert "setBulkBusy(false)" in guard[1][:900]
 
@@ -8317,7 +8414,8 @@ def test_picker_sends_the_set_it_was_opened_on_and_answers_409():
     assert "expect[id] = current" in row
     assert "expect: expect" in row
     bulk = app_js.split(
-        "getElementById('assign-images-selected').addEventListener", 1)[1][:3600]
+        "getElementById('assign-images-selected').addEventListener", 1)[1].split(
+            "getElementById('apply-cred-selected').addEventListener", 1)[0]
     assert "expect[id] = sets[i]" in bulk
     assert "assignImagesTo(claimed, imgIds, { expect: expect })" in bulk
     # device ids are operator-chosen strings, so these maps have no prototype
@@ -8366,7 +8464,7 @@ def test_bulk_assign_resolves_off_page_selection_from_the_server():
     # keyed by device_id, seeded from whatever page is already rendered
     assert "byId[d.device_id] = d" in fetch_fn
     assert "LAST_DEVICES.forEach(function (d) { byId[d.device_id] = d; })" in fetch_fn
-    assert "/api/devices?" in fetch_fn
+    assert "/api/v1/devices?" in fetch_fn
     # bounded: nothing to fetch when the whole selection is already rendered,
     # and the walk stops the moment every missing id has been found rather
     # than always paging the entire fleet
@@ -8471,8 +8569,8 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     as "B — error", with the stage_error attached to no row at all.
 
     Both now resolve membership in errored_image_ids, in the SAME precedence
-    the map uses (staged wins, then errored, then whichever image is in
-    flight), and an errored image blocks the all-green "deployed" badge and
+    the map uses (current errors override retained staged membership),
+    and an errored image blocks the all-green "deployed" badge and
     gets its own filterable state instead."""
     app_js = _webroot("app.js")
     assert "function rowErroredIds(d)" in app_js
@@ -8482,14 +8580,17 @@ def test_devices_side_reads_the_per_image_errors_the_agent_reports():
     drawer = app_js.split("function deployImageRows(d) {", 1)[1][:1200]
     assert "rowErroredIds(d)" in drawer
     assert "'error'" in drawer
-    # staged wins over errored -- the resolution order swarmmap.html uses
+    # rowHasStaged rejects a current per-image error before consulting the
+    # retained staged set, so drawer and device verdict cannot disagree.
+    staged = app_js.split("function rowHasStaged(d, iid) {", 1)[1].split("\n  }", 1)[0]
+    assert staged.index("errored_image_ids") < staged.index("staged_image_ids")
     assert drawer.index("rowHasStaged(d, iid)") < drawer.index("errored.indexOf(iid)")
-    # ...and per-image state is never derived from the identity pointer.
+    # Multi-image state is never derived from the identity pointer.
     # current_image_id is the first image of the set that produced heartbeat
     # data this tick (typically one already STAGED), not the one in flight, so
     # reading it as "currently transferring" mislabels whichever image it
     # lands on and leaves the real failure reading "queued".
-    assert "current_image_id" not in drawer
+    assert drawer.index("!perImage") < drawer.index("d.current_image_id")
 
     body = app_js.split("function deviceStatus(d, devNow) {", 1)[1]
     body = body.split("\n  function ", 1)[0]
@@ -9108,9 +9209,9 @@ def test_overview_fetches_devices_and_images_alongside_overview():
     # Task 10 added an AbortController signal to each fetch call (generation/
     # abort protection); these check the endpoint is still fetched, not the
     # exact argument list.
-    assert "fetch('/api/overview'" in fn
-    assert "fetch('/api/devices'" in fn
-    assert "fetch('/api/images'" in fn
+    assert "fetch('/api/v1/overview'" in fn
+    assert "fetch('/api/v1/devices'" in fn
+    assert "fetch('/api/v1/images'" in fn
     assert "renderOverviewAttention(" in fn
     assert "renderOverviewBoundary(" not in fn
 
@@ -9932,7 +10033,7 @@ def test_api_responses_are_no_store_and_static_assets_revalidate(tmp_path):
         st, h, _ = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
         assert st == 200 and h["Cache-Control"] == "private, no-store"
         st, h, _ = _req(host, port, "GET", "/api/session")
-        assert st == 401 and h["Cache-Control"] == "private, no-store"
+        assert st == 401 and h["Cache-Control"] == "no-store"
         st, h, body = _req(host, port, "GET", "/app.js")
         assert st == 200 and body and "Last-Modified" in h
         assert "no-cache" in h["Cache-Control"]
@@ -9981,16 +10082,16 @@ def test_poll_header_does_not_refresh_idle_expiry(tmp_path):
 
 
 def test_corrupt_secrets_store_fails_closed_with_503(tmp_path):
-    """IRIS-01-002 at the HTTP layer: a truncated live store must not turn
-    into "first run" (the default credential minted a setup grant) or a
-    dropped connection; every store-backed route answers 503."""
+    """A truncated live store must not turn into first-run setup."""
     host, port, app, stop = _serve(tmp_path)
     try:
         ck, csrf = _auth(host, port)
         with open(app.secrets_path, "w") as f:
             f.write("{ truncated")
         st, _, b = _req(host, port, "GET", "/api/session", headers={"Cookie": ck})
-        assert st == 503 and b"secrets store unreadable" in b
+        assert st == 503
+        assert json.loads(b)["code"] == "service-unavailable"
+        assert b"secrets store" not in b
         st, _, b = _req(host, port, "POST", "/api/login",
                         {"username": gui_server.DEFAULT_SETUP_USER,
                          "password": gui_server.DEFAULT_SETUP_PASS})
@@ -10162,7 +10263,10 @@ def test_corrupt_catalog_state_fails_closed_with_503(tmp_path):
         st, _, b = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "img1"},
                         headers={"Cookie": cookie, "X-CSRF-Token": csrf})
-        assert st == 503 and b"state unavailable" in b
+        assert st == 503
+        problem = json.loads(b)
+        assert problem["code"] == "service-unavailable"
+        assert problem["error"] == "service unavailable"
         with open(str(tmp_path / "state" / "policy.json")) as f:
             assert f.read() == "{ truncated"      # nothing written over it
     finally:

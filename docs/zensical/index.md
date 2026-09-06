@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # IRIS Documentation
 
-IRIS, Intelligent Release and Image Staging, stages Cisco images and patches across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, a signed catalog, per-device policies, and a small on-device agent so large images can move efficiently without giving up device-side verification.
+IRIS, Intelligent Release and Image Staging, stages Cisco images and patches across a network before an operator performs any install or reload activity. It combines a private BitTorrent swarm, an authenticated HTTPS catalog, per-device assignments, and a shared device agent.
 
-IRIS also measures that distribution rather than only performing it. Every rollout accounts for how many bytes the devices served to each other and how many came from the origin seeder, and each device reports the peers it actually took its image from — see [Telemetry Export](telemetry-export.md).
+IRIS reports staging progress and transfer measurements. These distinguish origin traffic, peer traffic, and bytes that could not be attributed to a device. See [Telemetry Export](telemetry-export.md) for the measurements and their limits.
 
 !!! warning "Stage-only invariant"
     IRIS distributes, verifies, and stages images. It never installs, activates, reloads, changes boot variables, or mutates the running software state of a device.
@@ -20,13 +20,13 @@ IRIS also measures that distribution rather than only performing it. Every rollo
 
 | Area | Purpose |
 | --- | --- |
-| Server stack | Tracker, catalog, seeder, artifact server, console, telemetry, and encrypted state. |
+| Server stack | A stateful tracker/catalog/seeder/artifact/telemetry tier plus a separate, stateless web Console and encrypted state. |
 | Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
 | Management types | Per-device **routed**, **inband**, **router-routed**, **router-nat**, or **xr-host**, with a record-backed deployment lifecycle. |
 | Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
 | Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
-| IOx app | The same agent model as an IOx Docker app: IE-3400 (arm64, stages to `sdflash:`) and SSD-equipped Catalyst 9300 (amd64, stages to `flash:` through the SSD share; the CLI installer's own default is `sdflash:`). |
-| IOS-XR appmgr agent | Cisco 8000-series path that runs on the router's own network stack and stages directly to `harddisk:` through a bind mount. |
+| IOx app | The shared IOx/XR image packaged for IE-3400 (arm64, stages to `sdflash:`) or SSD-equipped Catalyst 9300 (amd64, stages to `flash:` through the SSD share; the CLI installer's own default is `sdflash:`). |
+| IOS-XR appmgr agent | The same device image packaged for appmgr on Cisco 8000-series routers. It uses the router's network and stages directly to `harddisk:` through a bind mount. |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
 | Measured distribution | Per-image accounting of origin-served versus peer-served bytes, plus per-device peer transfer records naming which peers supplied the image. The portion the origin-side sampler could not trace to a device is published as its own counter -- untraced bytes did leave the origin, only the recipient is unknown -- rather than folded into the totals. |
 | Observability | Swarm map, health endpoint, metrics (Prometheus exposition format), optional OTLP export, peer-distribution counters, and structured audit trail. |
@@ -44,7 +44,7 @@ flowchart LR
     Policy --> Agent["Device agent"]
     Seeder --> Agent
     Agent --> Verify["Hash verification"]
-    Verify --> Stage["Stage image on flash"]
+    Verify --> Stage["Stage image on device storage"]
     Stage -. "operator-controlled" .-> Install["Install or reload outside IRIS"]
 ```
 
@@ -58,6 +58,7 @@ flowchart LR
 | Decide how a device attaches to the network | [Management Type and VLAN Ownership](management-type.md) |
 | Run a rollout across many devices | [Web Console](console.md), then [Network Workflows](fleet-workflows.md) |
 | Find out how much of a rollout the peers carried | [Telemetry Export](telemetry-export.md) |
+| Send IRIS telemetry to Splunk | [Splunk Setup](splunk.md) |
 | Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
 
 ## Documentation map
@@ -84,8 +85,9 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Server](server.md) | Server services, state, bootstrap, and certificates. |
-| [Container Deployments](containers.md) | The Compose seed server and the device agent containers. |
-| [Kubernetes](kubernetes.md) | Optional single-replica seed-server manifests. |
+| [Container Deployments](containers.md) | Server, Console, and shared device image. |
+| [Docker on Separate Hosts](docker-hosts.md) | Independent Docker deployments, private management HTTPS, and credential setup. |
+| [Kubernetes](kubernetes.md) | Optional split server and stateless Console manifests. |
 
 ### Onboard devices
 
@@ -104,11 +106,13 @@ Read these before connecting production devices.
 | [Operations](operations.md) | Day-two commands, backups, scaling, and cleanup. |
 | [Observability](observability.md) | Metrics, swarm map, OTLP export, and dashboards. |
 | [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer transfer records, and what each figure does and does not measure. |
+| [Splunk Setup](splunk.md) | HTTPS collector setup, Splunk indexes, HEC, dashboard import, and verification searches. |
 
 ### Reference and development
 
 | Page | What it covers |
 | --- | --- |
 | [Reference](reference.md) | Environment variables, file layouts, and APIs. |
+| [Problem type registry](problems.md) | Stable RFC 9457 error identifiers used by API clients. |
 | [Validation](validation.md) | The test suites and lab validation checklist. |
 | [Development](development.md) | Working on IRIS itself. |

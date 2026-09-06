@@ -4,124 +4,122 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# device/iox/build.sh's CATALOG_PEM discipline and its pinned-cert probe
-# member (review findings IRIS-12-002 and IRIS-12-001).
-#
-# The real build.sh runs, symlinked into a fake $REPO (the STUBDIR pattern
-# from test_iox_build_aria2c.bats) with `docker` and `file` stubbed on PATH
-# and a fake aria2c handed in via ARIA2C_BIN, in --image-only mode so neither
-# skopeo nor ioxclient is ever needed. The docker stub records what the build
-# context held at the moment `docker build` would have run.
+# #136: the canonical device image and native wrappers are deployment-neutral.
+# Catalog trust is delivered at install/runtime, never fetched or baked here.
 
 _build_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   BIN="$BATS_TEST_TMPDIR/bin"
-  mkdir -p "$STUBDIR/device/iox" "$STUBDIR/device/agent" "$STUBDIR/tools" \
-    "$STUBDIR/artifacts" "$BIN"
-  ln -s "$BATS_TEST_DIRNAME/../build.sh" "$STUBDIR/device/iox/build.sh"
-  for f in Dockerfile entrypoint.sh reconcile.sh package.yaml package-amd64.yaml; do
-    touch "$STUBDIR/device/iox/$f"
+  mkdir -p "$STUBDIR/device/container" "$STUBDIR/device/agent" "$STUBDIR/tools" \
+    "$STUBDIR/artifacts" "$STUBDIR/deliverables" "$BIN"
+  ln -s "$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh" \
+    "$STUBDIR/tools/build-device-image.sh"
+  for file in Dockerfile entrypoint.sh reconcile.sh; do
+    printf '%s\n' "$file" > "$STUBDIR/device/container/$file"
   done
   echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"
   echo "0.0.0-test" > "$STUBDIR/VERSION"
-  printf 'fake aria2c\n' > "$BATS_TEST_TMPDIR/aria2c-fake"
-  # `file` must claim the fake binary is aarch64 so the arch gate passes
+  printf 'fake amd64 aria2c\n' > "$STUBDIR/deliverables/aria2c-x86_64"
+  printf 'fake arm64 aria2c\n' > "$STUBDIR/deliverables/aria2c-aarch64"
+  chmod +x "$STUBDIR/deliverables/aria2c-x86_64" \
+    "$STUBDIR/deliverables/aria2c-aarch64"
+  {
+    printf '%s  x86_64\n' "$(sha256sum "$STUBDIR/deliverables/aria2c-x86_64" | awk '{print $1}')"
+    printf '%s  aarch64\n' "$(sha256sum "$STUBDIR/deliverables/aria2c-aarch64" | awk '{print $1}')"
+  } > "$STUBDIR/tools/aria2c.sha256"
+
   cat > "$BIN/file" <<'STUB'
 #!/bin/sh
-echo "$1: ELF 64-bit LSB executable, ARM aarch64"
+case "$1" in
+  *amd64) echo "$1: ELF 64-bit LSB executable, x86-64" ;;
+  *arm64) echo "$1: ELF 64-bit LSB executable, ARM aarch64" ;;
+esac
 STUB
-  # docker: snapshot the context's iris-catalog.pem instead of building
   cat > "$BIN/docker" <<'STUB'
 #!/bin/sh
-ctx="$(eval echo \${$#})"
-echo "DOCKER-STUB: build context=$ctx"
-cp "$ctx/iris-catalog.pem" "$DOCKER_STUB_SNAPSHOT"
-if grep -q "PRIVATE KEY" "$ctx/iris-catalog.pem"; then
-  echo "DOCKER-STUB: PRIVATE KEY block present in the build context"
-else
-  echo "DOCKER-STUB: no private key in context"
-fi
-exit 0
+if [ "$1" = buildx ] && [ "$2" = version ]; then exit 0; fi
+ctx=""
+for value in "$@"; do ctx="$value"; done
+find "$ctx" -type f -printf '%P\n' | LC_ALL=C sort > "$DOCKER_CONTEXT_FILES"
+printf 'build\n' >> "$DOCKER_CALLS"
+dest=""
+for arg in "$@"; do
+  case "$arg" in type=oci,dest=*) dest="${arg#type=oci,dest=}" ;; esac
+done
+work="$(mktemp -d)"
+printf '{}' > "$work/manifest.json"
+manifest_sha="$(sha256sum "$work/manifest.json" | awk '{print $1}')"
+mkdir -p "$work/blobs/sha256"
+cp "$work/manifest.json" "$work/blobs/sha256/$manifest_sha"
+cat > "$work/index.json" <<EOF
+{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:$manifest_sha","platform":{"os":"linux","architecture":"amd64"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:$manifest_sha","platform":{"os":"linux","architecture":"arm64"}}]}
+EOF
+tar cf "$dest" -C "$work" index.json blobs
+rm -rf "$work"
 STUB
   chmod +x "$BIN/file" "$BIN/docker"
-  export DOCKER_STUB_SNAPSHOT="$BATS_TEST_TMPDIR/baked.pem"
-  BUILD="$STUBDIR/device/iox/build.sh"
-  # a real self-signed cert + key so the fixtures are the genuine shapes
-  openssl req -x509 -newkey rsa:2048 -keyout "$BATS_TEST_TMPDIR/key.pem" \
-    -out "$BATS_TEST_TMPDIR/cert.pem" -days 1 -nodes -subj "/CN=iris-test" 2>/dev/null
-  cat "$BATS_TEST_TMPDIR/cert.pem" "$BATS_TEST_TMPDIR/key.pem" > "$BATS_TEST_TMPDIR/combined.pem"
+  export DOCKER_CONTEXT_FILES="$BATS_TEST_TMPDIR/context-files"
+  export DOCKER_CALLS="$BATS_TEST_TMPDIR/docker-calls"
+  : > "$DOCKER_CALLS"
+  BUILD="$STUBDIR/tools/build-device-image.sh"
+  OUT="$BATS_TEST_TMPDIR/image.oci.tar"
 }
 
 _run_build() {
-  run env PATH="$BIN:$PATH" ARIA2C_BIN="$BATS_TEST_TMPDIR/aria2c-fake" \
-    IRIS_NO_PULL=1 "$@" bash "$BUILD" --image-only --arm64
+  local context="$1"
+  shift
+  mkdir -p "$context"
+  run env PATH="$BIN:$PATH" IRIS_NO_PULL=1 "$@" \
+    bash "$BUILD" --context "$context" --output "$OUT"
 }
 
-@test "a combined cert+key CATALOG_PEM is refused before docker build" {
-  # The server's IRIS_CERT is a combined cert+key file; pointing CATALOG_PEM at
-  # it used to bake the catalog/console TLS private key into every layer of
-  # a package served to, and left on, every device.
+@test "canonical image builds with every catalog-certificate input unset" {
   _build_stub_setup
-  _run_build CATALOG_PEM="$BATS_TEST_TMPDIR/combined.pem"
+  unset CATALOG_PEM CATALOG_PEM_URL CATALOG_PEM_FINGERPRINT
+  _run_build "$BATS_TEST_TMPDIR/context"
+
+  [ "$status" -eq 0 ]
+  [ -f "$OUT" ]
+  ! grep -q 'iris-catalog.pem' "$DOCKER_CONTEXT_FILES"
+}
+
+@test "catalog certificate rotation does not change canonical source identity" {
+  _build_stub_setup
+  printf 'certificate A\n' > "$BATS_TEST_TMPDIR/a.pem"
+  printf 'certificate B\n' > "$BATS_TEST_TMPDIR/b.pem"
+  _run_build "$BATS_TEST_TMPDIR/context-a" CATALOG_PEM="$BATS_TEST_TMPDIR/a.pem"
+  [ "$status" -eq 0 ]
+  source_a="$(sed -n 's/^source_sha256=//p' "$OUT.manifest")"
+
+  _run_build "$BATS_TEST_TMPDIR/context-b" CATALOG_PEM="$BATS_TEST_TMPDIR/b.pem"
+  [ "$status" -eq 0 ]
+  source_b="$(sed -n 's/^source_sha256=//p' "$OUT.manifest")"
+
+  [ "$source_a" = "$source_b" ]
+  [ "$(wc -l < "$DOCKER_CALLS" | tr -d ' ')" -eq 1 ]
+  [[ "$output" == *"reusing canonical device OCI"* ]]
+}
+
+@test "build and wrapper definitions contain no baked or probe certificate path" {
+  common="$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh"
+  dockerfile="$BATS_TEST_DIRNAME/../../container/Dockerfile"
+  wrapper="$BATS_TEST_DIRNAME/../build.sh"
+  stage="$BATS_TEST_DIRNAME/../../../tools/stage-iox-package.sh"
+  for file in "$common" "$dockerfile" "$wrapper" "$stage"; do
+    run grep -E 'CATALOG_PEM|iris-catalog\.pem|catalog cert fingerprint' "$file"
+    [ "$status" -ne 0 ] || return 1
+  done
+}
+
+@test "Dockerfile leaves catalog CA selection to runtime onboarding" {
+  dockerfile="$BATS_TEST_DIRNAME/../../container/Dockerfile"
+  run grep -E '^COPY .*iris-catalog\.pem|IRIS_CATALOG_CA=' "$dockerfile"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"CATALOG_PEM contains a PRIVATE KEY block"* ]]
-  [[ "$output" == *"refusing to build"* ]]
-  [[ "$output" == *"openssl x509 -in combined.pem -out iris-catalog.pem"* ]]
-  # never reached docker, and never echoed the key material
-  [[ "$output" != *"DOCKER-STUB"* ]]
-  [[ "$output" != *"BEGIN PRIVATE KEY"* ]]
-  [[ "$output" != *"BEGIN RSA PRIVATE KEY"* ]]
-  [ ! -f "$DOCKER_STUB_SNAPSHOT" ]
 }
 
-@test "a cert-only CATALOG_PEM is accepted and baked unchanged" {
-  _build_stub_setup
-  _run_build CATALOG_PEM="$BATS_TEST_TMPDIR/cert.pem"
+@test "deployment-neutral builder has valid shell syntax" {
+  run bash -n "$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"DOCKER-STUB: no private key in context"* ]]
-  cmp -s "$DOCKER_STUB_SNAPSHOT" "$BATS_TEST_TMPDIR/cert.pem"
-}
-
-@test "only CERTIFICATE blocks reach the image (stray text around them is dropped)" {
-  _build_stub_setup
-  { echo "subject=CN=iris-test (openssl x509 -text style preamble)"
-    cat "$BATS_TEST_TMPDIR/cert.pem"
-    echo "trailing note"; } > "$BATS_TEST_TMPDIR/annotated.pem"
-  _run_build CATALOG_PEM="$BATS_TEST_TMPDIR/annotated.pem"
-  [ "$status" -eq 0 ]
-  cmp -s "$DOCKER_STUB_SNAPSHOT" "$BATS_TEST_TMPDIR/cert.pem"
-}
-
-@test "a CATALOG_PEM with no certificate block at all is refused" {
-  _build_stub_setup
-  _run_build CATALOG_PEM="$BATS_TEST_TMPDIR/key.pem"
-  [ "$status" -ne 0 ]
-  [[ "$output" != *"DOCKER-STUB"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# IRIS-12-001: the pinned-cert probe member. server/setup_status.py's
-# package_fingerprint() and tools/check-package-freshness.sh read a top-level
-# iris-catalog.pem out of artifacts.tar.gz; the 2026-09-02 slimming dropped
-# it, so every fresh package read as "no pinned cert" -> STALE forever.
-# ---------------------------------------------------------------------------
-
-@test "build.sh packages the cert-only pem next to rootfs.tar as the probe member" {
-  run grep -F 'cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"' "$BATS_TEST_DIRNAME/../build.sh"
-  [ "$status" -eq 0 ]
-  # and says why, naming both readers
-  grep -q 'PINNED-CERT' "$BATS_TEST_DIRNAME/../build.sh"
-  grep -q 'setup_status.py' "$BATS_TEST_DIRNAME/../build.sh"
-  grep -q 'check-package-freshness.sh' "$BATS_TEST_DIRNAME/../build.sh"
-}
-
-@test "the probe member is copied AFTER the private-key guard, from the cert-only file" {
-  # ordering proof: the guard, then the cert-only rewrite, then the PKG copy
-  guard="$(grep -n 'PRIVATE KEY block -- refusing to build' "$BATS_TEST_DIRNAME/../build.sh" | head -1 | cut -d: -f1)"
-  certonly="$(grep -n 'iris-catalog.pem.certonly' "$BATS_TEST_DIRNAME/../build.sh" | head -1 | cut -d: -f1)"
-  probe="$(grep -n 'cp "$CTX/iris-catalog.pem" "$PKG/iris-catalog.pem"' "$BATS_TEST_DIRNAME/../build.sh" | cut -d: -f1)"
-  [ -n "$guard" ] && [ -n "$certonly" ] && [ -n "$probe" ]
-  [ "$guard" -lt "$certonly" ] && [ "$certonly" -lt "$probe" ]
 }

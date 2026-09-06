@@ -86,8 +86,7 @@ TARGET_FS = "harddisk:"
 # "bundle" and skips anything else, which is exactly the reclaim-none
 # behaviour v1 wants (see the module docstring).
 MODE = "xr"
-# telemetry_report reads runtime_mode straight from cfg and defaults it to
-# "guestshell"; an XR container must not report that.
+# Derived telemetry label for the xr-appmgr platform selector.
 RUNTIME_MODE = "xr-container"
 
 # Sidecars whose NAME proves IRIS (or its aria2) wrote them. Everything else
@@ -289,10 +288,18 @@ def build_deps(cfg, conf_path, state_path=None):
     reused here, and the few remaining closures (the JSON-RPC caller and its
     aria2 wrappers) are the same handful of lines because the contract is
     identical. What differs is entirely in the device-facing fields above."""
+    platform = (cfg.get("device_platform") or "").strip()
+    if platform not in ("", "xr-appmgr"):
+        raise ValueError("xr_deps requires device_platform=xr-appmgr")
     stage_dir = cfg.get("stage_dir") or STAGE_DEFAULT
     target_prefix = (cfg.get("target_fs") or "").strip() or TARGET_FS
-    # Stamp the platform's telemetry label unless an operator set one.
-    if not (cfg.get("runtime_mode") or "").strip():
+    if platform and target_prefix != TARGET_FS:
+        raise ValueError("xr-appmgr target_fs must be harddisk:")
+    if platform:
+        # A selected container's runtime label is derived from its platform.
+        cfg["runtime_mode"] = RUNTIME_MODE
+    elif not (cfg.get("runtime_mode") or "").strip():
+        # Pre-selector XR configs keep the exact former defaulting behavior.
         cfg["runtime_mode"] = RUNTIME_MODE
 
     def emit(mnemonic, msg):
@@ -305,7 +312,8 @@ def build_deps(cfg, conf_path, state_path=None):
     import catalog_client
     ctx = iris_agent.make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
-        cfg["catalog_url"], cfg["catalog_token"], context=ctx)
+        cfg["catalog_url"], cfg["catalog_token"], context=ctx,
+        tracker_bearer=(platform == "xr-appmgr"))
 
     def refresh():
         # The CLIENT, not a bound method: _refresh_impl re-points
@@ -327,14 +335,16 @@ def build_deps(cfg, conf_path, state_path=None):
         with open(torrent_path, "rb") as f:
             tb = base64.b64encode(f.read()).decode()
         params = ["token:" + cfg["rpc_secret"], tb, [],
-                  {"dir": dest_dir, "bt-seed-unverified": "true",
-                   "bt-max-peers": cfg.get("max_peers", "10")}]
+                  iris_agent._aria_torrent_options(
+                      cfg, dest_dir, conf_path,
+                      require_tracker_bearer=(platform == "xr-appmgr"))]
         payload = json.dumps({"jsonrpc": "2.0", "id": "a",
                               "method": "aria2.addTorrent",
                               "params": params}).encode()
         req = urllib.request.Request(rpc, data=payload,
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10).read()
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return iris_agent._aria_add_result(response.read())
 
     def aria_remove(filename):
         for gid, names in iris_agent._aria_downloads(_rpc):

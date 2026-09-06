@@ -5,9 +5,10 @@
 """Response-header contract for personalized torrents (spec §6).
 
 A device-specific personalized torrent MUST carry ``Cache-Control: private,
-no-store`` and ``Vary: Authorization`` so proxies/browsers never cache another
-device's body, and MUST NOT leak the announce token or URL. A canonical
-(service) response carries no such personalization headers."""
+no-store`` and ``Vary: Authorization, X-IRIS-Tracker-Auth`` so proxies/browsers
+never cache another device's body or mix tracker-auth variants, and MUST NOT
+leak the announce token or URL. A canonical (service) response carries no such
+personalization headers."""
 import os
 import threading
 import time
@@ -31,6 +32,7 @@ def test_personalized_headers_present_via_route(tmp_path):
     s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
+    s.set_policy("dev-h", approved_image_id="img1")
     os.environ["IRIS_HOST_IP"] = "10.9.9.9"
     now = time.time()
     store_dict = {"devices": {"dev-h": {"announce_token": {
@@ -47,7 +49,7 @@ def test_personalized_headers_present_via_route(tmp_path):
     assert status == 200
     hdrs = dict(headers)
     assert hdrs["Cache-Control"] == "private, no-store"
-    assert hdrs["Vary"] == "Authorization"
+    assert hdrs["Vary"] == "Authorization, X-IRIS-Tracker-Auth"
     assert b"ANNH" in bencode.decode(body)[b"announce"]
 
 

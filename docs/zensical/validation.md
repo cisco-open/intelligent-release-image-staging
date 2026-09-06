@@ -40,7 +40,7 @@ IRIS_TEST_HOST_INTEGRATION=1 python3 -m pytest server/tests/test_aria2c_build_pi
 
 Today that covers the two image-build tests in
 `device/xr/tests/test_xr_image.bats` — run them before cutting a release or
-after changing `device/xr/Dockerfile` — and the pin-resolution test in
+after changing `device/container/Dockerfile` — and the pin-resolution test in
 `server/tests/test_aria2c_build_pins.py`, which asks the live Alpine package
 index whether the pins in the published aria2c build scripts still exist. Run
 that one before a release too: an Alpine security bump withdraws the exact
@@ -56,15 +56,12 @@ and drives a tracker announce, a catalog heartbeat, a device policy read, a
 terminal report, a credential resolution, a fleet-wide bulk credential
 reassignment, and the console's own fleet projection — the operations a real
 fleet drives concurrently — then reports how the cost of each moves as N
-grows. It exists so the per-device scaling work (issues #51–#53/#56/#58 and
-the console paging that followed) has something repeatable behind it, instead
-of the ad hoc, one-off scripts that produced its original numbers — and it is
-what found issue #125 (`FleetStore`, the operator inventory, was left
-un-sharded) on its first run. The bulk-reassignment measurement is that
-fix's coverage: reassigning the WHOLE selected set through
+grows. Reassigning the whole selected set through
 `FleetStore.bulk_upsert` costs at most `keyed_state.SHARD_COUNT` (256) shard
-writes, however many devices are selected, where the old one-request-per-
-device path cost one shard write per device.
+writes, however many devices are selected.
+Credential checks call the actual catalog, tracker query and tracker bearer
+resolvers with accepted and unknown tokens. The harness counts index lookups
+and rejects fleet-wide scans during resolution.
 
 A small pair of sizes (50 and 500 devices) runs by default, in seconds, with
 every test suite. The full progression the project's own scale claims are
@@ -88,7 +85,7 @@ absolute milliseconds are noisy and **not comparable across separate runs,
 days, or machines** — only the growth factor within one run, across its own
 sizes, means anything. The assertions that actually run check deterministic
 counted work instead — which shard file changed, how many rows it holds, how
-many credential-index builds a run of requests costs, how many bytes a
+many credential-index builds and lookups requests cost, how many bytes a
 console response carries — the same style `test_keyed_state_scaling.py`
 uses. It deliberately does not measure concurrent load (every call runs
 sequentially, never the thousands-of-devices-at-once shape a real fleet
@@ -99,11 +96,15 @@ docstring for the full accounting.
 
 ## Documentation build
 
-The docs site builds clean from the repository root, with no reported issues.
-For the commands and the pinned Zensical and Python versions, see
-[Documentation loop](development.md#documentation-loop).
+Build the docs from the repository root after changing the manual or its
+navigation. See [Documentation loop](development.md#documentation-loop) for
+the commands and supported tool versions. A build checks generated pages;
+review the Console's bundled help pages separately.
 
 ## Validated platforms
+
+This table records hardware coverage. Verify the packages being rolled out,
+including both architectures of the shared IOx/XR image.
 
 | Platform | Device staging | Status |
 | --- | --- | --- |
@@ -113,34 +114,38 @@ For the commands and the pinned Zensical and Python versions, see
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
 
-The IOS-XR validation covers the full lifecycle, not only package delivery:
-build the `iris-xr.rpm`, scp it to `harddisk:`, register and activate the
-appmgr container, download directly through the bind mount, verify sha256,
-report telemetry, and undeploy from the deployment record. The later teardown
-hardening was also exercised on 8010-R4: a record-driven teardown completed in
-62 seconds after the fail-closed command-adjudication fixes.
+IOS-XR validation checks the full agent lifecycle: build `iris-xr.rpm`,
+onboard through the Console, stage directly through the `harddisk:` bind
+mount, verify SHA-256, report telemetry, and undeploy from the deployment
+record. Check interrupted-transfer resume, peer seeding, independent status
+for two devices, and cleanup that preserves operator-provided files.
 
-Image import and swarm distribution have always worked for Cisco 8000 series
-images regardless: `.iso`, `.tar`, and `.rpm` artifacts publish to the catalog
-and distribute through the swarm like any other image.
+Cisco 8000 series `.iso`, `.tar`, and `.rpm` images use the same catalog and
+swarm distribution path as other image formats. Successful image import does
+not establish that an agent package works on a particular device.
 
 ## Lab checklist
 
 | Check | Expected result |
 | --- | --- |
-| Server starts | Console, catalog, tracker, artifact server, and telemetry ports are reachable. |
-| Runtime uid owns the host paths | The age key file and the host `artifacts/` directory are owned by uid `10001`, and any volume carried over from a root-runtime release is migrated ([Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment)). The Console Images screen lists no file as `not readable by the server`. |
+| Server and Console start | Both services are healthy. The Console can reach the internal management API; browsers reach the Console and agents reach the catalog, tracker, and seeder on their intended ports. |
+| Runtime uid owns the host paths | The age key file, host `artifacts/` directory, and named volumes have the required uid `10001` access ([Volume permissions](server.md#volume-permissions)). The Console Images screen lists no file as `not readable by the server`. |
 | Admin exists | Console login succeeds. |
 | Image publishes | Catalog lists image id, hashes, and info hash. |
 | Import publishes in place | A file already under the read-only image root imports from the Console, and the read-only root is unchanged: no copy of the image and no `.torrent` beside it. |
 | Management type recorded | Device shows routed, inband, router-routed, router-nat, or xr-host; onboarding creates an applied deployment record. |
-| Installer runs | Device has the expected Guest Shell, IOx, or XR appmgr agent plus its bootstrap/configuration. |
+| Installer runs | The job finishes successfully, the expected agent runtime is running, and a fresh heartbeat follows. Onboard completion alone does not prove image staging. |
+| Runtime trust delivered | Guest Shell has its pinned certificate; IOx receives it in application data after activation; XR reads it through the harddisk bind mount. Packages contain no deployment certificate. |
+| Shared package provenance | IOx and XR wrappers match their adjacent manifests and the same canonical OCI build. Guest Shell and both container architectures include the current shared agent source. |
 | Inband preserves network | For inband, before/after `show running-config` shows the existing VLAN/SVI/gateway/VRF unchanged. |
 | Catalyst 8000V router path | `router-routed` and `router-nat` onboard, stage a verified image, and undeploy from their deployment records. Swarm Map shows the device, and the operator's OTLP backend shows its telemetry when observability is enabled. |
 | IOS-XR appmgr path | `xr-host` + `xr-appmgr` onboards, stages directly to `harddisk:`, reports telemetry, and converges under record-driven or repeated undeploy without touching router networking. |
-| Assignment applies | Device reports the approved image id. |
+| Assignment applies | Device reports each assigned image id. A newly assigned image waits for the agent's report; a second device starting does not reset the first device's completed state. |
 | Download completes | Swarm state shows completed pieces. |
-| Verification passes | Agent reports the staged file and a sha256 match against the catalog's known-good value. |
+| Verification passes | The completed file matches the catalog SHA-256 and final size. IOS-XE places the verified file at the storage root; XR checks it in place. |
+| Existing Guest Shell image | A same-name root file with matching size and native SHA-512 is adopted. A mismatch is kept and reported as a staging failure. |
+| Partial failure | A current per-image hash, catalog, or RPC error stays visible while other assigned images continue. |
+| Clear assignments | Torrents stop, including when the last assignment is cleared. IOS-XE keeps root copies; XR removes downloaded files but retains adopted files or files of unknown origin. |
 | Undeploy from deployment record | Teardown targets only resources tracked in the deployment record; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the deployment record's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
@@ -154,10 +159,14 @@ command streams in `device/tests/test_router_install.bats` and
 
 ## What automated tests do not cover
 
-The console swarm map is verified **by hand in a browser**. There are no
-automated browser tests in this repository: the Python suites assert the shape of
-the documents the map consumes, not the rendering, focus behavior, or polling of
-the page itself. A green test run is not evidence that the map behaves.
+The Console has Python tests for server projections and Node-based tests that
+execute the shipped JavaScript for device fields, status, and Swarm Map
+updates. They cover per-image state, participant identity, stale responses,
+and open-drawer updates. They do not run a browser layout engine.
+
+Check layout, keyboard behavior, and the rendered graph by hand in a browser
+when those views change. Passing the logic tests does not establish that fields
+align or graph nodes render correctly.
 
 Check these by hand when the map or its data source changes:
 
@@ -167,7 +176,10 @@ Check these by hand when the map or its data source changes:
 | Backoff | While `/swarm` is unreachable the poll backs off and the header says so, rather than hammering. |
 | Keyboard | Graph nodes are reachable and operable from the keyboard; the detail drawer keeps focus and closes on Escape. |
 | Reduced motion | The graph respects the reduced-motion preference. |
-| Empty and error states | An empty swarm, an unreachable origin RPC, and a stale device observation each render as themselves rather than as a zero. |
+| Empty and error states | An empty swarm, an unreachable origin RPC, and a stale device observation remain distinguishable. |
+| Live details | An open peer drawer updates as polls arrive, retains focus, and shows when its participant disappears. A late response from an older poll does not replace newer data. |
+| Multiple devices and images | Completed staging remains complete when another device or image begins. Shared IPs do not duplicate rates, and each image's errors appear on the matching row. |
+| Add Device | Management type alone controls network fields; changing the free-text model preserves that selection. Fields and Save/Cancel stay aligned at desktop and narrow widths. |
 
 ## Reporting bugs
 

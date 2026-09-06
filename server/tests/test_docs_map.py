@@ -189,12 +189,18 @@ def test_docs_state_enforcement_status_is_count_only():
     _require("security.md", ["not address-free"])
 
 
-def test_docs_state_announce_credential_travels_over_http():
-    """The announce credential rides an HTTP URL, so it crosses the network in
-    cleartext. The base may be any routable IPv4 -- nothing enforces a private
-    one -- so the docs must state the exposure rather than imply a guarantee
-    the code does not make."""
-    _require("security.md", ["cleartext"])
+def test_docs_state_announce_credential_travels_over_pinned_https():
+    """All tracker credentials cross pinned HTTPS; IOx/XR use a header,
+    while Guest Shell's query credential remains inside the TLS connection."""
+    page = _page("security.md")
+    transport = page.split("### Tracker transport security", 1)[1].split(
+        "### Peer policy failure posture", 1)[0]
+    for contract in ("**HTTPS-only**", "public certificate as their CA",
+                     "certificate verification enabled",
+                     "Authorization: Bearer",
+                     "TLS encrypts the complete request"):
+        assert contract in transport, \
+            "security.md tracker transport omits: %s" % contract
 
 
 def test_docs_state_previous_announce_token_is_bounded():
@@ -203,12 +209,13 @@ def test_docs_state_previous_announce_token_is_bounded():
     """Both credentials stay valid for a bounded overlap, after which the old
     one expires on its own. There is still no shipped revoke command, so the
     docs must not tell an operator to retire one by hand."""
-    _require("security.md", ["no shipped command", "bounded overlap"])
+    _require("security.md", ["bounded overlap", "enforced automatically",
+                             "operator command for revoking a previous credential"])
 
 
 def test_docs_state_stage_only_invariant():
     """Images are staged and verified, never installed, activated or reloaded."""
-    _require("security.md", ["No install", "No reload", "No boot mutation"])
+    _require("security.md", ["No operating-system install", "No reload", "No boot mutation"])
 
 
 def test_docs_state_policy_outbox_backlog():
@@ -220,7 +227,7 @@ def test_docs_state_policy_outbox_backlog():
 def test_docs_state_pending_endpoint_retry():
     """An endpoint write that fails is queued and retried; the device
     participates meanwhile but the reported status degrades."""
-    _require("operations.md", ["peer-endpoints.json"])
+    _require("operations.md", ["peer-endpoints.d/", "queued in memory", "retried"])
 
 
 def test_docs_state_device_retirement_retention():
@@ -241,9 +248,10 @@ def test_docs_state_rotation_proof_is_loopback_swarm():
     _require("operations.md", ["/swarm", "service:seeder"])
 
 
-def test_docs_state_v1_event_ids_are_stamped_at_ingest():
-    """v1 telemetry has no device-supplied id; the server stamps it on receipt."""
-    _require("observability.md", ["stamped at ingest"])
+def test_docs_state_report_identity_survives_retries():
+    """A report keeps its device identity through retries and export."""
+    _require("observability.md", ["`report_id`", "frozen", "retry", "`event.id`",
+                                  "deduplication"])
 
 
 def test_docs_state_legacy_participants_are_visible_but_unjoinable():
@@ -280,21 +288,25 @@ _COMPOSE_UNAVAILABLE = {
     # neither is a container variable.
     "COMPOSE_PROJECT_NAME": "compose project name, host-side only",
     "IRIS_CONTAINER": "compose container_name + tools/ target, host-side only",
+    "IRIS_CONSOLE_CONTAINER": "console container_name, host-side only",
     # Interpolated host-side into the secrets/bind-mount stanzas, never injected.
     "IRIS_AGE_KEY_FILE_HOST": "host path of the age identity (docker secret)",
     "IRIS_ARTIFACTS_HOST_DIR": "host path of the artifacts bind mount",
     "IRIS_IMAGE_ROOT": "host path of the read-only image bind mount",
     "IRIS_SHARP_SANS_FONT_HOST": "host path of the licensed-font bind mount",
+    "IRIS_OBSERVABILITY_TOKEN_FILE_HOST": "host path of an observability-token bind mount",
+    "IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST": "host path of the previous-token bind mount",
+    "IRIS_OTLP_HEADERS_FILE_HOST": "host path of the OTLP-header bind mount",
     # Build argument, not a runtime variable.
     "IRIS_VERSION": "docker build arg",
     # Read by the IOS-XR appmgr container's own entrypoint on the device, not
     # by the server: it never belongs in the server container's environment.
-    "IRIS_XR_SKIP_MOUNT_CHECK": "device-side XR entrypoint, test-only",
+    "IRIS_CONTAINER_TESTING": "device-container entrypoint, test-only",
+    "IRIS_TEST_SKIP_MOUNT_CHECK": "device-container XR mount bypass, test-only",
     # Passed on the one-shot `run --rm -e ...` so the long-lived container never
     # holds the admin password in its environment.
     "IRIS_GUI_ADMIN_PASSWORD": "one-shot iris-gui-admin only",
     # Container-side defaults; the docs say none of these needs setting.
-    "IRIS_GUI_CERT": "container default path",
     "IRIS_TRUST_DIR": "container default path",
     "IRIS_CA_BUNDLE": "container default path",
 }
@@ -343,7 +355,8 @@ def _compose_environment_keys():
             continue
         here = len(line) - len(line.lstrip())
         if here <= indent:
-            break
+            indent = None
+            continue
         m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*:", line)
         if m:
             keys.add(m.group(1))

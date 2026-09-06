@@ -238,6 +238,12 @@ class TestNoRedirect:
         exp.emit({"ts": 1, "event": "start"})
         assert exp.flush() == 0            # swallowed, never raised
 
+    def test_authenticated_plaintext_transport_is_refused_before_open(self):
+        with pytest.raises(RuntimeError, match="requires HTTPS"):
+            otlp._http_post(
+                "http://collector.example:4318/v1/logs", b"{}",
+                headers={"Authorization": "Bearer secret"})
+
 
 class TestSemconvLogRecords:
     def test_swarm_event_record(self):

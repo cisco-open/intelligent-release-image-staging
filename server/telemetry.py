@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import socket
+import ssl
 import threading
 import time
 import urllib.request
@@ -25,7 +26,9 @@ from urllib.parse import urlparse
 import audit
 import auth
 import bounded_pool
-import ipaddress
+import api_problem
+import api_routes
+import tier_auth
 import keyed_state
 import live_samples
 import metrics
@@ -56,6 +59,63 @@ PEER_LEDGER_PRUNE_INTERVAL = 3600
 DEFAULT_METRICS_PORT = 9101
 DEFAULT_RPC_URL = "http://127.0.0.1:6800/jsonrpc"
 DEFAULT_RPC_SECRET_FILE = "/etc/iris/rpc-secret"
+TELEMETRY_HANDSHAKE_TIMEOUT = 30
+
+
+def local_tls_context(env=None):
+    """Pinned TLS context for same-host calls to the telemetry listener."""
+    env = os.environ if env is None else env
+    cafile = env.get("IRIS_TELEMETRY_CA", "").strip()
+    if not cafile:
+        combined = env.get("IRIS_CERT", "/run/iris/tls/cert.pem")
+        cafile = os.path.join(os.path.dirname(combined), "crt.pem")
+    context = ssl.create_default_context(cafile=cafile)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    # The local client dials 127.0.0.1 while the device-facing certificate is
+    # issued for IRIS_HOST_IP. Trust remains pinned to that certificate/CA;
+    # only hostname comparison is inapplicable on this loopback hop.
+    context.check_hostname = False
+    return context
+
+
+class _NoLocalRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the scoped management bearer on its single local origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def validate_local_swarm_url(raw, env=None, expected_path="/swarm"):
+    """Return a strict same-container telemetry URL or raise ValueError."""
+    env = os.environ if env is None else env
+    value = (raw or "").strip()
+    try:
+        parts = urlparse(value)
+        configured_port = int(env.get("IRIS_METRICS_PORT") or
+                              DEFAULT_METRICS_PORT)
+        port = parts.port or 443
+    except (TypeError, ValueError):
+        raise ValueError("invalid local swarm URL") from None
+    if (parts.scheme != "https" or parts.hostname not in
+            ("127.0.0.1", "localhost", "::1")
+            or port != configured_port or parts.path != expected_path
+            or parts.params or parts.query or parts.fragment
+            or parts.username is not None or parts.password is not None):
+        raise ValueError("invalid local swarm URL")
+    return value
+
+
+def local_swarm_get(url, token, timeout=3, env=None, expected_path="/swarm"):
+    """Fetch an authenticated local telemetry document without redirects."""
+    target = validate_local_swarm_url(
+        url, env=env, expected_path=expected_path)
+    request = urllib.request.Request(
+        target, headers={"Authorization": "Bearer " + token})
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoLocalRedirect(),
+        urllib.request.HTTPSHandler(context=local_tls_context(env)))
+    with opener.open(request, timeout=timeout) as response:
+        return response.read()
 
 
 def _int(value):
@@ -937,7 +997,10 @@ class Telemetry:
             return
         self._effective = effective
         sender = self._log_sender
-        if enabled and endpoint:
+        authenticated_plaintext = bool(
+            self._headers and endpoint
+            and urlparse(endpoint).scheme.lower() != "https")
+        if enabled and endpoint and not authenticated_plaintext:
             # Task 22: swap ONLY the mutable transport; the hub-owned
             # log_queue is untouched, so events queued under the previous
             # destination flush to the new one. Metrics stay conflating (no
@@ -1484,6 +1547,18 @@ class Telemetry:
         policy = self._policy_snapshot()
         enforcement = self._enforcement_snapshot()
         derived_denied = _derived_denied_ids(enforcement)
+        # Filenames are presentation, not image identity. Preserve the catalog
+        # id so a map can scope device observations to the selected torrent.
+        # An absent or ambiguous mapping leaves legacy snapshots unchanged.
+        try:
+            catalog_images = self._images_info() if self._images_info else {}
+        except Exception:
+            catalog_images = {}
+        image_ids = {}
+        if isinstance(catalog_images, dict):
+            for image_id, entry in catalog_images.items():
+                if isinstance(entry, dict) and entry.get("info_hash_hex"):
+                    image_ids.setdefault(str(entry["info_hash_hex"]), []).append(image_id)
 
         images = []
         for info_hash, peers in self._registry.snapshot(now=now).items():
@@ -1491,6 +1566,14 @@ class Telemetry:
             up_now = self._peer_up.get(info_hash, {}) \
                 if (self._torrent_observed_at and
                     now - self._torrent_observed_at <= 2 * self.interval) else {}
+            ip_claims, endpoint_claims = {}, {}
+            for peer in peers:
+                ip = peer["ip"]
+                endpoint = (ip, peer["port"])
+                ip_claims[ip] = ip_claims.get(ip, 0) + 1
+                endpoint_claims[endpoint] = endpoint_claims.get(endpoint, 0) + 1
+            ambiguous_ips = {ip for ip, count in ip_claims.items() if count > 1}
+            ambiguous_endpoints = {ep for ep, count in endpoint_claims.items() if count > 1}
             out = []
             for p in peers:
                 ptype = p.get("principal_type")
@@ -1504,15 +1587,19 @@ class Telemetry:
                 out.append(_peer_row(
                     p, total, up_now, devices_by_id, report_by_device,
                     live_by_device, policy, enforcement, derived_denied, now,
-                    self._torrent_observed_at))
-            images.append({
+                    self._torrent_observed_at, ambiguous_ips, ambiguous_endpoints))
+            image = {
                 "image": self._names.get(info_hash, info_hash),
                 "info_hash": info_hash,
                 "total_bytes": total,
                 "seeders": sum(1 for p in peers if p["is_seeder"]),
                 "leechers": sum(1 for p in peers if not p["is_seeder"]),
                 "peers": out,
-            })
+            }
+            matching_ids = image_ids.get(str(info_hash), [])
+            if len(matching_ids) == 1:
+                image["image_id"] = matching_ids[0]
+            images.append(image)
         return {
             "now": now,
             "server": self._server_source(now),
@@ -1873,7 +1960,7 @@ def _read_reports(state_dir):
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,
               live_by_device, policy, enforcement, derived_denied, now,
-              server_observed_at=None):
+              server_observed_at=None, ambiguous_ips=(), ambiguous_endpoints=()):
     """One canonical peer row (spec §10.3), source-grouped. All device
     attribution joins on the authenticated device principal id, never on the
     source IP."""
@@ -1922,13 +2009,15 @@ def _peer_row(p, total, up_now, devices_by_id, report_by_device,
     # port it announced to the tracker. Matching on (ip, port) alone therefore
     # drops the rate for every incoming connection — i.e. every normal transfer.
     # Prefer the exact endpoint; fall back to the address when it is
-    # unambiguous. When one address really does carry several connections, sum
-    # them but SAY SO, so the row is never a silent merge.
+    # unambiguous. When one participant carries several connections, sum them
+    # but SAY SO. An IP shared by several tracker participants cannot identify which
+    # participant received the measured bytes, even if there is only one
+    # current connection. Never copy that address aggregate onto every device.
     endpoint = (p["ip"], p["port"])
     measured, same_ip = None, None
-    if endpoint in up_now:
+    if endpoint in up_now and endpoint not in ambiguous_endpoints:
         measured = up_now[endpoint]
-    else:
+    elif p["ip"] not in ambiguous_ips:
         same_ip = [bps for (ip_, _port), bps in up_now.items()
                    if ip_ == p["ip"]]
         if len(same_ip) == 1:
@@ -2020,6 +2109,8 @@ def _device_observation(entry, now):
     out = {"schema": schema, "obs_state": obs_state,
            "observed_at": entry.get("observed_at"),
            "valid": valid, "stale": not valid, "age_s": age_s}
+    if isinstance(entry.get("image_id"), str) and entry["image_id"]:
+        out["image_id"] = entry["image_id"]
 
     if not valid:
         # Stale / withdrawn: retained context only; omit all fresh counters.
@@ -2145,12 +2236,15 @@ def _report_summary(ring):
         return None
     schema = rep.get("schema")
     is_v2 = schema == "v2" or rep.get("v") == 2 or "report_id" in rep
+    image_scope = ({"image_id": rep["image_id"]}
+                   if isinstance(rep.get("image_id"), str) and rep["image_id"] else {})
     if is_v2:
         sha = rep.get("content_sha256")
         sha = sha if isinstance(sha, dict) else {}
         ios = rep.get("ios_copy_verify")
         ios = ios if isinstance(ios, dict) else {}
         return {
+            **image_scope,
             "schema": "v2",
             "report_id": rep.get("report_id"),
             "event": rep.get("event"),
@@ -2163,6 +2257,7 @@ def _report_summary(ring):
     link = rep.get("link")
     link = link if isinstance(link, dict) else {}
     return {
+        **image_scope,
         "schema": "v1",
         "event": rep.get("event"),
         "tier": link.get("tier"),
@@ -2345,10 +2440,8 @@ def aggregate_transfers(live_doc, images, now, write_interval=None):
 def observability_enabled(env=None):
     """Is the EXTERNAL observability surface (Prometheus-format /metrics +
     OTLP push) turned on? Default OFF: IRIS doesn't assume any observability
-    stack exists. The swarm JSON (/swarm) is served to loopback peers only by
-    default (IRIS_SWARM_PUBLIC opens it) — the map PAGE lives in the
-    authenticated console (:8080); :9101 serves a static pointer there
-    (moved_page)."""
+    stack exists. Swarm JSON always requires the management-tier credential;
+    the map page lives in the authenticated console."""
     env = os.environ if env is None else env
     return env.get("IRIS_OBSERVABILITY", "").strip().lower() in (
         "1", "true", "yes", "on")
@@ -2359,55 +2452,6 @@ def metrics_port(env=None):
     env = os.environ if env is None else env
     raw = env.get("IRIS_METRICS_PORT", str(DEFAULT_METRICS_PORT)).strip()
     return int(raw) if raw and raw != "0" else None
-
-
-def _console_url():
-    """Resolve the operator console URL: IRIS_CONSOLE_URL override verbatim
-    when non-empty (e.g. shared hosts publishing the console on a non-default
-    port; garbage tolerant, used as-is), else the IRIS_HOST_IP-derived
-    https://<host>:8080/ default. Read per call so it works without a restart.
-    Shared by the retired-map pointer page and the /swarm 403 body — both
-    surfaces already publish this URL, so echoing it leaks nothing new."""
-    override = os.environ.get("IRIS_CONSOLE_URL", "").strip()
-    if override:
-        return override
-    host = os.environ.get("IRIS_HOST_IP", "").strip() or "localhost"
-    return "https://%s:8080/" % host
-
-
-def swarm_peer_allowed(peer_host, swarm_public):
-    """Is this TCP peer allowed to read /swarm? True when swarm_public is on,
-    else only for a loopback source (all of 127.0.0.0/8, ::1, and IPv4-mapped
-    forms). Defense-in-depth scoped to the container network namespace: under
-    a rootless engine or host networking a source-address check is meaningless
-    — the hard control is IRIS_METRICS_HOST / not publishing 9101 (documented
-    in security.md). Fails CLOSED on any unparseable address."""
-    if swarm_public:
-        return True
-    try:
-        addr = ipaddress.ip_address((peer_host or "").partition("%")[0])
-    except ValueError:
-        return False
-    mapped = getattr(addr, "ipv4_mapped", None)
-    if mapped is not None:
-        addr = mapped
-    return addr.is_loopback
-
-
-def moved_page():
-    """Static pointer page for the retired :9101 map URLs (/swarmmap and /).
-    The live swarm map is inside the authenticated console — this keeps old
-    bookmarks failing helpfully instead of 404ing. Reads env vars per request
-    (via _console_url) so it works without a restart once they're set."""
-    console = _console_url()
-    return ("<!doctype html>\n<html><head><meta charset=\"utf-8\">"
-            "<title>intelligent-release-image-staging swarm map has moved"
-            "</title></head><body>"
-            "<h1>The swarm map moved into the "
-            "intelligent-release-image-staging Console</h1>"
-            "<p>Open <a href=\"%s\">%s</a> and sign in &mdash; the live map "
-            "is on the Swarm tab.</p></body></html>\n"
-            % (console, console)).encode("ascii")
 
 
 def _probe_listeners(listeners):
@@ -2461,90 +2505,134 @@ def parse_health_listeners(spec, default=None):
 
 class _MetricsServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
     """ThreadingHTTPServer with a bounded pool of concurrently running
-    handler threads -- see bounded_pool.py. No TLS here (:9101 is a plain
-    monitoring/health surface, gated by IRIS_METRICS_HOST rather than a
-    cert) and no long-lived connections: every route answers one JSON/text
-    body and closes. Sized generously above any realistic scrape
-    concurrency; request_queue_size raised for the same reason as the other
-    listeners (a burst of health probes should queue, not RST)."""
+    handler threads -- see bounded_pool.py. TLS handshakes happen in those
+    workers rather than the accept thread, so one stalled scrape cannot block
+    probes. Every route answers one JSON/text body and closes."""
 
     request_queue_size = 128
     max_concurrent_requests = 64
+    tls_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        if self.tls_context is not None:
+            sock.settimeout(TELEMETRY_HANDSHAKE_TIMEOUT)
+        return sock, addr
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            try:
+                request = self.tls_context.wrap_socket(
+                    request, server_side=True)
+                request.settimeout(None)
+            except (ssl.SSLError, OSError, ValueError):
+                self.shutdown_request(request)
+                return
+        super().process_request_thread(request, client_address)
 
 
 def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
-                        health=None, swarm_public=False, listeners=None):
-    """HTTP server. `/healthz` is always served (JSON; `health` is an optional
-    zero-arg callable adding the otlp_export block — spec 7.7. Status stays
-    200: container HEALTHCHECK and orchestrator probes are status-code based);
+                        health=None, listeners=None,
+                        management_token_file=None,
+                        management_previous_token_file=None,
+                        observability_token_file=None,
+                        observability_previous_token_file=None,
+                        certfile=None, keyfile=None):
+    """Build the authenticated telemetry HTTPS server used in production.
 
-    `/readyz` is the STATUS-CODE probe /healthz deliberately is not. `/healthz`
-    answering 200 only ever proved that THIS server (:9101) was alive: the
-    tracker, catalog, artifact server, console and seeder are separate
-    listeners started by docker-entrypoint.sh, so any of them could die with
-    the container still reporting healthy and, under Kubernetes, never being
-    restarted -- devices would fail at [5/7] with "cannot connect" against a
-    pod marked Ready. `/readyz` TCP-probes `listeners` ({name: port}, or a
-    zero-arg callable returning one) and answers 503 with the offenders named
-    when any is down. `listeners=None` -> 200 and nothing probed, so the
-    endpoint is inert until a deployment declares what it expects;
-    `/metrics` is served only when `provider` is given (None -> 404, the
-    observability-off posture); /swarm answers only loopback peers unless
-    `swarm_public` (the console proxies it over container loopback — swarm
-    data is console-gated by default); /swarmmap serves the pointer page when
-    `html` is given.
+    Only `/healthz` and `/readyz` are anonymous, and their bodies contain the
+    single `ok` boolean. Readiness dependency details affect the status code
+    without disclosing listener topology. `/metrics` requires an observability
+    token before its enabled state is revealed; `/swarm` requires a management
+    token. Every other path authenticates before returning RFC 9457 404.
 
-    `html` may be a string, bytes, or a zero-arg callable returning either; a
-    callable is read per request, so the page can be hot-updated without a
-    restart."""
+    `listeners` is a mapping or callable used by `/readyz`; `health` supplies
+    the detailed exporter state returned only by the management-authenticated
+    `/status` route. The retired `html` argument remains accepted solely for
+    source compatibility and cannot add unauthenticated response data."""
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status, body, ctype):
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, no-store")
+            if status == 503:
+                self.send_header("Retry-After", "1")
             self.end_headers()
             self.wfile.write(body)
 
         def do_GET(self):
             path = urlparse(self.path).path
+            if path in ("/healthz", "/readyz"):
+                pass
+            elif path == "/metrics":
+                try:
+                    allowed = tier_auth.authorized(
+                        self.headers, observability_token_file,
+                        observability_previous_token_file,
+                        scope="observability")
+                except tier_auth.CredentialUnavailable:
+                    allowed = False
+                if not allowed:
+                    api_problem.send(
+                        self, 401, "observability-authentication-required",
+                        "Observability authentication required",
+                        headers=(("WWW-Authenticate", "Bearer"),))
+                    return
+                if provider is None:
+                    api_problem.send(self, 404, "route-not-found",
+                                     "Route not found")
+                    return
+            elif path in ("/swarm", "/status"):
+                try:
+                    allowed = tier_auth.authorized(
+                        self.headers, management_token_file,
+                        management_previous_token_file)
+                except tier_auth.CredentialUnavailable:
+                    allowed = False
+                if not allowed:
+                    api_problem.send(
+                        self, 401, "management-authentication-required",
+                        "Management authentication required",
+                        headers=(("WWW-Authenticate", "Bearer"),))
+                    return
+            else:
+                # Authenticate unknown non-probe paths before admitting that a
+                # route does not exist. Retired pointer pages are not APIs.
+                try:
+                    allowed = tier_auth.authorized(
+                        self.headers, management_token_file,
+                        management_previous_token_file)
+                except tier_auth.CredentialUnavailable:
+                    allowed = False
+                if not allowed:
+                    api_problem.send(
+                        self, 401, "management-authentication-required",
+                        "Management authentication required",
+                        headers=(("WWW-Authenticate", "Bearer"),))
+                    return
+                api_problem.send(self, 404, "route-not-found", "Route not found")
+                return
+            if api_routes.match("telemetry", "GET", self.path) is None:
+                api_problem.send(self, 404, "route-not-found", "Route not found")
+                return
             if path == "/metrics" and provider is not None:
                 self._send(200, provider().encode(),
                            "text/plain; version=0.0.4; charset=utf-8")
             elif path == "/healthz":
-                doc = {"ok": True}
-                if health is not None:
-                    try:
-                        doc["otlp_export"] = health()
-                    except Exception:
-                        pass
-                # Informational here, load-bearing on /readyz below: the status
-                # code for THIS path stays 200 by contract (above).
-                want = listeners() if callable(listeners) else listeners
-                if want:
-                    doc["listeners"] = _probe_listeners(want)
-                self._send(200, json.dumps(doc).encode(),
+                # Anonymous probes deliberately disclose no exporter or
+                # listener topology. /healthz proves this process can answer;
+                # /readyz retains the dependency status in its HTTP code.
+                self._send(200, json.dumps({"ok": True}).encode(),
                            "application/json; charset=utf-8")
             elif path == "/readyz":
                 want = listeners() if callable(listeners) else listeners
                 state = _probe_listeners(want) if want else {}
                 down = sorted(n for n, v in state.items() if v != "up")
-                doc = {"ok": not down}
-                if state:
-                    doc["listeners"] = state
-                if down:
-                    doc["down"] = down
-                self._send(503 if down else 200, json.dumps(doc).encode(),
+                self._send(503 if down else 200,
+                           json.dumps({"ok": not down}).encode(),
                            "application/json; charset=utf-8")
             elif path == "/swarm" and swarm_provider is not None:
-                if not swarm_peer_allowed(self.client_address[0],
-                                          swarm_public):
-                    body = json.dumps(
-                        {"error": "swarm data is served through the "
-                                  "authenticated console; set "
-                                  "IRIS_SWARM_PUBLIC=1 to expose it here",
-                         "console": _console_url()}).encode()
-                    self._send(403, body, "application/json; charset=utf-8")
-                    return
                 try:
                     # allow_nan=False: the console proxies this body to a
                     # browser JSON.parse, which rejects NaN/Infinity tokens.
@@ -2553,15 +2641,68 @@ def make_metrics_server(host, port, provider, swarm_provider=None, html=None,
                 except Exception:
                     body = b"{}"
                 self._send(200, body, "application/json; charset=utf-8")
-            elif path in ("/swarmmap", "/") and html is not None:
-                page = html() if callable(html) else html
-                if isinstance(page, str):
-                    page = page.encode()
-                self._send(200, page or b"", "text/html; charset=utf-8")
+            elif path == "/status":
+                try:
+                    export = health() if callable(health) else {
+                        "state": "off", "signals": {}}
+                    body = json.dumps({"ok": True,
+                                       "otlp_export": export},
+                                      allow_nan=False).encode()
+                except Exception:
+                    api_problem.send(self, 503, "telemetry-status-unavailable",
+                                     "Telemetry status unavailable")
+                    return
+                self._send(200, body, "application/json; charset=utf-8")
             else:
-                self._send(404, b"not found\n", "text/plain")
+                api_problem.send(self, 404, "route-not-found", "Route not found")
+
+        def _unsupported(self):
+            """Authenticate before disclosing unsupported method handling."""
+            path = urlparse(self.path).path
+            if path == "/metrics":
+                current = observability_token_file
+                previous = observability_previous_token_file
+                scope = "observability"
+                code = "observability-authentication-required"
+                title = "Observability authentication required"
+            else:
+                current = management_token_file
+                previous = management_previous_token_file
+                scope = "management"
+                code = "management-authentication-required"
+                title = "Management authentication required"
+            try:
+                allowed = tier_auth.authorized(
+                    self.headers, current, previous, scope=scope)
+            except tier_auth.CredentialUnavailable:
+                allowed = False
+            if not allowed:
+                api_problem.send(self, 401, code, title,
+                                 headers=(("WWW-Authenticate", "Bearer"),))
+                return
+            api_problem.send(self, 405, "method-not-allowed",
+                             "Method not allowed",
+                             headers=(("Allow", "GET"),))
+
+        do_POST = _unsupported
+        do_PUT = _unsupported
+        do_DELETE = _unsupported
+        do_PATCH = _unsupported
+        do_HEAD = _unsupported
+        do_OPTIONS = _unsupported
+
+        def __getattr__(self, name):
+            if name.startswith("do_"):
+                return self._unsupported
+            raise AttributeError(name)
 
         def log_message(self, *args):
             pass
 
-    return _MetricsServer((host, port), Handler)
+    server = _MetricsServer((host, port), Handler)
+    if certfile:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile, keyfile)
+        server.tls_context = context
+    return server

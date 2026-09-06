@@ -18,6 +18,7 @@ import random
 import re
 import shutil
 import sys
+import tempfile
 import time
 
 import agent_config
@@ -45,6 +46,28 @@ _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _ROOT_COPY_MAX_ATTEMPTS = 4
 _ROOT_COPY_BACKOFF_BASE = 5 * 60
 _ROOT_COPY_BACKOFF_MAX = 60 * 60
+# The outer announce URL is not part of a torrent's info dictionary, so moving
+# the tracker from HTTP to HTTPS deliberately leaves the info hash unchanged.
+# Persist the transport generation alongside the identity so every platform
+# replaces an identity-equal cached torrent exactly once after the upgrade.
+# Guest Shell still uses its established query credential; IOx and XR use the
+# separately scoped per-download Bearer header.
+_TORRENT_TRANSPORT_BEARER_HTTPS = "bearer-https-v2"
+_TORRENT_TRANSPORT_QUERY_HTTPS = "legacy-query-https-v1"
+
+
+def _choose_ios_stage_prefix(platform, filesystems, model,
+                             guest_share_fs, preferred_fs, boot_path):
+    """Select IOS storage while retaining the Guest Shell legacy fallback."""
+    prefix = (flash_target.choose_stage_fs(
+                  filesystems, model=model, guest_share_fs=guest_share_fs,
+                  preferred_fs=preferred_fs)
+              or flash_target.choose_target_fs(filesystems, boot_path))
+    # An absent selector is Guest Shell, whose established behavior falls back
+    # to flash:. The explicit IOx container profile must prove its destination.
+    if not prefix and platform != "iox":
+        return "flash:"
+    return prefix
 
 
 def _root_copy_tmp_name(fname):
@@ -56,6 +79,20 @@ def _root_copy_tmp_name(fname):
     coincide with the running image or the BOOT target — the real name is
     never deleted or overwritten until the replacement is proven good."""
     return fname + flash_target.ROOT_COPY_TMP_SUFFIX
+
+
+def _guestshell_root_ios_path(stage_dir, target_prefix, fname):
+    """Return a canonical IOS root path; Guest Shell mounts only guest-share.
+
+    The container's /flash and /bootflash do not expose IOS root files. Only
+    the installer-owned share can carry a native IOS hash receipt.
+    """
+    roots = {"flash:": "/flash", "bootflash:": "/bootflash"}
+    root = roots.get(target_prefix)
+    if (root is None or stage_dir != root + "/guest-share/iris"
+            or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
+        return None
+    return target_prefix + fname
 
 # Board #60: a park-pass record that has no root_file AND that the catalog no
 # longer answers for at all (e.g. the aria_add call site's bare
@@ -124,7 +161,9 @@ Deps = collections.namedtuple(
             "version copy_to_root purge_others reclaim root_present "
             "remove_stage aria_remove detect_mode target_fs running_image "
             "reclaimable reclaim_bundle model refresh aria_stats aria_peers "
-            "io_transfer checkpoint aria_session copy_in_place")
+            "io_transfer checkpoint aria_session copy_in_place "
+            "root_file_size verify_root")
+Deps.__new__.__defaults__ = (None, None)
 
 
 def _atomic_write_state(state_path, state):
@@ -696,7 +735,8 @@ def _reset_copy_failures(st):
     # set would mean a device that burned its once-guard on an EARLIER
     # image's content can never reclaim again for this id, permanently.
     for key in ("copy_attempts", "copy_next_ts", "copy_terminal", "stage_error",
-                "ios_copy_started", "copy_reclaim_tried", "reclaim_tried"):
+                "ios_copy_started", "copy_reclaim_tried", "reclaim_tried",
+                "root_adopt_checked"):
         st.pop(key, None)
 
 
@@ -706,8 +746,12 @@ def _copy_backoff(attempts):
 
 
 def _reclaim_failed_root_copy(deps, target_prefix, image):
-    """Delete this attempt's failed root copy when the retry gate goes
-    terminal. Called ONCE, on the transition into copy_terminal.
+    """Delete only IRIS's reserved temp root copy.
+
+    The retry path calls this once on its transition into copy_terminal. The
+    Guest Shell same-name recovery also calls it after SHA-attesting an already
+    correct real destination, when an earlier no-op rename left the proven temp
+    bytes beside it. Both call sites target only the reserved temp suffix.
 
     Why it has to happen here: after copy_terminal is set, no further copy
     fires, so the placement path's delete-first never runs again. Without this
@@ -736,9 +780,12 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
     nothing. Two independent layers keep the real image name (and, by
     construction, the temp name too) safe:
 
-      Layer 1 (caller): run_once only calls this when at least one attempt in
-        this image's cycle came back a genuine post-delete-first False
-        (st["ios_copy_started"]); ROOT_COPY_NOT_ATTEMPTED never sets it.
+      Layer 1 (terminal caller): run_once only calls this on terminal failure
+        when at least one attempt in this image's cycle came back a genuine
+        post-delete-first False (st["ios_copy_started"]);
+        ROOT_COPY_NOT_ATTEMPTED never sets it. The adoption caller is narrower
+        still: it has locally SHA-attested the untouched real destination and
+        observed the reserved temp name left beside it.
       Layer 2 (below): defence in depth, not the primary guarantee — the temp
         name is `fname` plus a reserved suffix
         (flash_target.ROOT_COPY_TMP_SUFFIX) that no real Cisco image or
@@ -800,6 +847,90 @@ def _reclaim_failed_root_copy(deps, target_prefix, image):
     deps.emit("ROOTCOPY-RECLAIM",
               "%s placement gave up; deleted this attempt's partial copy "
               "from %s%s" % (fname, target_prefix, tmp))
+
+
+def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
+    """Attest a pre-existing IOS root file through native IOS size and SHA.
+
+    Returns ``("adopted", None)`` only after the root bytes have the catalog
+    size and SHA-512 and any IRIS-reserved ``.iris-tmp`` leftover is confirmed
+    gone. ``("absent", None)`` means ordinary copy placement may proceed.
+    ``("not-applicable", None)`` keeps non-Guest-Shell/noncanonical platforms
+    on their existing placement path. Every ambiguous read or content mismatch
+    returns ``("blocked", <operator-facing error>)`` without touching the real
+    destination.
+
+    The only cleanup this path can request is the established guarded reclaim
+    of ``<filename>.iris-tmp``.  It never submits the real filename to an IOS
+    delete or rename command.
+    """
+    if cfg.get("device_platform"):
+        return "not-applicable", None
+    fname = image["filename"]
+    root_path = _guestshell_root_ios_path(
+        cfg.get("stage_dir"), target_prefix, fname)
+    if root_path is None:
+        return "not-applicable", None
+
+    try:
+        observed = deps.root_file_size(fname, target_prefix)
+    except Exception as e:
+        error = ("existing IOS root file could not be inspected safely: %s"
+                 % e)
+        deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+        return "blocked", error
+    if observed is None:
+        return "absent", None
+    expected = int(image["size"])
+    if observed != expected:
+        error = ("existing IOS root file has size %d, expected %d; left in place"
+                 % (observed, expected))
+        deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+        return "blocked", error
+
+    try:
+        digest = image.get("sha512")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{128}", digest):
+            raise ValueError("catalog SHA-512 is missing or malformed")
+        matches = deps.verify_root(fname, target_prefix, digest)
+    except Exception as e:
+        error = ("existing IOS root file SHA-512 could not be verified: %s"
+                 % e)
+        deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+        return "blocked", error
+    if not matches:
+        error = ("existing IOS root file SHA-512 does not match the catalog; "
+                 "left in place")
+        deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+        return "blocked", error
+
+    tmp_name = _root_copy_tmp_name(fname)
+    try:
+        if deps.root_file_size(fname, target_prefix) != expected:
+            raise ValueError("IOS root size changed during SHA-512 verification")
+        tmp_size = deps.root_file_size(tmp_name, target_prefix)
+    except Exception as e:
+        error = ("IRIS temp-copy state could not be inspected safely: %s" % e)
+        deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+        return "blocked", error
+    if tmp_size is not None:
+        _reclaim_failed_root_copy(deps, target_prefix, image)
+        try:
+            tmp_size = deps.root_file_size(tmp_name, target_prefix)
+        except Exception as e:
+            error = ("IRIS temp-copy cleanup could not be confirmed: %s" % e)
+            deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+            return "blocked", error
+        if tmp_size is not None:
+            error = ("verified IOS root file retained, but IRIS temp copy "
+                     "remains; cleanup must succeed before adoption")
+            deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
+            return "blocked", error
+
+    deps.emit("ROOTCOPY-ADOPTED",
+              "%s already exists at %s with catalog size and SHA-512; "
+              "adopted without replacement" % (fname, target_prefix))
+    return "adopted", None
 
 
 def _ios_basename(path):
@@ -987,7 +1118,8 @@ _RESERVED_STATE_KEYS = frozenset((
 _IMAGE_ENTRY_FIELDS = ("done", "copied", "sha", "tele", "root_file", "parked",
                        "copy_attempts", "copy_terminal", "copy_reclaim_tried",
                        "ios_copy_started", "reclaim_tried", "blocked_no_space",
-                       "stage_error", "origin", "download_started")
+                       "stage_error", "origin", "download_started",
+                       "root_adopt_checked")
 
 
 def _is_image_entry(value):
@@ -1068,7 +1200,7 @@ def _reconcile_set(deps, state, ids, stage_dir):
     resolves that: an origin-'adopted' (or provenance-unknown) placement is
     left in place exactly like every other platform's root copy; only a
     placement this agent proved it downloaded is freed on park. Either way,
-    origin/download_started are CLEARED on park (reviewer PROBE2): the
+    downloaded origin/download_started are CLEARED on park (reviewer PROBE2): the
     acquisition cycle those facts describe ends the moment the image leaves
     the set, and an operator can restage a byte-identical file under the
     SAME name while it is gone — the steady-state short-circuit that will
@@ -1235,10 +1367,15 @@ def _reconcile_set(deps, state, ids, stage_dir):
         # while the image is unassigned must not inherit a stale
         # 'downloaded' verdict from the PREVIOUS occupant of that name — that
         # is exactly what let the incident recur on the next unassign.
-        # Cleared unconditionally rather than only on the deleted branch, so
-        # re-derivation always starts from "unproven" instead of an
-        # assumption this cycle can no longer back.
-        entry.pop("origin", None)
+        # An explicitly adopted Guest Shell root is separate from the stage
+        # copy just removed, so its protection must survive parking. The
+        # legacy pending-root-delete queue drains later in this same tick;
+        # unlike in-place platforms, its missing-origin rule permits deletion
+        # on IOS-XE. Forgetting this adoption would turn park into a delete of
+        # the untouched operator file. Downloaded provenance is still always
+        # cleared, and in-place platforms retain their fail-safe unknown rule.
+        if deps.copy_in_place or entry.get("origin") != "adopted":
+            entry.pop("origin", None)
         entry.pop("download_started", None)
         # A real park happened (fname resolved this tick), so board #60's
         # retry counter -- only ever incremented on the "could not be named"
@@ -1288,8 +1425,7 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
     every agent that predates the fields)."""
     live = [t for t in ticks if t.hb is not None]
     if not live:
-        # Every image bailed before its heartbeat (a rejected catalog filename
-        # is the only such path). Say nothing, exactly as before.
+        # Defensive: a future path may return without a heartbeat payload.
         return None
     if len(ids) == 1:
         return _send_heartbeat(deps, sid, live[0].build())
@@ -1304,13 +1440,8 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
               if t.hb is not None and t.stage_state in _SET_STAGE_STATES]
     hb = live[0].build(staged_image_ids=staged, errored_image_ids=errored)
     seen = [t.stage_state for t in live]
-    # Identity is NOT forced to ids[0]: it comes from live[0], the first image
-    # that actually produced heartbeat data this tick, whose payload this is.
-    # Overriding it filed live[0]'s observation, target_fs and free-byte
-    # reading under a DIFFERENT image's id whenever the first image bailed
-    # before reporting (a rejected catalog filename). For a healthy set — and
-    # for every one-image set, which returns above — live[0] IS ids[0], so the
-    # compat pointer is unchanged.
+    # Keep the identity of the image that produced this payload: forcing a
+    # different id would mislabel its observation and filesystem reading.
     #
     # `staged` is read from STATE, so it still counts an image that was staged
     # on an earlier tick but FAILED on this one (the catalog dropped it, flash
@@ -1366,10 +1497,25 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     """
     sid = cfg["device_id"]
     stage_dir = cfg["stage_dir"]
-    image = deps.catalog.get_image(img_id)
+    try:
+        image = deps.catalog.get_image(img_id)
+    except Exception as e:
+        # One image's lookup must not discard siblings' completed work or
+        # suppress the whole device heartbeat. Exception text may contain an
+        # authenticated URL, so only its type belongs in the diagnostic.
+        deps.emit("IMAGE-UNAVAILABLE",
+                  "%s catalog image unavailable (%s)"
+                  % (img_id, type(e).__name__))
+        tick.heartbeat({"id": img_id}, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="catalog image unavailable; retrying",
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
+        return "image-unavailable"
     if image is None:
         deps.emit("ERROR", "assigned image %s not in catalog" % img_id)
-        tick.heartbeat(None, deps, "error",
+        tick.heartbeat({"id": img_id}, deps, "error",
                        target_fs=cfg.get("target_fs"),
                        tele_on=tele_on, stream_on=stream_on,
                        stage_error="assigned image %s not in catalog"
@@ -1384,10 +1530,35 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.emit("ERROR",
                   "rejected catalog filename (must match %s): %r"
                   % (_FILENAME_RE.pattern, fname))
+        tick.heartbeat({"id": img_id}, deps, "error",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       stage_error="catalog image filename is invalid",
+                       observation=_not_active_observation(
+                           tele_on, time.time()))
         return "bad-filename"
 
     stage = os.path.join(stage_dir, fname)
     size = int(image["size"])
+
+    # The tracker transport marker has to participate in the steady-state
+    # gate below.  A current-schema device can already be done+copied when it
+    # upgrades from HTTP; returning early would leave that live seed on the old
+    # announce forever.  Resolve the cheap cached-torrent identity here, then
+    # perform the actual network/RPC migration on the ordinary staging path
+    # after the existing content checks.
+    torrent = os.path.join(stage_dir, img_id + ".torrent")
+    st = state.setdefault(img_id, {})
+    torrent_id = _torrent_identity(image)
+    bearer_metainfo = (cfg.get("device_platform")
+                       in agent_config.DEVICE_PLATFORMS)
+    torrent_transport = (_TORRENT_TRANSPORT_BEARER_HTTPS
+                         if bearer_metainfo
+                         else _TORRENT_TRANSPORT_QUERY_HTTPS)
+    migrate_transport = (deps.file_size(torrent) is not None
+                         and st.get("torrent_id") in (None, torrent_id)
+                         and st.get("torrent_auth_format")
+                         != torrent_transport)
 
     # ADOPT THE SERVER'S TRANSFER IDENTITY. `plan_row` carries the plan_id and
     # transfer_id the server minted when it DECIDED this transfer. Adopting the
@@ -1465,7 +1636,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         staged_ok = deps.file_size(stage) is not None
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
                                     size)
-        if content_ok and staged_ok and root_ok:
+        if content_ok and staged_ok and root_ok and not migrate_transport:
             # REPLAN RE-VERIFY. A NEW server plan landed on an image this
             # device already has staged AND placed. Without this, that plan
             # could never be attested: this short-circuit deliberately never
@@ -1529,6 +1700,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                   "under the new plan)"
                                   % (image["filename"], img_id))
                     deps.remove_stage(stage)
+                    tick.heartbeat(
+                        image, deps, "error",
+                        target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+                        tele_on=tele_on, stream_on=stream_on,
+                        stage_error="image SHA-256 verification failed; retrying download",
+                        observation=_not_active_observation(tele_on, time.time()))
                     return "bad-sha"
             # The observation phase stays 'steady' whatever the report does:
             # aria2 is seeding here, not downloading, and _build_observation
@@ -1662,26 +1839,23 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     #
     # Provenance gate (Directive 2): pending_root_deletes names a FILE, not
     # the per-image record that placed it, so its origin is looked up by
-    # root_file. Gated on deps.copy_in_place exactly like the park guard: a
-    # platform that physically writes its own root copy (every IOS-XE
-    # platform) has no adoption concept at all, so a legacy entry with no
-    # owning record there is deleted exactly as it always was — treating it
-    # as "operator-adopted" would be a false claim, and worse, would strand
-    # a genuinely replaced image on flash forever with nothing left to
-    # retry it. On a platform WITH an adoption concept (copy_in_place), a
-    # name whose owning record says 'downloaded' is deleted exactly as
-    # before; 'adopted' or unproven (no owning record at all, or one with
-    # no origin — a state file older than this field) is left in place,
-    # logged once, and resolved out of the queue immediately rather than
-    # retried forever — there is nothing a retry could ever change.
+    # root_file. An explicit 'adopted' is protected on EVERY platform now
+    # that Guest Shell can attest a same-named root file. For legacy records
+    # with a missing/unknown origin, preserve the prior split: a platform
+    # that physically writes its root copy still drains the old queue, while
+    # copy_in_place platforms fail safe. A name explicitly recorded as
+    # 'downloaded' remains deletable everywhere. Protected entries are logged
+    # once and resolved out of the queue rather than retried forever — there
+    # is nothing a retry could ever change.
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
         deletable = [n for n in doomed
-                    if not deps.copy_in_place
-                    or _root_file_origin(state, n) == "downloaded"]
+                    if _root_file_origin(state, n) != "adopted"
+                    and (not deps.copy_in_place
+                         or _root_file_origin(state, n) == "downloaded")]
         for protected in doomed:
             if protected not in deletable:
                 deps.emit("ROOTCOPY-KEPT",
@@ -1725,8 +1899,66 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # has reached full size but whose last pieces aren't on disk yet (a race that
     # produced spurious sha mismatches on the 60s timer).
     downloading = deps.file_size(stage + ".aria2") is not None
-    if deps.file_size(stage) == size and not downloading:
+    # Both the old HTTP announce and the HTTPS replacement have an identical
+    # info dictionary, so torrent_id cannot distinguish them. For an
+    # identity-equal on-disk torrent with an older/missing transport marker,
+    # atomically refetch the small metainfo and re-add it. forceRemove does not
+    # delete the payload or its .aria2 resume bitfield. This applies to Guest
+    # Shell as well as the container platforms: the authentication style stays
+    # platform-specific, but no device may keep announcing over HTTP. Run it
+    # before the complete-file fast path so an already-staged seed migrates.
+    def migrate_cached_transport(readd):
+        try:
+            deps.catalog.download_torrent(img_id, torrent)
+            if readd:
+                deps.aria_remove(image["filename"])
+                deps.aria_add(torrent, stage_dir)
+        except TrackerAuthConfigError:
+            deps.emit("TRACKER-AUTH",
+                      "tracker authorization unavailable; refusing addTorrent")
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker authorization unavailable")
+            return "tracker-auth"
+        except Exception as e:
+            deps.emit("TORRENT-UNAVAILABLE",
+                      "%s tracker transport migration unavailable: %s"
+                      % (image["filename"], e))
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker transport migration unavailable")
+            return "torrent-unavailable"
+        # The just-fetched metainfo is for the catalog identity resolved above.
+        # Recording both facts together avoids a second fetch later in this
+        # same tick for pre-identity state, and prevents the HTTPS marker from
+        # describing an unknown/older torrent.
+        st["torrent_id"] = torrent_id
+        st["torrent_auth_format"] = torrent_transport
+        return None
+
+    staged_size = deps.file_size(stage)
+    completed_candidate = staged_size == size and not downloading
+    # A too-large payload is about to be discarded with its torrent, so do not
+    # fetch the replacement twice. A size-complete candidate is verified first
+    # so bad bytes likewise cannot consume a throwaway metainfo download.
+    if (migrate_transport and not completed_candidate
+            and (staged_size is None or staged_size <= size)):
+        # A resume sidecar proves aria2 has a real bitfield worth preserving
+        # and re-adding now. With no payload, or a partial payload lacking its
+        # sidecar, refresh only the metainfo here; the ordinary guarded start
+        # path below will clear any phantom entry and add it exactly once.
+        migration_error = migrate_cached_transport(readd=downloading)
+        if migration_error:
+            return migration_error
+
+    if completed_candidate:
         if deps.verify(stage, image["sha256"]):
+            if migrate_transport:
+                migration_error = migrate_cached_transport(readd=True)
+                if migration_error:
+                    return migration_error
             # state is PER-IMAGE: a reassignment to a new image id must go through
             # the full DONE + copy-to-root cycle again, untouched by the old one.
             st = state.setdefault(img_id, {})
@@ -1785,13 +2017,55 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                 mode = deps.detect_mode()
                 target_prefix, free = deps.target_fs()
                 state["stage_fs"] = target_prefix
+                now = time.time()
+
+                # Guest Shell mounts only guest-share, not the IOS root.
+                # IOS `rename` does not
+                # overwrite a same-named destination on affected releases, so
+                # first attest those existing bytes through native IOS SHA.
+                # This runs BEFORE
+                # the copy terminal/backoff and space gates: an upgraded agent
+                # must be able to recover a hardware-stranded good destination
+                # plus full-size .iris-tmp without needing room for a third
+                # copy. Once a collision has been checked, throttle subsequent
+                # multi-GB hashes with the ordinary copy backoff; the marker is
+                # absent in old state, guaranteeing one immediate upgrade
+                # probe even when copy_terminal/copy_next_ts are already set.
+                adoption = "not-applicable"
+                if (st.get("root_adopt_checked")
+                        and now < st.get("copy_next_ts", 0)):
+                    adoption = "blocked"
+                else:
+                    adoption, adoption_error = _try_adopt_guestshell_root(
+                        cfg, deps, image, target_prefix)
+                    if adoption == "adopted":
+                        st["copied"] = True
+                        st["root_file"] = image["filename"]
+                        if state.get("image_id") == img_id:
+                            state["root_file"] = image["filename"]
+                        st["origin"] = "adopted"
+                        _reset_copy_failures(st)
+                    elif adoption == "blocked":
+                        st["root_adopt_checked"] = True
+                        st["copy_terminal"] = True
+                        st["stage_error"] = adoption_error
+                        # Hashing itself can outlast a backoff interval. Start
+                        # the retry delay when it finishes, not before launch.
+                        st["copy_next_ts"] = time.time() + _ROOT_COPY_BACKOFF_BASE
+                    elif (adoption == "absent"
+                          and st.get("root_adopt_checked")):
+                        # The operator removed a previously conflicting root
+                        # file. Start a fresh placement cycle immediately.
+                        _reset_copy_failures(st)
                 # Container placement first creates an IOS-visible scratch and
                 # then the root copy, so it transiently consumes two full
                 # images; a platform whose root copy IS the staged file (no
                 # new bytes written) needs no additional headroom at all.
-                copy_bytes = (0 if deps.copy_in_place else
+                copy_bytes = (0 if deps.copy_in_place
+                              or adoption in ("adopted", "blocked") else
                               size * (2 if deps.io_transfer else 1))
-                if not flashcheck.has_room(free, copy_bytes):
+                if (adoption not in ("adopted", "blocked")
+                        and not flashcheck.has_room(free, copy_bytes)):
                     # Only burn the once-guard when reclaim ACTUALLY ran — a
                     # transient mode=None (or unconfirmable running image) does
                     # nothing, so leave the guard clear to retry next tick.
@@ -1825,12 +2099,12 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                 # IOS-visible storage before the final placement copy. That large
                 # transfer blocks this agent process, so publish its state first
                 # instead of leaving the Console on ambiguous "staging".
-                now = time.time()
                 # A state file written by the regressed implementation may have
                 # deferred the first retry. Clear that timestamp too: one
                 # immediate next-tick retry is intentional so transient
                 # filesystem/SSH failures recover without a five-minute wait.
-                if st.get("copy_attempts") == 1:
+                if (st.get("copy_attempts") == 1
+                        and not st.get("root_adopt_checked")):
                     st.pop("copy_next_ts", None)
                 if st.get("copy_terminal"):
                     pass
@@ -1848,7 +2122,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                               target_fs=target_prefix,
                                               tele_on=tele_on,
                                               stream_on=stream_on))
-                if not st.get("copy_terminal") \
+                if not st.get("copied") and not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
                     result = deps.copy_to_root(image["filename"], target_prefix, size)
                     # ROOT_COPY_NOT_ATTEMPTED is a truthy object(), so it MUST be
@@ -1871,15 +2145,13 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         st["root_file"] = image["filename"]
                         if state.get("image_id") == img_id:
                             state["root_file"] = image["filename"]
-                        # Provenance (Directive 2): a platform whose
-                        # copy_to_root PHYSICALLY writes the root copy
-                        # (copy_in_place=False, every IOS-XE platform) has no
-                        # adoption path at all — this agent's own copy/scp
-                        # wrote those bytes, full stop. A platform whose
-                        # copy_to_root is attest-in-place can succeed WITHOUT
-                        # this agent ever transferring anything, so its
-                        # verdict depends on whether THIS agent's aria2
-                        # session is what fetched the file
+                        # Provenance (Directive 2): reaching THIS branch means
+                        # copy_to_root physically wrote the IOS-XE root copy,
+                        # or an in-place platform attested its stage path. The
+                        # Guest Shell adoption path returns before this call
+                        # and records "adopted" directly. An in-place verdict
+                        # depends on whether THIS agent's aria2 session is what
+                        # fetched the file
                         # (download_started, set at the aria_add call site) —
                         # absent means attest_in_place adopted bytes that
                         # were already at the mount. Every deletion path
@@ -1974,6 +2246,16 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # hundred KB — instead of re-adding this one and looping.
         deps.remove_stage(os.path.join(stage_dir, img_id + ".torrent"))
         state[img_id].pop("torrent_id", None)
+        state[img_id].pop("torrent_auth_format", None)
+        # Verification failed on this tick, so publish that decision now.
+        # Omitting the heartbeat retained the previous device status and made
+        # set aggregation silently drop this image's failure.
+        tick.heartbeat(
+            image, deps, "error",
+            target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+            tele_on=tele_on, stream_on=stream_on,
+            stage_error="image SHA-256 verification failed; retrying download",
+            observation=_not_active_observation(tele_on, time.time()))
         return "bad-sha"
 
     # need to download — media-aware flash pre-check + mode-gated reclaim.
@@ -2024,9 +2306,6 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     # forever (board #70, hardware-reproduced on IOx and on a Cisco 8010's XR
     # appmgr). The guard below is keyed on ARIA2'S OWN KNOWLEDGE of the file
     # (deps.aria_stats), never on file presence alone.
-    torrent = os.path.join(stage_dir, img_id + ".torrent")
-    st = state.setdefault(img_id, {})
-    torrent_id = _torrent_identity(image)
     have = deps.file_size(stage)
     # A SAME-ID REPUBLISH regenerates the torrent (server/publish.py writes a
     # new info hash under the unchanged id), and nothing on the device ever
@@ -2049,7 +2328,11 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         deps.remove_stage(stage + ".aria2")
         deps.remove_stage(torrent)
         have = None
-    if deps.file_size(torrent) is None or st.get("torrent_id") != torrent_id:
+    # The state marker records both the platform's authentication form and the
+    # tracker transport generation. The migration above handles an unchanged
+    # identity; a genuinely new torrent records the current marker here.
+    if (deps.file_size(torrent) is None
+            or st.get("torrent_id") != torrent_id):
         try:
             deps.catalog.download_torrent(img_id, torrent)
         except Exception as e:
@@ -2068,6 +2351,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            stage_error="catalog torrent unavailable: %s" % e)
             return "torrent-unavailable"
         st["torrent_id"] = torrent_id
+        st["torrent_auth_format"] = torrent_transport
     # ARIA2 MAY HAVE FORGOTTEN A PRESENT FILE (board #70). A present partial
     # (or a size-matching file still marked 'downloading' below) no longer
     # proves aria2 is actively fetching it — ask aria2 directly.
@@ -2125,6 +2409,17 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # went through (an RPC failure below re-tries the whole thing,
             # including this, next tick).
             state.setdefault(img_id, {})["download_started"] = True
+        except TrackerAuthConfigError:
+            # The torrent URL deliberately carries no credential. Never start
+            # it without the separately scoped per-device announce bearer, and
+            # never print that bearer in the diagnostic.
+            deps.emit("TRACKER-AUTH",
+                      "tracker authorization unavailable; refusing addTorrent")
+            tick.heartbeat(image, deps, "error",
+                           target_fs=state.get("stage_fs"),
+                           tele_on=tele_on, stream_on=stream_on,
+                           stage_error="tracker authorization unavailable")
+            return "tracker-auth"
         except OSError as e:
             # An HTTP 400/401 from the RPC endpoint is NOT a dead daemon: it is
             # aria2c rejecting our token, which is the ordinary state of a
@@ -2173,6 +2468,19 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                            observation=rpc_obs,
                            stage_error="aria2c RPC unreachable: %s" % e)
             return "aria2-down"
+        except RuntimeError as e:
+            # addTorrent can answer HTTP 200 with a JSON-RPC error or no GID.
+            # _aria_add_result rejects that response: report this image's
+            # failure without losing the tick or completed sibling work.
+            # Arbitrary RPC diagnostics may contain credentials.
+            deps.emit("ARIA2-DOWN", "%s download could not start (%s)"
+                      % (image["filename"], type(e).__name__))
+            tick.heartbeat(
+                image, deps, "error", target_fs=state.get("stage_fs"),
+                tele_on=tele_on, stream_on=stream_on,
+                stage_error="aria2c could not start the download; retrying",
+                observation=_not_active_observation(tele_on, time.time()))
+            return "aria2-down"
         if resume_untracked:
             deps.emit("STAGING",
                       "%s aria2 lost track of an in-progress download "
@@ -2217,9 +2525,11 @@ def run_once(cfg, deps, state):
     # in-memory cfg (a 7d TTL + half-life refresh leaves a ~3.5d retry buffer,
     # so a few failed ticks never strand the device; the live client's bearer
     # is _refresh_impl's concern, see its docstring for the failure split).
-    if needs_refresh(time.time(),
-                     int(float(cfg.get("token_expires_at", 0) or 0)),
-                     _TOKEN_TTL, _TOKEN_REFRESH_AT):
+    _container_platform = cfg.get("device_platform") in agent_config.DEVICE_PLATFORMS
+    if ((_container_platform and not cfg.get("announce_token"))
+            or needs_refresh(time.time(),
+                             int(float(cfg.get("token_expires_at", 0) or 0)),
+                             _TOKEN_TTL, _TOKEN_REFRESH_AT)):
         new_cfg = deps.refresh()
         if new_cfg is None:
             deps.emit("TOKEN-REFRESH-FAIL",
@@ -2276,6 +2586,10 @@ def run_once(cfg, deps, state):
     # filename whitelist and still ahead of every deps.aria_add().
     plans = policy.get("plans")
     plan_rows = plans if isinstance(plans, dict) else {}
+    # Reconcile even an empty set: clearing the final assignment must stop
+    # and park its torrents under the same ownership rules as any other
+    # unassign, before reporting that the device is idle.
+    _reconcile_set(deps, state, ids, stage_dir)
     if not ids:
         # Still heartbeat: an unassigned device must register (devices.json,
         # swarm map, telemetry posture) or console onboarding can never see
@@ -2287,10 +2601,6 @@ def run_once(cfg, deps, state):
                                    observation=_not_active_observation(
                                        tele_on, time.time())))
         return "no-assignment"
-
-    # Settle what the set means for what is already on the device — park what
-    # left it, un-park what came back — BEFORE staging anything.
-    _reconcile_set(deps, state, ids, stage_dir)
 
     ticks = []
     statuses = []
@@ -2359,6 +2669,47 @@ def make_catalog_context(cfg, error):
            "set catalog_ca in the agent conf")
     error(msg)
     raise CatalogTLSConfigError(msg)
+
+
+class TrackerAuthConfigError(OSError):
+    """The per-device tracker bearer is unavailable or unsafe."""
+
+
+def _tracker_headers(cfg, conf_path=None):
+    """Return aria2's per-download Bearer header without exposing the token.
+
+    The first-boot refresh writes announce_token before image work. Since the
+    dependency closures were built from the pre-refresh dict, re-read that
+    atomic config here. JSON-RPC carries the value over loopback; it never
+    appears in aria2's process arguments.
+    """
+    current = cfg
+    if conf_path:
+        try:
+            current = agent_config.load(conf_path)
+        except (OSError, KeyError, ValueError):
+            current = cfg
+    token = current.get("announce_token")
+    try:
+        token = agent_config.validate_bearer_token(
+            "announce_token", token, allow_empty=False)
+    except ValueError as exc:
+        raise TrackerAuthConfigError("invalid tracker authorization") from exc
+    if not token:
+        raise TrackerAuthConfigError("tracker authorization is unavailable")
+    # aria2's JSON-RPC schema represents repeatable --header options as an
+    # array. Do not log or interpolate this value anywhere else.
+    return ["Authorization: Bearer " + token]
+
+
+def _aria_torrent_options(cfg, dest_dir, conf_path=None,
+                          require_tracker_bearer=False):
+    """Build addTorrent options, preserving legacy Guest Shell behavior."""
+    options = {"dir": dest_dir, "bt-seed-unverified": "true",
+               "bt-max-peers": cfg.get("max_peers", "10")}
+    if require_tracker_bearer:
+        options["header"] = _tracker_headers(cfg, conf_path)
+    return options
 
 
 # ---- Phase 2: catalog token self-refresh (half-life, stdlib only) ----
@@ -2478,6 +2829,24 @@ def _emit_impl(cli_execute_fn, mnemonic, msg):
 # aria2 hiccup (daemon bouncing on rpc_secret rotation, stopped download,
 # malformed row) returns None/[] — a raise out of the sampling tick would
 # discard persisted state and force a ~1.2 GB re-copy. ----
+
+
+def _aria_add_result(body):
+    """Require addTorrent's GID before recording a live transfer or migration.
+
+    JSON-RPC failures use HTTP 200 too. Never include their arbitrary message
+    in an exception: aria2 may echo a credential-bearing option or URL.
+    """
+    try:
+        response = json.loads(body)
+        if not isinstance(response, dict) or "error" in response:
+            raise ValueError
+        gid = response.get("result")
+        if not isinstance(gid, str) or not gid:
+            raise ValueError
+    except (ValueError, TypeError, UnicodeError):
+        raise RuntimeError("aria2 addTorrent did not return a download GID") from None
+    return gid
 
 
 def _aria_downloads(rpc):
@@ -2711,6 +3080,140 @@ def _dir_size_of(dir_out, fname):
         return None
     m = re.search(_DIR_ROW_RE_TMPL % re.escape(fname), dir_out)
     return int(m.group(1)) if m else None
+
+
+def _ios_root_file_size(fname, prefix, cli_execute_fn):
+    """Strict native size: only explicit IOS ENOENT proves absence."""
+    if (prefix not in ("flash:", "bootflash:")
+            or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
+        raise ValueError("invalid IOS root path")
+    path = prefix + fname
+    output = cli_execute_fn("dir " + path)
+    if not isinstance(output, str):
+        raise ValueError("IOS root directory response unavailable")
+    # IOS may spell the same root path with a slash after the colon.
+    missing = r"%%Error opening %s/?%s \(No such file or directory\)" % (
+        re.escape(prefix), re.escape(fname))
+    if re.search(r"(?m)^" + missing + r"\s*$", output) and _dir_size_of(output, fname) is None:
+        return None
+    if "%Error" in output or "% Invalid" in output:
+        raise ValueError("IOS root directory read failed")
+    size = _dir_size_of(output, fname)
+    if size is None:
+        raise ValueError("IOS root directory response is ambiguous")
+    return size
+
+
+def _parse_ios_sha512(output, root_path):
+    """Accept one native hash bound to the exact requested IOS filename."""
+    pattern = r"(?m)^verify /sha512 \(%s\) = ([0-9a-fA-F]{128})\s*$" % re.escape(root_path)
+    hashes = re.findall(pattern, output)
+    if (len(hashes) != 1 or output.count("verify /sha512") != 1
+            or "%Error" in output or "% Invalid" in output):
+        raise ValueError("IOS SHA-512 response is missing or ambiguous")
+    return hashes[0].lower()
+
+
+def _verify_guestshell_root(fname, prefix, digest, stage_dir,
+                           cli_configure_fn, sleep_fn=None,
+                           poll_attempts=125, poll_interval_s=5):
+    """Read-only IOS SHA in a bounded asynchronous EEM policy.
+
+    Native verify must never run in Guest Shell's synchronous CLI session:
+    long native commands can hang that transport. A one-shot countdown runs
+    on EEM with a 600-second maxrun. The agent polls only its fresh private
+    share directory, and requires a completion receipt written AFTER IOS
+    finishes and closes the hash output. No image is copied or modified.
+    """
+    root_path = _guestshell_root_ios_path(stage_dir, prefix, fname)
+    if root_path is None or not isinstance(digest, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{128}", digest):
+        raise ValueError("invalid native root hash request")
+    import fcntl
+    # main() already serializes ticks. Keep a dedicated lock and durable lease
+    # too: after a killed agent, the native EEM job may still be hashing. A
+    # launch whose CLI result was lost has no safe inferred completion time.
+    lock_path = os.path.join(stage_dir, ".iris-root-hash.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("another IOS root hash is running") from None
+        lease_path = os.path.join(stage_dir, ".iris-root-hash.json")
+        try:
+            with open(lease_path) as stream:
+                lease = json.load(stream)
+        except FileNotFoundError:
+            lease = {}
+        if not isinstance(lease, dict):
+            raise ValueError("IOS root hash lease is unreadable")
+        if lease:
+            expiry = lease.get("expires")
+            if not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+                raise RuntimeError("previous IOS root hash launch is unconfirmed; "
+                                   "operator must inspect its EEM policy")
+            if time.time() < expiry:
+                raise RuntimeError("previous IOS root hash may still be running")
+        return _run_guestshell_root_hash(
+            root_path, prefix, digest, stage_dir, lease_path, cli_configure_fn,
+            sleep_fn, poll_attempts, poll_interval_s)
+
+
+def _run_guestshell_root_hash(root_path, prefix, digest, stage_dir, lease_path,
+                             cli_configure_fn, sleep_fn, poll_attempts,
+                             poll_interval_s):
+    sleep = time.sleep if sleep_fn is None else sleep_fn
+    directory = tempfile.mkdtemp(prefix=".iris-root-hash-", dir=stage_dir)
+    receipt_dir = prefix + "guest-share/iris/" + os.path.basename(directory)
+    result_path = os.path.join(directory, "result")
+    done_path = os.path.join(directory, "done")
+    finished = False
+    lease = {"path": root_path, "sha512": digest.lower(), "expires": None}
+    try:
+        _atomic_write_state(lease_path, lease)
+        cli_configure_fn([
+            "no event manager applet IRIS-ROOT-HASH",
+            "event manager applet IRIS-ROOT-HASH authorization bypass",
+            "event timer countdown time 2 maxrun 600",
+            'action 010 cli command "enable"',
+            'action 020 cli command "verify /sha512 %s"' % root_path,
+            'action 030 file open result %s/result w' % receipt_dir,
+            'action 040 file write result "$_cli_result"',
+            'action 050 file close result',
+            'action 060 file open done %s/done w' % receipt_dir,
+            'action 070 file write done "complete"',
+            'action 080 file close done',
+        ])
+        # Start the crash-recovery budget after configuration returns, never
+        # before a possibly slow launch. Unknown launch errors retain None.
+        lease["expires"] = time.time() + 625
+        _atomic_write_state(lease_path, lease)
+        for _ in range(poll_attempts):
+            try:
+                with open(done_path) as stream:
+                    complete = stream.read(11) in (
+                        "complete", "complete\n", "complete\r\n")
+            except FileNotFoundError:
+                complete = False
+            if complete:
+                finished = True
+                with open(result_path) as stream:
+                    output = stream.read(262145)
+                if len(output) > 262144:
+                    raise ValueError("IOS SHA-512 response exceeds size limit")
+                return _parse_ios_sha512(output, root_path) == digest.lower()
+            sleep(poll_interval_s)
+        raise TimeoutError("bounded IOS SHA-512 policy did not produce a receipt")
+    finally:
+        try:
+            cli_configure_fn(["no event manager applet IRIS-ROOT-HASH"])
+            if finished or (lease["expires"] is not None
+                            and time.time() >= lease["expires"]):
+                _atomic_write_state(lease_path, {})
+        finally:
+            # This unique directory contains only this call's hash receipts.
+            shutil.rmtree(directory)
 
 
 def _root_present_from_dir(dir_out, fname, expected_size=None):
@@ -3379,22 +3882,22 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 # ---- on-box wiring (not exercised by unit tests) ----
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
-    # Platform seam. Everything below wires the IOS-XE families (Guest Shell
-    # and the SSH-to-self container), all of which reach the device through a
-    # CLI. An IOS-XR appmgr container has no CLI at all — it bind-mounts
-    # harddisk: and every device fact is a filesystem call — so conf
-    # `mode = xr` (written by device/xr/entrypoint.sh) selects that builder
-    # wholesale instead. Same 27-field Deps, same run_once.
-    if (cfg.get("mode") or "").strip() == "xr":
+    # One container selector owns both the backend and storage profile. An
+    # absent selector is the established Guest Shell path; container
+    # entrypoint.sh itself requires one and persists it before reaching here.
+    platform = (os.environ.get("IRIS_DEVICE_PLATFORM")
+                or cfg.get("device_platform") or "").strip()
+    agent_config.validate_device_platform(platform)
+    legacy_xr = (not platform and (cfg.get("mode") or "").strip() == "xr")
+    if platform == "xr-appmgr" or legacy_xr:
         import xr_deps
         return xr_deps.build_deps(cfg, conf_path, state_path)
     import base64
     import urllib.request
     import catalog_client
 
-    # Runtime-mode seam: Guest Shell `cli` on the C9300 (default, unchanged) or
-    # an SSH-to-self transport in a plain IOx Docker app on the IE-3400. Gated by
-    # IRIS_RUNTIME_MODE / conf `runtime_mode`; see cli_ssh.select_cli. Bound
+    # Guest Shell `cli` on the C9300 (default, unchanged) or SSH-to-self in the
+    # IOx profile; cli_ssh.select_cli reads the same device-platform key. Bound
     # (and `emit` defined) BEFORE make_catalog_context below: its fail-closed
     # path calls the error callback SYNCHRONOUSLY, unlike copy_to_root/reclaim
     # further down whose closures over `emit`/`cli_execute` aren't invoked
@@ -3412,7 +3915,8 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
 
     ctx = make_catalog_context(cfg, lambda m: emit("TLS-ERROR", m))
     catalog = catalog_client.CatalogClient(
-        cfg["catalog_url"], cfg["catalog_token"], context=ctx)
+        cfg["catalog_url"], cfg["catalog_token"], context=ctx,
+        tracker_bearer=(platform == "iox"))
 
     def refresh():
         # Thin wrapper — the POST + client rebind + atomic conf rewrite +
@@ -3430,8 +3934,10 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
     # scratch via the in-VM mount, so it pushes nothing here.
-    _mode = (os.environ.get("IRIS_RUNTIME_MODE")
-             or cfg.get("runtime_mode") or "guestshell")
+    _legacy_runtime = (os.environ.get("IRIS_RUNTIME_MODE")
+                       or cfg.get("runtime_mode") or "guestshell")
+    _container_iox = (platform == "iox"
+                      or (not platform and _legacy_runtime == "container"))
     _transport = getattr(cli_execute, "__self__", None)   # SSHCli in container mode
 
     def _push_scratch(fname, target_prefix):
@@ -3479,7 +3985,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # after a 1.2 GB scratch transfer adds failure modes without improving the
         # basename safety decision made before any destructive command.
         confirmed_running = lambda: running
-        if _mode == "container" and _transport is not None:
+        if _container_iox and _transport is not None:
             # C9k container: the SSD share (usbflash1:iox_host_data_share) is
             # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
             # disk speed and IOS places it with an internal disk-to-disk plain
@@ -3586,14 +4092,16 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         with open(torrent_path, "rb") as f:
             tb = base64.b64encode(f.read()).decode()
         params = ["token:" + cfg["rpc_secret"], tb, [],
-                  {"dir": dest_dir, "bt-seed-unverified": "true",
-                   "bt-max-peers": cfg.get("max_peers", "10")}]
+                  _aria_torrent_options(
+                      cfg, dest_dir, conf_path,
+                      require_tracker_bearer=(platform == "iox"))]
         payload = json.dumps({"jsonrpc": "2.0", "id": "a",
                               "method": "aria2.addTorrent",
                               "params": params}).encode()
         req = urllib.request.Request(rpc, data=payload,
                                      headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10).read()
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return _aria_add_result(response.read())
 
     def _rpc(method, params):
         payload = json.dumps({"jsonrpc": "2.0", "id": "p", "method": method,
@@ -3714,11 +4222,13 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         gsf = _guest_share_fs(fss)
         mdl = flash_target.device_model(_show("show version"))
         preferred = cfg.get("target_fs", "").strip()
-        prefix = (flash_target.choose_stage_fs(
-                      fss, model=mdl, guest_share_fs=gsf,
-                      preferred_fs=preferred)
-                  or flash_target.choose_target_fs(fss, flash_target.boot_path(sb))
-                  or "flash:")
+        prefix = _choose_ios_stage_prefix(
+            platform, fss, mdl, gsf, preferred, flash_target.boot_path(sb))
+        if not prefix:
+            emit("TARGET-FS",
+                 "no writable IOS staging filesystem could be proved from "
+                 "show/dir output; refusing to stage")
+            raise RuntimeError("no proved writable IOS staging filesystem")
         if preferred and prefix != preferred:
             emit("TARGET-FS",
                  "configured %s is not a writable IOS disk; using %s"
@@ -3762,7 +4272,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # reach IOS over a real vty, where `delete /force` runs directly — the
         # same command _copy_to_root_direct_impl already issues there before
         # every copy. Best-effort per name so one failure can't strand the rest.
-        if _mode == "container" and _transport is not None:
+        if _container_iox and _transport is not None:
             for n in names:
                 try:
                     cli_execute("delete /force %s%s" % (target_prefix, n))
@@ -3801,9 +4311,13 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
                 running_image=running_image, reclaimable=reclaimable,
                 reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
                 aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=(_mode == "container"),
+                io_transfer=_container_iox,
                 checkpoint=checkpoint, aria_session=aria_session,
-                copy_in_place=False)
+                copy_in_place=False,
+                root_file_size=lambda name, prefix: _ios_root_file_size(
+                    name, prefix, cli_execute),
+                verify_root=lambda name, prefix, digest: _verify_guestshell_root(
+                    name, prefix, digest, cfg["stage_dir"], cli_configure))
 
 
 def main():  # pragma: no cover

@@ -4,14 +4,14 @@
 
 (async function () {
   try {
-  var res = await fetch('/api/session');
+  var res = await fetch('/api/v1/session');
   if (res.status === 401) { window.location.href = '/login.html'; return; }
   if (!res.ok) throw new Error('Session check failed (' + res.status + ')');
   var info = await res.json();
   if (!info || typeof info !== 'object' || !info.csrf) throw new Error('Session check returned invalid data');
   document.getElementById('who').textContent = info.username;
   document.getElementById('logout').addEventListener('click', async function () {
-    await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
+    await fetch('/api/v1/logout', { method: 'POST', headers: { 'X-CSRF-Token': info.csrf } });
     window.location.href = '/login.html';
   });
 
@@ -119,8 +119,8 @@
   var SELECTED = Object.create(null);
   // device_id -> the most relevant retained onboard/undeploy job (facelift
   // carried fix #2, step/elapsed in the status cell). Refreshed alongside
-  // the devices table from the EXISTING GET /api/onboard/jobs listing
-  // (already used by the batch panel) -- the /api/devices merge itself
+  // the devices table from the EXISTING GET /api/v1/onboard/jobs listing
+  // (already used by the batch panel) -- the /api/v1/devices merge itself
   // (_device_view()/latest_jobs_by_device() server-side) deliberately trims
   // started_at and last_line off, so this is a client-side-only
   // cross-reference by device_id, never a server change.
@@ -141,7 +141,7 @@
       status: val('dev-filter-status')
     };
   }
-  // The SAME filter state as a GET /api/devices query string (q/
+  // The SAME filter state as a GET /api/v1/devices query string (q/
   // management_type/platform/cred/telemetry/peer/status) -- the wire names
   // _device_filter_params (gui_server.py) reads. Kept as one function so a
   // filter added to deviceFilterState() above can never be forgotten here.
@@ -176,10 +176,11 @@
     ['onboarding', 'Onboarding'],
     ['undeploying', 'Undeploying'],
     ['waiting-heartbeat', 'Waiting for heartbeat'],
+    ['waiting-staging', 'Waiting for staging'],
     ['onboard-failed', 'Onboard failed'],
     ['undeploy-failed', 'Undeploy failed'],
     ['deployed', 'Staged'],
-    ['placement-failed', 'Placement failed'],
+    ['placement-failed', 'Staging failed'],
     ['image-failed', 'Image(s) failed'],
     ['copying', 'Copying to IOS storage'],
     ['staging', 'Staging (other)'],
@@ -198,11 +199,22 @@
     if (ids && ids.length) return ids;
     return d.assigned_image_id ? [d.assigned_image_id] : [];
   }
+  // `router` is an install recipe/wire value, not an agent runtime. C8000V
+  // selected through that recipe runs the same Guest Shell agent as the
+  // `guestshell` value; VPG/routed/NAT belongs to Management type instead.
+  var AGENT_INSTALL_LABELS = {
+    guestshell: 'Guest Shell', iox: 'IOx', router: 'Guest Shell',
+    'xr-appmgr': 'XR appmgr container'
+  };
+  function agentInstallLabel(platform) {
+    return AGENT_INSTALL_LABELS[platform] || platform || '—';
+  }
   // Whether *d*'s device has staged image *iid*: membership in the
   // heartbeat's staged_image_ids when the agent reports it directly (Task
   // 3), else the legacy current_image_id/stage_state=='ready' pair for an
   // agent that predates the field. Mirrors the server's _row_has_staged.
   function rowHasStaged(d, iid) {
+    if ((d.errored_image_ids || []).indexOf(iid) !== -1) return false;
     var sids = d.staged_image_ids;
     if (sids != null) return sids.indexOf(iid) !== -1;
     return d.stage_state === 'ready' && d.current_image_id === iid;
@@ -258,22 +270,21 @@
                       ' image(s) failed',
                cls: 'badge badge-fail', detail: d.stage_error };
     }
-    if (d.stage_error) {
-      return { key: 'placement-failed', label: 'placement failed',
-               cls: 'badge badge-fail', detail: d.stage_error };
+    if (d.stage_error || d.stage_state === 'error' || d.stage_state === 'copy_failed') {
+      return { key: 'placement-failed', label: 'staging failed',
+               cls: 'badge badge-fail', detail: d.stage_error || d.stage_state };
     }
     if (d.stage_state === 'transferring_to_ios') {
       return { key: 'copying', label: 'copying to ' + (d.target_fs || 'IOS storage'),
                cls: 'badge badge-running' };
     }
-    // A legacy single-image agent reports this literal stage_state (it is
-    // absent from catalog.py's _V2_STAGE_STATES, so no current agent sends
-    // it). It used to fall through to the catch-all below, which rendered the
-    // raw word under the PROGRESS level -- an idle device dressed as one mid
-    // transfer, and selectable only via "Staging (other)" along with every
-    // other raw state.
-    if (d.stage_state === 'unassigned') {
-      return { key: 'unassigned', label: 'unassigned', cls: 'muted' };
+    // Policy changes are visible before the next agent tick. An idle/ready
+    // heartbeat for the previous assignment is no evidence that the new one
+    // has started, and a cleared assignment must not turn "ready" into work.
+    if (d.stage_state === 'unassigned' || d.stage_state === 'ready') {
+      return assignedIds.length
+        ? { key: 'waiting-staging', label: 'waiting for staging', cls: 'badge badge-queued' }
+        : { key: 'unassigned', label: 'unassigned', cls: 'muted' };
     }
     if (d.stage_state) {
       return { key: 'staging', label: d.stage_state, cls: 'badge badge-running' };
@@ -313,7 +324,7 @@
   var STATUS_LEVELS = {
     onboarding: 'progress', undeploying: 'progress',
     copying: 'progress', staging: 'progress',
-    'waiting-heartbeat': 'info',
+    'waiting-heartbeat': 'info', 'waiting-staging': 'info',
     'onboard-failed': 'negative', 'undeploy-failed': 'negative',
     'placement-failed': 'negative',
     deployed: 'positive', enrolled: 'positive',
@@ -502,12 +513,12 @@
     return !!(d.last_seen && (devNow - d.last_seen) >= 600);
   }
   // device_id -> job for every RETAINED onboard/undeploy job (from GET
-  // /api/onboard/jobs, already fetched by refreshDevices) -> the one job
+  // /api/v1/onboard/jobs, already fetched by refreshDevices) -> the one job
   // deviceStatusHtml should read for that device: mirrors gui_onboard.py's
   // own latest_jobs_by_device() tie-break exactly (an ACTIVE queued/running
   // job wins outright, else the most recently queued one), just kept on the
   // client so started_at and last_line survive the trip -- the server's own
-  // merge into /api/devices deliberately strips both (the raw data already
+  // merge into /api/v1/devices deliberately strips both (the raw data already
   // exists in the job listing; it is simply not in the trimmed
   // latest_jobs_by_device() dict). Device ids are operator-chosen, so the
   // map must not inherit anything from Object.prototype.
@@ -691,7 +702,7 @@
   // ---- Images (unchanged behavior) ----
   var statusEl = document.getElementById('status');
   var imageJobGen = 0;
-  // The full last-fetched /api/images rows, kept for the image-detail drawer
+  // The full last-fetched /api/v1/images rows, kept for the image-detail drawer
   // (KGV / Cisco Bulk Hash reconciler, Task 5) -- refreshImages() only ever
   // wrote row HTML before, with nowhere to read a single image's verdict
   // back out of once the drawer needed one.
@@ -739,7 +750,7 @@
   // fetch and the navigation race each other.
   var PENDING_IMG_ATTENTION = false;
   async function refreshImages() {
-    var r = await fetch('/api/images'); if (!r.ok) return;
+    var r = await fetch('/api/v1/images'); if (!r.ok) return;
     var imgs = (await r.json()).images || [];
     imgs.sort(function (a, b) { return (b.published_at || 0) - (a.published_at || 0); });
     LAST_IMAGES = imgs;
@@ -774,7 +785,7 @@
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
         if (!confirm('Delete image ' + id + '? This removes it from the catalog and stops seeding.')) return;
-        var r = await fetch('/api/images/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
+        var r = await fetch('/api/v1/images/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
         if (r.status === 409) { var j = await r.json(); alert('Cannot delete: assigned to ' + (j.assigned || []).join(', ') + '. Reassign those devices first.'); return; }
         refreshImages(); refreshImportable();
       });
@@ -861,7 +872,7 @@
     var overrideBtn = document.getElementById('ii-release-override');
     releaseBtn.disabled = true; overrideBtn.disabled = true;
     try {
-      var r = await jpost('/api/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
+      var r = await jpost('/api/v1/images/' + encodeURIComponent(imgInfoId) + '/release-quarantine',
         { override: override, confirm_text: confirmText });
       var body = {};
       try { body = await r.json(); } catch (e) { }
@@ -893,18 +904,38 @@
   document.getElementById('ii-release-override').addEventListener('click', function () {
     attemptReleaseQuarantine(true, document.getElementById('ii-confirm-text').value);
   });
+  function publishedJobText(job) {
+    var text = 'Published ' + (job.image_id || '');
+    var verification = job.verification;
+    if (!verification) return text + ' ✓';
+    if (verification.outcome !== 'ok') {
+      return text + '; Cisco hash verification incomplete: ' +
+        (verification.detail || 'unknown failure');
+    }
+    if (verification.image_state === 'verified') {
+      return text + ' · verified against Cisco Bulk Hash ✓';
+    }
+    if (verification.image_state === 'mismatch') {
+      return text + ' · Cisco hash mismatch — quarantined';
+    }
+    if (verification.image_state === 'not_in_feed') {
+      return text + ' · not found in Cisco Bulk Hash feed';
+    }
+    return text + ' · Cisco hash verdict unavailable';
+  }
   function pollJob(jobId) {
     var gen = ++imageJobGen;
     function next() { setTimeout(poll, 1000); }
     async function poll() {
       try {
-        var r = await fetch('/api/images/jobs/' + jobId);
+        var r = await fetch('/api/v1/images/jobs/' + jobId);
         if (gen !== imageJobGen) return;
         if (!r.ok) { statusEl.textContent = 'Publish status unavailable (' + r.status + '); retrying…'; next(); return; }
         var j = await r.json();
         if (gen !== imageJobGen) return;
-        if (j.state === 'done') { statusEl.textContent = 'Published ' + (j.image_id || '') + ' ✓'; refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
+        if (j.state === 'done') { statusEl.textContent = publishedJobText(j); refreshImages().catch(function () {}); refreshImportable().catch(function () {}); }
         else if (j.state === 'error') { statusEl.textContent = 'Publish failed: ' + j.message; refreshImportable().catch(function () {}); }
+        else if (j.state === 'verifying') { statusEl.textContent = 'Published ' + (j.image_id || j.filename) + '; checking Cisco Bulk Hash…'; next(); }
         else { statusEl.textContent = 'Publishing ' + j.filename + '…'; next(); }
       } catch (e) { statusEl.textContent = 'Publish status unavailable; retrying…'; next(); }
     }
@@ -914,7 +945,7 @@
   // catalog reset, and operator-staged files under the read-only image root.
   async function refreshImportable() {
     var panel = document.getElementById('import-panel');
-    var r = await fetch('/api/images/importable');
+    var r = await fetch('/api/v1/images/importable');
     if (!r.ok) { panel.hidden = true; return; }
     var out = await r.json();
     var cands = out.importable || [];
@@ -936,7 +967,7 @@
       btn.addEventListener('click', async function () {
         btn.disabled = true;
         statusEl.textContent = 'Importing…';
-        var res = await fetch('/api/images/import', {
+        var res = await fetch('/api/v1/images/import', {
           method: 'POST', headers: csrfHdr({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ path: btn.getAttribute('data-path') })
         });
@@ -989,6 +1020,10 @@
         rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
         state.textContent = 'publishing…';
       },
+      verifying: function () {
+        rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
+        state.textContent = 'checking Cisco Bulk Hash…';
+      },
       done: function (text) {
         rowBar.style.width = '100%'; rowProg.setAttribute('aria-valuenow', '100');
         state.textContent = text;
@@ -1005,7 +1040,7 @@
     function next() { setTimeout(poll, 1000); }
     async function poll() {
       try {
-        var r = await fetch('/api/images/jobs/' + jobId);
+        var r = await fetch('/api/v1/images/jobs/' + jobId);
         if (!r.ok) {
           // A non-OK status (401 session gone, 404 job evicted/unknown) never
           // heals — stop the poller and surface it in the row instead of
@@ -1015,12 +1050,15 @@
         }
         var j = await r.json();
         if (j.state === 'done') {
-          ui.done('published ' + (j.image_id || '') + ' ✓');
+          ui.done(publishedJobText(j));
           refreshImages().catch(function () {}); refreshImportable().catch(function () {});
         } else if (j.state === 'error') {
           ui.error('publish failed: ' + j.message);
           refreshImportable().catch(function () {});
-        } else { next(); }
+        } else {
+          if (j.state === 'verifying') ui.verifying();
+          next();
+        }
       } catch (e) { next(); }
     }
     poll();
@@ -1032,7 +1070,7 @@
     if (file.size > MAX) { ui.error('too large: ' + fmtSize(file.size) + ' (max 4 GB) — not uploaded'); return; }
     ui.progress(0);
     var xhr = new XMLHttpRequest();
-    xhr.open('PUT', '/api/images/upload/' + encodeURIComponent(file.name));
+    xhr.open('PUT', '/api/v1/images/upload/' + encodeURIComponent(file.name));
     xhr.setRequestHeader('X-CSRF-Token', info.csrf);
     xhr.upload.onprogress = function (e) { if (e.lengthComputable) ui.progress(e.loaded / e.total * 100); };
     xhr.onload = function () {
@@ -1055,7 +1093,7 @@
   // ---- Devices ----
   var devStatus = document.getElementById('dev-status');
   var imageIds = [];
-  // Whether imageIds/imageFilenames came from a SUCCESSFUL /api/images read.
+  // Whether imageIds/imageFilenames came from a SUCCESSFUL /api/v1/images read.
   // A failed fetch substitutes an empty list, which is indistinguishable from
   // an empty catalog once it reaches the picker -- and a picker showing no
   // images can only be applied as "unassign everything".
@@ -1069,7 +1107,7 @@
   // set_policy() refusal, which the operator would only discover at Apply.
   var imageQuarantined = Object.create(null);
   var credOpts = [];
-  // Whether the LAST /api/credentials read succeeded. Mirrors imageListOk:
+  // Whether the LAST /api/v1/credentials read succeeded. Mirrors imageListOk:
   // on failure credOpts keeps its previous value and every credential
   // picker is disabled and says so, instead of rendering the whole fleet
   // as "no credential" (an empty option list matches nothing).
@@ -1121,8 +1159,11 @@
     btn.disabled = true;
     peerPolicyBusy[id] = true;
     try {
-      var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
-        method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+      var r = await fetch('/api/v1/peer-policy/quarantine/' + encodeURIComponent(id), {
+        method: 'PUT', headers: csrfHdr({
+          'Content-Type': 'application/json',
+          'If-Match': '"iris-peer-policy-' + peerPolicy.revision + '"'
+        }),
         body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
       });
       var body = await r.json().catch(function () { return {}; });
@@ -1156,7 +1197,7 @@
   // regardless of which hash-routed view was visible) AND the hash
   // router's view-scoped startViewPoll(). Both called refreshDevices()
   // every ~10s while Devices was on screen -- redundant, unsynchronized
-  // /api/devices traffic. The hash router (below) is now the SOLE owner of
+  // /api/v1/devices traffic. The hash router (below) is now the SOLE owner of
   // visible-view polling, Devices included; this is the guarded function it
   // polls Devices with. Never redraw while the operator is interacting
   // with a row control (redrawing innerHTML would yank an open dropdown
@@ -1204,12 +1245,12 @@
     // Optional job listing -- decoupled from the other four fetches below
     // via its own .then/.catch (Task 7's refreshOverview pattern); see the
     // full rationale where its result is consumed, past credOpts below.
-    var jobsPromise = fetch('/api/onboard/jobs', { signal: signal }).then(function (r) {
+    var jobsPromise = fetch('/api/v1/onboard/jobs', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : null;
     }).catch(function () { return null; });
     var results;
     try {
-      results = await Promise.all([fetch('/api/devices?' + devicesQuery, { signal: signal }), fetch('/api/images', { signal: signal }), fetch('/api/credentials', { signal: signal }), fetch('/api/peer-policy', { signal: signal }), jobsPromise]);
+      results = await Promise.all([fetch('/api/v1/devices?' + devicesQuery, { signal: signal }), fetch('/api/v1/images', { signal: signal }), fetch('/api/v1/credentials', { signal: signal }), fetch('/api/v1/peer-policy', { signal: signal }), jobsPromise]);
     } catch (e) {
       // Superseding a refresh is expected; callers must not see an unhandled
       // AbortError. Other failures still reach their caller/status handling.
@@ -1245,7 +1286,7 @@
       }
     }
     // Fix wave 1 (reviewer finding): the job listing is OPTIONAL polish on
-    // top of the device rows /api/devices already returned above -- a
+    // top of the device rows /api/v1/devices already returned above -- a
     // network-level rejection on it must never take the other four fetches
     // down with it, so jobsPromise (above) resolves to null on EITHER a
     // rejection or a non-2xx response rather than rejecting the shared
@@ -1254,7 +1295,7 @@
     // outer catch, unchanged -- out of scope for this fix). jobsBody null
     // here just leaves the previous status-cell step/elapsed suffixes in
     // place for this tick rather than blanking them; the plain
-    // onboarding…/undeploying… pill underneath (from /api/devices, which
+    // onboarding…/undeploying… pill underneath (from /api/v1/devices, which
     // DID gate this refresh above) is never affected.
     if (jobsBody) {
       var jobs = jobsBody.jobs || [];
@@ -1275,7 +1316,7 @@
 
   // Populate the credential filter from the profiles that actually exist,
   // preserving the operator's current choice even if it is momentarily absent
-  // from a slow /api/credentials response.
+  // from a slow /api/v1/credentials response.
   function syncDeviceFilterOptions() {
     var sel = document.getElementById('dev-filter-cred');
     if (!sel) return;
@@ -1344,11 +1385,9 @@
       var credAttrs = credListOk ? '' :
         ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
       var platVal = d.platform || '';
-      var platSel = [
-        ['', '— auto —'], ['guestshell', 'Guest Shell'], ['iox', 'IOx'],
-        ['router', 'Router (VPG)'], ['xr-appmgr', 'XR appmgr container']
-      ].map(function (o) {
-        return '<option value="' + esc(o[0]) + '"' + (o[0] === platVal ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+      var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map(function (key) {
+        var label = key ? agentInstallLabel(key) : '— auto —';
+        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') + '>' + esc(label) + '</option>';
       }).join('');
       var status = deviceStatusHtml(d, devNow);
       var managementType = d.management_type || 'legacy';
@@ -1387,14 +1426,14 @@
     document.querySelectorAll('#dev-rows .cred').forEach(function (sel) {
       sel.addEventListener('change', async function () {
         var id = sel.closest('tr').getAttribute('data-id');
-        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/credential', { credential_profile_id: sel.value });
+        var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/credential', { credential_profile_id: sel.value });
         devStatus.textContent = r.ok ? ('Credential updated for ' + id) : 'Credential update failed';
       });
     });
     document.querySelectorAll('#dev-rows .platform').forEach(function (sel) {
       sel.addEventListener('change', async function () {
         var id = sel.closest('tr').getAttribute('data-id');
-        var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
+        var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/platform', { platform: sel.value });
         if (r.ok) {
           devStatus.textContent = 'Agent install updated for ' + id;
         } else {
@@ -1506,7 +1545,7 @@
     pairs.push(
       ['Swarm port', '<span class="machine">' + esc(res.swarm_port || '—') + '</span>'],
       ['Model', esc(res.model || '—')],
-      ['Agent install', esc(res.platform || '—')],
+      ['Agent install', esc(agentInstallLabel(res.platform))],
       ['Device identity', '<span class="machine">' + esc(res.device_identity || '—') + '</span>']
     );
     return pairs.map(function (kv) {
@@ -1514,11 +1553,11 @@
     }).join('');
   }
   // One row per assigned image: id + state, resolved from the per-image
-  // MEMBERSHIP the agent reports -- staged_image_ids first, then
-  // errored_image_ids -- which is exactly how the Swarm Map's own image list
+  // MEMBERSHIP the agent reports. A current error overrides retained staged
+  // membership, which is exactly how the Swarm Map's own image list
   // resolves it, so two views of one heartbeat cannot disagree about an image.
   //
-  // current_image_id is deliberately NOT consulted here. It is the wire-compat
+  // For a set, current_image_id is deliberately NOT an activity pointer. It is the wire-compat
   // identity pointer: the FIRST image of the set that produced heartbeat data
   // this tick, which is typically one already staged -- not the one in flight.
   // Reading it as "the image currently transferring" is what left a failed
@@ -1546,8 +1585,14 @@
         state = 'ready';
       } else if (errored.indexOf(iid) !== -1) {
         state = 'error';
+      } else if (!d.last_seen || !d.stage_state ||
+                 d.stage_state === 'ready' || d.stage_state === 'unassigned') {
+        state = 'pending';
       } else if (!perImage) {
-        state = (d.stage_state || 'staging') + (d.stage_error ? ' — ' + d.stage_error : '');
+        // A legacy heartbeat describes its named image only. A new policy
+        // can already name another image while that heartbeat is retained.
+        state = d.current_image_id && d.current_image_id !== iid ? 'pending' :
+          d.stage_state + (d.stage_error ? ' — ' + d.stage_error : '');
       } else {
         // neither staged nor errored this tick: genuinely still in flight
         state = 'staging';
@@ -1589,7 +1634,7 @@
     var st = deviceStatus(d, devNow);
     var transferring, staged;
     if (st.key === 'placement-failed') {
-      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'placement failed') };
+      transferring = { state: 'failed', pillHtml: levelPillHTML('negative', 'staging failed') };
       staged = 'na';
     } else if (st.key === 'image-failed') {
       var ratio = imageFailedRatio(d);
@@ -1622,7 +1667,7 @@
     document.getElementById('deploy-info-panel').hidden = false;
     document.getElementById('di-close').focus();
     var r = null;
-    try { r = await fetch('/api/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
+    try { r = await fetch('/api/v1/devices/' + encodeURIComponent(id) + '/deployment'); } catch (e) { }
     if (deployInfoDev !== id) return;      // another row was opened meanwhile
     if (!r) {
       note.textContent = 'Deployment details unavailable.';
@@ -1647,7 +1692,7 @@
   async function renderDeviceDeployLogs(id) {
     var tbody = document.getElementById('di-log-rows');
     var r = null;
-    try { r = await fetch('/api/deploy-logs?device_id=' + encodeURIComponent(id)); } catch (e) { }
+    try { r = await fetch('/api/v1/deploy-logs?device_id=' + encodeURIComponent(id)); } catch (e) { }
     if (deployInfoDev !== id) return;
     if (!r || !r.ok) {
       tbody.innerHTML = '<tr><td colspan="5" class="muted">Deployment logs unavailable.</td></tr>';
@@ -1714,7 +1759,7 @@
                  'key that device presents.')) return;
     var status = document.getElementById('di-forget-host-key-status');
     status.textContent = 'Forgetting…';
-    var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/forget-host-key', {});
+    var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/forget-host-key', {});
     if (deployInfoDev !== id) return;   // the drawer moved to another device meanwhile
     if (r.ok) {
       var body = await r.json();
@@ -1778,16 +1823,16 @@
     // Tracks whether the job is still parked in the queue: log lines only
     // exist once a job runs, so the first streamed message means it started.
     var isQueued = !!queued;
-    if (queued) append('(queued — waiting for a free install slot; the log streams once it starts)');
-    var es = new EventSource('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
+    if (queued) append('Queued: waiting for an available slot.');
+    var es = new EventSource('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/stream');
     entry.es = es;
     es.onmessage = function (e) { isQueued = false; append(e.data); };
     es.addEventListener('end', function (e) {
       // "idle": the server closed a stream with no progress for its idle
       // budget; the job itself may still be running -- reopen to continue.
-      append(e.data === 'idle'
-        ? '— stream closed: no progress for a while; the job may still be running, reopen the log to continue —'
-        : '— ' + e.data + ' —'); flush();
+      if (e.data === 'idle') append('Log paused. Reopen it to follow the job.');
+      else if (e.data !== 'done') append('Job ' + e.data + '.');
+      flush();
       es.close(); entry.es = null; abortBtn.hidden = true;
       refreshDevices().catch(function () {});
     });
@@ -1800,14 +1845,14 @@
       // 409 — take it out of the queue instead, scoped to just this job
       // (same endpoint the batch panel's cancel uses).
       if (isQueued) {
-        var qr = await jpost('/api/onboard/cancel-queued', { job_ids: [jobId] });
+        var qr = await jpost('/api/v1/onboard/cancel-queued', { job_ids: [jobId] });
         if (!qr.ok) { append('[cancel failed (' + qr.status + ')]'); return; }
         var cancelled = 0;
         try { cancelled = (await qr.json()).cancelled || 0; } catch (e2) { }
         if (cancelled) { append('[cancelled while queued]'); return; }
         isQueued = false;   // won a slot between open and click: abort the running job
       }
-      var r = await jpost('/api/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
+      var r = await jpost('/api/v1/onboard/jobs/' + encodeURIComponent(jobId) + '/abort', {});
       append(r.ok ? '[abort requested]' : '[abort failed (' + r.status + ')]');
     });
     closeBtn.addEventListener('click', function () { closeJobLog(jobId); });
@@ -2073,7 +2118,7 @@
   // "Onboard selected" fires every device's onboard POST; the SERVER caps how
   // many installers run at once (OnboardService pool, default 25, env
   // IRIS_ONBOARD_CONCURRENCY) and queues the rest. This panel polls
-  // GET /api/onboard/jobs for live per-device state; a row's "log" action
+  // GET /api/v1/onboard/jobs for live per-device state; a row's "log" action
   // opens the SSE log panel for that job (streams once it starts running).
   var batchJobs = {};    // job_id -> device_id for jobs tracked by this panel
   var batchTimer = null;
@@ -2143,7 +2188,7 @@
   async function pollBatch() {
     var seq = ++pollSeq;
     var r;
-    try { r = await fetch('/api/onboard/jobs'); } catch (e) { return true; }
+    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) { return true; }
     if (r.status === 401) {   // session gone: stop hammering, tell the operator
       stopBatchPoll();
       document.getElementById('batch-summary').textContent = 'session expired — sign in again';
@@ -2161,7 +2206,7 @@
   // the jobs live server-side; only this panel's tracking was in page memory.
   async function restoreBatch() {
     var r;
-    try { r = await fetch('/api/onboard/jobs'); } catch (e) { return; }
+    try { r = await fetch('/api/v1/onboard/jobs'); } catch (e) { return; }
     if (!r.ok) return;
     var listing = await r.json();
     var jobs = listing.jobs || [];
@@ -2206,7 +2251,7 @@
     try {
       await Promise.all(ids.map(async function (id) {
         try {
-          var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/' + action,
+          var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/' + action,
                               action === 'onboard' ? telemetryFlags()
                                 : (forced ? { force: true } : {}));
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
@@ -2266,7 +2311,7 @@
       while (total === null || offset < total) {
         var qs = (base ? base + '&' : '') + 'limit=' + batch + '&offset=' + offset;
         var r;
-        try { r = await fetch('/api/devices?' + qs); } catch (e) { break; }
+        try { r = await fetch('/api/v1/devices?' + qs); } catch (e) { break; }
         if (!r.ok) break;
         var body = await r.json();
         total = typeof body.total === 'number' ? body.total : 0;
@@ -2583,7 +2628,7 @@
     return forSelected(label, ids, async function (id) {
       var body = { image_ids: imgIds };
       if (expect && expect[id] !== undefined) body.expect_image_ids = expect[id];
-      var r = await jpost('/api/devices/' + encodeURIComponent(id) + '/assign', body);
+      var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/assign', body);
       if (r.status === 409) conflicts.push(id);
       return r;
     }, opts).then(async function () {
@@ -2601,7 +2646,7 @@
     if (!ids) return;
     if (!confirm(delWarning(ids))) { setBulkBusy(false); return; }
     var failedIds = await forSelected('Deleted', ids, function (id) {
-      return fetch('/api/devices/' + encodeURIComponent(id),
+      return fetch('/api/v1/devices/' + encodeURIComponent(id),
                    { method: 'DELETE', headers: csrfHdr() });
     });
     // A deleted device cannot stay "selected" forever -- SELECTED is keyed
@@ -2691,8 +2736,11 @@
         var id = ids[i];
         var done = false;
         for (var attempt = 0; attempt < 2 && !done; attempt++) {
-          var r = await fetch('/api/peer-policy/quarantine/' + encodeURIComponent(id), {
-            method: 'PUT', headers: csrfHdr({ 'Content-Type': 'application/json' }),
+          var r = await fetch('/api/v1/peer-policy/quarantine/' + encodeURIComponent(id), {
+            method: 'PUT', headers: csrfHdr({
+              'Content-Type': 'application/json',
+              'If-Match': '"iris-peer-policy-' + peerPolicy.revision + '"'
+            }),
             body: JSON.stringify({ quarantined: quarantined, if_revision: peerPolicy.revision })
           });
           var body = await r.json().catch(function () { return {}; });
@@ -2704,7 +2752,7 @@
             ok++; done = true;
           } else if (r.status === 409 && attempt === 0) {
             // someone else moved the policy on: re-read and try this one again
-            var pr = await fetch('/api/peer-policy');
+            var pr = await fetch('/api/v1/peer-policy');
             if (pr.ok) peerPolicy = await pr.json();
           } else {
             failed.push(id); done = true;
@@ -2736,7 +2784,7 @@
       '(idempotent) is the safer option. Router deployments cannot be adopted.' +
       '\n\nProceed with adopt?')) { setBulkBusy(false); return; }
     await forSelected('Adopted', ids, function (id) {
-      return jpost('/api/devices/' + encodeURIComponent(id) + '/adopt',
+      return jpost('/api/v1/devices/' + encodeURIComponent(id) + '/adopt',
                    { acknowledge_adopt: true });
     });
   });
@@ -2749,7 +2797,7 @@
   // reason, and every off-page device in the selection spuriously conflicted.
   //
   // There is no "fetch by id list" route (only q=, a substring search), so
-  // this walks /api/devices at the server's own page cap
+  // this walks /api/v1/devices at the server's own page cap
   // (gui_server.MAX_PAGE_LIMIT), matching by device_id, and stops the moment
   // every id missing from LAST_DEVICES has been found. Unfiltered, since
   // SELECTED persists across filter changes and a selected device may no
@@ -2770,7 +2818,7 @@
     while (remaining > 0 && (total === null || offset < total)) {
       var qs = 'limit=' + batch + '&offset=' + offset;
       var r;
-      try { r = await fetch('/api/devices?' + qs); } catch (e) { break; }
+      try { r = await fetch('/api/v1/devices?' + qs); } catch (e) { break; }
       if (!r.ok) break;
       var body = await r.json();
       total = typeof body.total === 'number' ? body.total : 0;
@@ -2825,6 +2873,13 @@
     openImagePicker(intersection, function (imgIds) {
       var claimed = claimSelection();
       if (!claimed) return;
+      // A mixed starting point is not itself destructive.  For example,
+      // [A] + [] -> [A] only gives the second device the same assignment.
+      // Warn only when the proposed result actually removes an image from at
+      // least one selected device.
+      var removesAssignment = sets.some(function (s) {
+        return s.some(function (id) { return imgIds.indexOf(id) === -1; });
+      });
       // An empty pick from the bulk path is one accidental Apply away from
       // wiping every selected device's assignment (an empty intersection
       // opens the picker with nothing pre-checked) -- confirm before it posts.
@@ -2832,9 +2887,9 @@
         if (!confirm('Unassign all images from ' + claimed.length + ' device(s)?')) {
           setBulkBusy(false); return;
         }
-      } else if (setsDiffer &&
-          !confirm('The selected devices have differing image assignments.\n\n' +
-                   'Applying replaces every selected device\'s set with the ' +
+      } else if (removesAssignment &&
+          !confirm('This change removes one or more existing image assignments.\n\n' +
+                   'Applying gives every selected device the same set of ' +
                    imgIds.length + ' checked image(s). Any image a device has ' +
                    'that is not checked here is dropped from it.\n\nProceed?')) {
         setBulkBusy(false); return;
@@ -2848,8 +2903,9 @@
     if (setsDiffer) {
       var note = document.getElementById('img-picker-note');
       if (note) {
-        note.textContent = 'Selected devices have differing assignments; '
-          + 'applying replaces them all.';
+        note.textContent = 'Some selected devices are missing assignments present on others. '
+          + 'Apply gives every selected device the same checked set; you will be asked '
+          + 'before any existing assignment is removed.';
         note.hidden = false;
       }
     }
@@ -2876,17 +2932,17 @@
     closeModal('cred-modal');
     // issue #125: one request for the whole selection (ids can run into the
     // thousands via "Select all N matching devices"), not one per device --
-    // see bulkApply and gui_server.py's /api/devices/bulk-credential.
+    // see bulkApply and gui_server.py's /api/v1/devices/bulk-credential.
     await bulkApply(pid ? 'Assigned ' + pid + ' to' : 'Cleared credential on', ids,
       function (allIds) {
-        return jpost('/api/devices/bulk-credential',
+        return jpost('/api/v1/devices/bulk-credential',
                      { device_ids: allIds, credential_profile_id: pid });
       });
   });
   document.getElementById('batch-cancel').addEventListener('click', async function () {
     // scoped to THIS panel's jobs — other sessions' queued batches and parked
     // single-device onboards must survive our cancel
-    var r = await jpost('/api/onboard/cancel-queued', { job_ids: Object.keys(batchJobs) });
+    var r = await jpost('/api/v1/onboard/cancel-queued', { job_ids: Object.keys(batchJobs) });
     if (r.ok) {
       var n = (await r.json()).cancelled;
       devStatus.textContent = 'Cancelled ' + n + ' queued onboard(s).';
@@ -2903,133 +2959,81 @@
   function updateDeviceFields() {
     var managementType = document.getElementById('df-management-type').value;
     var router = managementType === 'router-routed' || managementType === 'router-nat';
-    // xr-host runs the appmgr container on the router's own network stack:
-    // no VLAN, SVI, VPG, NAT interface, or app IP/mask/gateway. Those last
-    // three used to be visible for every management type -- the core bug this
-    // hides.
-    var xrHost = managementType === 'xr-host';
-    document.getElementById('df-vlan').hidden = router || xrHost;
+    var switchNetwork = managementType === 'routed' || managementType === 'inband';
+    var appNetwork = switchNetwork || router;
+    // Only the operator's management type controls network-field visibility.
+    // XR host and an unchosen management type need no app-network fields.
+    document.getElementById('df-vlan').hidden = !switchNetwork;
     document.getElementById('df-svi').hidden = managementType !== 'routed';
     document.getElementById('df-vpg').hidden = !router;
     document.getElementById('df-nat-interface').hidden = managementType !== 'router-nat';
-    document.getElementById('df-guest').hidden = xrHost;
-    document.getElementById('df-mask').hidden = xrHost;
-    document.getElementById('df-gateway').hidden = xrHost;
-    var platform = document.getElementById('df-platform');
-    if (router && !platform.value) platform.value = 'router';
-    if (!router && platform.value === 'router') platform.value = '';
-    if (xrHost && !platform.value) platform.value = 'xr-appmgr';
-    if (!xrHost && platform.value === 'xr-appmgr') platform.value = '';
+    document.getElementById('df-guest').hidden = !appNetwork;
+    document.getElementById('df-mask').hidden = !appNetwork;
+    document.getElementById('df-gateway').hidden = !appNetwork;
   }
-  document.getElementById('df-management-type').addEventListener('change', updateDeviceFields);
-  // xr-host <-> xr-appmgr is mutually required server-side, so picking the
-  // agent install directly should carry the operator into xr-host too --
-  // the same auto-select the model-driven path below performs, just from
-  // the other field. Never fight an operator already on xr-host.
-  document.getElementById('df-platform').addEventListener('change', function () {
-    if (this.value !== 'xr-appmgr') return;
-    var mgmtTypeSel = document.getElementById('df-management-type');
-    if (mgmtTypeSel.value === 'xr-host') return;
-    mgmtTypeSel.value = 'xr-host';
+  document.getElementById('df-management-type').addEventListener('change', function () {
     updateDeviceFields();
+    return refreshInstallOptions();
   });
-  // Agent-install options depend on the model, so df-model sits ahead of
-  // df-platform in the form and this repaints the select as the operator
-  // types -- the same model-aware guardrail server-side validation enforces
-  // (gui_fleet.validate_record / gui_onboard.install_options_for), surfaced
-  // before submit instead of as a rejection after it.
-  var INSTALL_OPTION_LABELS = { guestshell: 'Guest Shell', iox: 'IOx',
-                                router: 'Router (Guest Shell via VirtualPortGroup)',
-                                'xr-appmgr': 'XR appmgr container' };
-  // Offered when the model is blank or unrecognized -- i.e. when nobody has
-  // established what the hardware is. 'xr-appmgr' is deliberately NOT in
-  // that permissive set: validate_record refuses it without an IOS-XR model,
-  // so offering it here would only produce a rejection after submit. It
-  // appears the moment the model says IOS-XR, from the fetched options below.
-  var AUTO_INSTALL_OPTIONS = ['guestshell', 'iox', 'router'];
-  var FULL_INSTALL_OPTIONS_HTML = '<option value="" disabled selected>Choose an agent install</option>' +
-    AUTO_INSTALL_OPTIONS.map(function (k) {
-      return '<option value="' + esc(k) + '">' + esc(INSTALL_OPTION_LABELS[k]) + '</option>';
-    }).join('');
+  // Management type bounds the install choices. Model compatibility can
+  // narrow them, but neither the model nor the installer changes that type.
+  var INSTALL_OPTION_LABELS = AGENT_INSTALL_LABELS;
+  function managementInstallOptions(managementType) {
+    if (managementType === 'xr-host') return ['xr-appmgr'];
+    if (managementType === 'router-routed' || managementType === 'router-nat') return ['router'];
+    if (managementType === 'routed' || managementType === 'inband') return ['guestshell', 'iox'];
+    return [];
+  }
   var installOptionsGen = 0;
   async function refreshInstallOptions() {
     var model = document.getElementById('df-model').value.trim();
+    var managementType = document.getElementById('df-management-type').value;
     var platform = document.getElementById('df-platform');
-    var mgmtTypeSel = document.getElementById('df-management-type');
+    var hint = document.getElementById('df-platform-hint');
+    var allowed = managementInstallOptions(managementType);
     var gen = ++installOptionsGen;
-    // The install-options answer for an IOS-XR-shaped model is exactly
-    // ["xr-appmgr"] -- the one thing it can run, and nothing else ever
-    // returns just that -- so ANY other repaint of the platform select
-    // (blank model, a server/network error, a null or empty answer, or a
-    // real answer that isn't that exact singleton) must exit an
-    // auto-entered xr-host management type. Left stuck on xr-host, the
-    // addressing fields stay hidden for a non-XR device with no visible
-    // cause and the platform select no longer even offers xr-appmgr to
-    // undo it with. Every one of those paths below calls this helper.
-    function exitXrHostIfStale() {
-      if (mgmtTypeSel.value === 'xr-host') {
-        mgmtTypeSel.value = '';
-        updateDeviceFields();
-      }
-    }
-    if (!model) {
-      platform.disabled = false;
-      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-      exitXrHostIfStale();
-      return;
-    }
-    try {
-      var r = await fetch('/api/install-options?model=' + encodeURIComponent(model));
-      if (gen !== installOptionsGen) return;   // a newer keystroke superseded this fetch
-      if (!r.ok) {
-        // Restore to permissive default on server error: a valid choice must not
-        // be locked out by a transient failure. The server-side validate_record
-        // guard still refuses impossible platform+model combinations.
-        platform.disabled = false;
-        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-        exitXrHostIfStale();
-        return;
-      }
-      var options = (await r.json()).options;
-      if (options === null) {
-        platform.disabled = false;
-        platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-        exitXrHostIfStale();
-        return;
-      }
-      if (options.length === 0) {
-        // No family answers this today: every model the server has an
-        // opinion about can run something (IOS-XR included, since the appmgr
-        // container agent shipped). Kept as an honest dead end rather than a
-        // silent fall-through to the permissive list.
-        platform.innerHTML = '<option value="">No agent install available for this model</option>';
-        platform.disabled = true;
-        exitXrHostIfStale();
-        return;
-      }
+    function renderOptions(modelOptions, message) {
+      var options = allowed.filter(function (option) {
+        return modelOptions === null || modelOptions.indexOf(option) !== -1;
+      });
       var kept = platform.value;
-      platform.disabled = false;
+      platform.disabled = options.length === 0;
+      hint.textContent = message || '';
+      if (!allowed.length) {
+        platform.innerHTML = '<option value="">Choose a management type first</option>';
+        return;
+      }
+      if (!options.length) {
+        platform.innerHTML = '<option value="">No compatible agent install</option>';
+        hint.textContent = 'This model and management type have no compatible agent install. Check either value.';
+        return;
+      }
       platform.innerHTML = '<option value="" disabled selected>Choose an agent install</option>' +
-        options.map(function (o) {
-          return '<option value="' + esc(o) + '">' + esc(INSTALL_OPTION_LABELS[o] || o) + '</option>';
+        options.map(function (option) {
+          return '<option value="' + esc(option) + '">' + esc(INSTALL_OPTION_LABELS[option]) + '</option>';
         }).join('');
       if (options.indexOf(kept) !== -1) platform.value = kept;
-      // Drive the management type auto-select off the server answer instead of
-      // re-implementing the model regex here.
-      if (options.length === 1 && options[0] === 'xr-appmgr') {
-        if (mgmtTypeSel.value !== 'xr-host') {
-          mgmtTypeSel.value = 'xr-host';
-          updateDeviceFields();
-        }
-      } else {
-        exitXrHostIfStale();
-      }
+      // XR host and router management explicitly identify their installer.
+      // A model match alone never selects an installer for a switch.
+      else if (allowed.length === 1) platform.value = options[0];
+    }
+    renderOptions(null);
+    if (!model || !allowed.length) return;
+    try {
+      var r = await fetch('/api/v1/install-options?model=' + encodeURIComponent(model));
+      if (gen !== installOptionsGen) return;
+      if (!r.ok) throw new Error('Install options unavailable');
+      var options = (await r.json()).options;
+      // JSON parsing can yield too: a newer model/type may already be shown.
+      if (gen !== installOptionsGen) return;
+      if (options !== null && !Array.isArray(options)) throw new Error('Invalid install options');
+      renderOptions(options, options === null
+        ? 'Unrecognized model. Confirm agent support before onboarding.' : '');
     } catch (e) {
-      // Network failure or JSON parse error: restore permissive defaults so
-      // a transient blip never locks out a valid platform choice.
-      platform.disabled = false;
-      platform.innerHTML = FULL_INSTALL_OPTIONS_HTML;
-      exitXrHostIfStale();
+      if (gen !== installOptionsGen) return;
+      // Keep the chosen management type and its valid install choices. The
+      // backend still validates model compatibility when the device is saved.
+      renderOptions(null, 'Model compatibility could not be checked. It will be validated when saved.');
     }
   }
   document.getElementById('df-model').addEventListener('input', refreshInstallOptions);
@@ -3049,17 +3053,18 @@
     var did = document.getElementById('df-id').value.trim();
     var derr = document.getElementById('df-err'); derr.textContent = '';
     if (!did) { derr.textContent = 'Device ID is required.'; return; }
-    // No automatic answer: the agent install is always chosen explicitly.
+    var managementType = document.getElementById('df-management-type').value;
+    if (!managementType) { derr.textContent = 'Choose a management type for this device.'; return; }
+    // The management type or explicit install choice identifies the installer.
     // Letting this through blank handed the decision to a model guess, which
     // is how an IOS-XR router was sent down an install its hardware cannot run.
     var platformSel = document.getElementById('df-platform');
     if (!platformSel.value) {
       derr.textContent = platformSel.disabled
-        ? 'No agent install is available for this model.'
+        ? document.getElementById('df-platform-hint').textContent
         : 'Choose an agent install for this device.';
       return;
     }
-    var managementType = document.getElementById('df-management-type').value;
     var vlan = document.getElementById('df-vlan').value.trim();
     var mask = document.getElementById('df-mask').value.trim();
     var body = {
@@ -3094,7 +3099,7 @@
       body.svi_ip = document.getElementById('df-svi').value.trim();
       body.svi_mask = mask;
     }
-    var r = await jpost('/api/devices', body);
+    var r = await jpost('/api/v1/devices', body);
     if (!r.ok) { derr.textContent = 'Add failed: ' + ((await r.json()).error || r.status); return; }
     devForm.hidden = true; devForm.reset(); refreshDevices();
   });
@@ -3103,7 +3108,7 @@
     var f = e.target.files[0]; if (!f) return;
     var rd = new FileReader();
     rd.onload = async function () {
-      var r = await fetch('/api/devices/import-csv', { method: 'POST', headers: csrfHdr({ 'Content-Type': 'text/csv' }), body: rd.result });
+      var r = await fetch('/api/v1/devices/import-csv', { method: 'POST', headers: csrfHdr({ 'Content-Type': 'text/csv' }), body: rd.result });
       var j = await r.json();
       devStatus.textContent = r.ok ? ('Imported ' + j.imported) : ('Import failed: ' + j.error);
       refreshDevices();
@@ -3122,12 +3127,12 @@
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(a.href);
   }
-  document.getElementById('export-csv').addEventListener('click', function () { downloadCsv('/api/devices/export-csv', 'devices.csv'); });
-  document.getElementById('example-csv').addEventListener('click', function () { downloadCsv('/api/devices/example-csv', 'devices-example.csv'); });
+  document.getElementById('export-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/export-csv', 'devices.csv'); });
+  document.getElementById('example-csv').addEventListener('click', function () { downloadCsv('/api/v1/devices/example-csv', 'devices-example.csv'); });
   var credPanel = document.getElementById('cred-panel');
   var _credProfs = [];
   async function renderCreds() {
-    var cr = await fetch('/api/credentials'); var profs = cr.ok ? (await cr.json()).profiles : [];
+    var cr = await fetch('/api/v1/credentials'); var profs = cr.ok ? (await cr.json()).profiles : [];
     credOpts = profs; _credProfs = profs;
     syncCredSelected();
     document.getElementById('cred-rows').innerHTML = profs.length
@@ -3148,7 +3153,7 @@
       btn.addEventListener('click', async function () {
         var id = btn.closest('tr').getAttribute('data-id');
         if (!confirm('Delete credential profile ' + id + '?')) return;
-        await fetch('/api/credentials/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
+        await fetch('/api/v1/credentials/' + encodeURIComponent(id), { method: 'DELETE', headers: csrfHdr() });
         await renderCreds(); refreshDevices();
       });
     });
@@ -3185,7 +3190,7 @@
     var body = { id: id, name: document.getElementById('cf-name').value.trim() || id,
                  device_user: document.getElementById('cf-user').value.trim(),
                  device_pass: pass, enable_secret: document.getElementById('cf-en').value };
-    var r = await jpost('/api/credentials', body);
+    var r = await jpost('/api/v1/credentials', body);
     if (!r.ok) { err.textContent = 'Save failed: ' + ((await r.json()).error || r.status); return; }
     document.getElementById('cred-form').reset();
     // Re-render the device rows too: their credential dropdowns are built from
@@ -3285,12 +3290,12 @@
     // refresh. Deliberately not awaited with the overview fetch: a slow or
     // unreachable collector must not delay the cards.
     refreshTelemetryHealth();
-    // /api/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
+    // /api/v1/overview is the PRIMARY fetch -- Fleet Totals and Rollout need
     // nothing else, so its own failure is still a hard bail (matches the
     // pre-existing behavior: no data, nothing to render).
     var or_;
     try {
-      or_ = await fetch('/api/overview', { signal: signal });
+      or_ = await fetch('/api/v1/overview', { signal: signal });
     } catch (e) {
       // Superseding a refresh is expected (a newer refreshOverview() call
       // already owns the render) and must not be treated as a real
@@ -3303,7 +3308,7 @@
     var ov = await or_.json();
     if (mine !== overviewRefreshGeneration) return;
 
-    // /api/devices and /api/images are SECONDARY -- only the attention band
+    // /api/v1/devices and /api/v1/images are SECONDARY -- only the attention band
     // and the aggregate boundary need them (Overview reads the same two
     // existing endpoints Devices/Images already fetch; nothing server-side
     // is new). Each gets its OWN .catch(), so a network-level rejection on
@@ -3318,10 +3323,10 @@
     // you have is an empty array. (A superseded/aborted secondary fetch
     // also resolves to this same failed:true fallback, but that is never
     // rendered either -- the generation check right below discards it.)
-    var devsPromise = fetch('/api/devices', { signal: signal }).then(function (r) {
+    var devsPromise = fetch('/api/v1/devices', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : { devices: [], now: null, failed: true };
     }).catch(function () { return { devices: [], now: null, failed: true }; });
-    var imgsPromise = fetch('/api/images', { signal: signal }).then(function (r) {
+    var imgsPromise = fetch('/api/v1/images', { signal: signal }).then(function (r) {
       return r.ok ? r.json() : { images: [], failed: true };
     }).catch(function () { return { images: [], failed: true }; });
     var results = await Promise.all([devsPromise, imgsPromise]);
@@ -3363,7 +3368,7 @@
     });
   }
   async function refreshSwarm() {
-    var [or_, sr] = await Promise.all([fetch('/api/overview'), fetch('/api/swarm')]);
+    var [or_, sr] = await Promise.all([fetch('/api/v1/overview'), fetch('/api/v1/swarm')]);
     var mapUrl = or_.ok ? (await or_.json()).swarm_map_url : '';
     var link = document.getElementById('swarm-open');
     if (mapUrl) { link.href = mapUrl; link.style.display = ''; } else { link.style.display = 'none'; }
@@ -3447,7 +3452,10 @@
       'will not resolve this.',
     'distributed-cert-unavailable':
       'The copy of the certificate handed to devices could not be read, ' +
-      'so package state cannot be confirmed.'
+      'so onboarding readiness cannot be confirmed.',
+    'served-cert-unavailable':
+      'The certificate used by this server could not be read, so ' +
+      'onboarding readiness cannot be confirmed.'
   };
 
   function setupPkgRemedyText(pkg) {
@@ -3455,17 +3463,18 @@
     var parts = [];
     var reasonText = SETUP_PKG_REASON_TEXT[pkg.reason];
     if (reasonText) parts.push(reasonText);
-    // The rebuild remedy is per stale ITEM, never a single card-wide
-    // command -- the IOx tars and the IOS-XR RPM (iris-xr.rpm, Wave C) are
-    // rebuilt by two DIFFERENT scripts, so a cert rotation that stales both
-    // families needs BOTH commands named, not just whichever one
-    // pkg.remedy used to hardcode. Never fires for a served-vs-distributed
-    // mismatch, where rebuilding would not fix anything regardless of
-    // which item looks stale.
+    // Each non-ready package names its own build command: IOx and IOS-XR
+    // use different wrappers. Certificate rotation does not stale packages;
+    // a served/distributed certificate mismatch needs separate repair.
     if (pkg.reason !== 'served-vs-distributed-mismatch') {
       var remedies = [];
       (pkg.items || []).forEach(function (i) {
-        if (i.state === 'stale' && i.remedy && remedies.indexOf(i.remedy) === -1) {
+        // Every non-ready item carries an actionable host-side command.  In
+        // particular, a missing/invalid provenance sidecar is reported as
+        // "unknown", not "absent" or "stale"; hiding its remedy would leave
+        // the operator with a diagnosis but no way to repair it.
+        if (i.state !== 'ok' && i.remedy &&
+            remedies.indexOf(i.remedy) === -1) {
           remedies.push(i.remedy);
         }
       });
@@ -3502,6 +3511,23 @@
     document.getElementById('setup-iv-chip').innerHTML = setupChip('unknown');
   }
 
+  function renderPackageStatus(pkg, chipId, tableId, remedyId) {
+    var chip = document.getElementById(chipId);
+    var table = document.querySelector('#' + tableId + ' tbody');
+    var remedy = document.getElementById(remedyId);
+    if (chip) chip.innerHTML = setupChip(pkg ? pkg.state : 'unknown');
+    if (table) {
+      table.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
+        var when = i.built_at ? new Date(i.built_at * 1000).toLocaleString() : '—';
+        var evidence = i.detail || i.reason || '';
+        return '<tr><td class="muted machine">' + esc(i.name || '') + '</td><td>' +
+          setupChip(i.state) + '</td><td class="muted">' + esc(when) +
+          '</td><td class="muted">' + esc(evidence) + '</td></tr>';
+      }).join('');
+    }
+    if (remedy) remedy.textContent = pkg ? setupPkgRemedyText(pkg) : '';
+  }
+
   // Items that are recommended rather than required to finish onboarding a
   // server: IRIS runs without a telemetry destination or image verification,
   // it just cannot prove either is happening. This is a per-ITEM judgment
@@ -3515,7 +3541,7 @@
   // SUCCEEDED (see its docstring) -- a scheduled-but-never-run config and a
   // truly unconfigured one both resolve to "unset" from that field alone.
   // The schedule's own mode -- the same data Settings > Image verification
-  // already reads via /api/settings/image-verification -- is what tells
+  // already reads via /api/v1/settings/image-verification -- is what tells
   // them apart. A failed/thrown fetch here must never invent "configured"
   // without evidence, so it resolves to null (treated as "don't know",
   // never as configured).
@@ -3536,7 +3562,7 @@
   var wizardIvStatus = null;
   async function fetchIvScheduleConfigured() {
     try {
-      var r = await fetch('/api/settings/image-verification');
+      var r = await fetch('/api/v1/settings/image-verification');
       if (!r.ok) { wizardIvStatus = null; return null; }
       var iv = await r.json();
       wizardIvStatus = iv;
@@ -3676,27 +3702,13 @@
   }
 
   function renderWizardPackages(pkg) {
-    var body = document.querySelector('#wz-pkg-table tbody');
-    if (!body) return;
-    body.innerHTML = ((pkg && pkg.items) || []).map(function (i) {
-      // i.detail (iris-xr.rpm, Wave C): this module cannot pin the RPM's
-      // baked certificate the way it pins the IOx tars' (see
-      // setup_status._xr_package_item), so its row says plainly what was
-      // and was not verified rather than showing a bare ok/stale chip that
-      // would look like the same guarantee. Empty for the tar rows, which
-      // need no such caveat.
-      return '<tr><td class="machine">' + esc(i.name || '') + '</td><td>' +
-        setupChip(i.state) + '</td><td class="muted">built ' +
-        esc(i.built_at || 'unknown') + '</td><td class="muted">' +
-        esc(i.detail || '') + '</td></tr>';
-    }).join('');
-    document.getElementById('wz-pkg-remedy').textContent = setupPkgRemedyText(pkg || {});
+    renderPackageStatus(pkg, 'wz-pkg-chip', 'wz-pkg-table', 'wz-pkg-remedy');
   }
 
   async function refreshSetupWizard() {
     var s = null;
     try {
-      var r = await fetch('/api/settings/setup-status');
+      var r = await fetch('/api/v1/settings/setup-status');
       if (r.ok) s = await r.json();
     } catch (e) { /* leave s null -- never report green on missing evidence */ }
     wizardStatus = s;
@@ -3773,7 +3785,7 @@
   async function refreshSetup() {
     var s;
     try {
-      var r = await fetch('/api/settings/setup-status');
+      var r = await fetch('/api/v1/settings/setup-status');
       if (!r.ok) { setupShowUnknown(); return; }
       s = await r.json();
     } catch (e) {
@@ -3787,31 +3799,42 @@
       setupItemChipHTML('telemetry', s.telemetry.state, null);
     document.getElementById('setup-td-note').textContent =
       setupTelemetryNote(s.telemetry);
-    document.getElementById('setup-pkg-chip').innerHTML =
-      setupChip(s.packages.state);
-    document.querySelector('#setup-pkg-table tbody').innerHTML =
-      s.packages.items.map(function (i) {
-        var when = i.built_at
-          ? new Date(i.built_at * 1000).toLocaleString() : '—';
-        // i.detail: see the matching comment in renderWizardPackages.
-        return '<tr><td class="muted machine">' + esc(i.name) + '</td><td>' +
-               setupChip(i.state) + '</td><td class="muted">built ' +
-               esc(when) + '</td><td class="muted">' + esc(i.detail || '') +
-               '</td></tr>';
-      }).join('');
-    document.getElementById('setup-pkg-remedy').textContent =
-      setupPkgRemedyText(s.packages);
+    renderPackageStatus(s.packages, 'setup-pkg-chip', 'setup-pkg-table',
+      'setup-pkg-remedy');
     document.getElementById('setup-iv-chip').innerHTML =
       setupItemChipHTML('image_verification', s.image_verification.state, ivConfigured);
   }
 
+  async function refreshDevicePackages() {
+    var msg = document.getElementById('device-packages-msg');
+    try {
+      var r = await fetch('/api/v1/settings/setup-status');
+      if (!r.ok) throw new Error('status ' + r.status);
+      var s = await r.json();
+      renderPackageStatus(s.packages, 'device-packages-chip',
+        'device-packages-table', 'device-packages-remedy');
+      if (msg) msg.textContent = '';
+    } catch (e) {
+      renderPackageStatus(null, 'device-packages-chip',
+        'device-packages-table', 'device-packages-remedy');
+      if (msg) msg.textContent = 'Package state cannot be determined.';
+    }
+  }
+
+  document.getElementById('device-packages-recheck').addEventListener('click', function () {
+    var msg = document.getElementById('device-packages-msg');
+    if (msg) msg.textContent = 'Re-checking…';
+    refreshDevicePackages();
+  });
+
   async function refreshSettings() {
-    var r = await fetch('/api/settings'); if (!r.ok) return;
+    var r = await fetch('/api/v1/settings'); if (!r.ok) return;
     var s = await r.json();
     var rows = [
       ['Version', s.version],
       ['Admin', s.admin_username],
-      ['Host IP', s.host_ip || '(unset)', 'machine'],
+      ['Server IP', s.host_ip || '(unset)', 'machine'],
+      ['Console URL', s.console_url || location.origin, 'machine'],
       ['Ports', 'tracker ' + s.ports.tracker + ' · catalog ' + s.ports.catalog +
                 ' · artifacts ' + s.ports.artifacts + ' · swarm ' + s.ports.swarm +
                 ' · console ' + s.ports.console]
@@ -3829,17 +3852,17 @@
     if (gc.source === 'custom' || gc.source === 'built-in') {
       certStatus.innerHTML = (gc.source === 'custom'
           ? '<span class="badge badge-running">custom</span> '
-          : '<span class="badge badge-queued">built-in</span> ') +
+          : '<span class="badge badge-queued">deployment default</span> ') +
         esc(gc.subject || 'unknown') +
         ' — expires ' + esc(gc.not_after || 'unknown') +
-        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>' +
-        (gc.source === 'custom' ? ''
-          : ' <span class="muted">(the revert button appears once a custom certificate is installed)</span>');
+        ' — sha256 <span class="machine">' + esc((gc.fingerprint_sha256 || '').slice(0, 16)) + '…</span>';
     } else {
       certStatus.textContent =
-        'No TLS certificate — the console is serving plain HTTP.';
+        'Certificate details are unavailable.';
     }
-    document.getElementById('cert-revert').hidden = gc.source !== 'custom';
+    // A saved override may still be pending after a failed reload. Keep the
+    // default action available even when the active certificate is unchanged.
+    document.getElementById('cert-revert').hidden = false;
     // --- Trusted CAs table (rows rebuilt per render, like the images table) ---
     var trust = s.trust || [];
     var caSrcNow = (s.ca_trust || {}).url;
@@ -3873,7 +3896,7 @@
             'on the next connection.')) return;
         var msg = document.getElementById('trust-msg');
         msg.textContent = ''; msg.classList.remove('ok');
-        var r = await fetch('/api/settings/trust/' + encodeURIComponent(name),
+        var r = await fetch('/api/v1/settings/trust/' + encodeURIComponent(name),
                             { method: 'DELETE', headers: csrfHdr() });
         if (!r.ok) { msg.textContent = 'Remove failed (' + r.status + ')'; return; }
         refreshSettings();
@@ -3935,17 +3958,17 @@
     }
     // --- Image verification (KGV / Cisco Bulk Hash reconciler, Task 5) ---
     // Its own dedicated GET, unlike the panes above -- not part of the big
-    // /api/settings blob (see the endpoint contract in Task 4's report).
+    // /api/v1/settings blob (see the endpoint contract in Task 4's report).
     await refreshImageVerificationSettings();
   }
   // ---- Settings: Image verification (KGV / Cisco Bulk Hash reconciler) ----
   // Schedule select + hour, Refresh now, offline .tar upload. Its own
-  // dedicated GET/POST at /api/settings/image-verification and
-  // /api/image-verification/{refresh,offline} -- see Task 4's endpoint
+  // dedicated GET/POST at /api/v1/settings/image-verification and
+  // /api/v1/image-verification/{refresh,offline} -- see Task 4's endpoint
   // contracts. Factored out of refreshSettings (rather than inlined like the
   // ae-/cert- panes above) because the Refresh now button and the offline
   // upload both need to re-render just the last-run line afterward, without
-  // re-fetching the whole /api/settings blob.
+  // re-fetching the whole /api/v1/settings blob.
   //
   // last_run.outcome is "ok" or "fail: <detail>" -- NEVER compared with
   // equality against "fail" (the detail suffix always differs); this
@@ -3982,7 +4005,7 @@
     var lastRun = document.getElementById('iv-last-run');
     var r;
     try {
-      r = await fetch('/api/settings/image-verification');
+      r = await fetch('/api/v1/settings/image-verification');
     } catch (e) {
       lastRun.textContent = 'Could not load status.';
       return;
@@ -4007,7 +4030,7 @@
     var msg = document.getElementById('iv-schedule-msg'); msg.textContent = ''; msg.classList.remove('ok');
     var mode = document.getElementById('iv-mode').value;
     var hour = parseInt(document.getElementById('iv-hour').value, 10);
-    var r = await jpost('/api/settings/image-verification', { mode: mode, hour_utc: hour });
+    var r = await jpost('/api/v1/settings/image-verification', { mode: mode, hour_utc: hour });
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     msg.textContent = 'Schedule saved.'; msg.classList.add('ok');
     refreshImageVerificationSettings();
@@ -4017,7 +4040,7 @@
     var msg = document.getElementById('iv-refresh-msg'); msg.textContent = ''; msg.classList.remove('ok');
     btn.disabled = true;
     try {
-      var r = await jpost('/api/image-verification/refresh', {});
+      var r = await jpost('/api/v1/image-verification/refresh', {});
       var body = {};
       try { body = await r.json(); } catch (e) { }
       if (r.status === 409) {
@@ -4054,7 +4077,7 @@
     var bar = document.getElementById('iv-offline-bar');
     prog.hidden = false; bar.style.width = '0%'; prog.setAttribute('aria-valuenow', '0');
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/image-verification/offline');
+    xhr.open('POST', '/api/v1/image-verification/offline');
     xhr.setRequestHeader('X-CSRF-Token', info.csrf);
     xhr.upload.onprogress = function (e) {
       if (!e.lengthComputable) return;
@@ -4098,7 +4121,7 @@
     var cf = document.getElementById('pw-confirm').value;
     if (nw.length < 8) { msg.textContent = 'New password must be at least 8 characters.'; return; }
     if (nw !== cf) { msg.textContent = 'Passwords do not match.'; return; }
-    var r = await jpost('/api/settings/password', { current: cur, new: nw, confirm: cf });
+    var r = await jpost('/api/v1/settings/password', { current: cur, new: nw, confirm: cf });
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     document.getElementById('pw-form').reset();
     msg.textContent = 'Password changed. Other sessions signed out.'; msg.classList.add('ok');
@@ -4106,7 +4129,7 @@
   });
   document.getElementById('revoke-others').addEventListener('click', async function () {
     var m = document.getElementById('revoke-msg'); m.textContent = '';
-    var r = await jpost('/api/settings/sessions/revoke-others', {});
+    var r = await jpost('/api/v1/settings/sessions/revoke-others', {});
     if (!r.ok) { m.textContent = 'Failed (' + r.status + ')'; return; }
     m.textContent = 'Signed out ' + (await r.json()).revoked + ' other session(s).';
     refreshSettings();
@@ -4241,7 +4264,7 @@
       msg.textContent = recognized.concat(errors).join('; ') || 'No files recognized.';
       if (recognized.length && !errors.length) msg.classList.add('ok');
       // Filled the textareas only — the existing Upload button still owns
-      // the actual /api/settings/gui-cert submit.
+      // the actual /api/v1/settings/gui-cert submit.
     });
   document.getElementById('cert-form').addEventListener('submit', async function (e) {
     e.preventDefault();
@@ -4264,7 +4287,7 @@
       }
       body.key_passphrase = pw;
     }
-    var r = await jpost('/api/settings/gui-cert', body);
+    var r = await jpost('/api/v1/settings/gui-cert', body);
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     var certRes = await r.json().catch(function () { return {}; });
     document.getElementById('cert-form').reset();   // never leave the key in the DOM
@@ -4276,12 +4299,16 @@
   });
   document.getElementById('cert-revert').addEventListener('click', async function () {
     var msg = document.getElementById('cert-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    if (!confirm('Use the built-in certificate?\n\nThe uploaded certificate and key ' +
-        'are deleted and the console serves the bootstrap certificate again. New ' +
+    if (!confirm('Use the deployment default certificate?\n\nThe uploaded certificate and key ' +
+        'are deleted and the Console serves its deployment certificate again. New ' +
         'connections switch immediately; open sessions continue.')) return;
-    var r = await fetch('/api/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
+    var r = await fetch('/api/v1/settings/gui-cert', { method: 'DELETE', headers: csrfHdr() });
     if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
-    msg.textContent = 'Reverted to the built-in certificate.'; msg.classList.add('ok');
+    var certRes = await r.json().catch(function () { return {}; });
+    msg.textContent = certRes.applied === false
+      ? 'Certificate ' + (certRes.note || 'saved; takes effect at the next restart') + '.'
+      : 'Reverted to the deployment default certificate.';
+    msg.classList.add('ok');
     refreshSettings();
   });
   document.getElementById('trust-form').addEventListener('submit', async function (e) {
@@ -4291,7 +4318,7 @@
     if (pem.indexOf('BEGIN CERTIFICATE') < 0) {
       msg.textContent = 'Paste at least one PEM certificate block.'; return;
     }
-    var r = await jpost('/api/settings/trust', { pem: pem });
+    var r = await jpost('/api/v1/settings/trust', { pem: pem });
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     document.getElementById('trust-form').reset();
     msg.textContent = 'CA installed.'; msg.classList.add('ok');
@@ -4306,7 +4333,7 @@
         var text;
         try { text = await readFileAsText(file); } catch (err) { fail++; continue; }
         if (!PEM_CERTIFICATE_RE.test(text)) { skipped++; continue; }
-        var r = await jpost('/api/settings/trust', { pem: text });
+        var r = await jpost('/api/v1/settings/trust', { pem: text });
         if (r.ok) ok++; else fail++;
       }
       var parts = [];
@@ -4334,7 +4361,7 @@
     var auto = document.getElementById('ca-auto').checked;
     if (url && url.indexOf('https://') !== 0) { msg.textContent = 'Bundle URL must be https://'; return; }
     if (auto && !url) { msg.textContent = 'Auto-refresh needs a bundle URL.'; return; }
-    var r = await jpost('/api/settings/ca-trust', { url: url || null, auto: auto });
+    var r = await jpost('/api/v1/settings/ca-trust', { url: url || null, auto: auto });
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     msg.textContent = 'CA download settings saved.'; msg.classList.add('ok');
     refreshSettings();
@@ -4349,7 +4376,7 @@
     function next() { caPollTimer = setTimeout(poll, 1000); }
     async function poll() {
       try {
-      var r = await fetch('/api/settings/ca-trust/refresh/' + encodeURIComponent(jobId));
+      var r = await fetch('/api/v1/settings/ca-trust/refresh/' + encodeURIComponent(jobId));
       if (gen !== caPollGen) return;
       if (!r.ok) { msg.textContent = 'Download status unavailable (' + r.status + '); retrying…'; next(); return; }
       var j = await r.json();
@@ -4372,7 +4399,7 @@
   }
   document.getElementById('ca-refresh').addEventListener('click', async function () {
     var msg = document.getElementById('ca-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var r = await jpost('/api/settings/ca-trust/refresh', {});
+    var r = await jpost('/api/v1/settings/ca-trust/refresh', {});
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     msg.textContent = 'Downloading…';
     pollCaRefresh((await r.json()).job);
@@ -4387,7 +4414,7 @@
     if (endpoint && !(endpoint.indexOf('http://') === 0 || endpoint.indexOf('https://') === 0)) {
       msg.textContent = 'Endpoint must be an http:// or https:// URL.'; return;
     }
-    var r = await jpost('/api/settings/telemetry-destination',
+    var r = await jpost('/api/v1/settings/telemetry-destination',
                         { endpoint: endpoint || null, enabled: enabled });
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     msg.textContent = 'Telemetry destination saved. The exporter picks it up on the next sample pass.';
@@ -4399,7 +4426,7 @@
     if (!confirm('Revert the telemetry destination to the deployment default?\n\n' +
         'The console override is deleted and the exporter goes back to the environment configuration ' +
         '(IRIS_OTLP_ENDPOINT / IRIS_OBSERVABILITY) on the next sample pass.')) return;
-    var r = await fetch('/api/settings/telemetry-destination', { method: 'DELETE', headers: csrfHdr() });
+    var r = await fetch('/api/v1/settings/telemetry-destination', { method: 'DELETE', headers: csrfHdr() });
     if (!r.ok) { msg.textContent = 'Revert failed (' + r.status + ')'; return; }
     msg.textContent = 'Reverted to the deployment default.'; msg.classList.add('ok');
     refreshSettings();
@@ -4429,7 +4456,7 @@
                  age_recipient: recipient,
                  auto: document.getElementById('ae-auto').checked };
     if (pass) body.password = pass;    // absent password keeps the stored one
-    var r = await jpost('/api/settings/audit-export', body);
+    var r = await jpost('/api/v1/settings/audit-export', body);
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     document.getElementById('ae-pass').value = '';   // never leave the password in the DOM
     msg.textContent = 'Audit export settings saved.'; msg.classList.add('ok');
@@ -4445,7 +4472,7 @@
     function next() { aePollTimer = setTimeout(poll, 1000); }
     async function poll() {
       try {
-      var r = await fetch('/api/settings/audit-export/run/' + encodeURIComponent(jobId));
+      var r = await fetch('/api/v1/settings/audit-export/run/' + encodeURIComponent(jobId));
       if (gen !== aePollGen) return;
       if (!r.ok) { msg.textContent = 'Export status unavailable (' + r.status + '); retrying…'; next(); return; }
       var j = await r.json();
@@ -4468,7 +4495,7 @@
   }
   document.getElementById('ae-run').addEventListener('click', async function () {
     var msg = document.getElementById('ae-msg'); msg.textContent = ''; msg.classList.remove('ok');
-    var r = await jpost('/api/settings/audit-export/run', {});
+    var r = await jpost('/api/v1/settings/audit-export/run', {});
     if (!r.ok) { msg.textContent = ((await r.json()).error || ('Failed (' + r.status + ')')); return; }
     msg.textContent = 'Exporting…';
     pollAuditExport((await r.json()).job_id);
@@ -4478,7 +4505,7 @@
     if (!confirm('Clear the audit export configuration?\n\nThe stored settings and ' +
         'password are deleted and the daily export stops. Audit events stay on ' +
         'this server; files already exported to the remote host are untouched.')) return;
-    var r = await fetch('/api/settings/audit-export', { method: 'DELETE', headers: csrfHdr() });
+    var r = await fetch('/api/v1/settings/audit-export', { method: 'DELETE', headers: csrfHdr() });
     if (!r.ok) { msg.textContent = 'Clear failed (' + r.status + ')'; return; }
     msg.textContent = 'Audit export configuration cleared.'; msg.classList.add('ok');
     refreshSettings();
@@ -4499,6 +4526,8 @@
   // The setup pane rides the same pane/nav id pattern; appended for the
   // same reason (keeps the original trio a literal for the source guard).
   SETTINGS_SUBS.push('setup');
+  // Device packages stay available after first-run setup is dismissed.
+  SETTINGS_SUBS.push('packages');
   // The Image verification (KGV / Cisco Bulk Hash reconciler) pane rides the
   // same pane/nav id pattern; appended for the same reason.
   SETTINGS_SUBS.push('bulkhash');
@@ -4514,6 +4543,7 @@
     // Same reclaim, but a move rather than a re-mount -- see
     // mountImageVerification's own comment for why.
     if (sub === 'bulkhash') mountImageVerification('settings-pane-bulkhash');
+    if (sub === 'packages') refreshDevicePackages();
     refreshSettings();
   }
   // Monitoring uses the same sidebar sub-menu pattern (audit | deploylogs):
@@ -4625,7 +4655,7 @@
     password_change_fail: 'failed to change the console password',
     revoke_other_sessions: 'revoked other console sessions',
     'gui-cert-replace': 'replaced the console TLS certificate',
-    'gui-cert-revert': 'reverted the console to the built-in certificate',
+    'gui-cert-revert': 'selected the deployment default certificate',
     'trust-add': 'installed a trusted CA certificate',
     'trust-remove': 'removed a trusted CA certificate',
     'ca-trust-config': 'changed the CA bundle download settings',
@@ -4744,7 +4774,7 @@
       var w = auditWindow();
       params.push('after_ts=' + w.since);
     }
-    return '/api/audit?' + params.join('&');
+    return '/api/v1/audit?' + params.join('&');
   }
 
   function renderWindowLabel() {
@@ -4805,13 +4835,13 @@
     var url, domain;
     if (auditSel) {
       var span = auditSel.end - auditSel.start;
-      url = '/api/audit/histogram?since_ts=' + encodeURIComponent(auditSel.start) +
+      url = '/api/v1/audit/histogram?since_ts=' + encodeURIComponent(auditSel.start) +
         '&until_ts=' + encodeURIComponent(auditSel.end) +
         '&buckets=' + pickBucketCount(span);
       domain = { since: auditSel.start, until: auditSel.end };
     } else {
       var w = auditWindow();
-      url = '/api/audit/histogram?window=' + w.window + '&buckets=' + w.buckets;
+      url = '/api/v1/audit/histogram?window=' + w.window + '&buckets=' + w.buckets;
       domain = null;                      // set from response 'now' below
     }
     if (cat) url += '&category=' + encodeURIComponent(cat);
@@ -4867,7 +4897,7 @@
     pre.hidden = false;
     pre.textContent = 'Loading ' + file + '…';
     var r = null;
-    try { r = await fetch('/api/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
+    try { r = await fetch('/api/v1/deploy-logs/' + encodeURIComponent(file)); } catch (e) { }
     if (gen !== deployLogGen) return;   // a newer view request superseded this one
     if (!r || !r.ok) {
       pre.textContent = 'Log unavailable' + (r ? ' (' + r.status + ')' : '') + '.';
@@ -5010,13 +5040,13 @@
     var url, domain;
     if (dlSel) {
       var span = dlSel.end - dlSel.start;
-      url = '/api/deploy-logs/histogram?since_ts=' + encodeURIComponent(dlSel.start) +
+      url = '/api/v1/deploy-logs/histogram?since_ts=' + encodeURIComponent(dlSel.start) +
         '&until_ts=' + encodeURIComponent(dlSel.end) +
         '&buckets=' + dlPickBucketCount(span);
       domain = { since: dlSel.start, until: dlSel.end };
     } else {
       var cfg = DL_RANGES[dlRange] || DL_RANGES['7d'];
-      url = '/api/deploy-logs/histogram?window=' + cfg.window + '&buckets=' + cfg.buckets;
+      url = '/api/v1/deploy-logs/histogram?window=' + cfg.window + '&buckets=' + cfg.buckets;
       domain = null;
     }
     var r = null;
@@ -5153,7 +5183,7 @@
       var ob = dlOuterBounds();
       params.push('after_ts=' + Math.floor(ob.since));
     }
-    return '/api/deploy-logs' + (params.length ? '?' + params.join('&') : '');
+    return '/api/v1/deploy-logs' + (params.length ? '?' + params.join('&') : '');
   }
 
   // Timeline and table are one view of one query: refresh them together, or a
@@ -5214,7 +5244,7 @@
     var state = 'unknown';
     el.title = '';
     try {
-      var r = await fetch('/api/telemetry/health');
+      var r = await fetch('/api/v1/telemetry/health');
       if (!r.ok) throw new Error('health proxy ' + r.status);   // unknown, never "off"
       var d = await r.json();
       if (d && d.otlp_export && d.otlp_export.signals) {
@@ -5245,7 +5275,7 @@
     if (cat) params.push('category=' + encodeURIComponent(cat));
     var lowerBound = auditSel ? auditSel.start : auditWindow().since;
     params.push('after_ts=' + lowerBound);
-    var r = await fetch('/api/audit?' + params.join('&'));
+    var r = await fetch('/api/v1/audit?' + params.join('&'));
     if (!r.ok) return;
     var events = (await r.json()).events || [];
     renderAuditRows(events, true);
@@ -5361,13 +5391,13 @@
   });
 
   // ---- header help popover ----
-  // Version / deployment id / docs links come from GET /api/help, fetched
+  // Version / deployment id / docs links come from GET /api/v1/help, fetched
   // lazily on the first open and cached for the session.
   var helpLoaded = false;
   document.getElementById('help-btn').addEventListener('click', async function () {
     if (helpLoaded) return;
     var r;
-    try { r = await fetch('/api/help'); } catch (e) { return; }
+    try { r = await fetch('/api/v1/help'); } catch (e) { return; }
     if (!r.ok) return;
     var h = await r.json();
     helpLoaded = true;

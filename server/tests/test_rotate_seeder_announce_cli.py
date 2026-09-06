@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Operational preflight and nonsecret CLI coverage for seeder rotation."""
+import hashlib
 import json
 
 import pytest
@@ -123,6 +124,38 @@ def test_cli_existing_manifest_refuses_before_rpc_or_core(tmp_path, monkeypatch)
     assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 2
 
 
+def test_cli_recovery_passes_current_persisted_bearer_in_memory(
+        tmp_path, monkeypatch, capsys):
+    state, _ = _state(tmp_path)
+    manifest = state / "seeder-rotation-recovery.json"
+    manifest.write_text("{}")
+    secrets_path = tmp_path / "secrets.json"
+    current = "test-current-bearer"
+    seen = {}
+    monkeypatch.setenv("IRIS_RPC_SECRET", "rpc-test-value")
+    monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller",
+                        lambda *args: object())
+    monkeypatch.setattr(rot, "_current_announce_token",
+                        lambda path: current if path == str(secrets_path)
+                        else pytest.fail("wrong secrets path"))
+
+    def recover(path, state_dir, rpc, announce_token):
+        seen["manifest"] = path
+        seen["state"] = state_dir
+        seen["token_digest"] = hashlib.sha256(announce_token.encode()).digest()
+        return True
+
+    monkeypatch.setattr(rot, "recover_rotation", recover)
+    assert rot.main(["--maintenance-frozen", "--recover",
+                     "--state", str(state),
+                     "--secrets", str(secrets_path)]) == 0
+    assert seen["manifest"] == str(manifest)
+    assert seen["state"] == str(state)
+    assert seen["token_digest"] == hashlib.sha256(current.encode()).digest()
+    output = capsys.readouterr().out + capsys.readouterr().err
+    assert current not in output
+
+
 def test_cli_uses_production_deps_and_never_outputs_request_values(
         tmp_path, monkeypatch, capsys):
     state, hashes = _state(tmp_path)
@@ -137,13 +170,18 @@ def test_cli_uses_production_deps_and_never_outputs_request_values(
             return [{"gid": "g", "infoHash": next(iter(hashes.values()))}]
         return None
     monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller", lambda *a: rpc)
-    monkeypatch.setattr(rot, "production_deps", lambda *a: seen.setdefault("deps", a) or object())
+    def fake_production_deps(*args, **kwargs):
+        seen["deps"] = args
+        seen["deps_kwargs"] = kwargs
+        return object()
+    monkeypatch.setattr(rot, "production_deps", fake_production_deps)
     monkeypatch.setattr(rot, "rotate_seeder_announce", lambda *a: type(
         "Result", (), {"served_claimed": True, "hard_no_go": False})())
     assert rot.main(["--maintenance-frozen", "--state", str(state)]) == 0
     output = capsys.readouterr().out + capsys.readouterr().err
     assert "secret-value" not in output and "http://" not in output
     assert seen["deps"][2:4] == ("age1recipient", str(tmp_path / "s.age"))
+    assert callable(seen["deps_kwargs"]["seeder_set_credential"])
 
 
 def test_cli_hard_no_go_keeps_manifest_and_returns_one(tmp_path, monkeypatch):
@@ -154,7 +192,7 @@ def test_cli_hard_no_go_keeps_manifest_and_returns_one(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.1")
     monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller", lambda *a: lambda m, p: [
         {"gid": "g", "infoHash": next(iter(hashes.values()))}])
-    monkeypatch.setattr(rot, "production_deps", lambda *a: object())
+    monkeypatch.setattr(rot, "production_deps", lambda *a, **kw: object())
     def failed(*args):
         open(args[1], "w").write("evidence")
         return type("Result", (), {"served_claimed": False, "hard_no_go": True})()
@@ -169,6 +207,14 @@ def test_announce_base_still_refuses_loopback_and_linklocal():
     for host in ("127.0.0.1", "169.254.1.1"):
         with pytest.raises(ValueError):
             rot._tracker_announce_base({"IRIS_HOST_IP": host})
+
+
+def test_announce_base_refuses_plaintext_override_without_echoing_it():
+    value = "http://10.0.0.1:6969/announce?key=do-not-echo"
+    with pytest.raises(ValueError) as error:
+        rot._tracker_announce_base({"IRIS_TRACKER_ANNOUNCE": value})
+    assert value not in str(error.value)
+    assert "do-not-echo" not in str(error.value)
 
 
 def test_swarm_proof_window_outlasts_one_announce_interval():
@@ -195,7 +241,7 @@ def test_announce_base_accepts_any_routable_ipv4():
     for host in ("100.64.0.1", "10.1.2.3", "192.168.5.4", "203.0.113.9",
                  "8.8.8.8"):
         assert rot._tracker_announce_base({"IRIS_HOST_IP": host}) == \
-            "http://%s:6969/announce" % host
+            "https://%s:6969/announce" % host
 
 
 def test_announce_base_refuses_addresses_no_peer_could_dial():
@@ -248,7 +294,7 @@ def test_cli_rotates_past_a_quarantined_image_and_says_so(tmp_path, monkeypatch,
     monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.1")
     monkeypatch.setattr(rot.telemetry, "make_jsonrpc_caller", lambda *a: lambda m, p: [
         {"gid": "g-a", "infoHash": hashes["a"]}])
-    monkeypatch.setattr(rot, "production_deps", lambda *a: object())
+    monkeypatch.setattr(rot, "production_deps", lambda *a, **kw: object())
     seen = {}
 
     def core(secrets_path, manifest, targets, base, deps):

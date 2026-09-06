@@ -57,16 +57,17 @@ setup() {
   [[ "$output" == *$'no crypto pki trustpoint IRIS\nyes'* ]]
 }
 
-@test "dry-run deletes the staged app package" {
+@test "dry-run deletes the staged app package and runtime certificate source" {
   run bash "$UNINSTALL" --dry-run
-  [[ "$output" == *"delete flash:iris-arm64.tar"* ]]
+  [[ "$output" == *"delete /force flash:iris-arm64.tar"* ]] && \
+  [[ "$output" == *"delete /force flash:iris-catalog.pem"* ]]
 }
 
 @test "dry-run leaves generic config and the sdflash image in place" {
   run bash "$UNINSTALL" --dry-run
-  [[ "$output" == *"LEFT IN PLACE"* ]] && \
-  [[ "$output" == *"ip scp server"* ]] && \
-  [[ "$output" == *"sdflash image"* ]]
+  [[ "$output" != *"no iox"* ]] && \
+  [[ "$output" != *"no ip scp server"* ]] && \
+  [[ "$output" != *"delete /force sdflash:"* ]]
 }
 
 @test "dry-run persists successful IOx cleanup" {
@@ -77,7 +78,7 @@ setup() {
 @test "custom VLAN and PKG_FS flow into the removal" {
   VLAN=42 PKG_FS=sdflash: run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no interface Vlan42"* ]] && \
-  [[ "$output" == *"delete sdflash:iris-arm64.tar"* ]]
+  [[ "$output" == *"delete /force sdflash:iris-arm64.tar"* ]]
 }
 
 @test "real run refuses to start without DEVICE_PASS" {
@@ -191,7 +192,7 @@ setup() {
   [[ "$output" == *"app-hosting uninstall appid iris"* ]] && \
   [[ "$output" == *"no app-hosting appid iris"* ]] && \
   [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]] && \
-  [[ "$output" == *"delete flash:iris-arm64.tar"* ]] && \
+  [[ "$output" == *"delete /force flash:iris-arm64.tar"* ]] && \
   [[ "$output" == *"delete /force /recursive sdflash:guest-share/iris"* ]]
 }
 
@@ -224,8 +225,8 @@ STUB
     DEVICE_PASS=p IRIS_FORCE_AGENT_ONLY=1 \
     bash "$STUBDIR/device/iox/uninstall.sh"
   [[ "$output" != *"VLAN not set"* ]] || return 1
-  [[ "$output" == *"Removing:"*"IRISQ"*"IRIS PKI"* ]] || return 1
-  [[ "$output" == *"Preserving: operator VLAN/SVI"* ]] || return 1
+  [[ "$output" == *"FORCE:"*"IRISQ"*"IRIS PKI"* ]] || return 1
+  [[ "$output" == *"preserve operator VLAN/SVI"* ]] || return 1
   [ "$status" -eq 0 ]
 }
 
@@ -282,7 +283,7 @@ _sent_destructive() {
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"device identity mismatch"* ]] || return 1
   [[ "$output" == *"FCW1234RECORD"*"FCW9999LIVE"* ]] || return 1
-  [[ "$output" == *"undeploy it again with Force"* ]] || return 1
+  [[ "$output" == *"use Force"* ]] || return 1
   # the ONLY session was the read-only probe
   grep -q '^show version' "$IRIS_STUB_LOG" || return 1
   [ -z "$(_sent_destructive)" ]

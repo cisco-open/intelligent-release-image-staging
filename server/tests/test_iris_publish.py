@@ -30,7 +30,7 @@ def test_publish_end_to_end(tmp_path):
 
     entry = publish.publish(
         str(img), store,
-        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        tracker_url="https://10.0.0.5:6969/announce",
         image_id=None, signature_verified=False, seeder=fake_seeder)
 
     # id derived from filename (strip .SPA.bin)
@@ -62,7 +62,7 @@ def test_signature_verified_writes_operator_field_not_the_reconcilers(tmp_path):
 
     entry = publish.publish(
         str(img), store,
-        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        tracker_url="https://10.0.0.5:6969/announce",
         image_id=None, signature_verified=True,
         seeder=lambda torrent_bytes, image_dir: None)
 
@@ -93,7 +93,7 @@ def test_publish_without_signature_verified_flag_leaves_attestation_false(tmp_pa
     store = catalog.CatalogStore(str(tmp_path / "state"))
     entry = publish.publish(
         str(img), store,
-        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        tracker_url="https://10.0.0.5:6969/announce",
         image_id=None, signature_verified=False,
         seeder=lambda torrent_bytes, image_dir: None)
     assert entry["operator_attested_signature"] is False
@@ -108,8 +108,8 @@ def test_derive_id_strips_known_suffixes():
 
 
 def test_default_tracker_url_from_secrets_store(tmp_path, monkeypatch):
-    # The secrets-broker store (tokens.txt retired): the seeder pseudo-device
-    # holds the announce_token that keys the private tracker URL.
+    # The secrets-broker store supplies the seeder's Authorization header; its
+    # credential must never be embedded in the canonical torrent URL.
     store = {"devices": {}, "seeder": {}}
     secrets_store.mint(store, "seeder", "announce_token", int(time.time()))
     tok = store["seeder"]["announce_token"]["value"]
@@ -118,24 +118,82 @@ def test_default_tracker_url_from_secrets_store(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.5")
     monkeypatch.setenv("IRIS_SECRETS", str(sec))
     monkeypatch.setenv("IRIS_TOKENS", str(tmp_path / "no-such-tokens.txt"))
-    assert publish.default_tracker_url() == \
-        "http://10.0.0.5:6969/announce?announce_token=%s" % tok
+    assert publish.default_tracker_url() == "https://10.0.0.5:6969/announce"
+    assert publish.default_announce_header() == "Authorization: Bearer %s" % tok
 
 
-def test_default_tracker_url_legacy_tokens_fallback(tmp_path, monkeypatch):
-    # Pre-broker installs with no secrets.json fall back to tokens.txt.
+def test_default_tracker_url_does_not_embed_legacy_tokens(tmp_path, monkeypatch):
+    # A legacy tokens.txt must not put a credential back into torrent metadata.
     toks = tmp_path / "tokens.txt"
     toks.write_text("# header comment\nLEGACYSEEDTOK\n")
     monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.5")
     monkeypatch.setenv("IRIS_SECRETS", str(tmp_path / "absent.json"))
     monkeypatch.setenv("IRIS_TOKENS", str(toks))
-    assert publish.default_tracker_url() == \
-        "http://10.0.0.5:6969/announce?key=LEGACYSEEDTOK"
+    assert publish.default_tracker_url() == "https://10.0.0.5:6969/announce"
+    assert publish.default_announce_header() is None
 
 
-def test_default_tracker_url_none_without_host_ip(monkeypatch):
+@pytest.mark.parametrize("value", [
+    "private-token\nX-Injected: yes", "private-token\rX-Injected: yes",
+    "private-token\tmore", "private-token more", "private-token\x00",
+    "private-token\x7f", "private-token\u00e9", "private-token\ud800",
+    "", None, 12, ["private-token"], {"value": "private-token"},
+])
+def test_seeder_rpc_rejects_unsafe_persisted_announce_token(
+        tmp_path, monkeypatch, capsys, value):
+    sec = tmp_path / "secrets.json"
+    secrets_store.save({"devices": {}, "seeder": {
+        "announce_token": {"value": value}}}, str(sec))
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    calls = []
+    monkeypatch.setattr(publish, "_rpc_call", lambda *a, **kw: calls.append(a))
+
+    assert publish.default_announce_header() is None
+    with pytest.raises(RuntimeError) as error:
+        publish.add_torrent_rpc(b"torrent", str(tmp_path),
+                                rpc_url="http://127.0.0.1:6800/jsonrpc",
+                                rpc_secret="test-rpc")
+    assert str(error.value) == "seeder announce credential unavailable"
+    assert calls == []
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_seeder_rpc_preserves_safe_printable_announce_token(tmp_path, monkeypatch):
+    value = "test-Token_0123.~+/=:!"
+    sec = tmp_path / "secrets.json"
+    secrets_store.save({"devices": {}, "seeder": {
+        "announce_token": {"value": value}}}, str(sec))
+    monkeypatch.setenv("IRIS_SECRETS", str(sec))
+    calls = []
+    monkeypatch.setattr(publish, "_rpc_call", lambda *a, **kw: calls.append(a))
+
+    publish.add_torrent_rpc(b"torrent", str(tmp_path),
+                            rpc_url="http://127.0.0.1:6800/jsonrpc",
+                            rpc_secret="test-rpc")
+    assert len(calls) == 1
+    assert calls[0][2] == "aria2.addTorrent"
+    assert calls[0][3][2]["header"] == ["Authorization: Bearer " + value]
+
+
+def test_default_tracker_url_fails_closed_without_host_ip(monkeypatch):
     monkeypatch.delenv("IRIS_HOST_IP", raising=False)
-    assert publish.default_tracker_url() is None
+    monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)
+    with pytest.raises(ValueError, match="unavailable"):
+        publish.default_tracker_url()
+
+
+@pytest.mark.parametrize("url", [
+    "http://10.0.0.5:6969/announce",
+    "https://10.0.0.5:6969/announce?announce_token=secret",
+])
+def test_make_torrent_rejects_plaintext_or_credential_bearing_url(
+        tmp_path, url):
+    image = tmp_path / "image.bin"
+    image.write_bytes(b"payload")
+    with pytest.raises(ValueError, match="invalid tracker announce URL"):
+        publish.make_torrent(str(image), url, str(tmp_path / "image.torrent"))
+    assert not (tmp_path / "image.torrent").exists()
 
 
 @pytest.mark.skipif(shutil.which("mktorrent") is None,
@@ -152,7 +210,7 @@ def test_publish_seeder_failure_does_not_commit_catalog(tmp_path):
     with pytest.raises(RuntimeError, match="aria2 RPC unreachable"):
         publish.publish(
             str(img), store,
-            tracker_url="http://127.0.0.1:6969/announce?key=tok",
+            tracker_url="https://10.0.0.5:6969/announce",
             image_id=None, signature_verified=False, seeder=failing_seeder)
 
     # The catalog must NOT contain the entry — no advertised-but-unseeded window.
@@ -182,7 +240,7 @@ def test_publish_seeder_called_before_catalog_commit(tmp_path):
 
     publish.publish(
         str(img), store,
-        tracker_url="http://127.0.0.1:6969/announce?key=tok",
+        tracker_url="https://10.0.0.5:6969/announce",
         image_id=None, signature_verified=False, seeder=tracking_seeder)
 
     assert call_order == ["seeder", "catalog"], (
@@ -209,13 +267,12 @@ def test_default_rpc_secret_missing_returns_empty(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 8 — publisher uses the CURRENT announce token under announce_token=
+# Publisher keeps the CURRENT announce token in an HTTP header only.
 # ---------------------------------------------------------------------------
 
 def test_default_tracker_url_uses_current_never_previous(tmp_path, monkeypatch):
-    """The canonical URL carries the CURRENT seeder announce token under
-    `announce_token=` — never a rotated-out `announce_token_previous` (spec §6).
-    aria2's own `key=` must not be used for the IRIS credential."""
+    """The canonical URL is token-free and the HTTP header carries only the
+    current seeder credential, never a rotated-out previous value."""
     now = int(time.time())
     store = {"devices": {}, "seeder": {}}
     secrets_store.mint(store, "seeder", "announce_token", now)
@@ -230,9 +287,12 @@ def test_default_tracker_url_uses_current_never_previous(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_SECRETS", str(sec))
     monkeypatch.setenv("IRIS_TOKENS", str(tmp_path / "no-such-tokens.txt"))
     url = publish.default_tracker_url()
-    assert url == "http://10.0.0.9:6969/announce?announce_token=%s" % current
+    assert url == "https://10.0.0.9:6969/announce"
     assert "PREVIOUSVALUE" not in url
     assert "key=" not in url
+    header = publish.default_announce_header()
+    assert header == "Authorization: Bearer %s" % current
+    assert "PREVIOUSVALUE" not in header
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +302,8 @@ def test_default_tracker_url_uses_current_never_previous(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 _TOKEN = "deadbeefcafef00d" * 2
-_TRACKER = "http://10.0.0.5:6969/announce?announce_token=" + _TOKEN
+_TRACKER = "https://10.0.0.5:6969/announce"
+_LEAKY_TRACKER = _TRACKER + "?announce_token=" + _TOKEN
 
 
 def _stub_mktorrent(tmp_path, monkeypatch, rc=1):
@@ -292,9 +353,9 @@ def test_cli_publish_failure_prints_no_token_and_no_traceback(tmp_path, monkeypa
 
 def test_redact_strips_announce_credentials_and_known_secrets():
     argv_text = ("Command '['mktorrent', '-p', '-a', '%s', '-o', 'x.torrent']' "
-                 "returned non-zero exit status 1." % _TRACKER)
+                 "returned non-zero exit status 1." % _LEAKY_TRACKER)
     assert _TOKEN not in publish.redact(argv_text)
-    assert _TOKEN not in publish.redact(argv_text, _TRACKER)
+    assert _TOKEN not in publish.redact(argv_text, _LEAKY_TRACKER)
     assert "announce_token=<redacted>" in publish.redact(argv_text)
     assert publish.redact("legacy ?key=abc&x=1") == "legacy ?key=<redacted>&x=1"
     assert publish.redact("plain error text") == "plain error text"
@@ -315,7 +376,7 @@ def test_publish_failure_after_mktorrent_rolls_back_the_torrent_file(tmp_path):
         raise RuntimeError("aria2 RPC unreachable")
 
     with pytest.raises(RuntimeError, match="aria2 RPC unreachable"):
-        publish.publish(str(img), store, "http://127.0.0.1:6969/announce?key=tok",
+        publish.publish(str(img), store, "https://10.0.0.5:6969/announce",
                         seeder=failing_seeder)
     assert not os.path.exists(store.torrent_path("cat9k_iosxe.26.01.01"))
 
@@ -324,7 +385,7 @@ def test_publish_failure_after_mktorrent_rolls_back_the_torrent_file(tmp_path):
 
     store.save_image = failing_save
     with pytest.raises(OSError, match="state volume full"):
-        publish.publish(str(img), store, "http://127.0.0.1:6969/announce?key=tok",
+        publish.publish(str(img), store, "https://10.0.0.5:6969/announce",
                         seeder=lambda b, d: None)
     assert not os.path.exists(store.torrent_path("cat9k_iosxe.26.01.01"))
 
@@ -349,16 +410,16 @@ def test_default_tracker_url_honours_tracker_port(tmp_path, monkeypatch):
     monkeypatch.setenv("IRIS_HOST_IP", "10.0.0.5")
     monkeypatch.setenv("IRIS_TRACKER_PORT", "7070")
     monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)
-    assert publish.default_tracker_url() == \
-        "http://10.0.0.5:7070/announce?announce_token=%s" % tok
+    assert publish.default_tracker_url() == "https://10.0.0.5:7070/announce"
+    assert publish.default_announce_header() == "Authorization: Bearer %s" % tok
 
 
 def test_default_tracker_url_honours_tracker_announce_override(tmp_path, monkeypatch):
     tok = _secrets_with_seeder_token(tmp_path, monkeypatch)
     monkeypatch.delenv("IRIS_HOST_IP", raising=False)
-    monkeypatch.setenv("IRIS_TRACKER_ANNOUNCE", "http://tracker.lab:6969/announce")
-    assert publish.default_tracker_url() == \
-        "http://tracker.lab:6969/announce?announce_token=%s" % tok
+    monkeypatch.setenv("IRIS_TRACKER_ANNOUNCE", "https://10.9.8.7:6969/announce")
+    assert publish.default_tracker_url() == "https://10.9.8.7:6969/announce"
+    assert publish.default_announce_header() == "Authorization: Bearer %s" % tok
 
 
 # ---------------------------------------------------------------------------
@@ -389,20 +450,27 @@ def test_resume_torrent_rpc_resyncs_announce_and_adds_when_inactive(tmp_path, mo
         raise AssertionError(method)
 
     monkeypatch.setattr(publish, "_rpc_call", fake_rpc)
+    monkeypatch.setattr(
+        publish, "default_announce_header",
+        lambda: "Authorization: Bearer current-seeder-token")
     gid = publish.resume_torrent_rpc(str(path), str(tmp_path), info_hash,
-                                     tracker_url=_TRACKER, rpc_url="http://x",
+                                     tracker_url="https://10.0.0.5:6969/announce",
+                                     rpc_url="http://x",
                                      rpc_secret="s")
     assert gid == "gid-new"
     assert [m for m, _ in calls] == ["aria2.tellActive", "aria2.addTorrent"]
-    # the canonical file now carries the current credential, info hash intact
+    # The canonical file is token-free and keeps its info hash intact.
     data = path.read_bytes()
-    assert bencode.decode(data)[b"announce"] == _TRACKER.encode()
+    assert bencode.decode(data)[b"announce"] == \
+        b"https://10.0.0.5:6969/announce"
     assert publish.torrent_info_hash(str(path)) == info_hash
     # and that is what the seeder was handed, from the image's own directory
     import base64
     add_params = calls[1][1]
     assert base64.b64decode(add_params[0]) == data
     assert add_params[2]["dir"] == str(tmp_path)
+    assert add_params[2]["header"] == [
+        "Authorization: Bearer current-seeder-token"]
 
 
 def test_resume_torrent_rpc_leaves_an_active_torrent_alone(tmp_path, monkeypatch):
@@ -422,13 +490,17 @@ def test_resume_torrent_rpc_leaves_an_active_torrent_alone(tmp_path, monkeypatch
     assert calls == ["aria2.tellActive"]
 
 
-def test_resume_torrent_rpc_without_a_known_tracker_keeps_bytes(tmp_path, monkeypatch):
+def test_resume_torrent_rpc_without_a_known_tracker_fails_closed(tmp_path, monkeypatch):
     path, info_hash = _canonical(tmp_path)
     before = path.read_bytes()
     monkeypatch.delenv("IRIS_HOST_IP", raising=False)
     monkeypatch.delenv("IRIS_TRACKER_ANNOUNCE", raising=False)
     monkeypatch.setattr(publish, "_rpc_call",
                         lambda *a, **k: [] if a[2] == "aria2.tellActive" else "g")
-    assert publish.resume_torrent_rpc(str(path), str(tmp_path), None,
-                                      rpc_url="http://x", rpc_secret="s") == "g"
+    monkeypatch.setattr(
+        publish, "default_announce_header",
+        lambda: "Authorization: Bearer current-seeder-token")
+    with pytest.raises(ValueError, match="unavailable"):
+        publish.resume_torrent_rpc(str(path), str(tmp_path), None,
+                                   rpc_url="http://x", rpc_secret="s")
     assert path.read_bytes() == before

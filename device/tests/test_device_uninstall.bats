@@ -25,10 +25,11 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "dry-run removes both EEM applets" {
+@test "dry-run removes timer, copy, and interrupted hash applets" {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no event manager applet IRIS-AGENT"* ]] && \
-  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]]
+  [[ "$output" == *"no event manager applet IRIS-COPYROOT"* ]] && \
+  [[ "$output" == *"no event manager applet IRIS-ROOT-HASH"* ]]
 }
 
 @test "dry-run also removes the on-demand reclaim applets" {
@@ -97,9 +98,10 @@ setup() {
   [[ "$output" == *"delete /force /recursive flash:guest-share"* ]]
 }
 
-@test "dry-run documents what is deliberately left in place" {
+@test "dry-run leaves the device IOx service enabled" {
   run bash "$UNINSTALL" --dry-run
-  [[ "$output" == *"LEFT IN PLACE"* ]] && [[ "$output" == *"iox"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\nno iox\n'* ]]
 }
 
 @test "dry-run persists successful Guest Shell cleanup" {
@@ -228,8 +230,7 @@ _device_uninstall_run_live() {
     DEVICE_PASS=p IRIS_FORCE_AGENT_ONLY=1 \
     bash "$STUBDIR/device/device-uninstall.sh"
   [[ "$output" != *"VLAN not set"* ]] || return 1
-  [[ "$output" == *"Removing:"*"IRISQ"*"IRIS PKI"* ]] || return 1
-  [[ "$output" == *"Preserving: operator VLAN/SVI"* ]] || return 1
+  [[ "$output" == *"Force undeploy: remove IRIS; retain networking without an ownership record."* ]] || return 1
   [ "$status" -eq 0 ]
 }
 

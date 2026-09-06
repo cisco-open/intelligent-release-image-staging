@@ -4,11 +4,16 @@
 
 import http.client
 import hashlib
+import os
+import socket
+import ssl
+import subprocess
 import threading
 import time
 from urllib.parse import quote_from_bytes
 
 import bencode
+import pytest
 import secrets_store
 import telemetry
 import tracker
@@ -79,7 +84,9 @@ def _serve(tmp_path, device_id="dev-1"):
     """Start a tracker with a secrets store; return (srv, port, announce_token)."""
     sp = _secrets_path(tmp_path)
     tok = _mint_announce_token(sp, device_id)
-    srv = tracker.make_server("127.0.0.1", 0, sp)
+    srv = tracker.make_server(
+        "127.0.0.1", 0, sp,
+        scrape_authorizer=lambda _device_id, _info_hash: True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1], tok
 
@@ -113,6 +120,124 @@ def _get(port, path):
     c.request("GET", path)
     r = c.getresponse()
     return r.status, r.read()
+
+
+def _tls_material(tmp_path):
+    key = str(tmp_path / "tracker-key.pem")
+    crt = str(tmp_path / "tracker-crt.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-days", "2", "-keyout", key, "-out", crt,
+         "-subj", "/CN=iris", "-addext", "subjectAltName=IP:127.0.0.1"],
+        check=True, capture_output=True)
+    combined = str(tmp_path / "tracker-combined.pem")
+    with open(combined, "w") as out:
+        for part in (crt, key):
+            with open(part) as stream:
+                out.write(stream.read())
+    return crt, combined
+
+
+def _tls_get(port, path, cafile, headers=None):
+    context = ssl.create_default_context(cafile=cafile)
+    conn = http.client.HTTPSConnection("127.0.0.1", port, context=context,
+                                       timeout=5)
+    conn.request("GET", path, headers=headers or {})
+    response = conn.getresponse()
+    result = response.status, response.read()
+    conn.close()
+    return result
+
+
+def test_one_tls_listener_accepts_query_and_bearer_auth(tmp_path):
+    """TLS is transport, not an auth split: both supported credential forms
+    must reach the same Handler and shared peer registry on port 6969."""
+    secrets_path = _secrets_path(tmp_path)
+    token = _mint_announce_token(secrets_path)
+    cafile, certfile = _tls_material(tmp_path)
+    srv = tracker.make_server(
+        "127.0.0.1", 0, secrets_path,
+        scrape_authorizer=lambda _device_id, _info_hash: True,
+        certfile=certfile)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    base = "/announce?info_hash=%s&port=6881&left=0" % INFO_HASH
+    try:
+        query_status, _ = _tls_get(
+            port, base + "&peer_id=query-peer&announce_token=" + token,
+            cafile)
+        bearer_status, _ = _tls_get(
+            port, base + "&peer_id=bearer-peer", cafile,
+            headers={"Authorization": "Bearer " + token})
+        assert query_status == bearer_status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_tracker_tls_handshake_is_not_on_accept_thread(tmp_path):
+    secrets_path = _secrets_path(tmp_path)
+    token = _mint_announce_token(secrets_path)
+    cafile, certfile = _tls_material(tmp_path)
+    srv = tracker.make_server("127.0.0.1", 0, secrets_path,
+                              certfile=certfile)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    idle = None
+    try:
+        assert not isinstance(srv.socket, ssl.SSLSocket)
+        idle = socket.create_connection(("127.0.0.1", port), timeout=5)
+        time.sleep(0.3)  # connected, but never sends a ClientHello
+        status, _ = _tls_get(
+            port,
+            "/announce?info_hash=%s&peer_id=p1&port=6881&left=0&key=%s"
+            % (INFO_HASH, token),
+            cafile)
+        assert status == 200
+    finally:
+        if idle is not None:
+            idle.close()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_tracker_tls_rejects_plain_http(tmp_path):
+    secrets_path = _secrets_path(tmp_path)
+    token = _mint_announce_token(secrets_path)
+    _cafile, certfile = _tls_material(tmp_path)
+    srv = tracker.make_server("127.0.0.1", 0, secrets_path,
+                              certfile=certfile)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1",
+                                          srv.server_address[1], timeout=5)
+        with pytest.raises((ConnectionError, http.client.BadStatusLine,
+                            http.client.RemoteDisconnected, socket.timeout)):
+            conn.request(
+                "GET", "/announce?info_hash=%s&peer_id=p1&port=6881&key=%s"
+                % (INFO_HASH, token))
+            conn.getresponse()
+        conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_tracker_main_refuses_missing_tls_certificate(monkeypatch, tmp_path,
+                                                      capsys):
+    monkeypatch.setenv("IRIS_CERT", str(tmp_path / "missing.pem"))
+    with pytest.raises(SystemExit) as exc:
+        tracker.main()
+    assert exc.value.code == 2
+    assert "refusing plaintext" in capsys.readouterr().err
+
+
+def test_tracker_rejects_unusable_tls_certificate_before_binding(tmp_path):
+    certfile = tmp_path / "not-a-certificate.pem"
+    certfile.write_text("not a certificate")
+    with pytest.raises(ssl.SSLError):
+        tracker.make_server("127.0.0.1", 0, _secrets_path(tmp_path),
+                            certfile=str(certfile))
 
 
 # ---------------------------------------------------------------------------

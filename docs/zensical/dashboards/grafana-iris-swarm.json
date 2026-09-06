@@ -39,7 +39,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "### What this board proves — and what it only infers\n\n**Measured** panels come straight from a counter IRIS observed: aria2's torrent-wide `uploadLength` (banked monotonically by the peer ledger) and aria2-next's per-connection `getSessionUploadLength` per peer.\n\n**Derived** panels are arithmetic on measured quantities and say so in the panel description. *Peers served* is `device-reported fleet delivery - origin sent`, where fleet delivery is the sum over devices of each device's largest `iris.transfer.completed_content_bytes`; nothing in the hub can watch a device send to another device.\n\nNo panel multiplies an image size by a device count. `iris_image_size_bytes` appears on exactly one panel and feeds no arithmetic. Reproducing a headline from `image size x completed devices` will not match this board.\n\n*Narrowing to one image:* set **both** pickers. `$image` narrows the Prometheus (origin) leg; `$image (catalog id)` narrows the Loki (device-report) leg. They are separate because the two record families carry different id forms - the report carries the CATALOG id, `iris.swarm.peer_bytes` and the metrics carry the aria2 BASENAME. Leaving the catalog-id picker on **All** while `$image` is narrowed subtracts one image's origin bytes from *every* image's fleet delivery, and inflates every derived peer share.\n\n**Untraced** is not an error bar, it is the part of the origin's own upload that could not be traced to a device, because the connection opened and closed between two samples. Lab capture rate: 73.3% at 3 s sampling, 88.1% at 2 s. It is shown, never absorbed.\n\n*Prerequisite:* the `iris_*` families below live on the IRIS `/metrics` text endpoint (`:9101`). Prometheus must scrape it directly, or the collector's `metrics/iris9101` pipeline must gain a `prometheusremotewrite` exporter. The OTLP push path renames the labels (`iris_image_id`, `iris_torrent_info_hash`) and this dashboard does not read it.",
+        "content": "### What this board proves — and what it only infers\n\n**Measured** panels come straight from a counter IRIS observed: aria2's torrent-wide `uploadLength` (banked monotonically by the peer ledger) and aria2-next's per-connection `getSessionUploadLength` per peer.\n\n**Derived** panels are arithmetic on measured quantities and say so in the panel description. *Peers served* is `device-reported fleet delivery - origin sent`, where fleet delivery is the sum over devices of each device's largest `iris.transfer.completed_content_bytes`; nothing in the hub can watch a device send to another device.\n\nNo panel multiplies an image size by a device count. `iris_image_size_bytes` appears on exactly one panel and feeds no arithmetic. Reproducing a headline from `image size x completed devices` will not match this board.\n\n*Narrowing to one image:* use the single **Image** picker. Its selected values are catalog IDs; the dashboard uses them directly for device-report records and expands them to the optional `.SPA.bin`/`.bin` basename form for Prometheus and `iris.swarm` peer records. All and multi-select therefore narrow both legs together.\n\n**Untraced** is not an error bar, it is the part of the origin's own upload that could not be traced to a device, because the connection opened and closed between two samples. Lab capture rate: 73.3% at 3 s sampling, 88.1% at 2 s. It is shown, never absorbed.\n\n*Prerequisite:* the `iris_*` families below live on the IRIS `/metrics` text endpoint (`:9101`). Prometheus must scrape it directly, or the collector's `metrics/iris9101` pipeline must gain a `prometheusremotewrite` exporter. The OTLP push path renames the labels (`iris_image_id`, `iris_torrent_info_hash`) and this dashboard does not read it.",
         "mode": "markdown"
       },
       "title": "How to read this board",
@@ -63,7 +63,7 @@
         "type": "loki",
         "uid": "${ds_loki}"
       },
-      "description": "MEASURED (device-reported) — the sum over devices of the largest `iris.transfer.completed_content_bytes` each device reported on an `iris.device.transfer.report` record inside the range: max per device, then sum. Never a bare sum over report records — a device files several report flavours (staging-complete, seeding-only, pull) and a bare sum multi-counts them; taking the max also keeps a device whose terminal report was lost but whose earlier report arrived. No image-size constant is involved. Note the report carries `iris.image.id` as the CATALOG id (`.SPA.bin`/`.bin` stripped) while the `$image` picker carries the aria2 BASENAME — they are different fields, reconciled by the `$image_catalog_id` suffix-strip variable, never joined directly. No data when no device reported in range; a device that never reported is absent from the sum, not a zero. This is a FLOOR on fleet delivery: it counts only devices that filed a report in range. aria2 counts wire bytes, so hashfailed and duplicate pieces can push a device above the image size. The report carries no info_hash, so there is no per-torrent breakdown.",
+      "description": "MEASURED (device-reported) — the sum over devices of the largest `iris.transfer.completed_content_bytes` each device reported on an `iris.device.transfer.report` record inside the range: max per device, then sum. Never a bare sum over report records — a device files several report flavours (staging-complete, seeding-only, pull) and a bare sum multi-counts them; taking the max also keeps a device whose terminal report was lost but whose earlier report arrived. No image-size constant is involved. The report carries `iris.image.id` as the catalog id, which the single `$image` picker selects directly; basename-bearing Prometheus and peer-record queries expand that same selection separately. No data when no device reported in range; a device that never reported is absent from the sum, not a zero. This is a FLOOR on fleet delivery: it counts only devices that filed a report in range. aria2 counts wire bytes, so hashfailed and duplicate pieces can push a device above the image size. The report carries no info_hash, so there is no per-torrent breakdown.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -114,7 +114,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": false,
           "legendFormat": "delivered"
@@ -180,7 +180,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "legendFormat": "origin",
@@ -195,7 +195,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin. Lab reference: origin 4618.5 MiB, peers 1877.5 MiB of 6496.0 MiB. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
+      "description": "DERIVED — fleet delivered (device-reported, panel to the left) minus origin sent (measured). This is the load peer-to-peer distribution carried: everything the fleet received that the origin did not send. It is arithmetic on two measured quantities, not an observation, and it therefore absorbs re-sends, hashfail waste and any clock skew between the log and metric sources. If 'Over-traced excess' is nonzero, this figure is suspect. If either input is missing the panel reads no data — it is never computed against a zero-filled origin.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -247,7 +247,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": true
         },
@@ -257,7 +257,7 @@
             "type": "prometheus",
             "uid": "${ds_prom}"
           },
-          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "hide": true
@@ -281,7 +281,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. Lab reference: 28.9% fleet-wide, but per device it ranged 18.7% to 55.9% — a fleet average is not a per-device truth (see the per-device table). NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
+      "description": "DERIVED — 100 x (fleet delivered - origin sent) / fleet delivered, both inputs as defined on the two panels to the left: delivery is device-reported `completed_content_bytes` (max per device, then sum), origin is the cumulative `iris_origin_sent_bytes_total` value. No image-size constant. No data if either input is missing or delivery is not positive. Inherits every caveat of its two inputs. A fleet average does not describe each device; see the per-device table.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -342,7 +342,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": true
         },
@@ -352,7 +352,7 @@
             "type": "prometheus",
             "uid": "${ds_prom}"
           },
-          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "hide": true
@@ -432,7 +432,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "100 * sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))\n/\nsum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "100 * sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))\n/\nsum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "legendFormat": "coverage",
@@ -498,7 +498,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time(iris_swarm_peers_attributed{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_swarm_peers_attributed{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "legendFormat": "peers",
@@ -526,7 +526,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "Origin is MEASURED (`iris_origin_sent_bytes_total`, cumulative value); the peers band is DERIVED as device-reported fleet delivery minus origin sent. Both are cumulative, so the stack holds its shape after the swarm goes idle instead of collapsing to a blank panel — that is the whole reason these are counters and not gauges. No image-size constant is used, and if either input is missing the peers band is not drawn rather than filled with zero. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
+      "description": "Origin is MEASURED (`iris_origin_sent_bytes_total`, cumulative value); the peers band is DERIVED as device-reported fleet delivery minus origin sent. Both are cumulative, so the stack holds its shape after the swarm goes idle instead of collapsing to a blank panel — that is the whole reason these are counters and not gauges. No image-size constant is used, and if either input is missing the peers band is not drawn rather than filled with zero.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -649,7 +649,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -661,7 +661,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
           "queryType": "range",
           "hide": true
         },
@@ -684,7 +684,7 @@
         "type": "datasource",
         "uid": "-- Mixed --"
       },
-      "description": "DERIVED — the same two numbers as the stacked chart, at the end of the range: measured origin bytes, and device-reported fleet delivery minus those origin bytes. The peers slice is clamped at zero for display only; a clamp that fires means more was traced to devices than the origin sent, so read 'Over-traced excess' before believing the split. If either input is missing the pie is not drawn — a pie with one measured slice is not a split. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
+      "description": "DERIVED — the same two numbers as the stacked chart, at the end of the range: measured origin bytes, and device-reported fleet delivery minus those origin bytes. The peers slice is clamped at zero for display only; a clamp that fires means more was traced to devices than the origin sent, so read 'Over-traced excess' before believing the split. If either input is missing the pie is not drawn — a pie with one measured slice is not a split.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -788,7 +788,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -800,7 +800,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
+          "expr": "sum(max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": true
         },
@@ -903,7 +903,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (image) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -997,7 +997,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
+          "expr": "sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1009,7 +1009,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (rate(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval])) - sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
+          "expr": "sum by (image) (rate(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__rate_interval])) - sum by (image) (rate(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__rate_interval]))",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -1151,7 +1151,7 @@
           "instant": false,
           "range": true,
           "refId": "A",
-          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))",
+          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__interval]))",
           "legendFormat": "Traced to a device (measured)"
         },
         {
@@ -1163,7 +1163,7 @@
           "instant": false,
           "range": true,
           "refId": "B",
-          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))",
+          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__interval]))",
           "legendFormat": "Untraced residue (measured)"
         }
       ],
@@ -1228,7 +1228,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "legendFormat": "residue",
@@ -1303,7 +1303,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "100 * sum(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})\n  /\nclamp_min(sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}), 1)",
+          "expr": "100 * sum(iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})\n  /\nclamp_min(sum(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}), 1)",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1370,7 +1370,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "instant": true,
           "range": false,
           "legendFormat": "traced",
@@ -1440,7 +1440,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range])) - sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range])), 0)",
+          "expr": "clamp_min(sum(last_over_time(iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range])) - sum(last_over_time(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range])), 0)",
           "instant": true,
           "range": false,
           "legendFormat": "excess",
@@ -1539,7 +1539,7 @@
           "range": true,
           "refId": "A",
           "legendFormat": "{{info_hash}}",
-          "expr": "max by (info_hash) (last_over_time(iris_swarm_peers_saturated{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__interval]))"
+          "expr": "max by (info_hash) (last_over_time(iris_swarm_peers_saturated{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__interval]))"
         }
       ]
     },
@@ -1683,7 +1683,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash, image) (iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash, image) (iris_origin_sent_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1695,7 +1695,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_peer_attributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1707,7 +1707,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_peer_unattributed_bytes_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1719,7 +1719,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_swarm_peers_attributed{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_swarm_peers_attributed{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -1731,7 +1731,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_swarm_seeders{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_swarm_seeders{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "E",
           "range": false,
           "instant": true,
@@ -1743,7 +1743,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_swarm_leechers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_swarm_leechers{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "F",
           "range": false,
           "instant": true,
@@ -1755,7 +1755,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "G",
           "range": false,
           "instant": true,
@@ -1767,7 +1767,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_transfer_progress_ratio{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_transfer_progress_ratio{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "H",
           "range": false,
           "instant": true,
@@ -1779,7 +1779,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (info_hash) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (info_hash) (iris_seeder_torrent_upload_bytes_per_second{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "I",
           "range": false,
           "instant": true,
@@ -1791,7 +1791,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "max by (info_hash) (iris_transfer_freshness_age_seconds{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "max by (info_hash) (iris_transfer_freshness_age_seconds{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "J",
           "range": false,
           "instant": true,
@@ -1924,7 +1924,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_swarm_seeders{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (image) (iris_swarm_seeders{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1936,7 +1936,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_swarm_leechers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (image) (iris_swarm_leechers{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -1948,7 +1948,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_swarm_peers{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (image) (iris_swarm_peers{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "C",
           "range": true,
           "instant": false,
@@ -2043,7 +2043,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "sum by (image) (iris_swarm_bytes_remaining{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -2137,7 +2137,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\", direction=\"receive\"})",
+          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\", direction=\"receive\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -2149,7 +2149,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\", direction=\"transmit\"})",
+          "expr": "sum by (image) (iris_transfer_throughput_bytes_per_second{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\", direction=\"transmit\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -2314,7 +2314,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum by (network_peer_address, iris_device_id) (max by (network_peer_address, iris_device_id, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
+          "expr": "sum by (network_peer_address, iris_device_id) (max by (network_peer_address, iris_device_id, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": false
         }
@@ -2413,7 +2413,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum by (iris_device_id) (\n  max by (iris_device_id, network_peer_address, iris_torrent_info_hash) (max_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n  -\n  min by (iris_device_id, network_peer_address, iris_torrent_info_hash) (min_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n)",
+          "expr": "sum by (iris_device_id) (\n  max by (iris_device_id, network_peer_address, iris_torrent_info_hash) (max_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n  -\n  min by (iris_device_id, network_peer_address, iris_torrent_info_hash) (min_over_time(\n    {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n    | unwrap iris_transfer_peer_sent_bytes [$__range]\n  ))\n)",
           "queryType": "instant",
           "hide": false,
           "legendFormat": "{{iris_device_id}}"
@@ -2522,7 +2522,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "avg by (network_peer_address) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_rate\" | iris_image_id=~\"${image:regex}\"\n  | unwrap iris_transfer_peer_send_bps [$__auto]\n))",
+          "expr": "avg by (network_peer_address) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_rate\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\"\n  | unwrap iris_transfer_peer_send_bps [$__auto]\n))",
           "queryType": "range",
           "hide": false,
           "legendFormat": "{{network_peer_address}}"
@@ -2580,7 +2580,7 @@
             "uid": "${ds_loki}"
           },
           "editorMode": "code",
-          "expr": "{service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"",
+          "expr": "{service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\" | iris_torrent_info_hash=~\"${info_hash:regex}\"",
           "refId": "A",
           "queryType": "range"
         }
@@ -2592,7 +2592,7 @@
       "id": 32,
       "type": "table",
       "title": "Peer share of delivery, per device (derived, %)",
-      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'. Lab reference range 18.7%-55.9%. NARROWING CAVEAT: this panel takes its delivery leg from Loki ($image (catalog id)) and its origin leg from Prometheus ($image). Narrow BOTH pickers or leave both on All - narrowing only $image inflates this figure with every other image's fleet delivery.",
+      "description": "DERIVED, per device — 100 x (delivered - origin_to_device) / delivered. `delivered` is that device's largest reported `iris.transfer.completed_content_bytes`; `origin_to_device` is the sum of its origin edges (max of the cumulative `iris.transfer.peer_sent_bytes` per (info_hash, peer address), then summed). The two records are joined ON DEVICE ID ONLY (`iris.device.id` on peer_bytes renamed to `device.id`) within the dashboard range; joining on `iris.image.id` is forbidden because the two records carry different id forms (basename vs catalog id) and would match nothing. A device present in only one of the two sources leaves this cell blank — never 0, never 100%. A device with no traced origin edge (its origin connection was never named) reads as 100% peer-served, which is a tracing artefact, not a fact: read it beside 'Trace coverage' and 'Peer ledger cap saturated'.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Mixed --"
@@ -2610,7 +2610,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "sum by (device_id) (max by (device_id, network_peer_address, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"${image:regex}\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | label_format device_id=iris_device_id\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
+          "expr": "sum by (device_id) (max by (device_id, network_peer_address, iris_torrent_info_hash) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.swarm.peer_bytes\" | iris_image_id=~\"(${image})(([.]SPA)?[.]bin)?\" | iris_torrent_info_hash=~\"${info_hash:regex}\"\n  | label_format device_id=iris_device_id\n  | unwrap iris_transfer_peer_sent_bytes [$__range]\n)))",
           "queryType": "instant",
           "hide": true
         },
@@ -2620,7 +2620,7 @@
             "type": "loki",
             "uid": "${ds_loki}"
           },
-          "expr": "max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image_catalog_id:regex}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n))",
+          "expr": "max by (device_id) (last_over_time(\n  {service_name=\"iris-tracker\"} | otel_log_name=\"iris.device.transfer.report\"\n  | iris_image_id=~\"${image}\"\n  | unwrap iris_transfer_completed_content_bytes [$__range]\n))",
           "queryType": "instant",
           "hide": true
         },
@@ -2747,7 +2747,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "sum(max_over_time(iris_swarm_completed_total{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"}[$__range]))",
+          "expr": "sum(max_over_time(iris_swarm_completed_total{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"}[$__range]))",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -2813,7 +2813,7 @@
             "uid": "${ds_prom}"
           },
           "editorMode": "code",
-          "expr": "max by (image, info_hash) (iris_image_size_bytes{job=~\"$job\", image=~\"$image\", info_hash=~\"$info_hash\"})",
+          "expr": "max by (image, info_hash) (iris_image_size_bytes{job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\", info_hash=~\"$info_hash\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -3048,36 +3048,11 @@
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
-        "regex": "",
+        "regex": "/^(.*?)(?:(?:\\.SPA)?\\.bin)?$/",
         "skipUrlSync": false,
         "sort": 1,
-        "type": "query"
-      },
-      {
-        "name": "image_catalog_id",
-        "label": "Image (catalog id) - narrow with $image",
         "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${ds_prom}"
-        },
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "allValue": ".*",
-        "refresh": 2,
-        "regex": "/^(.*?)(?:(?:\\.SPA)?\\.bin)?$/",
-        "query": {
-          "qryType": 1,
-          "query": "label_values(iris_origin_sent_bytes_total{job=~\"$job\", image=~\"$image\"}, image)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        },
-        "options": [],
-        "description": "The catalog id, derived from $image by stripping a .SPA.bin/.bin suffix and passing every other name through unchanged - the same rule as publish.derive_id, so .iso/.tar/.rpm images map to themselves instead of dropping out of the list. iris.device.transfer.report carries the catalog id while iris.swarm.peer_bytes and the Prometheus metrics carry the aria2 basename, so the two are never equated directly and this picker is what narrows the Loki (device-report) leg. IT IS SEPARATE FROM $image AND DOES NOT FOLLOW IT: narrowing $image while this stays on All subtracts one image's origin bytes from every image's fleet delivery. Narrow both, or leave both on All."
+        "description": "The single image picker drives both telemetry legs. Values are catalog IDs: a .SPA.bin/.bin suffix is stripped from Prometheus image basenames using the same rule as publish.derive_id, while .iso/.tar/.rpm names pass through unchanged. Device-report records already carry this catalog ID. Prometheus metrics and iris.swarm peer records carry the aria2 basename, so those queries expand the selected value with the optional .SPA.bin/.bin suffix. All and multi-select apply to both legs together."
       },
       {
         "allValue": ".*",
@@ -3089,7 +3064,7 @@
           "type": "prometheus",
           "uid": "${ds_prom}"
         },
-        "definition": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"$image\"}, info_hash)",
+        "definition": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\"}, info_hash)",
         "hide": 0,
         "includeAll": true,
         "label": "Info hash",
@@ -3098,7 +3073,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"$image\"}, info_hash)",
+          "query": "label_values({__name__=~\"iris_origin_sent_bytes_total|iris_swarm_peers\", job=~\"$job\", image=~\"(${image})(([.]SPA)?[.]bin)?\"}, info_hash)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

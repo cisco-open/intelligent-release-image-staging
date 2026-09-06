@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 # Management type and VLAN ownership
 
 IRIS supports five explicit management type models for the staging agent. The
-choice is per device, recorded in inventory, and — critically — determines what
-IRIS is allowed to create and remove on the device.
+choice is per device, recorded in inventory, and determines which network
+fields the Console shows and what IRIS may create and remove on the device.
+Changing the model or agent installer does not change the management type.
 
 > **Stage-only, network-preserving.** Inband never creates, changes, or removes
 > the operator's network, and IRIS never mutates running software state — see
@@ -33,7 +34,7 @@ Two details of what routed mode touches beyond the VLAN and SVI:
   `ip router isis` (for fabrics such as an SD-Access underlay that need to
   learn the IRIS subnet). The default (`none`) never injects the IRIS subnet
   into the operator's routing protocol and never creates a `router isis`
-  process. Before this was unconditional. This is a **per-device** setting —
+  process. This is a **per-device** setting —
   one server routinely onboards devices into different fabrics, only some of
   which run IS-IS. Set it on the device's inventory record (the `svi_igp`
   CSV column, or the same field via the console/API), routed devices only;
@@ -41,16 +42,14 @@ Two details of what routed mode touches beyond the VLAN and SVI:
   interpolated into the device's config, the same command-injection defense
   every other value on that path gets. A device whose record leaves it blank
   falls back to the fleet-wide `SVI_IGP` env var on the server (default
-  `none`) — the process-wide setting `SVI_IGP=isis` in `server/.env` used to
-  be the only way to opt a device in at all; it is now the default a
-  per-device override can still opt out of.
+  `none`). An explicit `svi_igp=none` overrides a server default of `isis`.
 
 Global `ip routing` is a switch-wide setting IRIS never enables on the
 operator's behalf — it is an operator decision. Both installers
 (`device/device-install.sh`, `device/iox/install.sh`) check for it before
 applying any config on a device using the routed management type. The check is semantic, not a grep
 for a positive `ip routing` line: that line is absent whenever routing is the
-platform default (seen on IE-3x00), which used to false-fail a healthy switch.
+platform default (as on IE-3x00).
 Instead the installers treat an explicit `no ip routing` line, or a route
 table answering in host mode (`Default gateway ...`), as the authoritative
 signal that routing is off — and treat a session that never echoes the
@@ -130,14 +129,8 @@ with telemetry when observability is enabled.
   preserved and undeploy removes that marking only when IRIS created it.
 
 `device/router-install.sh` destroys any pre-existing Guest Shell before
-applying config, instead of reusing one already `RUNNING`. A re-onboard over a
-running guest left it on its old networking — `guestshell enable` sees
-`RUNNING` and never rebuilds the guest, so the freshly applied VPG gateway
-never reaches it and the agent loses egress, silently (inbound ping still
-answers). Destroying the guest first forces `guestshell enable` to always
-build it from the config this run applies. Agent state persists on
-`bootflash:guest-share`, so a re-onboard only costs the ~60-second guest
-rebuild.
+applying config, then enables it with the selected VPG networking. Agent
+state persists on `bootflash:guest-share` across the Guest Shell rebuild.
 
 Undeploy of a **router-nat** device clears only translations whose inside-local
 address matches the app IP recorded in the deployment record, using targeted
@@ -158,17 +151,11 @@ a 2 GB image) for one image in flight: the staging copy plus the placed copy
 coexist while the placement runs. The agent safely refuses to stage when space
 is insufficient.
 
-**A same-name replacement — including republishing under a name the `BOOT`
-variable currently points at — costs no more free space than the figure
-above.** The old file at the destination, the staging copy, and the new
-proven copy at its temp name do all coexist on the storage root until the
-crash-safe [`rename` that puts it in
-place](device-agents.md#crash-safe-same-name-replacement) — but the old
-file was already occupying space before this placement began, so it is
-already excluded from "free" rather than something this placement newly
-needs room for. The only bytes this placement writes that were not already
-on the device are the staging copy and its root-side twin — the same **2×
-the image size + 200 MB** as a fresh filename.
+A file already on bootflash consumes space before the free-space check.
+Guest Shell can adopt an existing file after checking its size and native
+SHA-512 against the catalog. A conflicting or unreadable file is kept, and
+staging fails until the operator resolves it. See
+[Crash-safe same-name replacement](device-agents.md#crash-safe-same-name-replacement).
 
 Budget beyond that for the images you want **resident at once**, not for the
 number of reassignments you expect. Unchecking or reassigning an image parks it
@@ -191,23 +178,21 @@ may carry platform `xr-appmgr` before its management type is chosen, but plannin
 or deploying refuses the half-classified state.
 
 Onboarding creates the appmgr application `iris`, registers the package
-source `iris-xr`, stages the agent RPM at `harddisk:iris-xr.rpm`, and creates
-the working directory `harddisk:iris-work`. Undeploy removes exactly those
-four resources from its deployment record; every other router setting, including its
-networking configuration, is preserved. One qualification on the fourth:
-undeploy empties `harddisk:iris-work` but cannot delete the directory itself,
-because XR's CLI offers no prompt-free directory removal. An empty
-`harddisk:iris-work` left behind is therefore the **normal successful
-outcome**, reported as a note rather than a fault — not evidence of an
-interrupted run. A second undeploy run converges regardless, because each
-step re-probes the router's own
-state before acting instead of assuming its own prior success. Files an
+source `iris-xr`, and stages `iris-xr.rpm`, `iris-catalog.pem`, and the
+`iris-work/` directory under `harddisk:`. Undeploy removes the recorded app
+and package, the IRIS files, and torrent sidecars while preserving router
+networking. It empties `iris-work/` but can leave that directory in place:
+XR's CLI offers no prompt-free directory removal.
+
+The successful job ends with `undeploy complete: <device-ip>`. An empty work
+directory is expected. Repeating undeploy probes the router's current state
+and skips resources already removed. Files an
 operator staged directly on the router (adopted, not downloaded by IRIS)
 are never removed by teardown or by the agent, with one exception: a
 catalog republish of different content under the same image id replaces
 the file IRIS is tracking, and that replacement is logged.
 
-## Inventory (CSV v2)
+## Inventory
 
 Inventory is a management-type-aware, named-header CSV. The header is required and
 validated; extra, missing, or misplaced columns are rejected.
@@ -217,7 +202,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
-  `app_gateway`, and may fill `svi_igp` (`isis` or blank; every other
+  `app_gateway`, and may fill `svi_igp` (`none`, `isis`, or blank; every other
   management type must leave it blank).
 - **inband** rows fill `inband_vlan`, `app_ip`, `app_mask`, `app_gateway`, and
   must not carry routed VLAN/SVI fields. There is no IRIS VRF field.
@@ -226,8 +211,9 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 - **router-nat** rows additionally fill `nat_interface`. `platform=router` is
   explicit in the Add Device form; an imported blank can resolve from a known
   Catalyst 8000 (C8xxx) model at onboard time.
-- **xr-host** rows fill only `model` and `platform` (`xr-appmgr`, required);
-  every addressing column stays empty.
+- **xr-host** rows retain `device_id` and the router's `device_ip`, with
+  `platform=xr-appmgr` required and an optional model. All app-network fields
+  stay empty; the container shares the router's network stack.
 - `ios_ssh_host` is an OPTIONAL advanced override: the IOS endpoint the inband
   IOx app SSHes to for the placement copy. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
@@ -235,8 +221,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 
 The same server-side validator is applied to the Console, the API, and CSV
 import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and
-static host/subnet consistency. Older positional CSVs still import but are
-classified `legacy_routed`; they are never inferred as inband.
+static host/subnet consistency.
 
 The Add Device form requires an explicit agent install. The row editor and CSV
 can still hold a blank `platform` as inventory-only intent; onboarding resolves
@@ -246,9 +231,9 @@ is uncertain. `xr-host` is never inferred from a blank platform: it requires
 
 ## Deployment plans and applied records
 
-IRIS separates three concepts that were previously conflated:
+IRIS records three parts of each deployment:
 
-1. **Desired inventory** — editable operator intent (`fleet.json`).
+1. **Desired inventory** — editable operator intent (`fleet.d/`).
 2. **Deployment plan** — an immutable, resolved plan for one action, including
    the resolved platform and a `plan_hash`. Computed before any device contact.
 3. **Deployment record** — a durable, non-secret account of what IRIS actually
@@ -282,7 +267,7 @@ or legacy, cleanup stops in `needs-reconcile` instead of guessing.
 
 ### Adopting a pre-existing deployment
 
-Devices deployed before deployment records existed have no active deployment record, so a normal
+When a device has an IRIS agent but no active deployment record, normal
 undeploy is refused. Non-router deployments may use the explicit, audited
 **Adopt** action, which records current ownership without changing the device.
 Routers cannot be adopted, and preflight refuses to onboard over a live agent,
@@ -296,7 +281,7 @@ Audit as `undeploy_forced`. Onboard again after it completes.
 
 Router preflight is read-only and runs once, in the bounded onboarding worker
 pool, immediately before the enrollment token is minted — not synchronously
-inside the `POST /api/devices/<id>/onboard` request. Submitting a batch of
+inside the `POST /api/v1/devices/<id>/onboard` request. Submitting a batch of
 routers therefore returns a job id per device promptly, with progress shown
 as each job queues and then runs, instead of the request blocking on live SSH
 to every router in turn. Preflight rejects collisions for the VPG, NAT
@@ -309,27 +294,26 @@ token is minted or router configuration is applied.
 ## Console and CLI
 
 The Console Add Device flow offers **Routed**, **Inband**, **Router routed**,
-**Router NAT**, and **XR host** management types. Router choices show VPG number
-and app addressing; Router NAT also shows the outside interface. XR host hides
-every addressing field and is auto-selected for a Cisco 8000 series router
-model or the XR appmgr container agent install. The device table shows
-each device's **Management type**, not a bare VLAN/SVI value. Onboarding is
-record-backed. See
+**Router NAT**, and **XR host** management types. This choice alone controls
+which network fields appear. Router choices show VPG number and app addressing;
+Router NAT also shows the outside interface. XR host keeps the device's
+management IP and hides all app-network fields. Its installer is XR appmgr.
+The model is optional free text: typing a model does not change the selected
+management type. Saving a model name does not establish hardware support.
+The device table shows each device's **Management type**, and onboarding uses
+an applied deployment record. See
 [Web Console](console.md).
-
-The legacy `tools/gen-device-installers.sh` generator is routed-only and refuses
-a v2 (`management_type`) header: a self-contained installer cannot create a
-deployment record or run preflight before minting an enrollment token.
 
 ## Deployment environments
 
 Deployment records use the same contract on both deployments:
 
-- **Docker Compose** persists them under `IRIS_STATE` on the `iris-state`
-  volume; Console artifact staging is the host-bind-mounted `/srv/artifacts`.
-- **Kubernetes** persists them under `/data/state` on the RWO PVC; Console
-  artifact staging is `/data/artifacts` on the same PVC. Kubernetes runs one
-  replica with `Recreate`; a pod restart marks in-flight work `unknown` and
-  requires reconciliation rather than blind retry.
+- **Docker Compose** persists them in the server's `IRIS_STATE` on the
+  `iris-state` volume. The server stages artifacts in the host-bound
+  `/srv/artifacts`; the Console accesses them through the management API.
+- **Kubernetes** persists them in the server's `/data/state` on the RWO PVC,
+  with artifacts in `/data/artifacts`. The separate Console deployment has
+  no state PVC. Each deployment runs one replica with `Recreate`; a server
+  restart marks in-flight work `unknown` and requires reconciliation.
 
 See [Container Deployments](containers.md) and [Kubernetes](kubernetes.md).

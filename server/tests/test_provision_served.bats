@@ -33,6 +33,9 @@ teardown() { rm -rf "$TMP"; }
   # the cert is the server's public cert, verbatim
   run cat "$ART/iris-catalog.pem"
   [[ "$output" == "CRTPEM" ]]
+  # This is public certificate material and the documented host-side XR build
+  # reads it directly even when the container runs with umask 077.
+  [ "$(stat -c '%a' "$ART/iris-catalog.pem" 2>/dev/null || stat -f '%Lp' "$ART/iris-catalog.pem")" = "644" ]
   # the bundle carries the agent code
   tar tzf "$ART/iris-agent.tgz" | grep -q "agent/iris_agent.py"
 }

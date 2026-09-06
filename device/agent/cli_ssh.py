@@ -21,11 +21,19 @@ no enable/login noise) because the downstream parsers (flash_target, flashcheck)
 are text-exact. `extract_output` does that scrubbing and is unit-tested against a
 real captured IE-3400 transcript.
 
-`select_cli` is the runtime-mode seam: container mode -> this SSH transport;
-otherwise the Guest Shell `cli` import (C9300 path, byte-identical). Stdlib only."""
+`select_cli` uses the unified container's device_platform: iox selects this
+transport, xr-appmgr is forbidden, and no selector retains the Guest Shell
+`cli` import. Stdlib only."""
 import os
 import re
 import subprocess
+
+
+def _single_line(name, value):
+    value = "" if value is None else str(value)
+    if any(char in value for char in ("\n", "\r", "\x00")):
+        raise ValueError("%s must be a single line" % name)
+    return value
 
 
 class CliTransportError(RuntimeError):
@@ -90,12 +98,22 @@ class SSHCli(object):
     def __init__(self, host, user, password=None, enable=None, port=22,
                  runner=None, scp_runner=None, connect_timeout=15,
                  exec_timeout=900, control_path=None, known_hosts=None):
-        self.host = host
-        self.user = user
-        self.password = password
+        self.host = _single_line("device_ssh_host", host)
+        self.user = _single_line("device_ssh_user", user)
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", self.host or ""):
+            raise ValueError("invalid device_ssh_host")
+        # The destination is a positional `user@host` argument. Requiring a
+        # non-dash first character prevents an option-shaped username from
+        # being reinterpreted by ssh/scp even though no shell is involved.
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", self.user or ""):
+            raise ValueError("invalid device_ssh_user")
+        self.password = _single_line("device_ssh_pass", password)
         # default the enable secret to the login password (lab convention)
-        self.enable = enable if enable is not None else password
+        self.enable = _single_line(
+            "device_ssh_enable", enable if enable is not None else password)
         self.port = int(port)
+        if not 1 <= self.port <= 65535:
+            raise ValueError("device_ssh_port must be 1..65535")
         self.connect_timeout = int(connect_timeout)
         self.exec_timeout = int(exec_timeout)
         self.known_hosts = known_hosts
@@ -177,6 +195,7 @@ class SSHCli(object):
             self._needs_enable = False
 
     def execute(self, cmd):
+        _single_line("IOS command", cmd)
         try:
             transcript = self._runner(self._exec_script(cmd))
         except Exception as e:
@@ -189,8 +208,11 @@ class SSHCli(object):
         # ignore the result. Apply the block and surface only transport failure
         # (config-level `% ...` messages -- e.g. removing an absent applet --
         # are benign, exactly as on the Guest Shell path).
+        lines = list(lines)
+        for line in lines:
+            _single_line("IOS config line", line)
         try:
-            transcript = self._runner(self._config_script(list(lines)))
+            transcript = self._runner(self._config_script(lines))
         except Exception as e:
             raise CliTransportError("ssh transport failed: %s" % e)
         self._learn_privilege(transcript)
@@ -203,6 +225,14 @@ class SSHCli(object):
         cat9k.bin'. This is how the IOx-app agent lands its downloaded scratch on
         the IOS-visible SD so a plain `copy` can place it — the IE3x00 analog of
         the C9300 writing the scratch via the guestshell mount."""
+        _single_line("SCP local path", local_path)
+        _single_line("SCP remote path", remote_dest)
+        if not os.path.isabs(local_path) or ".." in local_path.split(os.sep):
+            raise ValueError("invalid SCP local path")
+        if not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*",
+                remote_dest or "") or ".." in remote_dest.split("/"):
+            raise ValueError("invalid SCP remote IOS path")
         target = "%s@%s:%s" % (self.user, self.host, remote_dest)
         try:
             self._scp(local_path, target)
@@ -252,15 +282,23 @@ def _import_guestshell_cli():  # pragma: no cover (only runs inside Guest Shell)
 
 
 def select_cli(cfg, env=None, guestshell_factory=None):
-    """Runtime-mode seam. Return `(cli_execute, cli_configure)`.
+    """Return the CLI transport selected by the device-platform key.
 
-    container mode (env IRIS_RUNTIME_MODE=container, or conf `runtime_mode =
-    container`) -> SSHCli bound methods. Otherwise the Guest Shell `cli` import
-    -- the C9300 path, unchanged. Gating on env/conf keeps the guestshell branch
-    byte-identical to the original two-line import."""
+    An absent selector retains the pre-unification runtime_mode seam exactly;
+    that is the Guest Shell/default compatibility path (and lets an older IOx
+    config survive until its entrypoint persists device_platform). Explicit
+    container profiles never fall back to the legacy key.
+    """
     env = os.environ if env is None else env
-    mode = env.get("IRIS_RUNTIME_MODE") or cfg.get("runtime_mode") or "guestshell"
-    if mode == "container":
+    platform = (env.get("IRIS_DEVICE_PLATFORM")
+                or cfg.get("device_platform") or "").strip()
+    if platform not in ("", "iox", "xr-appmgr"):
+        raise ValueError("invalid device platform: %s" % platform)
+    if platform == "xr-appmgr":
+        raise CliTransportError("xr-appmgr has no IOS SSH/CLI transport")
+    legacy_mode = (env.get("IRIS_RUNTIME_MODE")
+                   or cfg.get("runtime_mode") or "guestshell")
+    if platform == "iox" or (not platform and legacy_mode == "container"):
         cli = SSHCli(
             host=cfg["device_ssh_host"],
             user=cfg["device_ssh_user"],

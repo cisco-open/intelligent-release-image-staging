@@ -6,17 +6,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # Security Model
 
-IRIS is designed around least surprise: it moves images, verifies images, and reports status. Installation remains a separate operator decision.
+IRIS transfers, verifies, and stages operating-system images. Installing or
+activating a staged image remains an operator action outside IRIS.
 
 ## Guardrails
 
 | Guardrail | Meaning |
 | --- | --- |
-| No install | IRIS does not run install, activate, or package commit commands. |
+| No operating-system install | IRIS does not install or activate the staged IOS image, or commit an operating-system package change. Onboarding and undeploy manage only the IRIS application. |
 | No reload | IRIS does not reload or schedule reloads. |
 | No boot mutation | IRIS does not change boot variables or running software state. |
 | No inband network mutation | For inband devices, IRIS never creates, changes, or removes the existing VLAN, SVI, gateway, routes, or VRF. |
-| Device-side content check | The agent hashes the staged file with sha256 against its catalog entry before placing it, and confirms the placed copy by exact catalog byte size. |
+| Device-side content check | Downloaded bytes are checked against catalog SHA-256. IOS-XE placement checks the final copy's exact size; XR verifies the file on its host mount. An existing Guest Shell root image is adopted only after native SHA-512 verification against the catalog. |
 | Private swarm | Torrents use private metadata and authenticated announces. |
 | Unprivileged runtime | Every server process runs as a fixed non-root uid with all Linux capabilities dropped. |
 
@@ -37,28 +38,26 @@ and processor-board identity and own only collision-free named globals and
 
 ## Container runtime privileges
 
-The server image creates a system user `iris` with a **fixed uid and gid of
-10001** and declares `USER iris`. Every service — tracker (6969), catalog
-(8443), artifact server (8000), seeder and `aria2c` (6881), Console (8080), and
-telemetry (9101) — runs as that uid. No listener uses a privileged port, no
-service needs a raw socket, and nothing chowns anything at runtime. Compose pins
+The server and Console images create a system user `iris` with a **fixed uid
+and gid of 10001** and declare `USER iris`. Tracker (6969), catalog (8443),
+artifact server (8000), seeder/aria2c (6881), telemetry (9101), internal
+management (9443), and the separate Console (8080) run as that uid. No listener
+uses a privileged port, no service needs a raw socket, and nothing chowns
+anything at runtime. Compose pins
 the same identity and drops the remaining privilege surface; the exact settings
 are in [Runtime identity](server.md#runtime-identity).
 
-Plaintext secrets live only on the `/run/iris` tmpfs, which is mounted with
-`uid=`, `gid=`, and `mode=` mount options so the directory is owned by and
+Decrypted copies of the server's age-encrypted secrets live on `/run/iris` tmpfs,
+which is mounted with `uid=`, `gid=`, and `mode=` options so the directory is owned by and
 private to the runtime uid. Those options require Docker Engine 23.0 or later.
 
 Because the Dockerfile cannot change ownership of host paths, uid 10001 must be
 given access to the age identity file (`IRIS_AGE_KEY_FILE_HOST`, keeping mode
 600 or 400) and the artifacts directory (`IRIS_ARTIFACTS_HOST_DIR`) on every
-deploy. A deployment upgraded from a root-runtime release additionally needs a
-one-time ownership migration of its existing named volumes. `cap_drop: [ALL]` applies to
-`docker compose run` as well, so that migration cannot be done through this
-service even as `--user 0`; it needs a throwaway container with default
-capabilities. The ownership gap is per volume, so a reset that removes some
-volumes and keeps others reopens it for the ones kept. The commands are in
-[Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
+deploy. Named volumes must also be writable by uid 10001. `cap_drop: [ALL]`
+applies to `docker compose run`, so permission repairs require a separate
+container with permission to change ownership. See
+[Volume permissions](server.md#volume-permissions).
 
 The host image tree (`IRIS_IMAGE_ROOT`, mounted read-only at `/opt/images`)
 must also be readable and traversable by uid 10001 — see
@@ -88,7 +87,11 @@ flowchart TB
         Images["Image files"]
         Credentials["Stage-host and device credentials"]
     end
-    subgraph ServerZone["IRIS server"]
+    subgraph ConsoleZone["State-free Console"]
+        BrowserApi["Browser API gateway"]
+    end
+    subgraph ServerZone["IRIS server tier"]
+        Management["Authenticated management API"]
         Catalog["Catalog and policy"]
         Secrets["Encrypted secret store"]
         Artifacts["Served artifacts"]
@@ -99,6 +102,8 @@ flowchart TB
         IOS["Plain copy, byte-size attested"]
     end
 
+    BrowserApi -->|"CA-pinned HTTPS + scoped tier token"| Management
+    Management --> Catalog
     Images --> Catalog
     Credentials --> Artifacts
     Secrets --> Catalog
@@ -108,24 +113,55 @@ flowchart TB
     Flash --> IOS
 ```
 
+### Console and server are separate trust zones
+
+The Console mounts no fleet, device credential, catalog, image, artifact, or
+audit state. It sends allowlisted `/api/v1` browser requests to the internal
+`/internal/v1` management API over CA-pinned HTTPS. A management-scoped bearer
+is read from a mounted file, re-read for rotation, and compared against current
+and previous values in constant time before route lookup or body buffering.
+The credential is valid nowhere else and never appears in an environment value,
+URL, process argument, exception, or audit entry. Browser session and CSRF
+checks remain independently required.
+
+The Console tries the current token first. Only an explicit management-tier
+authentication rejection permits one attempt with the previous token; browser
+authentication failures, TLS failures and server errors do not. A mutation
+retains the token accepted by preflight and sends its body once.
+
+The default Compose stack exposes port 9443 only on its project network.
+Across Docker hosts, bind it to the server's private management address and
+allow only the Console host through the firewall. Kubernetes uses a ClusterIP
+Service plus a NetworkPolicy that selects Console pods. These reachability
+controls supplement the credential and verified TLS.
+
+The Console also needs its own TLS serving identity. The default Compose stack
+obtains a Console-only fallback or installed custom identity through the
+authenticated management connection. Docker on separate hosts and Kubernetes
+mount an independent default certificate and key read-only into the Console;
+the server has neither that default private key nor the ability to fetch it.
+A custom identity installed through Settings crosses the protected management
+connection. The Console keeps its active copy in tmpfs.
+
+The Compose tier credential is an exception to the encrypted server store: its
+current/previous files persist in the `iris-tier-auth` volume and are readable
+by both tiers, with the Console mount read-only. Separate Docker hosts have
+local credential directories provisioned over a trusted channel; neither host
+mounts the other's storage. Restrict access to these files and their backups.
+Kubernetes supplies the credentials through Secrets. See
+[Docker on separate hosts](docker-hosts.md) for provisioning and rotation.
+
 ### Swarm data is console-gated
 
 Per-device swarm state (device IDs, IPs, models, progress, live transfer
-rates) is reserved for the authenticated console: `:9101/swarm` answers only
-loopback peers by default, and the console proxies it over container loopback
-behind its session. `IRIS_SWARM_PUBLIC=1` reopens remote access for operators
-who scrape it on a trusted segment.
-
-Be honest about what that gate is: a peer-address check scoped to the
-container network namespace — defense in depth, not a hard boundary. Under a
-rootful container engine (the shipped Compose and Kubernetes postures),
-external connections to the published port never arrive as
-container-loopback, so the gate holds. Under a rootless engine
-(rootless Docker/Podman) published-port connections can be re-originated
-inside the namespace as `127.0.0.1`, and under host networking every
-host-local process is loopback — in those deployments the gate is void, and
-the hard control is `IRIS_METRICS_HOST=127.0.0.1` (bind the listener to
-loopback) or not publishing port 9101 at all.
+rates) is reserved for the authenticated management API and browser session.
+The telemetry listener authenticates credentials independently of source IP.
+Probes at `/healthz` and `/readyz` disclose no fleet state. Metrics require the
+monitoring credential, and swarm data crosses the tier-authenticated management
+hop plus browser session checks. Login and first-run setup have their own
+credential/grant checks. Static Console pages and the documented Guest Shell
+bootstrap/bundle/certificate downloads are public; short-lived installer files
+require their unguessable capability paths.
 
 ## Typed identity and peer policy
 
@@ -139,9 +175,9 @@ enrollment.
 
 A `legacy` participant is visible, answered, and counted, but it carries no
 device identity: it is never written to the durable endpoint map, never joined to
-a device row, and cannot be quarantined individually. Because every device that
-ever received a torrent carrying a previous seeder token still holds it, the
-tracker treats a legacy announce from an address that a durable endpoint
+a device row, and cannot be quarantined individually. While a rotated seeder
+credential remains valid, the tracker treats an unattributed announce from an
+address that a durable endpoint
 attributes to a quarantined or revoked device as that device: it receives no
 peers and is handed to nobody. The real boundary is the credential's own expiry
 — a previous seeder token is retired automatically 30 days after the rotation
@@ -155,17 +191,34 @@ value, index construction raises and every request in that lane is refused — a
 tracker 403 or a catalog authorization failure — rather than silently resolving
 to whichever record loaded last. No error message carries the offending value.
 
-### The announce credential travels over HTTP
+Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
+record's token with a constant-time comparison. Each request checks that
+record's current expiry and revocation state without scanning other devices.
 
-The tracker announce is an **HTTP** URL, so the announce credential rides an
-unencrypted hop. The address may be any routable IPv4 the operator uses —
-fleets are not always on RFC1918 space — and rotation only refuses a base no
-peer could dial (loopback, link-local, unspecified, multicast).
+### Tracker transport security
 
-That makes the placement of the announce endpoint a deployment decision with a
-real consequence: on a routable address the credential crosses that network in
-cleartext. Put the tracker on a management network you trust. The catalog
-(HTTPS) and the console are the surfaces that do carry transport security.
+The tracker on TCP 6969 is **HTTPS-only** and presents the same server
+certificate that devices already pin for the catalog. The origin seeder and
+every device aria2 process load that public certificate as their CA and keep
+certificate verification enabled. A plaintext request fails during the TLS
+handshake and never reaches tracker authentication.
+
+The origin seeder, IOx and IOS-XR send their announce credential in an
+`Authorization: Bearer` header. Guest Shell uses a BEP-compatible query
+credential. TLS encrypts the complete request, and credentials are never
+logged. The local aria2 JSON-RPC endpoint uses HTTP on `127.0.0.1` only and
+is not exposed to the network.
+
+Seeder credentials must contain only printable ASCII characters without
+whitespace. Startup validates both the RPC secret and announce token before
+replacing the private aria2 configuration; publishing and rotation validate
+the announce token before sending it to aria2. Invalid values stop the operation
+with an error that does not include the credential.
+
+For manually generated torrents, `tools/make-torrent.sh` requires an HTTPS
+announce URL with a nonempty `announce_token` or `key` query parameter. It
+parses the query and rejects missing or ambiguous credentials before creating
+the torrent.
 
 ### Peer policy failure posture
 
@@ -250,14 +303,10 @@ that missed the rotation keeps announcing on the old one meanwhile. It is not a
 second permanent key: past the window the tracker refuses the old token like any
 other expired credential, and the next rotation drops the record.
 
-Nothing here waits on an operator. Rotation does not *revoke* the previous
-record: revoking one early is still library-level support, and
-**no shipped command** performs it. It no longer has to — the expiry is stamped
-at rotation time, is enforced from the first read of the store afterwards, and a
-store written before this release has the same window applied from its own
-recorded rotation time. At most two still-valid previous records are allowed and a
-rotation that would exceed that is refused; an expired one no longer counts, so
-it never blocks a rotation.
+The expiry is set at rotation and enforced automatically. At most two valid
+previous credentials are allowed; a rotation that would exceed that limit is
+refused. Expired credentials do not count toward the limit. There is no
+operator command for revoking a previous credential before its expiry.
 
 A device cannot be locked out inside the window, and expiry never strands one:
 the way a device receives the current announce token is a freshly personalised
@@ -269,34 +318,43 @@ torrents during the overlap and nothing announces on a seeder token afterwards.
 announce is refused with a token-free 403 and no other symptom by default:
 the operator-visible signal is `iris_tracker_announces_refused_expired_total`
 (nonzero) alongside `iris_legacy_announce_participants` reading `0` — that
-combination is a locked-out, un-migrated fleet, not a migrated one. See
+combination can indicate devices attempting to use expired credentials. See
 [Observability: reading iris_legacy_announce_participants](observability.md#reading-iris_legacy_announce_participants).
 
 ## First-run admin claim
 
 Before an admin account exists, the console's normal login page accepts the
 documented default credential `iris` / `irisisgreat!` and, instead of a
-session, mints a one-time, single-use, 10-minute setup grant that leads into
-admin creation. That pair authorizes nothing else and stops working the
-moment a real admin account exists — afterwards it is an ordinary failed
-login, rate-limited and audited like any other. The operator may name the
-real admin `iris` too.
+session, mints a one-use, 10-minute setup grant that leads into administrator
+creation. That pair authorizes nothing else and stops receiving special
+treatment the moment a real administrator account exists; afterwards it is
+checked only against the stored administrator credentials, with failures
+rate-limited and audited like any other login. The operator may name the real
+administrator `iris` or even deliberately retain the default pair.
 
-This is a deliberate trade: a documented, unauthenticated default credential
-means whoever reaches a brand-new console first can claim the admin account.
-Complete setup immediately after deploying, and keep the console on a
-trusted network until you have.
+This is a deliberate trade: whoever reaches a brand-new Console first can
+claim the administrator account. The one-host Compose stack publishes port
+8080 only on `IRIS_HOST_IP`; the standalone Console uses
+`IRIS_CONSOLE_BIND_IP`. That
+binding is not caller authorization: anyone who can reach that address can
+still race the intended operator. Restrict the port to trusted operator sources
+(or apply the equivalent policy to the Kubernetes Console LoadBalancer) and
+complete setup immediately after deploying.
 
 ## Secrets
 
-Server secret material is encrypted at rest with age recipients. Plaintext lives only in `/run/iris` while the container runs. Device enrollment tokens are short-lived and generated per device by the running server.
+Catalog and device credentials, RPC secrets, and private server TLS material are
+encrypted at rest with age recipients. Their decrypted runtime copies live in
+`/run/iris`. Tier credentials use the separate file mounts described above;
+short-lived install assets under `staging/` can also contain device credentials.
+Device enrollment tokens are generated per device by the running server.
 
 Catalog-token rotation is recoverable without making a rolled token a general
 device credential. If the server commits a rotation but the response or the
 device's atomic config write is lost, that device's one previous token may ask
 only the token-refresh route to reissue the already-current secret bag. It
-cannot heartbeat or submit telemetry, its access to shared catalog routes still
-ends after the short overlap, and recovery ends at the token's original expiry.
+cannot heartbeat or submit telemetry, its assignment-bound catalog reads end
+after the short overlap, and recovery ends at the token's original expiry.
 The normal clock-skew allowance still applies. The retry is revalidated under
 the server's secrets-store lock, so revocation or a newer successful rotation
 takes precedence.
@@ -304,8 +362,8 @@ takes precedence.
 The age private key is deliberately kept outside the directory holding the
 ciphertext it opens. Co-locating them would mean any backup, snapshot, or read
 of the config directory yields both halves at once, making the at-rest
-encryption theater. Compose enforces the separation structurally: the key is
-mounted as a Docker secret at `/run/secrets/iris_age_key` from a host path the
+encryption ineffective against that access. Compose enforces the separation:
+the key is mounted as a Docker secret at `/run/secrets/iris_age_key` from a host path the
 operator controls, never from the encrypted volume.
 
 Do not commit:
@@ -319,7 +377,7 @@ Do not commit:
 
 The Console can publish an image that is already on disk, across the uploads
 volume and the read-only import root. Both routes require an authenticated
-session, `POST /api/images/import` additionally requires the CSRF header, and
+session, `POST /api/v1/images/import` additionally requires the CSRF header, and
 every attempt writes an `image_import` audit event, rejections included. The
 `POST` authorizes on candidate **identity** rather than a path prefix: the
 submitted path must be exactly one of the paths the scan currently offers, so a
@@ -344,8 +402,8 @@ content check" guardrail above does not cover: that check proves a device
 received what the catalog holds, not that the catalog holds a genuine Cisco
 file.
 
-Before anything in a downloaded feed is parsed, its X.509 signature is
-verified against a Cisco certificate pinned in-repo
+Before the CSV rows are parsed, the feed's detached RSA/SHA-512 signature is
+verified using the public key from a Cisco certificate pinned in-repo
 (`server/certs/cisco_bulkhash_verify.pem`; the file's own header records its
 provenance and fingerprint) — never a certificate found inside the feed
 itself. Any fetch, signature, or parse failure leaves every stored
@@ -364,43 +422,46 @@ releases a quarantine.
 
 ## TLS and certificates
 
-The catalog and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.
+The catalog, tracker, and artifact server use HTTPS. The generated device installer installs the catalog certificate into the device trust path so the bootstrap and catalog calls can validate the server identity.
 
 The catalog and artifact server **fail closed to TLS**, the same contract as
 the console below. At start each resolves `IRIS_CERT`; if it names no usable
 certificate, the process exits with a message naming the path instead of
-serving plain HTTP. The catalog answers a device bearer token on every
-route, and the artifact server's staging URLs carry the only authorization
-on the capability-bearing enrollment files it serves — a silent plaintext
-fallback would put either one on the wire in clear text. Set
+serving plain HTTP. The catalog answers a device bearer token on every route.
+The artifact server's v1 API uses resource-bound HTTP Basic over TLS; the
+Guest Shell installer uses high-entropy, one-install capability names under
+`staging/`. A silent plaintext fallback would expose either credential. Set
 `IRIS_CATALOG_ALLOW_PLAINTEXT=1` or `IRIS_ARTIFACTS_ALLOW_PLAINTEXT=1` to opt
 into a plaintext listener deliberately — loopback or an isolated lab network
 only. The shipped `docker-entrypoint.sh` always provisions `IRIS_CERT`, so
 this refusal is only reachable running `catalog.py` or `artifact_server.py`
 directly, outside the supported deployment.
 
-The console's own certificate and key, imported through Settings → TLS &
+The Console's own certificate and key, imported through Settings → TLS &
 trust, get the same careful handling: an encrypted private key is decrypted
 with `openssl pkey`, its passphrase piped over stdin and never passed as an
-argument or written to a log, and the key is stored age-encrypted at rest
-either way.
+argument or written to a log, and the key is stored age-encrypted in the
+server tier. The default Compose stack generates a Console-only fallback in
+server tmpfs. Docker on separate hosts supplies a Console-local default
+certificate and key; Kubernetes supplies an independent TLS Secret. The Console
+validates and copies its active pair into tmpfs. Custom identities and the
+single-host fallback arrive over the authenticated management connection;
+independently mounted defaults are copied locally, and their private keys stay
+on the Console host.
 
-The console **fails closed to TLS**. At start it resolves `IRIS_GUI_CERT`
-(the imported override, when its file exists) and then `IRIS_CERT`; if
-neither loads, `iris-gui` exits with a message naming both paths instead of
-serving plain HTTP. The old silent fallback accepted the admin password in
-cleartext and then could not even keep a session, because browsers discard
-a `Secure` cookie set over `http://` anywhere but `localhost`. Set
+The Console **fails closed to TLS**. Unless the explicit plaintext opt-in is
+set, startup fetches the active identity through the verified management hop
+or uses its independently mounted default; an unavailable or
+unusable identity makes `iris-console` exit. Set
 `IRIS_GUI_ALLOW_PLAINTEXT=1` to opt into a plaintext console deliberately —
 loopback or an isolated lab network only. With the opt-in the session
 cookie drops its `Secure` attribute (it keeps `HttpOnly` and
-`SameSite=Strict`), a warning is printed at start, and a certificate
-uploaded through Settings is saved but reported as not applied until the
-next restart. The listener completes the TLS handshake in the
-per-connection worker thread, so a client that connects and never sends a
+`SameSite=Strict`), and a certificate uploaded through Settings is saved but does not change a plaintext listener
+to HTTPS. Remove the opt-in and restart the Console to enable TLS. The
+listener completes the TLS handshake in the per-connection worker thread, so a client that connects and never sends a
 ClientHello ties up only its own connection.
 
-The console's trust store (Settings → TLS & trust → Trusted CAs) accepts
+The server's outbound trust store (Settings → TLS & trust → Trusted CAs) accepts
 only blocks that OpenSSL parses as X.509 certificates, whether pasted or
 downloaded. One `CERTIFICATE` block that is not a certificate would make
 OpenSSL reject the whole runtime bundle — and every private CA in it — so
@@ -410,7 +471,7 @@ degraded `ssl_context()` (system roots only) is logged rather than silent.
 
 ### Console sessions
 
-Sessions live in the console process and expire on idle. The console's
+Sessions live in the state-owning management process and expire on idle. The Console's
 periodic view refreshers mark themselves with `X-IRIS-Poll: 1` (GET only);
 the server validates the session for those without refreshing its idle
 clock, so a console left open on a polled view still reaches the idle
@@ -444,22 +505,23 @@ discarded, so "connection refused", "no matching key exchange method" and
 `known_hosts` path and the `ssh-keygen -R <ip> -f <file>` command to clear it
 when a device was legitimately re-imaged -- and a note to treat it as a
 possible interception otherwise. The console's **Forget host key** action
-(`POST /api/devices/<id>/forget-host-key`) runs the equivalent removal
+(`POST /api/v1/devices/<id>/forget-host-key`) runs the equivalent removal
 without shell access to the state volume, and is audited either way -- see
 [Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key).
 
 ### On-device agent sessions
 
 The agent's IOS control channel supports optional host-key pinning through the
-`device_ssh_known_hosts` agent config key, mirroring the verify-if-present
-pattern the catalog TLS context already uses. When the key is set **and** the
+`device_ssh_known_hosts` agent config key. This is separate from catalog TLS,
+which requires a usable pinned certificate. When the key is set **and** the
 file exists, SSH and SCP run with `StrictHostKeyChecking=yes` against that
 `known_hosts` file. Otherwise they keep `StrictHostKeyChecking=no` with
 `UserKnownHostsFile=/dev/null`, which is the default and is tolerable only
 because this is SSH-to-self over a link that never leaves the device (the SVI
 on switches, the VirtualPortGroup on routers, the operator's SVI inband).
 Nothing in IRIS writes this key, so pinning is opt-in: set it yourself
-in the agent configuration to enable it.
+in the agent configuration to enable it. XR uses its host mount and does not
+use this SSH-to-self channel.
 
 ## Third-party tools
 

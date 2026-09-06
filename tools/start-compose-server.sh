@@ -46,35 +46,24 @@ done
 [ -x "$REPO/tools/provision-iox-packages.sh" ] || { echo ">> IOx packaging tools not present; skipping IOx package staging" >&2; exit 0; }
 "$REPO/tools/provision-iox-packages.sh"
 
-# XR RPM freshness (Cisco 8000 series, IOS-XR): this bring-up only stages
-# the two IOx tars above -- the XR RPM is built separately and out of band
-# (tools/build-xr-package.sh) and is entirely optional (a server with no
-# Cisco 8000 devices in scope never needs one). An ABSENT RPM is therefore
-# silent, same "absent = neutral" rule tools/check-package-freshness.sh
-# uses for it. A PRESENT RPM that predates the certificate this bring-up
-# just (re)provisioned is different: docker-entrypoint.sh mints iris-
-# catalog.pem fresh on every start, so a prebuilt RPM naturally cannot pin
-# a certificate that did not exist yet. Warn with the exact remedy rather
-# than rebuilding automatically -- building the RPM needs docker context
-# decisions (base image, CATALOG_PEM, ...) this deploy script does not own.
-# The baseline is the certificate's OWN notBefore, never the mtime of
-# /srv/artifacts/iris-catalog.pem. That file is a staged COPY rewritten at every
-# bring-up, so its mtime records the last staging rather than the certificate,
-# and comparing against it warned about a current RPM purely because this script
-# had just re-copied the pem -- measured 2026-08-31, where the RPM was built
-# eleven minutes AFTER the very certificate it was accused of predating.
+# The XR RPM is optional and built separately. If one is already staged, check
+# its byte/provenance binding; certificate rotation is intentionally irrelevant
+# because onboarding now supplies the current public certificate at runtime.
 XR_RPM="$REPO/artifacts/iris-xr.rpm"
 if [ -f "$XR_RPM" ]; then
-  CERT_NB="$(docker exec "$IRIS_CONTAINER" openssl x509 -in /srv/artifacts/iris-catalog.pem \
-               -noout -startdate 2>/dev/null | sed 's/^notBefore=//' || true)"
-  CERT_EPOCH=""
-  if [ -n "$CERT_NB" ]; then
-    CERT_EPOCH="$(date -u -d "$CERT_NB" '+%s' 2>/dev/null \
-      || date -u -j -f '%b %e %H:%M:%S %Y %Z' "$CERT_NB" '+%s' 2>/dev/null || true)"
-  fi
-  RPM_EPOCH="$(date -r "$XR_RPM" '+%s' 2>/dev/null || true)"
-  if [ -n "$CERT_EPOCH" ] && [ -n "$RPM_EPOCH" ] && [ "$RPM_EPOCH" -lt "$CERT_EPOCH" ]; then
-    echo "WARNING: artifacts/iris-xr.rpm predates the live catalog certificate (build time only -- contents not inspected)." >&2
-    echo "  Rebuild it: tools/build-xr-package.sh --out artifacts/   (CATALOG_PEM: the live certificate, certificate block only)" >&2
+  XR_STATE="$(PYTHONPATH="$REPO/server${PYTHONPATH:+:$PYTHONPATH}" python3 - \
+      "$XR_RPM" <<'PY'
+import sys
+import setup_status
+
+item = setup_status.package_readiness(
+    sys.argv[1], "iris-xr.rpm", "xr-appmgr", "linux/amd64",
+    "tools/build-xr-package.sh --out artifacts/")
+print(item["state"])
+PY
+)"
+  if [ "$XR_STATE" != ok ]; then
+    echo "WARNING: artifacts/iris-xr.rpm does not match its canonical-image provenance ($XR_STATE)." >&2
+    echo "  Rebuild it: tools/build-xr-package.sh --out artifacts/" >&2
   fi
 fi

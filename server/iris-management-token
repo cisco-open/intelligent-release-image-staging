@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Rotate the Compose management-tier credential without exposing its value.
+
+Run inside the state-owning server container.  The credential is generated in
+process and written only to the tier-auth volume; stdout contains status only.
+"""
+
+import argparse
+import json
+import os
+import secrets
+import stat
+import tempfile
+
+import tier_auth
+
+
+def _paths():
+    current = os.environ.get(
+        "IRIS_MANAGEMENT_API_TOKEN_FILE", "/run/iris-tier/current.json")
+    previous = os.environ.get(
+        "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE",
+        "/run/iris-tier/previous.json")
+    if not current or not previous:
+        raise tier_auth.CredentialUnavailable(
+            "management credential paths are not configured")
+    # Both actions require separate slots: replacing or unlinking an alias of
+    # current would remove the overlap or the active credential. Resolve path
+    # aliases, then compare existing inodes to catch hard links as well.
+    same_file = os.path.realpath(current) == os.path.realpath(previous)
+    if not same_file:
+        try:
+            same_file = os.path.samefile(current, previous)
+        except FileNotFoundError:
+            pass  # The overlap file need not exist yet.
+        except OSError:
+            raise tier_auth.CredentialUnavailable(
+                "management credential paths are unavailable") from None
+    if same_file:
+        raise tier_auth.CredentialUnavailable(
+            "management credential paths must be distinct")
+    if os.path.realpath(os.path.dirname(current) or ".") != \
+            os.path.realpath(os.path.dirname(previous) or "."):
+        raise tier_auth.CredentialUnavailable(
+            "management credential paths must share one directory")
+    return current, previous
+
+
+def _fsync_directory(path):
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(path, data):
+    directory = os.path.dirname(path) or "."
+    fd, temporary = tempfile.mkstemp(
+        dir=directory, prefix="." + os.path.basename(path) + ".")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def rotate():
+    current, previous = _paths()
+    # Validate scope, length and permissions before copying the old credential
+    # into the overlap slot. Refuse a symlink even though replacing one would
+    # not follow it: rotation should operate only on the expected regular file.
+    try:
+        current_stat = os.lstat(current)
+    except OSError as exc:
+        raise tier_auth.CredentialUnavailable(
+            "current management credential is unavailable") from None
+    if not stat.S_ISREG(current_stat.st_mode):
+        raise tier_auth.CredentialUnavailable(
+            "current management credential is not a regular file")
+    tier_auth.load_pair(current)
+    with open(current, "rb") as stream:
+        old = stream.read(tier_auth.MAX_TOKEN_BYTES + 1)
+    if len(old) > tier_auth.MAX_TOKEN_BYTES:
+        raise tier_auth.CredentialUnavailable(
+            "current management credential is oversized")
+
+    replacement = (json.dumps({
+        "scope": "management", "token": secrets.token_urlsafe(48)},
+        separators=(",", ":")) + "\n").encode("utf-8")
+    # Make the overlap directory entry durable before replacing current, so a
+    # crash cannot persist the new current without the old credential overlap.
+    directory = os.path.dirname(current) or "."
+    _atomic_write(previous, old)
+    _fsync_directory(directory)
+    _atomic_write(current, replacement)
+    _fsync_directory(directory)
+
+
+def retire_previous():
+    _current, previous = _paths()
+    try:
+        st = os.lstat(previous)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise tier_auth.CredentialUnavailable(
+            "previous management credential is unavailable") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise tier_auth.CredentialUnavailable(
+            "previous management credential is not a regular file")
+    os.unlink(previous)
+    _fsync_directory(os.path.dirname(previous) or ".")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Rotate or retire the management-tier overlap credential")
+    parser.add_argument("action", choices=("rotate", "retire-previous"))
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "rotate":
+            rotate()
+            print("management credential rotated; previous overlap retained")
+        else:
+            retire_previous()
+            print("previous management credential retired")
+    except tier_auth.CredentialUnavailable as exc:
+        parser.exit(1, "iris-management-token: %s\n" % exc)
+
+
+if __name__ == "__main__":
+    main()

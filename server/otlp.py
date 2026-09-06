@@ -17,6 +17,7 @@ import os
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 import trust
 
@@ -819,6 +820,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _http_post(url, body, headers=None):
+    if headers and urlsplit(url).scheme.lower() != "https":
+        # Collector credentials must never cross a plaintext hop. Anonymous
+        # OTLP/HTTP remains compatible for isolated deployments.
+        raise RuntimeError("authenticated OTLP requires HTTPS")
     hdrs = {"Content-Type": "application/json"}
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=body, headers=hdrs)

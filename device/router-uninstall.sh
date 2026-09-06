@@ -67,11 +67,7 @@ if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
   : "${DEVICE_PASS:?set DEVICE_PASS}"
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== FORCE: agent-footprint-only teardown (no deployment record) ====="
-    echo "  Removing: IRIS EEM applets, Guest Shell, and $IRIS_DIR."
-    echo "  Reclaiming ONLY what carries IRIS's own mark: a VirtualPortGroup"
-    echo "  with IRIS's description, and IRIS-NAT-* objects. Anything unmarked"
-    echo "  is left exactly as it is."
+    echo "Force undeploy: remove IRIS and its marked VPG/NAT configuration."
   else
     : "${EXPECTED_DEVICE_IDENTITY:?set EXPECTED_DEVICE_IDENTITY from the deployment record}"
     [ "$ROUTER_RESOURCES_OWNED" = "1" ] \
@@ -127,6 +123,7 @@ config_teardown() {
 cat <<EOF
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-ROOT-HASH
 no event manager applet IRIS-RECLAIM
 no event manager applet IRIS-RECLAIM-BUNDLE
 EOF
@@ -272,13 +269,16 @@ EOF
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== [1/5] EEM applets removed FIRST ====="; config_teardown
-  echo "===== [2/5] guestshell disable  [3/5] guestshell destroy ====="
+  echo "===== [1/5] Remove IRIS timers ====="; config_teardown
+  echo "===== [2/5] Stop Guest Shell ====="
+  echo "guestshell disable"
+  echo "===== [3/5] Remove Guest Shell ====="
+  echo "guestshell destroy"
   if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [4/5] FORCE: IRIS app-hosting stanza removed; VPG/NAT SKIPPED (force) - ownership unproven ====="
+    echo "===== [4/5] Remove IRIS and its marked VPG/NAT configuration ====="
     config_cleanup_force
   else
-  echo "===== [4/5] record-owned config removal ====="
+  echo "===== [4/5] Remove recorded IRIS configuration ====="
   if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
     echo "no ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT"
     echo "show ip nat translations | include $APP_IP"
@@ -288,22 +288,22 @@ if [ "$DRY" -eq 1 ]; then
   fi
   config_cleanup
   fi
-  echo "===== [5/5] remove only IRIS files under $IOS_ROOT (preserve directory) ====="
+  echo "===== [5/5] Remove IRIS files under $IOS_ROOT ====="
   echo "delete /force /recursive $IRIS_DIR"
   for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
     echo "delete /force $IOS_ROOT/$name"
   done
-  echo "===== PERSIST: copy running-config startup-config ====="
-  echo "===== LEFT IN PLACE: outside interface config not owned by IRIS, bootflash-root image ====="
+  echo "===== Save startup-config ====="
+  echo "copy running-config startup-config"
   exit 0
 fi
 
 RUN="$HERE/../lab/device-run.sh"
 
-echo "[1/5] remove EEM applets on $DEVICE_IP"
+echo "[1/5] remove IRIS timers on $DEVICE_IP"
 { echo "configure terminal"; config_teardown; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
 
-echo "[2/5] guestshell disable"
+echo "[2/5] stop Guest Shell"
 printf 'guestshell disable\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 st="?"
 for _ in $(seq 1 30); do
@@ -311,7 +311,7 @@ for _ in $(seq 1 30); do
   case "$st" in *RUNNING*|*STOPPING*) sleep 10 ;; *) break ;; esac
 done
 
-echo "[3/5] guestshell destroy"
+echo "[3/5] remove Guest Shell"
 printf 'guestshell destroy\ny\n' | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
 for _ in $(seq 1 30); do
   st="$(printf 'show app-hosting list\n' | "$RUN" "$DEVICE_IP" | grep -i guestshell || true)"
@@ -322,7 +322,7 @@ done
 
 OWNED=""
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[4/5] FORCE: remove the IRIS app-hosting stanza and reclaim IRIS-marked network config"
+  echo "[4/5] remove IRIS and its marked VPG/NAT configuration"
   { echo "configure terminal"; config_cleanup_force; echo "end"; } | "$RUN" "$DEVICE_IP" >/dev/null
   # Without a record the device itself is the evidence: a VirtualPortGroup
   # carrying IRIS's description, and NAT objects carrying IRIS's own name, are
@@ -389,9 +389,8 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
     {
       echo "ERROR: could not remove the IRIS NAT overload mapping after $NAT_REMOVE_ATTEMPTS attempts. LEFT ON THE DEVICE:"
       echo "         $force_nat_stuck"
-      echo "       Its ACL is kept so the mapping stays valid for reconciliation rather than dangling."
-      echo "       Cause is usually NAT translations still referencing the mapping; re-run the"
-      echo "       forced undeploy once \`show ip nat translations\` has drained, or remove both by hand."
+      echo "       The matching ACL remains. Retry after NAT translations drain"
+      echo "       (show ip nat translations), or remove the mapping and ACL manually."
     } >&2
     exit 1
   fi
@@ -404,17 +403,16 @@ if [ "$FORCE_AGENT_ONLY" = "1" ]; then
   done <<< "$OWNED"
   while IFS=' ' read -r kind a b; do
     [ "$kind" = "vpg" ] || continue
-    echo "  reclaiming VirtualPortGroup$a (carries IRIS's description)"
+    echo "  removing VirtualPortGroup$a"
     reclaimed_any=1
     { echo "configure terminal"; echo "no interface VirtualPortGroup$a"; echo "end"; } \
       | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
   done <<< "$OWNED"
   if [ "$reclaimed_any" -eq 0 ]; then
-    echo "  no IRIS-marked VirtualPortGroup or IRIS-named NAT object found;" \
-         "operator network left untouched"
+    echo "  no IRIS network configuration found"
   fi
 else
-echo "[4/5] remove record-owned VPG and NAT footprint"
+echo "[4/5] remove recorded VPG/NAT configuration"
 # IOS refuses to unconfigure a dynamic NAT mapping while translations still
 # reference it. Remove the static rule, clear only translations whose inside
 # local address belongs to this record, then remove and verify the overload
@@ -490,12 +488,9 @@ for line in sys.stdin:
       echo "ERROR: could not remove the IRIS NAT overload mapping after" \
            "$NAT_REMOVE_ATTEMPTS attempts. LEFT ON THE DEVICE:"
       echo "         $NAT_RULE"
-      echo "         ip access-list standard IRIS-NAT-$VPG_NUMBER  (preserved deliberately)"
-      echo "       The ACL is kept so the mapping stays valid for reconciliation" \
-           "rather than dangling."
-      echo "       Cause is usually NAT translations still referencing the mapping."
-      echo "       Fix: re-run this undeploy once translations have drained" \
-           "(\`show ip nat translations\`), or remove both by hand:"
+      echo "         ip access-list standard IRIS-NAT-$VPG_NUMBER"
+      echo "       Retry after NAT translations drain (show ip nat translations),"
+      echo "       or remove the mapping and ACL manually:"
       echo "         configure terminal"
       echo "          no $NAT_RULE"
       echo "          no ip access-list standard IRIS-NAT-$VPG_NUMBER"
@@ -508,7 +503,7 @@ fi
 
 fi
 
-echo "[5/5] remove IRIS files under $IOS_ROOT (preserve the platform directory)"
+echo "[5/5] remove IRIS files"
 {
   printf 'delete /force /recursive %s\n' "$IRIS_DIR"
   for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
@@ -644,7 +639,7 @@ fi
 
 save_out="$(printf 'copy running-config startup-config\n' | "$RUN" "$DEVICE_IP" 2>&1 || true)"
 case "$save_out" in
-  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP is clean and persisted" ;;
+  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP" ;;
   *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
      printf '%s\n' "$save_out" >&2; exit 1 ;;
 esac

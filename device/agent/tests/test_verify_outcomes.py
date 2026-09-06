@@ -16,6 +16,8 @@ stale 'ok' its previous agent persisted. The two facts stay independent.
 """
 import time as _time
 
+import pytest
+
 import iris_agent
 import telemetry_report
 
@@ -297,3 +299,77 @@ def test_a_mismatch_lowers_done_so_the_record_cannot_claim_both():
     assert iris_agent.run_once(_CFG, deps, state) == "bad-sha"
     assert telemetry_report.content_sha256_state(state, "img1") == "mismatch"
     assert state["img1"]["done"] is False
+
+
+@pytest.mark.parametrize("platform,io_transfer,copy_in_place,target_fs", [
+    ("", False, False, "flash:"),          # Guest Shell on a switch
+    ("iox", True, False, "sdflash:"),      # IOx placement through IOS
+    ("", False, False, "bootflash:"),      # router Guest Shell
+    ("xr-appmgr", False, True, "harddisk:"),
+])
+@pytest.mark.parametrize("replan", [False, True])
+def test_hash_failure_heartbeats_immediately_and_next_tick_can_retry(
+        platform, io_transfer, copy_in_place, target_fs, replan):
+    """A failed verification must replace the previous visible stage state.
+
+    Exercise both the ordinary download verification and the already-staged
+    replan path through the shared loop used by every device runtime.
+    """
+    policy = {"approved_image_id": "img1"}
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "stage_fs": target_fs}
+    if replan:
+        state["img1"] = {"done": True, "copied": True, "sha": "abc",
+                         "tele": {"plan_id": "1" * 32,
+                                  "transfer_id": "a" * 32}}
+        policy["plans"] = {"img1": {"plan_id": "2" * 32,
+                                    "transfer_id": "b" * 32}}
+    cfg = dict(_CFG, device_platform=platform, announce_token="test-announce")
+    cat = _Cat(policy, _IMG)
+    sizes = {"/stage/img1.bin": 5}
+    deps = _deps(cat, sizes, verify=lambda p, sha: False,
+                 io_transfer=io_transfer, copy_in_place=copy_in_place,
+                 target_fs=lambda: (target_fs, 9_000_000_000))
+
+    assert iris_agent.run_once(cfg, deps, state) == "bad-sha"
+    assert len(cat.heartbeats) == 1
+    failed = cat.heartbeats[-1]
+    assert failed["current_image_id"] == "img1"
+    assert failed["stage_state"] == "error"
+    assert "SHA-256" in failed["stage_error"]
+    assert failed["target_fs"] == target_fs
+    assert "/stage/img1.bin" not in sizes
+    assert cat.telemetry == []              # a failure is no completion report
+
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    assert cat.heartbeats[-1]["stage_state"] == "staging"
+    assert cat.heartbeats[-1]["stage_error"] is None
+
+
+@pytest.mark.parametrize("failed_id", ["img1", "img2"])
+@pytest.mark.parametrize("replan", [False, True])
+def test_hash_failure_is_counted_in_set_heartbeat(failed_id, replan):
+    """A good sibling must not hide an image whose bytes failed verification."""
+    good_id = "img2" if failed_id == "img1" else "img1"
+    cat = _SetCat({}, _IMG)
+    _assign(cat, "img1", "img2")
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             good_id: {"done": True, "copied": True}}
+    if replan:
+        state[failed_id] = {"done": True, "copied": True,
+                            "tele": {"plan_id": "1" * 32,
+                                     "transfer_id": "a" * 32}}
+        cat._policy["plans"] = {
+            failed_id: {"plan_id": "2" * 32, "transfer_id": "b" * 32}}
+    sizes = {"/stage/img1.bin": 5, "/stage/img2.bin": 7}
+    deps = _deps(cat, sizes, verify=lambda p, sha: False)
+
+    expected = ("multi:bad-sha,complete" if failed_id == "img1"
+                else "multi:complete,bad-sha")
+    assert iris_agent.run_once(_CFG, deps, state) == expected
+    assert len(cat.heartbeats) == 1
+    hb = cat.heartbeats[-1]
+    assert hb["stage_state"] == "error"
+    assert hb["staged_image_ids"] == [good_id]
+    assert hb["errored_image_ids"] == [failed_id]
+    assert "SHA-256" in hb["stage_error"]

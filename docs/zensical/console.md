@@ -6,20 +6,33 @@ SPDX-License-Identifier: Apache-2.0
 
 # Web Console
 
-The console is the preferred operator surface once the server is running. It does not replace the CLI; it wraps common workflows and makes network state visible.
+The Console runs in its own container and provides the browser interface and
+operator API. It forwards authenticated requests to the server, which owns
+images, inventory, credentials, jobs, and audit records.
 
 ## First run
 
 Open:
 
 ```text
-https://<server-ip>:8080/
+https://<console-address>:8080/
 ```
 
-The server uses a self-signed certificate by default. Before an admin account
-exists, sign in with the default credential `iris` / `irisisgreat!` — it only
-works pre-setup — which takes you straight to the account-creation page for the
-real admin account. Or create the initial admin from the container instead:
+Use the configured Console host and port. In the one-host Compose stack this
+is `IRIS_HOST_IP`; a separate deployment has its own Console address. Its
+browser certificate is independent of the device/catalog certificate. Before an admin account
+exists, sign in with the default credential `iris` / `irisisgreat!`. A correct
+login creates no session; it yields a one-use setup grant that expires after
+ten minutes and takes you to the account-creation page. Creating the real admin
+permanently ends this special behavior, after which the pair is checked only
+against the stored administrator credentials and normally fails.
+
+!!! warning "The first reachable caller can claim a fresh Console"
+    Keep the Console on a trusted management network and complete admin setup
+    immediately after deployment. Do not expose a brand-new Console to an
+    untrusted network while no administrator exists.
+
+Or create the initial admin from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
@@ -36,11 +49,12 @@ own controls on the right — which walks the other three in order:
    health are published. Already satisfied if the deployment environment sets
    `IRIS_OTLP_ENDPOINT` and observability is enabled, in which case the step
    shows as done rather than being hidden.
-2. **Device packages** — whether each served IOx package still pins the
-   certificate this server hands to devices, plus the IOS-XR agent RPM
-   (`iris-xr.rpm`), checked differently — see below.
-3. **Image verification** — the Cisco Bulk Hash source check against every
-   staged image. Configured inline: refresh now, enable the daily schedule, a
+2. **Device packages** — whether each served IOx package and the IOS-XR agent
+   RPM (`iris-xr.rpm`) matches its canonical-image provenance, plus whether
+   the live and distributed copies of the runtime certificate agree — see
+   below.
+3. **Image verification** — the Cisco Bulk Hash source check against published
+   images. Configured inline: refresh now, enable the daily schedule, a
    pointer to downloading Cisco's Bulk Hash feed for air-gapped servers, and
    the offline feed-file import. These are the same controls Settings ›
    Image verification exposes — the wizard step mounts them in place rather
@@ -53,12 +67,9 @@ upcoming ones stay outline-only — and lets you open any of them directly, in
 any order.
 
 Every step can be skipped, and re-entering `#setup` resumes at the first one
-still outstanding. That is not merely a convenience: **the device-packages step
-can never be completed from the console**, because the console container has no
-Docker socket and so can detect a stale package but not rebuild one. That step
-is therefore a report and a command to run on the Docker host, plus a
-**Re-check** button — not a form whose submit button would be pretending to do
-something. A wizard that insisted on completion could never be finished.
+still outstanding. The package step shows the server's inspection results and
+provides build commands to run on the Docker host. Use **Re-check** after a
+build. Neither runtime container has a Docker socket.
 
 While anything is outstanding, a banner offers the way back. It dismisses for
 the session rather than permanently, because a package that goes stale later is
@@ -97,16 +108,18 @@ from the fallback font.
 | Settings | Shows server configuration, version, and operational settings. |
 | Audit | Records administrative and workflow actions. |
 
-For IOx devices, the Devices status distinguishes `Copying to <filesystem>`
-(sentence-cased render of the underlying `copying` wire status) from the
-torrent download phase while the app transfers a completed image from its
-container storage into IOS-visible storage. A final-placement failure is
-shown as `Placement failed` (wire status `placement-failed`) with a bounded
-diagnostic beside the pill; inspect the device's `IRIS ROOTCOPY-FAIL` syslog
-entry for the full device-side detail.
+For IOx devices, **Copying to <filesystem>** means the app is copying the
+downloaded image to IOS storage. **Staging failed** reports a download,
+verification or placement error. Read the diagnostic beside the status; for
+placement failures, the device's `IRIS ROOTCOPY-FAIL` syslog entry has more detail.
+
+After a new assignment, an idle device shows **Waiting for staging** until its
+agent reports activity. **Staging now** counts devices reporting work. Current
+image errors take precedence over older staged flags in Devices and Overview.
 
 On the Images screen, every picked or dropped file gets its own upload row —
-filename, progress bar, then publish state — with its own publish poller, so
+filename, progress bar, publish state, then Cisco Bulk Hash verification —
+with its own publish poller, so
 concurrent uploads report independently and a failed file names its error
 without stopping the others. Finished rows fade out on their own; failed rows
 stay until dismissed. A file over the 4 GB upload cap is refused in the
@@ -133,8 +146,12 @@ Importing publishes **in place**: the publish seeds from the file's own
 directory, so nothing is copied and the read-only root stays read-only, and the
 `.torrent` is written to the server's state directory rather than next to the
 image. The import runs as an ordinary publish job with the same progress
-reporting as an upload, and is recorded in Audit as `image_import` (also with
-`result=fail` when a request is rejected).
+reporting as an upload. After publication it immediately reconciles the
+catalog against Cisco's Bulk Hash feed even when the schedule is off; the job
+stays in `verifying` until that pass returns and reports `verified`,
+`mismatch`, `not in feed`, or an explicit incomplete-check reason. Publication
+remains durable if the feed is unavailable. The import is recorded in Audit as
+`image_import` (also with `result=fail` when a request is rejected).
 
 A file is offered only when it has an explicit Cisco software suffix (`.bin`,
 `.iso`, `.tar`, or `.rpm`), passes the filename charset gate, is not a dotfile
@@ -151,16 +168,16 @@ from this screen:
   exactly one file claims the ID, then re-check the panel.
 - `not readable by the server` — fix ownership so uid 10001 can read the file and
   traverse its directory, then re-check the panel. See
-  [Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
+  [Volume permissions](server.md#volume-permissions).
 
 `already published` needs nothing; the image is already in the catalog under its
 derived ID. For the exact definitions see
 [Import skip reasons](reference.md#import-skip-reasons).
 
-Ambiguity is refused rather than guessed. Reseeding prefers the catalog entry's
-recorded `source_dir`. Only for entries published before that field existed, or
-whose directory has since gone away, does it fall back to searching both image
-roots for a file with the entry's filename. The seeder runs with
+Ambiguity is refused rather than guessed at import. Startup reseeding prefers
+the catalog entry's recorded `source_dir`. If that field is absent or its
+directory is unavailable, it searches both image roots for a file with the
+entry's filename. The seeder runs with
 `bt-seed-unverified`, so a wrong directory would serve the wrong bytes under
 correct piece hashes.
 
@@ -185,10 +202,16 @@ device table shows each device's management type rather than a bare VLAN/SVI val
 - **XR host - router's own network stack** — the appmgr container runs on
   the router's own network stack; there are no app-network fields to set.
 
-A device with no management type chosen yet — imported from an older positional CSV,
-or added without picking one of the five types above — reads **Inventory only —
-management type not chosen** in that column instead. See
-[Older positional CSVs](fleet-workflows.md#inventory).
+A device without a management type reads **Inventory only — management type
+not chosen**. Choose a management type before onboarding it. See
+[Inventory](fleet-workflows.md#inventory).
+
+Management type alone controls the network fields in Add Device. Model is
+optional free text; known models narrow the **Agent install** choices without
+changing the management type. A model such as `C3650` can be saved, but that
+does not confirm hardware support. XR host selects `xr-appmgr`, router modes
+select `router`, and routed/inband modes require a compatible Guest Shell or
+IOx choice.
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on
@@ -197,28 +220,28 @@ OpenTelemetry (OTLP) export.
 
 Each onboard creates a durable **deployment record** of what it applied, and **Undeploy**
 runs only from that deployment record, so editing inventory after onboarding cannot
-retarget cleanup. A device deployed before deployment records existed shows no active
-deployment record; check its row and use the toolbar's **Adopt** action (an explicit,
+retarget cleanup. If an agent is present without an active deployment record,
+check its row and use the toolbar's **Adopt** action (an explicit,
 audited, no-change recording of current ownership) before undeploying it. Router deployments cannot
-be adopted — re-onboard instead. For preflight and deployment-record ownership see
+be adopted — force-undeploy the IRIS footprint, then onboard again. For preflight and deployment-record ownership see
 [Deployment plans and applied records](management-type.md#deployment-plans-and-applied-records).
 
 Each device row's **ⓘ Deployment details** control opens a read-only drawer
 beside the table — it slides in from the right, closes on **Esc** or **✕**, and
 leaves the row you opened it from where it was. It opens on an **Images** table
-listing every image currently assigned to the device with its own state:
-`ready` once that image is staged and verified, `error` for an image the
-agent's last tick gave up on, and `staging` for one still in flight. That is
-the same resolution the Swarm Map's drawer uses, so the two never disagree
-about an image, and a device with any failed image reads `N of M image(s)
-failed` in the Status column rather than `Staged` (the rendered label for
-the underlying `deployed` wire status). A device staging a single image shows
-that agent's own state string instead, sentence-cased for display (for
-example the raw `downloading` or `transferring_to_ios` state renders
-`Downloading` or `Transferring_to_ios`), since a one-image heartbeat
-reports exactly one image. The reported error is one per heartbeat, for the tick
-rather than for a particular image, so a multi-image set carries it on its
-own **Last reported error** row below the images. Below that, it shows the deployment itself: the deployment record state (`active`,
+listing every image currently assigned to the device:
+
+- `ready`: staged and verified.
+- `error`: the agent reported a failure.
+- `staging`: the agent is working on the image.
+- `pending`: staging has not been reported.
+
+For a single image, the drawer shows the agent's detailed state and error.
+For multiple images, the shared error appears in **Last reported error** below
+the table. A device with failed images shows `N of M image(s) failed` in the
+Status column.
+
+Below that, it shows the deployment record state (`active`,
 `removed`, `superseded`, `needs-reconcile`,
 `abandoned`) and record id, the
 preflight result, and the resolved configuration the onboard applied — the
@@ -235,15 +258,16 @@ and shown, never presented as this device's own history. Devices registered
 before IRIS started stamping registration time carry no stamp, and nothing is
 labelled for them.
 
-The Swarm Map's own device drawer lists images differently from the drawer
-above: its **Image staging** section is built from the device's last
-heartbeat (`staged_image_ids`, `errored_image_ids`, `current_image_id`), so it
-shows what the device last reported, not what is assigned. The Devices drawer
-above shows the full assigned set, including images still `queued` and not
-yet staged; it reads the same heartbeat fields for the states it shares, so
-an image is never `error` on one and something else on the other. A freshly assigned image therefore appears in the Devices drawer
-right away but does not show on the map until the device's next heartbeat
-reports it.
+The Swarm Map's **Image staging** section lists images from the device's last
+heartbeat. The Devices drawer lists current assignments, including pending
+ones. A new assignment can therefore appear in Devices before it appears on
+the map.
+
+Open swarm details update with the map. **Tracker role** describes torrent
+participation: a seeder may still be verifying or placing an image. **Ready**
+requires the device to report staging complete. Rates and verification results
+identify the image they describe. Measurements that cannot be tied to a
+participant are unavailable.
 
 An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
@@ -260,18 +284,18 @@ Above it, the filter bar narrows what the table shows — free text across
 device, IP and model, plus management type, **Agent install**, credential,
 telemetry, peer policy and status. Filtering happens on the server, not just
 in the browser: every one of these controls (and the free-text search) is
-applied by the same `GET /api/devices` request the table polls, so the count
+applied by the same `GET /api/v1/devices` request the table polls, so the count
 next to the filter bar and the rows on screen can never disagree about what
 "matches" means, no matter how large the fleet is. The **Status** choices are
 generated from the same derivation the Status column renders, so every state
 a row can show can be filtered for. Each dropdown choice shows the same
 sentence-case label the column renders: `Onboarding`, `Undeploying`, `Waiting
-for heartbeat`, `Onboard failed`, `Undeploy failed`, `Staged`, `Placement
+for heartbeat`, `Waiting for staging`, `Onboard failed`, `Undeploy failed`, `Staged`, `Staging
 failed`, `Image(s) failed`, `Copying to IOS storage`, `Staging (other)`,
 `Enrolled`, `Not enrolled`, and `Offline (no recent heartbeat)` — but its
 `<option>` value, and the wire status the cell itself carries, is the
 lowercase/kebab form underneath: `onboarding`, `undeploying`,
-`waiting-heartbeat`, `onboard-failed`, `undeploy-failed`, `deployed`,
+`waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`,
 `placement-failed`, `image-failed`, `copying`, `staging`, `enrolled`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
@@ -330,9 +354,11 @@ selected device, so an image a device has that you leave unchecked is dropped
 from it: whenever the selection's assignments are not all identical, the picker
 says so and **Apply** asks you to confirm before it posts. Applying an empty pick is a
 deliberate unassign and confirms first, whether for one device or for the
-whole selection: unchecking an image stops its torrent and frees the staging
-copy, but leaves any already-staged file on the device's boot filesystem,
-still tracked by IRIS — see
+whole selection. On the next policy poll, the agent stops an unassigned
+torrent and removes its download data. IOS-XE keeps an already placed root
+image for reuse or later guarded reclaim. IOS-XR downloads directly to the
+root, so it removes an IRIS-downloaded file but preserves an operator-adopted
+file or one whose origin is unknown. See
 [Unassigned image park](device-agents.md#unassigned-image-park) for what
 reclaims that space and when.
 
@@ -408,14 +434,13 @@ at once instead of after the next ten-second poll.
 
 ## Onboarding from the console
 
-GUI-driven onboarding uses the device's assigned credential profile to run the same install logic that the CLI generates. The sensitive values belong in the console or the server secret store, not in Git. Generated per-device staging files are temporary and swept after their configured age.
+Console onboarding uses the device's assigned credential profile to run the platform installer. Credentials belong in the Console or the server secret store. Generated per-device staging files are temporary and swept after their configured age.
 
 Guest Shell onboards probe device reachability before running the installer:
 an unpingable or unreachable IP fails the job immediately with `cannot reach
-device <ip> — ping/SSH probe failed; check the device IP and credentials`,
-instead of hanging inside an opaque SSH timeout. Router and IOx onboards
-already run their own live preflight, so all three platforms now fail loud on
-an unreachable device. Every onboarding rejection — a failed preflight, a
+device <ip> — ping/SSH probe failed; check the device IP and credentials`.
+Router, IOx, and XR onboarding also check device reachability in their
+preflight. Every onboarding rejection — a failed preflight, a
 busy device, an unreachable device, a router already holding a deployment
 record — is rendered in the console and recorded in Audit, whether it is
 refused at submit time or fails once the job is running.
@@ -432,6 +457,10 @@ stops the installer, with the confirmation warning that the device may be
 left partially configured (re-onboard, which is idempotent, or undeploy to
 clean up). A window opened on a queued job says so and starts streaming the
 moment the job wins a slot.
+
+Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
+Errors name the failed check and any recovery steps. Onboarding completion
+means the agent is set up; check Devices for image staging progress.
 
 ### Deployment logs
 
@@ -458,11 +487,16 @@ later verification step instead of exposing only one total duration.
 
 ## Settings
 
-Settings is a sidebar feature with its own sub-menu — **Setup**, **General**,
-**TLS & trust**, **Telemetry**, and **Audit export** — rather than an in-page
-tab strip. Each sub-page is deep-linkable: `#settings/setup`,
-`#settings/general`, `#settings/tls`, `#settings/telemetry`,
-`#settings/audit`.
+Settings is a sidebar feature with its own sub-menu — **Setup**, **Device
+packages**, **General**, **TLS & trust**, **Telemetry**, and **Audit export** —
+rather than an in-page tab strip. Each sub-page is deep-linkable, including
+`#settings/setup`, `#settings/packages`, `#settings/general`,
+`#settings/tls`, `#settings/telemetry`, and `#settings/audit`.
+
+General shows the device-facing server IP and the Console's browser URL
+separately. They can belong to different hosts. `IRIS_CONSOLE_URL` on the
+server supplies the published Console URL; the Console host's Compose binding
+controls where it actually listens.
 
 ### Setup
 
@@ -486,36 +520,38 @@ success — and `absent` is rendered as a neutral, not-applicable chip rather
 than a warning, since (as the device packages paragraph below explains) it
 routinely just means an architecture this deployment does not use.
 
-The **device packages** card exists because the IOx device packages
-(`iris-arm64.tar`, `iris-amd64.tar`) — and the IOS-XR agent RPM
-(`iris-xr.rpm`) — bake the catalog's TLS certificate in at **build** time.
-If the server's certificate later changes — a rebuilt server, a fresh
-volume, a deliberate rotation — every package already built against the old
-certificate silently stops working: the device installs and its app reports
-RUNNING, but it can never authenticate to the catalog and so never checks
-in. See
-[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages)
-for the full failure mode and the fix. The card lists each package's build
-time and state against the server's live certificate; `absent` for an
-architecture you do not deploy (for example `iris-amd64.tar` at a site with
-no Catalyst 9300 IOx devices, or `iris-xr.rpm` with no Cisco 8000 devices)
-needs no action. A `stale` row links to the rebuild command; if instead the
-certificate the server currently serves disagrees with the copy already
-handed to devices, the card names that condition specifically, because
-rebuilding packages alone would not fix it.
+The Setup card links to the persistent **Settings › Device packages** page,
+where the same status remains available after the first-run flow is dismissed.
+That page re-checks all three artifacts on demand and prints the complete
+Docker-host build command for every absent, stale, or unverifiable package
+family. The server inspects the artifacts and returns the results through the
+management API; neither runtime container has a Docker socket.
 
-The `iris-xr.rpm` row is checked differently from the two tars, and its
-detail text says so: this module has no RPM/cpio reader, so it cannot pin
-the certificate baked *inside* the RPM the way it does for the tars — it can
-only compare the RPM's build time against the server's live certificate.
-`ok` means the RPM was built after the current certificate (the best
-available evidence, not a contents check); `stale` means it predates the
-certificate and may still pin an old one. Either way the row says plainly
-that only build time was verified, never contents. Its rebuild command is
-`tools/build-xr-package.sh --out artifacts/`, not the IOx tars' — a
-different script for a different package format — and needs `CATALOG_PEM`
-pointed at the live certificate (certificate block only) the same way the
-tars' rebuild does.
+The **device packages** status covers deployment-neutral wrappers. The two IOx
+packages (`iris-arm64.tar`, `iris-amd64.tar`) and IOS-XR RPM (`iris-xr.rpm`)
+contain the shared agent but no deployment certificate. Each row binds the
+served wrapper's SHA-256 to an adjacent provenance manifest naming its wrapper
+kind, platform, and canonical OCI image/source digests. `ok` means those bytes
+and metadata agree; it does not claim to inspect the package contents or
+validate its native signature. `stale` means the wrapper digest no longer
+matches its manifest, while missing or malformed evidence is `absent` or
+`unknown`. `absent` for an architecture you do not deploy needs no action.
+Build time is informational, never a proxy for certificate freshness.
+
+The card performs a separate TLS readiness check between the certificate the
+live service presents and the public `iris-catalog.pem` copy that onboarding
+distributes. A mismatch or unreadable copy makes the aggregate state non-green
+because new onboards would receive unusable trust, but it does not make any
+package row certificate-stale. Reconcile the served/distributed certificate;
+rebuilding a deployment-neutral package cannot fix that condition.
+
+When a wrapper or its provenance really needs rebuilding, use
+`tools/provision-iox-packages.sh` for both IOx tars and
+`tools/build-xr-package.sh --out artifacts/` for the XR RPM. Certificate
+rotation needs no package rebuild: re-onboard affected devices to replace the
+runtime certificate delivered through IOx app data, the IOS-XR harddisk bind
+mount, or the Guest Shell artifact flow. See
+[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 ### TLS & trust
 
@@ -525,7 +561,8 @@ tars' rebuild does.
   private key reveals a passphrase field; the key is decrypted at import
   (`openssl pkey`, passphrase piped over stdin, never on the command line)
   instead of being rejected, and is still stored age-encrypted at rest either
-  way. **Use built-in certificate** reverts to the shipped self-signed cert
+  way. The card shows the identity this Console is serving.
+  **Use deployment default certificate** reverts to the deployment's default browser identity
   and appears only once a custom certificate is installed.
 - **Trusted CAs** — drop one or many CA certificate files to install them
   individually, or use the CA bundle source picker to download and trust a
@@ -556,7 +593,7 @@ The command line stays the right tool for four things:
 
 | Task | Why it stays on the CLI |
 | --- | --- |
-| Bringing the server up | The console does not exist until the server is running. |
+| Bringing the deployment up | Build and start the containers and provision their certificates and credentials on the hosts. |
 | Reproducible batch operations | Reviewed CSV files give you a diff and a rollback path. |
 | Building agent bundles and IOx packages | Build-time tooling, not a runtime operation. |
 | Credential minting, revocation, and seeder rotation | Deliberately kept off the browser surface. |

@@ -16,7 +16,8 @@
 #     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
 #     timer)
 #   - remove crypto pki trustpoint IRIS + ip http client secure-trustpoint IRIS
-#   - delete the staged app package (<pkg-fs>iris-arm64.tar) and, on C9k share
+#   - delete the staged app package (<pkg-fs>iris-arm64.tar), the runtime
+#     certificate source (<pkg-fs>iris-catalog.pem), and, on C9k share
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
 #     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
@@ -116,16 +117,18 @@ EOF
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== [1/4] app-hosting stop -> deactivate -> uninstall '$APPID' ====="
+  echo "[1/4] remove app: $APPID"
   printf 'app-hosting stop appid %s\napp-hosting deactivate appid %s\napp-hosting uninstall appid %s\n' \
     "$APPID" "$APPID" "$APPID"
   if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-    echo "===== [2/4] IRIS-named config removal (operator VLAN/SVI left in place) ====="
+    echo "[2/4] remove IRIS configuration"
   else
-    echo "===== [2/4] remove config footprint (appid, VLAN$VLAN, applets, trustpoint) ====="
+    echo "[2/4] remove IRIS configuration and VLAN $VLAN"
   fi
   config_cleanup
-  echo "===== [3/4] delete ${PKG_FS}${PKG} ====="
+  echo "[3/4] remove IRIS files"
+  echo "delete /force ${PKG_FS}${PKG}"
+  echo "delete /force ${PKG_FS}iris-catalog.pem"
   if [ -n "$SHARE_IOS_PATH" ]; then
     echo "delete /force $SHARE_IOS_PATH/iris-staged.bin"
     echo "delete /force $SHARE_IOS_PATH/iris-staged.bin.part"
@@ -133,19 +136,15 @@ if [ "$DRY" -eq 1 ]; then
     echo "delete /force /recursive $SHARE_IOS_PATH/iris"
   fi
   echo "delete /force /recursive $IRIS_STAGE_DIR"
-  echo "===== [4/4] verify no '$APPID' app / config footprint / $IRIS_STAGE_DIR remains ====="
-   echo "===== PERSIST: copy running-config startup-config (after successful cleanup) ====="
-   echo "===== LEFT IN PLACE: iox, file prompt quiet, AppGig trunk, ip scp server, sdflash image ====="
+  echo "[4/4] verify cleanup and save"
+  echo "copy running-config startup-config"
   exit 0
 fi
 
 : "${DEVICE_IP:?set DEVICE_IP}"; : "${DEVICE_USER:?set DEVICE_USER}"
 : "${DEVICE_PASS:?set DEVICE_PASS}"
 if [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "===== FORCE: IRIS-named footprint teardown (no deployment record) ====="
-  echo "  Removing: IRIS EEM applets, the '$APPID' app, staged files, IRISQ, and IRIS PKI."
-  echo "  Preserving: operator VLAN/SVI network configuration, because no"
-  echo "  deployment record proves IRIS created it."
+  echo "FORCE: no deployment record; remove IRIS app, files, applets, IRISQ and IRIS PKI; preserve operator VLAN/SVI"
 else
   # Only a record-driven teardown removes Vlan$VLAN, so only it needs the number.
   # Demanding one in force mode re-strands the record-less device this mode
@@ -176,14 +175,12 @@ if [ "$FORCE_AGENT_ONLY" != "1" ] && [ -n "$EXPECTED_DEVICE_IDENTITY" ]; then
   if [ "$LIVE_IDENTITY" != "$EXPECTED_DEVICE_IDENTITY" ]; then
     echo "ERROR: device identity mismatch; refusing to modify $DEVICE_IP" >&2
     echo "  record expects board ID '$EXPECTED_DEVICE_IDENTITY', device reports '$LIVE_IDENTITY'" >&2
-    echo "  If this device was rebuilt or replaced, undeploy it again with Force" >&2
-    echo "  (removes the IRIS agent footprint only, leaving the operator VLAN/SVI" >&2
-    echo "  untouched), or delete and re-add it in the Console." >&2
+    echo "  If replaced, use Force to remove IRIS artifacts while preserving operator VLAN/SVI, or re-add the device." >&2
     exit 1
   fi
 fi
 
-echo "[1/4] app-hosting stop -> deactivate -> uninstall '$APPID' on $DEVICE_IP"
+echo "[1/4] remove app: $APPID"
 # Idempotent + order-tolerant: each step is a no-op (harmless error, swallowed)
 # if the app is already past that state. uninstall frees the app's persist-disk.
 printf 'app-hosting stop appid %s\n' "$APPID" | RUN >/dev/null 2>&1 || true
@@ -200,16 +197,16 @@ st="$(app_state)"
 [ -z "$st" ] || echo "  WARN: '$APPID' still shows state '$st' after uninstall"
 
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
-  echo "[2/4] remove IRIS-named footprint (operator VLAN/SVI preserved)"
+  echo "[2/4] remove IRIS configuration"
 else
-  echo "[2/4] remove config footprint (appid, Vlan$VLAN, EEM applets, PKI trustpoint)"
+  echo "[2/4] remove IRIS configuration and VLAN $VLAN"
 fi
 { echo "configure terminal"; config_cleanup; echo "end"; } | RUN >/dev/null
 
-echo "[3/4] delete ${PKG_FS}${PKG} (the staged IOx app package)"
-printf 'delete /force %s%s\n' "$PKG_FS" "$PKG" | RUN >/dev/null 2>&1 || true
+echo "[3/4] remove IRIS files"
+printf 'delete /force %s%s\ndelete /force %siris-catalog.pem\n' \
+  "$PKG_FS" "$PKG" "$PKG_FS" | RUN >/dev/null 2>&1 || true
 if [ -n "$SHARE_IOS_PATH" ]; then
-  echo "  also removing the IRIS-prefixed transfer files from the share"
   # our transient staging files at the share ROOT (name-prefix isolation),
   # plus the legacy iris/ subdir from earlier builds. Never the share itself.
   printf 'delete /force %s/iris-staged.bin\ndelete /force %s/iris-staged.bin.part\ndelete /force %s/iris-probe.txt\ndelete /force /recursive %s/iris\n\n' \
@@ -218,10 +215,9 @@ fi
 # the scp-push staging dir (IE-3400 path, and the C9300 share-mount fallback).
 # Recursive so a mid-transfer scratch file cannot keep the directory alive;
 # guest-share itself is never touched.
-echo "  removing the scp-push staging dir $IRIS_STAGE_DIR"
 printf 'delete /force /recursive %s\n\n' "$IRIS_STAGE_DIR" | RUN >/dev/null 2>&1 || true
 
-echo "[4/4] verify no '$APPID' app, config footprint, or $IRIS_STAGE_DIR remains"
+echo "[4/4] verify cleanup and save"
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
   # VLAN/SVI preserved (operator network); IRIS-named artifacts removed, so
   # they are verified here too.
@@ -246,10 +242,9 @@ if [ -n "$left" ]; then
   printf '%s\n' "$left" >&2
   exit 1
 fi
-echo "persist cleanup to startup-config"
 save_out="$(printf 'copy running-config startup-config\n' | RUN 2>&1 || true)"
 case "$save_out" in
-  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP is clean and persisted" ;;
+  *"[OK]"*|*"bytes copied"*) echo "undeploy complete: $DEVICE_IP" ;;
   *) echo "ERROR: cleanup succeeded but saving startup-config failed:" >&2
      printf '%s\n' "$save_out" >&2
      exit 1 ;;

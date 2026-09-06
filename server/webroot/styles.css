@@ -165,9 +165,17 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
 .card .sub { font-size:11px; color:var(--text-secondary); margin-top:2px; }
 .pbar { height:8px; background:var(--rule); border-radius:5px; overflow:hidden; min-width:80px; }
 .pbar > span { display:block; height:100%; background:var(--success); }
-.inline-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--surface-subtle); border:1px solid var(--rule); border-radius:8px; padding:12px; margin:0 0 16px; }
-.inline-form input, .inline-form select { padding:7px 9px; border:1px solid var(--border); border-radius:var(--radius-control); font-size:13px; }
+/* Align each wrapped row at its controls, below the persistent labels.
+   The credential form shares this layout inside its existing panel. */
+.inline-form:not([hidden]), #cred-form:not([hidden]) { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
+.inline-form:not([hidden]) { background:var(--surface-subtle); border:1px solid var(--rule); border-radius:8px; padding:12px; margin:0 0 16px; }
+.inline-form input:not([type="checkbox"]):not([type="radio"]), .inline-form select { padding:0 9px; border:1px solid var(--border); border-radius:var(--radius-control); font-size:13px; }
+.form-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; min-height:32px; max-width:100%; }
+.form-check { display:inline-flex; align-items:center; gap:6px; min-height:32px; }
+.form-check input { margin:0; flex:none; }
+.inline-form .err, .form-help { flex:1 1 100%; min-width:0; margin:0; }
 .inline-form .err { color:var(--danger); font-size:13px; }
+.inline-form .err:empty, .form-help:empty { display:none; }
 /* A success message reuses the .err slot (same element, same layout)
    rather than a second status element. Must come AFTER .inline-form .err
    above: both are two-class selectors (equal specificity), so source order
@@ -180,6 +188,7 @@ select:focus-visible, textarea:focus-visible, button:focus-visible {
    every form and repainted eight previously-working success messages red. */
 .err.ok { color:var(--success); }
 #cred-panel:not([hidden]) { display:block; }
+#cred-form { margin-top:12px; }
 #cred-rows td { padding:6px 10px; }
 /* Swarm map keeps its dark presentation (re-tokened from magnetic.dark.css
    in Task 11) -- not part of this task's light-theme migration. */
@@ -602,7 +611,8 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 /* Persistent field labels (foundation for Task 9's field-row layout):
    every operational form input gets a real <label>, wrapping the control
    so the association holds even once a form is restyled around it. */
-.field { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.field { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; max-width: 100%; }
+.field > input, .field > select, .field > textarea { max-width: 100%; }
 .field-label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 /* A textarea field spans the row instead of sitting at compact width, and
    its control stretches to fill it (matches the pre-Task-6 sizing). */
@@ -610,7 +620,7 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
 /* A field's own control can be hidden independently by app.js (conditional
    form fields, e.g. df-vlan for xr-host) -- without this the wrapping
    label stays on screen with nothing left to label. */
-.field:has(> [hidden]) { display: none; }
+.field[hidden], .field:has(> [hidden]) { display: none; }
 
 /* Off-canvas nav rail (mobile, <=768px): #nav-toggle lives in the product
    bar and is otherwise invisible -- there is nothing to toggle above the

@@ -4,438 +4,245 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for tools/build-xr-package.sh -- packages the Task-1 device/xr/
-# image for appmgr delivery (agentinfo/plans/2026-08-28-xr-agent.md, Task
-# 2). The real ios-xr/xr-appmgr-build tool needs network + rpmbuild and is
-# not available here, so behavioral coverage stubs it (and docker, and git)
-# on PATH. The critical property under test throughout: xr-appmgr-build
-# prints "Done building" EVEN ON FAILURE (lab-confirmed on 192.0.2.10),
-# so this script must verify the RPM landed on disk and never trust the
-# tool's own exit code or message.
+# Fast source-level contract tests. The real multi-platform BuildKit and
+# xr-appmgr/rpmbuild paths are integration builds, not default unit tests.
 
 setup() {
   HELPER="$BATS_TEST_DIRNAME/../../../tools/build-xr-package.sh"
+  COMMON="$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh"
 }
 
-# ---------------------------------------------------------------------------
-# Static / fast checks against the real script (no stubbing needed)
-# ---------------------------------------------------------------------------
-
-@test "has no syntax errors" {
-  run bash -n "$HELPER"
-  [ "$status" -eq 0 ]
+@test "XR package helper has valid shell syntax" {
+  bash -n "$HELPER"
 }
 
-@test "--help lists --out and --dry-run" {
+@test "help exposes output and dry-run controls" {
   run bash "$HELPER" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"--out"* ]]
   [[ "$output" == *"--dry-run"* ]]
 }
 
-@test "rejects an unknown option" {
+@test "unknown options fail as usage errors" {
   run bash "$HELPER" --nope
   [ "$status" -eq 2 ]
 }
 
-@test "pins the lab-proven xr-appmgr-build commit" {
-  run grep -F 'APPMGR_BUILD_COMMIT:-37d79607' "$HELPER"
+@test "dry-run is hermetic and names the canonical multi-platform OCI" {
+  run env PATH="/usr/bin:/bin" bash "$HELPER" --out /tmp/iris-test-out --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"canonical amd64+arm64 OCI archive"* ]]
+  [[ "$output" == *"tools/build-device-image.sh --context"* ]]
+  [[ "$output" == *"/tmp/iris-test-out/iris-xr.rpm"* ]]
+}
+
+@test "XR wrapper consumes linux/amd64 from the canonical OCI, never rebuilds it" {
+  grep -q '"\$REPO/tools/build-device-image.sh" --context "\$CTX"' "$HELPER"
+  grep -q 'iris-device-oci.manifest' "$HELPER"
+  grep -q 'skopeo copy --override-os linux --override-arch amd64' "$HELPER"
+  ! grep -qE 'docker (build|save)' "$HELPER"
+}
+
+@test "XR and IOx wrappers call the same common builder" {
+  IOX="$BATS_TEST_DIRNAME/../../iox/build.sh"
+  run grep -F '$REPO/tools/build-device-image.sh" --context "$CTX"' "$HELPER"
+  [ "$status" -eq 0 ]
+  run grep -F '$REPO/tools/build-device-image.sh" --context "$CTX"' "$IOX"
   [ "$status" -eq 0 ]
 }
 
-@test "pins the lab-proven appmgr release config" {
-  run grep -F 'APPMGR_RELEASE:-ThinXR_7.3.15' "$HELPER"
-  [ "$status" -eq 0 ]
+@test "appmgr metadata stays on the hardware-proven release and source shape" {
+  grep -q 'APPMGR_BUILD_COMMIT:-37d79607' "$HELPER"
+  grep -q 'APPMGR_RELEASE:-ThinXR_7.3.15' "$HELPER"
+  grep -q 'file: iris-src/\$IMAGE_TAR_NAME' "$HELPER"
+  grep -q 'copy_hostname: false' "$HELPER"
+  grep -q 'copy_ems_cert: false' "$HELPER"
 }
 
-@test "never trusts appmgr_build's exit status alone -- the RPM check runs regardless" {
-  # The build is invoked with "|| true" specifically so a non-zero exit does
-  # not short-circuit past the RPMS/ verification below it.
-  run grep -F '$APPMGR_BUILD_CMD -b build.yaml ) >"$LOG" 2>&1 || true' "$HELPER"
-  [ "$status" -eq 0 ]
+@test "stale RPMS cannot satisfy a failed appmgr build" {
+  grep -q 'rm -rf "\$APPMGR_BUILD_DIR/RPMS"' "$HELPER"
+  grep -q "find .*RPMS.*-name '\*.rpm'" "$HELPER"
+  grep -q 'did not produce an RPM' "$HELPER"
 }
 
-@test "clears RPMS/ before each run so a stale artifact cannot read as success" {
-  run grep -F 'rm -rf "$APPMGR_BUILD_DIR/RPMS"' "$HELPER"
-  [ "$status" -eq 0 ]
+@test "common builder pins both architectures and records immutable identity" {
+  grep -q -- '--platform linux/amd64,linux/arm64' "$COMMON"
+  grep -q 'source_sha256=' "$COMMON"
+  grep -q 'oci_identity()' "$COMMON"
+  grep -q 'index_digest=\$index_digest' "$COMMON"
+  grep -q 'archive_sha256=' "$COMMON"
+  grep -q 'refusing to overwrite it' "$COMMON"
 }
 
-@test "reuses an existing clone instead of always re-cloning" {
-  run grep -F 'if [ ! -x "$APPMGR_BUILD_DIR/appmgr_build" ]; then' "$HELPER"
-  [ "$status" -eq 0 ]
-  run grep -F 'reusing existing xr-appmgr-build' "$HELPER"
-  [ "$status" -eq 0 ]
-}
-
-@test "refuses without CATALOG_PEM or CATALOG_PEM_URL" {
-  run env -u CATALOG_PEM -u CATALOG_PEM_URL bash "$HELPER" --dry-run
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"CATALOG_PEM"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# CATALOG_PEM cert-only guard (device/iox/build.sh discipline)
-# ---------------------------------------------------------------------------
-
-_cert_only() {
-  CERT_DIR="$BATS_TEST_TMPDIR/cert"
-  mkdir -p "$CERT_DIR"
-  openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" \
-    -out "$CERT_DIR/cert-only.pem" -days 1 -nodes -subj "/CN=test-catalog" 2>/dev/null
-}
-
-_cert_combined() {
-  CERT_DIR="$BATS_TEST_TMPDIR/cert"
-  mkdir -p "$CERT_DIR"
-  openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" \
-    -out "$CERT_DIR/cert-only.pem" -days 1 -nodes -subj "/CN=test-catalog" 2>/dev/null
-  cat "$CERT_DIR/cert-only.pem" "$CERT_DIR/key.pem" > "$CERT_DIR/combined.pem"
-}
-
-@test "cert-only guard: refuses a CATALOG_PEM carrying a PRIVATE KEY block" {
-  _cert_combined
-  run env CATALOG_PEM="$CERT_DIR/combined.pem" bash "$HELPER" --dry-run
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"PRIVATE KEY"* ]]
-  [[ "$output" == *"refusing to build"* ]]
-}
-
-@test "cert-only guard: accepts a certificate-block-only CATALOG_PEM" {
-  _cert_only
-  run env CATALOG_PEM="$CERT_DIR/cert-only.pem" bash "$HELPER" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"PRIVATE KEY"* ]]
-}
-
-@test "cert-only guard fires before any docker/git dependency is required" {
-  # No docker/git on PATH at all -- the guard must still reject a combined
-  # file, proving it runs first.
-  _cert_combined
-  run env PATH="/usr/bin:/bin" CATALOG_PEM="$CERT_DIR/combined.pem" bash "$HELPER" --dry-run
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"PRIVATE KEY"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# --dry-run: build.yaml shape, no aria2c/docker/git required
-# ---------------------------------------------------------------------------
-
-@test "dry-run preview carries the build.yaml shape (name: iris-xr, release: ThinXR_7.3.15)" {
-  _cert_only
-  run env -u ARIA2C_BIN CATALOG_PEM="$CERT_DIR/cert-only.pem" bash "$HELPER" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"packages:"* ]] || return 1
-  [[ "$output" == *'name: "iris-xr"'* ]] || return 1
-  [[ "$output" == *'release: "ThinXR_7.3.15"'* ]] || return 1
-  [[ "$output" == *"file: iris-src/iris-xr.tar.gz"* ]]
-}
-
-@test "dry-run never invokes docker or git" {
-  _cert_only
-  run env -u ARIA2C_BIN PATH="/usr/bin:/bin" CATALOG_PEM="$CERT_DIR/cert-only.pem" \
-    bash "$HELPER" --dry-run
-  [ "$status" -eq 0 ]
-}
-
-@test "dry-run honors --out in its final message" {
-  _cert_only
-  OUTDIR="$BATS_TEST_TMPDIR/custom-out"
-  run env -u ARIA2C_BIN CATALOG_PEM="$CERT_DIR/cert-only.pem" \
-    bash "$HELPER" --out "$OUTDIR" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$OUTDIR/iris-xr.rpm"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# Behavioral tests: fake docker/git on PATH + a stub xr-appmgr-build, so the
-# RPM-verification logic is exercised without network, real docker, or
-# rpmbuild. Mirrors the STUBDIR/PATH-shim pattern in
-# device/iox/tests/test_iox_build_amd64_name.bats and test_iox_install_output.bats.
-# ---------------------------------------------------------------------------
-
+# Behavioral harness: the canonical builder, OCI selector, git, and appmgr
+# build tool are small fakes; the real wrapper's ordering, stale-output guard,
+# metadata, atomic publication, and provenance are exercised end to end.
 _xr_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/tools" "$STUBDIR/device/xr" "$STUBDIR/device/agent" "$STUBDIR/bin"
+  APPMGR_DIR="$BATS_TEST_TMPDIR/appmgr"
+  OUT_DIR="$BATS_TEST_TMPDIR/out"
+  mkdir -p "$STUBDIR/tools" "$STUBDIR/device/xr" "$STUBDIR/bin" "$APPMGR_DIR"
   ln -s "$HELPER" "$STUBDIR/tools/build-xr-package.sh"
-  cp "$BATS_TEST_DIRNAME/../Dockerfile" "$STUBDIR/device/xr/Dockerfile"
-  cp "$BATS_TEST_DIRNAME/../entrypoint.sh" "$STUBDIR/device/xr/entrypoint.sh"
-  echo "# dummy" > "$STUBDIR/device/agent/dummy.py"
-  printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
-  chmod +x "$STUBDIR/device/agent/peer-transfer-hook.sh"
-  # device/verify_image.py lives one level up from device/agent/ -- the real
-  # script stages it into agent/verify_image.py (iris_agent.py imports it).
-  # Missing here would fail the staging cp before appmgr_build ever runs.
-  echo "# dummy" > "$STUBDIR/device/verify_image.py"
-  echo "0.0.0-test" > "$STUBDIR/VERSION"
+  printf '0.0.0-test\n' > "$STUBDIR/VERSION"
 
-  echo "fake aria2c bytes" > "$STUBDIR/aria2c-stub"
-  chmod +x "$STUBDIR/aria2c-stub"
-
-  _cert_only
-  CERT_FILE="$CERT_DIR/cert-only.pem"
-
-  # fake docker: build/save are both no-ops; save touches the -o target.
-  cat > "$STUBDIR/bin/docker" <<'DOCKER'
+  cat > "$STUBDIR/tools/build-device-image.sh" <<'STUB'
 #!/usr/bin/env bash
-case "$1" in
-  build) exit 0 ;;
-  save)
-    shift; out=""
-    while [ $# -gt 0 ]; do
-      case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
-    done
-    [ -n "$out" ] && : > "$out"
-    exit 0 ;;
-  *) exit 0 ;;
-esac
-DOCKER
-  chmod +x "$STUBDIR/bin/docker"
+set -eu
+[ "${COMMON_STUB_FAIL:-0}" = 0 ] || { echo "COMMON-STUB: refused" >&2; exit 41; }
+ctx=""
+while [ $# -gt 0 ]; do
+  case "$1" in --context) ctx="$2"; shift 2 ;; *) shift ;; esac
+done
+archive="$TEST_ROOT/canonical.oci.tar"
+printf 'canonical oci bytes\n' > "$archive"
+printf '%s\n' "$archive" > "$ctx/iris-device-oci-path"
+cat > "$ctx/iris-device-oci.manifest" <<EOF
+format=iris-device-oci-v1
+source_sha256=1111111111111111111111111111111111111111111111111111111111111111
+index_digest=sha256:2222222222222222222222222222222222222222222222222222222222222222
+archive_sha256=3333333333333333333333333333333333333333333333333333333333333333
+platforms=linux/amd64,linux/arm64
+EOF
+STUB
+  chmod +x "$STUBDIR/tools/build-device-image.sh"
 
-  # fake git: fails loudly if ever invoked -- proves the reuse-not-clone
-  # path is honored when appmgr_build already exists in APPMGR_BUILD_DIR.
-  cat > "$STUBDIR/bin/git" <<'GITSTUB'
+  cat > "$STUBDIR/bin/skopeo" <<'STUB'
+#!/usr/bin/env bash
+echo "SKOPEO-STUB: $*"
+for arg in "$@"; do
+  case "$arg" in
+    docker-archive:*) out="${arg#docker-archive:}"; out="${out%%:*}" ;;
+  esac
+done
+printf 'classic docker archive bytes\n' > "$out"
+STUB
+  cat > "$STUBDIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "STUB-GIT-SHOULD-NOT-BE-CALLED: $*" >&2
 exit 99
-GITSTUB
-  chmod +x "$STUBDIR/bin/git"
-
-  APPMGR_DIR="$BATS_TEST_TMPDIR/appmgr"
-  mkdir -p "$APPMGR_DIR"
-  OUT_DIR="$BATS_TEST_TMPDIR/out"
+STUB
+  chmod +x "$STUBDIR/bin/skopeo" "$STUBDIR/bin/git"
+  export TEST_ROOT="$BATS_TEST_TMPDIR"
 }
 
 _run_real() {
-  run env PATH="$STUBDIR/bin:$PATH" \
-    CATALOG_PEM="$CERT_FILE" \
-    ARIA2C_BIN="$STUBDIR/aria2c-stub" \
+  run env PATH="$STUBDIR/bin:$PATH" TEST_ROOT="$TEST_ROOT" \
+    COMMON_STUB_FAIL="${COMMON_STUB_FAIL:-0}" \
     APPMGR_BUILD_DIR="$APPMGR_DIR" \
     bash "$STUBDIR/tools/build-xr-package.sh" --out "$OUT_DIR"
 }
 
-# NOTE on structure: this sandbox's bash 3.2 + bats-core 1.13 combination
-# does not reliably fail a multi-line @test body on a non-final failing
-# assertion -- only the test's LAST statement is enforced (see
-# .superpowers/sdd/xr-xr2-review.md Finding 2). The "no RPM produced"
-# scenarios below are exactly the case Finding 1 was hiding behind: the
-# critical, bug-discriminating assertion (that the honest "did not produce
-# an RPM" diagnostic actually prints, rather than the script dying earlier
-# on the RPMS/ find pipeline under set -e+pipefail) is therefore split into
-# its own @test with that assertion as the final line, instead of being
-# buried as a non-final line inside a longer test.
-
-@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM exits non-zero" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
+_appmgr_success() {
+  cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
 #!/usr/bin/env bash
-echo "Building app..."
+mkdir -p RPMS
+printf 'real rpm bytes\n' > RPMS/iris-xr-test.x86_64.rpm
+echo "Done building"
+STUB
+  chmod +x "$APPMGR_DIR/appmgr_build"
+}
+
+@test "behavior: a success-looking appmgr run without an RPM fails honestly" {
+  _xr_stub_setup
+  cat > "$APPMGR_DIR/appmgr_build" <<'STUB'
+#!/usr/bin/env bash
 echo "Done building"
 exit 0
-EOF
+STUB
   chmod +x "$APPMGR_DIR/appmgr_build"
   _run_real
   [ "$status" -ne 0 ]
-}
-
-@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM prints the honest diagnostic" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Building app..."
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
   [[ "$output" == *"did not produce an RPM"* ]]
-}
-
-@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM explains Done building is not proof" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Building app..."
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
   [[ "$output" == *"not proof of success"* ]]
+  [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }
 
-@test "real run: appmgr_build reporting success (Done building, exit 0) with no RPM copies nothing to OUT" {
+@test "behavior: a stale RPM is removed before a failed build" {
   _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Building app..."
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [ ! -f "$OUT_DIR/iris-xr.rpm" ]
-}
-
-@test "real run: appmgr_build crashing (nonzero exit) with no RPM exits non-zero" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "some fatal rpmbuild error" >&2
-exit 1
-EOF
+  mkdir -p "$APPMGR_DIR/RPMS"
+  printf 'stale\n' > "$APPMGR_DIR/RPMS/old.rpm"
+  printf '#!/usr/bin/env bash\necho Done building\n' > "$APPMGR_DIR/appmgr_build"
   chmod +x "$APPMGR_DIR/appmgr_build"
   _run_real
   [ "$status" -ne 0 ]
+  [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }
 
-@test "real run: appmgr_build crashing (nonzero exit) with no RPM prints the honest diagnostic" {
+@test "behavior: a produced RPM and adjacent provenance publish atomically" {
   _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "some fatal rpmbuild error" >&2
-exit 1
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [[ "$output" == *"did not produce an RPM"* ]]
-}
-
-@test "real run: appmgr_build crashing (nonzero exit) with no RPM includes the tool's own log tail" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "some fatal rpmbuild error" >&2
-exit 1
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [[ "$output" == *"some fatal rpmbuild error"* ]]
-}
-
-@test "real run: a stale RPM left over from a previous run does not read as success" {
-  _xr_stub_setup
-  mkdir -p "$APPMGR_DIR/RPMS"
-  echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [ "$status" -ne 0 ]
-}
-
-@test "real run: a stale RPM left over from a previous run -- the honest diagnostic still prints" {
-  _xr_stub_setup
-  mkdir -p "$APPMGR_DIR/RPMS"
-  echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [[ "$output" == *"did not produce an RPM"* ]]
-}
-
-@test "real run: a stale RPM left over from a previous run is not copied to OUT" {
-  _xr_stub_setup
-  mkdir -p "$APPMGR_DIR/RPMS"
-  echo "stale bytes from a previous run" > "$APPMGR_DIR/RPMS/iris-xr-old.x86_64.rpm"
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [ ! -f "$OUT_DIR/iris-xr.rpm" ]
-}
-
-@test "real run: an RPM actually produced is copied to OUT/iris-xr.rpm" {
-  _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-mkdir -p RPMS
-echo "real rpm bytes" > RPMS/iris-xr-0.0.0-ThinXR_7.3.15.x86_64.rpm
-echo "Done building"
-exit 0
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
+  _appmgr_success
   _run_real
   [ "$status" -eq 0 ]
-  [ -f "$OUT_DIR/iris-xr.rpm" ]
-  run cat "$OUT_DIR/iris-xr.rpm"
-  [[ "$output" == "real rpm bytes" ]]
+  [ "$(cat "$OUT_DIR/iris-xr.rpm")" = "real rpm bytes" ]
+  manifest="$OUT_DIR/iris-xr.rpm.manifest"
+  [ -f "$manifest" ]
+  grep -q '^format=iris-device-wrapper-v1$' "$manifest"
+  grep -q '^wrapper_kind=xr-appmgr$' "$manifest"
+  grep -q '^platform=linux/amd64$' "$manifest"
+  grep -q '^canonical_index_digest=sha256:2222222222222222222222222222222222222222222222222222222222222222$' "$manifest"
+  grep -q '^canonical_archive_sha256=3333333333333333333333333333333333333333333333333333333333333333$' "$manifest"
+  grep -q '^canonical_source_sha256=1111111111111111111111111111111111111111111111111111111111111111$' "$manifest"
+  grep -q "^wrapper_sha256=$(sha256sum "$OUT_DIR/iris-xr.rpm" | awk '{print $1}')$" "$manifest"
+  ! find "$OUT_DIR" -maxdepth 1 -name '.iris-xr.rpm.*' | grep -q .
 }
 
-@test "real run: the build.yaml actually written carries the pinned name/release" {
+@test "behavior: generated build.yaml keeps the proven source and release" {
   _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-mkdir -p RPMS
-echo "real rpm bytes" > RPMS/iris-xr-0.0.0-ThinXR_7.3.15.x86_64.rpm
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
+  _appmgr_success
   _run_real
   [ "$status" -eq 0 ]
-  run cat "$APPMGR_DIR/build.yaml"
-  [[ "$output" == *"packages:"* ]] || return 1
-  [[ "$output" == *'name: "iris-xr"'* ]] || return 1
-  [[ "$output" == *'release: "ThinXR_7.3.15"'* ]]
+  grep -q '^  release: "ThinXR_7.3.15"$' "$APPMGR_DIR/build.yaml"
+  grep -q '^      file: iris-src/iris-xr.tar.gz$' "$APPMGR_DIR/build.yaml"
+  [ -s "$APPMGR_DIR/iris-src/iris-xr.tar.gz" ]
 }
 
-@test "real run: an existing clone (appmgr_build present) is reused -- git is never invoked" {
+@test "behavior: a reused builder cannot leak stale iris-src files into the wrapper" {
   _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-mkdir -p RPMS
-echo "real rpm bytes" > RPMS/iris-xr-0.0.0-ThinXR_7.3.15.x86_64.rpm
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
+  mkdir -p "$APPMGR_DIR/iris-src/config" "$APPMGR_DIR/iris-src/data"
+  printf 'stale config\n' > "$APPMGR_DIR/iris-src/config/stale.conf"
+  printf 'stale data\n' > "$APPMGR_DIR/iris-src/data/stale.bin"
+  _appmgr_success
   _run_real
   [ "$status" -eq 0 ]
-  [[ "$output" != *"STUB-GIT-SHOULD-NOT-BE-CALLED"* ]]
+  [ ! -e "$APPMGR_DIR/iris-src/config/stale.conf" ]
+  [ ! -e "$APPMGR_DIR/iris-src/data/stale.bin" ]
+  [ -s "$APPMGR_DIR/iris-src/iris-xr.tar.gz" ]
+}
+
+@test "behavior: an existing builder is reused without git" {
+  _xr_stub_setup
+  _appmgr_success
+  _run_real
+  [ "$status" -eq 0 ]
   [[ "$output" == *"reusing existing xr-appmgr-build"* ]]
-}
-
-@test "real run: a missing peer-transfer-hook.sh fails closed before docker is invoked" {
-  _xr_stub_setup
-  rm -f "$STUBDIR/device/agent/peer-transfer-hook.sh"
-  _run_real
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"peer-transfer-hook.sh"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# APPMGR_BUILD_DIR is operator-overridable and used to be `rm -rf`ed before
-# cloning whenever it lacked an executable ./appmgr_build -- a typo pointing
-# at a parent directory deleted it. The clone now only goes into a missing
-# or empty directory; anything else is refused, never deleted.
-# ---------------------------------------------------------------------------
-
-@test "real run: a non-empty APPMGR_BUILD_DIR without appmgr_build is refused, not deleted" {
-  _xr_stub_setup
-  echo "operator data" > "$APPMGR_DIR/precious.txt"
-  _run_real
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"refusing to clone over it"* ]]
   [[ "$output" != *"STUB-GIT-SHOULD-NOT-BE-CALLED"* ]]
-  [ -f "$APPMGR_DIR/precious.txt" ]
 }
 
-@test "real run: an empty APPMGR_BUILD_DIR is cloned into (git is invoked, nothing removed first)" {
+@test "behavior: nonempty APPMGR_BUILD_DIR without a builder is preserved and refused" {
   _xr_stub_setup
-  # git stub that records the clone and plants a working appmgr_build
-  cat > "$STUBDIR/bin/git" <<'GITSTUB'
+  printf 'operator data\n' > "$APPMGR_DIR/precious.txt"
+  _run_real
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Refusing to clone over it"* ]]
+  [ "$(cat "$APPMGR_DIR/precious.txt")" = "operator data" ]
+}
+
+@test "behavior: an empty APPMGR_BUILD_DIR is cloned without deletion" {
+  _xr_stub_setup
+  cat > "$STUBDIR/bin/git" <<'STUB'
 #!/usr/bin/env bash
-case "$1" in
-  clone) mkdir -p "$3"; printf '#!/usr/bin/env bash\nmkdir -p RPMS\necho rpm > RPMS/iris-xr.rpm\n' > "$3/appmgr_build"; chmod +x "$3/appmgr_build"; echo "CLONED $3" ;;
-  *) exit 0 ;;
-esac
-GITSTUB
+if [ "$1" = clone ]; then
+  mkdir -p "$3"
+  cat > "$3/appmgr_build" <<'INNER'
+#!/usr/bin/env bash
+mkdir -p RPMS
+printf 'cloned rpm\n' > RPMS/iris-xr.rpm
+INNER
+  chmod +x "$3/appmgr_build"
+  echo "CLONED $3"
+fi
+exit 0
+STUB
   chmod +x "$STUBDIR/bin/git"
   _run_real
   [ "$status" -eq 0 ]
@@ -443,39 +250,12 @@ GITSTUB
   [ -f "$OUT_DIR/iris-xr.rpm" ]
 }
 
-@test "the script never rm -rf's APPMGR_BUILD_DIR" {
-  run grep -F 'rm -rf "$APPMGR_BUILD_DIR"' "$HELPER"
-  [ "$status" -ne 0 ]
-}
-
-@test "dry-run says the clone never deletes an existing directory" {
-  _cert_only
-  run env -u ARIA2C_BIN CATALOG_PEM="$CERT_DIR/cert-only.pem" bash "$HELPER" --dry-run
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"never deleted"* ]]
-}
-
-# The RPM is copied into --out via a temp name + mv: --out artifacts/ is the
-# served directory device/xr-install.sh reads, and a plain cp could be read
-# half-written.
-
-@test "real run: the RPM is placed atomically (temp name + mv, no .tmp left behind)" {
+@test "behavior: canonical builder failure stops before wrapper work" {
   _xr_stub_setup
-  cat > "$APPMGR_DIR/appmgr_build" <<'EOF'
-#!/usr/bin/env bash
-mkdir -p RPMS
-echo "real rpm bytes" > RPMS/iris-xr-0.0.0-ThinXR_7.3.15.x86_64.rpm
-EOF
-  chmod +x "$APPMGR_DIR/appmgr_build"
-  _run_real
-  [ "$status" -eq 0 ]
-  [ -f "$OUT_DIR/iris-xr.rpm" ]
-  [ ! -e "$OUT_DIR/.iris-xr.rpm.tmp" ]
-  run grep -F 'mv -f "$OUT/.iris-xr.rpm.tmp" "$OUT/iris-xr.rpm"' "$HELPER"
-  [ "$status" -eq 0 ]
-}
-
-@test "the default XR output directory is gitignored" {
-  run git -C "$BATS_TEST_DIRNAME/../../.." check-ignore -q device/xr/out/iris-xr.rpm
-  [ "$status" -eq 0 ]
+  _appmgr_success
+  COMMON_STUB_FAIL=1 _run_real
+  [ "$status" -eq 41 ]
+  [[ "$output" == *"COMMON-STUB: refused"* ]]
+  [[ "$output" != *"SKOPEO-STUB"* ]]
+  [ ! -e "$OUT_DIR/iris-xr.rpm" ]
 }

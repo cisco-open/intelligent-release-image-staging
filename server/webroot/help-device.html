@@ -14,89 +14,131 @@
     <span class="product-name">◈ Intelligent Release &amp; Image Staging <span class="tag">IRIS</span></span>
     <span class="spacer"></span>
     <a class="toplink" href="/">← Console</a>
-    <a class="toplink" href="https://cisco-open.github.io/intelligent-release-image-staging/" target="_blank" rel="noopener">Official documentation ↗</a>
+    <a class="toplink" href="https://cisco-open.github.io/intelligent-release-image-staging/docs/" target="_blank" rel="noopener">Official documentation ↗</a>
   </div>
   <main class="doc">
     <h1>Device-side troubleshooting</h1>
-    <p>The agent's first successful heartbeat is what makes a device appear in
-    the console — nothing before that point is visible outside the device.
-    Work this chain <strong>in order</strong>; each step assumes the previous
-    one passed.</p>
+    <p>Start with the device's latest heartbeat, assigned images, and job log.
+    An inventory row can exist before an agent connects. A successful onboard
+    job confirms the installer finished; a fresh heartbeat confirms the agent
+    can reach the catalog. Image staging happens afterward.</p>
 
-    <ol>
-      <li><strong>Is the device heartbeating?</strong><br>
-      Console → Devices: a green heartbeat means the agent is alive and
-      talking to the catalog. Assignment only gates staging, not presence —
-      an unassigned device still heartbeats. If the heartbeat is green, the
-      problem is assignment or staging state, not the agent; stop here and
-      check the device's report and assigned image instead.</li>
+    <h2>Read the device status</h2>
+    <ul>
+      <li><strong>Waiting for staging</strong>: the assignment is saved, but the
+      agent has not reported work on it yet. Allow for the normal 60-second
+      tick, startup jitter, or a retry delay.</li>
+      <li><strong>Staging</strong>: check the assigned image's progress and
+      latest report. A fresh heartbeat proves contact, not a successful
+      download.</li>
+      <li><strong>Staging failed</strong> or <strong>Error</strong>: read the
+      current image's error. An older staged result does not clear a new
+      failure.</li>
+      <li><strong>Staged</strong>: the agent verified and placed the image.
+      A tracker peer at 100% only proves transfer completion; it does not
+      confirm the IOS-XE copy to the storage root.</li>
+      <li><strong>Stale or missing heartbeat</strong>: check the runtime and
+      its path to the catalog below. Unassigned agents still heartbeat.</li>
+    </ul>
+    <p>For multiple assignments, open the device details and check each image.
+    The Swarm Map shows observations for a particular image and participant;
+    an idle or unobserved peer is not evidence of a failed download.</p>
 
-      <li><strong>Is the EEM applet firing?</strong> (Guest Shell and router
-      paths)<br>
-      The installer configures applet <code>IRIS-AGENT</code> on a 60-second
-      watchdog timer. On the device:
-      <pre class="log">show event manager history events
-show event manager statistics</pre>
-      No entries means the applet is missing or never runs — re-run the
-      installer. On devices running AAA command authorization the applet must
-      carry <code>authorization bypass</code> (the installer sets this);
-      without it, IOS discards the applet's actions silently.</li>
+    <h2>Guest Shell and router agents</h2>
+    <p>The <code>IRIS-AGENT</code> EEM applet runs bootstrap every 60 seconds.
+    Check it from IOS-XE:</p>
+    <pre class="log">show event manager history events
+show event manager statistics
+show logging | include IRIS</pre>
+    <p>The installer sets <code>authorization bypass</code> on the applet for
+    devices using AAA command authorization. A missing applet, a failed
+    bootstrap, or an <code>IRIS ROOTCOPY-FAIL</code> line identifies the next
+    check.</p>
+    <p>Inside Guest Shell, the working directory is
+    <code>/flash/guest-share/iris</code> on Catalyst 9300 or
+    <code>/bootflash/guest-share/iris</code> on routers. Check
+    <code>iris-agent.conf</code>, the public <code>iris-catalog.pem</code>, and
+    any <code>aria2c-launch-failed</code> marker there. Keep configuration and
+    secret-file contents out of shared logs.</p>
+    <p>Dropping a fresh <code>bundle.tgz</code> into the guest-share root upgrades
+    the agent on the next tick. Console upgrades use <strong>Undeploy</strong>,
+    then <strong>Onboard</strong>; preflight refuses an already-running agent.</p>
 
-      <li><strong>What does syslog say?</strong><br>
-      <pre class="log">show logging | include IRIS</pre>
-      Installer, bootstrap, and copy-to-root messages land here. An
-      <code>IRIS ROOTCOPY-FAIL</code> entry carries the device-side detail
-      behind a console <code>placement failed</code> status.</li>
+    <h2>IOx agents</h2>
+    <pre class="log">show app-hosting list</pre>
+    <p>The <code>iris</code> app must reach <code>RUNNING</code>. A new package
+    can take several minutes to load. A failed onboard that left the app
+    <code>DEPLOYED</code> or <code>ACTIVATED</code> can be retried from the
+    Console; a running app requires undeploy before onboarding again.</p>
+    <p>IOx uses the common device container with
+    <code>IRIS_DEVICE_PLATFORM=iox</code>. It needs the configured app IP,
+    gateway, and VLAN, plus SSH access from the app to IOS for storage checks
+    and final placement. Downloads use CAF persistent storage; Catalyst 9300
+    normally hands files to IOS through the SSD share, while IE-3400 uses SCP
+    to the device. Check <code>show logging | include IRIS</code> for placement
+    or SSH errors.</p>
+    <p>The package contains no server certificate. Onboarding copies the
+    current public certificate into application data <em>after activation</em>
+    and before starting the app. A missing runtime certificate, incorrect
+    <code>CAF_APP_APPDATA_DIR</code>, or stale certificate stops the catalog
+    and tracker clients.</p>
 
-      <li><strong>Can the guest reach the server?</strong><br>
-      The agent needs HTTPS to the catalog on <code>:8443</code> and the
-      artifact server on <code>:8000</code>. Probe from inside Guest Shell:
-      <pre class="log">guestshell
-curl -sk -o /dev/null -w '%{http_code}\n' https://&lt;server-ip&gt;:8443/
-curl -sk -o /dev/null -w '%{http_code}\n' https://&lt;server-ip&gt;:8000/</pre>
-      Any HTTP status code proves the path. Connection refused or a timeout
-      is a routing/VLAN/NAT problem — check the device's management type and
-      the server's published ports.</li>
+    <h2>IOS-XR agents</h2>
+    <pre class="log">show appmgr application-table
+show appmgr application name iris logs
+dir harddisk:</pre>
+    <p>The <code>iris</code> app must be <code>Up</code>. It uses the same
+    device container as IOx, with
+    <code>IRIS_DEVICE_PLATFORM=xr-appmgr</code>, host networking, and
+    <code>/misc/disk1:/hostmount</code>. It uses the router's IP addresses and
+    routes; there is no separate app IP, VLAN, or SSH-to-self connection.</p>
+    <p>Images download directly to <code>harddisk:</code>. The agent checks
+    the bind mount before writing. Its configuration and state live in
+    <code>harddisk:iris-work/</code>, and its runtime certificate is
+    <code>harddisk:iris-catalog.pem</code>. Agent diagnostics appear in the
+    appmgr log above. An empty <code>iris-work/</code> directory after a
+    successful undeploy is expected.</p>
 
-      <li><strong>Is aria2c serving?</strong><br>
-      The download daemon answers JSON-RPC on loopback only. From inside the
-      guest:
-      <pre class="log">curl -s http://127.0.0.1:6800/jsonrpc \
-  -d '{"jsonrpc":"2.0","id":"p","method":"aria2.getVersion","params":["token:'$(cat rpc-secret)'"]}'</pre>
-      (run from the stage directory: <code>/flash/guest-share/iris</code> on
-      Catalyst 9300, <code>/bootflash/guest-share/iris</code> on routers). A
-      <code>aria2c-launch-failed</code> marker file in the stage directory
-      means the daemon launch itself failed — see <code>aria2c.log</code>
-      next to it for why. Supervision keys on RPC health: a healthy tick
-      relaunches a non-serving daemon automatically.</li>
+    <h2>Network and certificate checks</h2>
+    <p>All agents need HTTPS to the catalog on TCP <code>8443</code>, HTTPS
+    tracker announces on TCP <code>6969</code>, and BitTorrent TCP
+    <code>6881</code> to the server seeder. Device peers use TCP
+    <code>6881–6999</code> in both directions; Router NAT publishes TCP
+    <code>6881</code> through its outside address. Guest Shell onboarding
+    also fetches artifacts over HTTPS on TCP <code>8000</code>. The server
+    opens SSH/SCP connections to devices on TCP <code>22</code>; IOx also
+    uses SSH/SCP from the app to IOS. These are the default ports.</p>
+    <p>Test from the agent's network context, using its public certificate.
+    For example, from the Guest Shell working directory:</p>
+    <pre class="log">curl --connect-timeout 5 --max-time 15 --cacert iris-catalog.pem \
+  -o /dev/null -w '%{http_code}\n' https://&lt;server-ip&gt;:8443/
+curl --connect-timeout 5 --max-time 15 --cacert iris-catalog.pem \
+  -o /dev/null -w '%{http_code}\n' https://&lt;server-ip&gt;:6969/</pre>
+    <p>An HTTP response proves the route and certificate check, including a
+    401 or 404; it does not prove device authorization. A timeout needs a
+    routing, ACL, VLAN, or NAT check. A refused connection needs a listener
+    check. A TLS error needs the device clock, certificate, and server address
+    checked. After server certificate rotation, undeploy and onboard affected
+    agents to deliver the new certificate. IOx/XR packages do not need a
+    rebuild for certificate rotation.</p>
+    <p>Aria2 JSON-RPC is local to the agent on <code>127.0.0.1:6800</code>;
+    do not publish it. Bootstrap and the common container supervisor check
+    RPC health and restart a daemon that no longer serves requests.
+    <code>aria2c.log</code> is disabled by default; enable
+    <code>IRIS_LOG</code> only when you need that transfer log. Agent status
+    and error messages remain available with it disabled.</p>
 
-      <li><strong>Is the agent bundle fresh?</strong><br>
-      Dropping a new <code>bundle.tgz</code> into the stage directory
-      <em>is</em> the upgrade for Guest Shell and router devices — the next
-      60-second tick unpacks and runs it. There is no separate upgrade
-      command; re-running the installer has the same effect.</li>
-
-      <li><strong>IOx devices</strong> (Catalyst 9300 IOx, IE-3400)<br>
-      <pre class="log">show app-hosting list</pre>
-      The <code>iris</code> app must be <code>RUNNING</code>; if not, check
-      the app-hosting logs on the device. TLS-rotation gotcha: IOx packages
-      bake the catalog CA in at build time, so packages built <em>before</em>
-      a server certificate rotation keep pinning the old cert — the app runs
-      and TCP connects, but the device never heartbeats. Rebuild and restage
-      with <code>tools/provision-iox-packages.sh</code>, then re-onboard the
-      affected devices. Guest Shell devices heal on re-onboard
-      automatically.</li>
-    </ol>
-
-    <div class="warn"><strong>Warning:</strong> <code>guestshell run</code>
-    performs <em>no</em> shell quote processing — quoted one-liners silently
-    do nothing. Stage a script file on the device and run that instead.</div>
+    <div class="warn"><strong>Guest Shell commands:</strong>
+    <code>guestshell run</code> does not perform shell quote processing.
+    Open an interactive Guest Shell for the examples above, or stage a
+    script file and run it.</div>
 
     <h2>More detail</h2>
     <ul>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/device-agents/" target="_blank" rel="noopener">Device agents</a> — installer file set, EEM applet, agent loop</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/iox/" target="_blank" rel="noopener">IOx app</a> — building, staging, and transfer paths</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/observability/" target="_blank" rel="noopener">Observability</a> — symptom → first place to look</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/network-ports/" target="_blank" rel="noopener">Networking</a> — ports, routing, and peer reachability</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/operations/" target="_blank" rel="noopener">Operations</a> — day-two commands and cleanup</li>
     </ul>
   </main>

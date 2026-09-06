@@ -7,38 +7,53 @@ SPDX-License-Identifier: Apache-2.0
 # IOx App
 
 The IOx path runs the agent as a Docker-based IOx application. It supports
-ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting.
+ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting. IOx and
+IOS-XR package the same canonical device image and run the same entrypoint;
+`IRIS_DEVICE_PLATFORM=iox` selects this profile.
 
 ## When to use it
 
 Use the IOx app when the platform expects an IOx application lifecycle. The
 Guest Shell path remains available for Catalyst devices that support that agent
-model. The staging target is platform-appropriate, and the rule is stated once
-here: the CLI installer (`device/iox/install.sh`) defaults `TARGET_FS` to
-`sdflash:` (the IE-3400 case); console onboarding overrides it to `flash:`
-(bootflash, like Guest Shell) for Catalyst 9300 IOx, with the SSD share
-carrying the transfer. The table in
+model. The staging target is platform-appropriate and selected by the existing
+live filesystem/model policy rather than a second platform knob: IE-3400
+normally selects `sdflash:`, while Catalyst 9300 normally selects `flash:`
+(bootflash, like Guest Shell) and uses the SSD share to carry the transfer. The table in
 [Device Agents](device-agents.md#platform-targets) reflects the same rule.
+
+The installer reads the selected package from the server's local
+`artifacts/` directory and pushes it to IOS over its authenticated,
+host-key-checked SCP session before driving app hosting. It does not put a
+credential in an artifact URL.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `device/iox/Dockerfile` | Builds the multi-architecture IOx agent container. |
+| `device/container/Dockerfile` | Builds the canonical multi-architecture IOx/XR agent container. |
+| `device/container/entrypoint.sh` | Validates `IRIS_DEVICE_PLATFORM` and supervises either runtime profile. |
 | `device/iox/package.yaml` | ARM64 IOx package metadata. |
 | `device/iox/package-amd64.yaml` | x86_64 IOx package metadata. |
-| `device/iox/entrypoint.sh` | Starts the agent inside the application container. |
-| `device/iox/build.sh` | Builds the IOx package. |
+| `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
 | `device/iox/install.sh` | Installs the IOx app on a target device. |
 | `device/iox/uninstall.sh` | Removes the IOx app. |
-| `device/iox/rebake_iris_tar.py` | Updates an existing IOx package's content. |
 
 ## Runtime behavior
 
 The IOx agent follows the same catalog and staging model as the Guest Shell
 agent. It downloads resumable swarm data under the CAF persistent directory
-(`/iox_data/iris` on the validated Catalyst 9300 runtime). The hand-off of the verified
-scratch file to IOS depends on the platform:
+(`/iox_data/iris` on the validated Catalyst 9300 runtime).
+
+The IOx package contains no deployment certificate. On every onboarding,
+`device/iox/install.sh` validates the current public certificate from the
+served artifacts directory, pushes it with the package, and uses IOS-XE's
+`app-hosting data` channel to place it in the app's application-data directory
+after activation and before app start. Activation mounts application storage;
+the `DEPLOYED` state cannot accept the copy. The entrypoint requires and validates
+that runtime-delivered certificate before it starts either the catalog client
+or the aria2 tracker client.
+
+The hand-off of the verified scratch file to IOS depends on the platform:
 
 - **Catalyst 9300 (share mount)**: onboarding bind-mounts the app-hosting SSD share —
   `usbflash1:iox_host_data_share`, host-side `/vol/usb1/iox_host_data_share` —
@@ -76,13 +91,10 @@ and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host 
 against it instead of running unverified. See
 [Device Agents](device-agents.md).
 
-`IRIS_TARGET_FS` optionally selects a filesystem prefix such as `sdflash:` or
-`bootflash:`. The agent accepts it only when `show file systems` reports a
-writable non-crash disk; otherwise it logs the fallback and retains automatic
-platform selection. `device/iox/install.sh` exposes this as `TARGET_FS` and
-defaults it to `sdflash:`.
-
-When `TARGET_FS` is `sdflash:` (the IE3x00 default), the installer checks
+The agent selects a target only after `show file systems`, model evidence, and
+the existing flash-target rules prove a writable non-crash disk. It does not
+fall back to a guessed `flash:` target. When the selected target is `sdflash:`
+(the IE3x00 case), the installer checks
 `show sdflash: filesys` for an IOx partition before applying any config and
 fails closed with a `PREREQ:` line if the SD card was never formatted for
 IOx. The installer also checks `ip routing` on a device using the routed management type (see
@@ -109,40 +121,59 @@ An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
 does **not** need an undeploy or a forced teardown: re-run the installer, or
 press Onboard again in the console. Console preflight treats an IRIS app that
-is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry (it serves
-nothing, and the installer's own step [1/9] tears down whatever it finds),
-while an app that is `RUNNING` is a live deployment and still refuses.
+is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
+installer removes that incomplete app before retrying. An app that is
+`RUNNING` is a live deployment and requires undeploy first.
 
 ## Build modes
 
+The canonical build always persists one OCI archive with one image manifest
+per CPU architecture under one multi-architecture identity. `--image-only`
+still builds/verifies both `linux/amd64` and `linux/arm64`; the architecture
+flag selects only a later native wrapper. The default signable output is
+`artifacts/iris-device-$VERSION.oci.tar` with an adjacent `.manifest` recording
+its index, archive, and source digests. `device/iox/build.sh` places that image inside an
+`ioxclient` package; `tools/build-xr-package.sh` places the same amd64 image
+inside an appmgr RPM. The outer tar and RPM necessarily differ in metadata and
+format, but their embedded amd64 image config and rootfs digest must match.
+Signing the OCI identity therefore signs one common payload; deployments that
+also require native IOx/RPM signatures still sign each native envelope. Each
+wrapper is published atomically beside a `.manifest` tying its own SHA-256 and
+selected platform back to the canonical index/archive/source digests.
+
 ```bash
 # Docker image only
-CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh --image-only
+device/iox/build.sh --image-only
 
 # Docker image plus Cisco iris-arm64.tar package (requires ioxclient)
-CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+device/iox/build.sh device/iox/out
 
 # x86_64 Catalyst package
 IOX_ARCH=amd64 PACKAGE_NAME=iris-amd64.tar \
-  CATALOG_PEM=/path/to/iris-catalog.pem device/iox/build.sh device/iox/out
+  device/iox/build.sh device/iox/out
 ```
 
-`CATALOG_PEM` must be the certificate block **only** — the public cert IRIS
-hands to devices, never the server's combined cert+key file (`IRIS_CERT`).
-The build refuses a file carrying a private-key block, and only CERTIFICATE
-blocks reach the image. The same cert-only bytes are packaged a second time
-as a top-level `iris-catalog.pem` inside `artifacts.tar.gz`: that is the
-pinned-cert probe member `tools/check-package-freshness.sh` and the console's
-Setup "device packages" card read, so a served package can be checked
-against the live certificate without unpacking its image.
+The build deliberately accepts no `CATALOG_PEM`, `CATALOG_PEM_URL`, or
+certificate fingerprint input. The canonical OCI image and the native IOx/XR
+wrappers contain no deployment-specific trust material, so one signed package
+can be used across deployments. The current public certificate remains a
+required onboarding input and never includes the server's private key.
 
-`device/iox/build.sh` never downloads `aria2c`. The binary is a handed-in
+Rebuild the canonical image and every native wrapper after a change to source
+included in the shared device image. If a canonical archive already exists
+for the same `VERSION`, the builder refuses to overwrite it after a source
+change. Set `IRIS_FORCE_DEVICE_IMAGE_BUILD=1` to replace that local build, or
+set `IRIS_DEVICE_IMAGE_OCI` to a new archive path. Both wrapper builders must
+use the same archive. Certificate rotation alone does not require a rebuild.
+
+The common device-image builder and `device/iox/build.sh` never download
+`aria2c`. The binary is a handed-in
 deliverable, produced elsewhere by the aria2-next-static project and only
 verified here — never fetched from a third party, never built in this
 repository (`tools/get-aria2c.sh` and `tools/aria2c.sha256` document the same
 producer/consumer split and the same verify-or-fail idiom the build uses
-internally). It resolves an architecture-matched `aria2c` in order:
-`ARIA2C_BIN` if set, else the matching local agent bundle
+internally). It resolves each architecture-matched `aria2c` in order:
+`ARIA2C_BIN_AMD64` or `ARIA2C_BIN_ARM64` if set, else the matching local agent bundle
 (`artifacts/iris-agent-arm.tgz` or `iris-agent.tgz`, whose `aria2c` is still
 checksum-verified — a bundle's provenance is not otherwise pinned), else
 `deliverables/aria2c-<arch>` checksum-verified against `tools/aria2c.sha256`.
@@ -162,7 +193,7 @@ name.
 # Build and stage both packages during server bring-up (recommended).
 tools/provision-iox-packages.sh
 
-# IE-3400 / IE-3400 / IR: arm64 package served as iris-arm64.tar
+# IE-3x00 / IR1101 / IR18xx: arm64 package served as iris-arm64.tar
 tools/stage-iox-package.sh --arch arm64
 
 # SSD-equipped Catalyst 9300 IOx: amd64 package served as iris-amd64.tar
@@ -174,30 +205,49 @@ On first use the helper downloads Cisco's pinned `ioxclient` 1.18.0.0 to
 `tools/ioxclient.sha256` and refusing a mismatch or an unrecorded version
 (`IOXCLIENT_SKIP_VERIFY=1` is the explicit one-off escape hatch, which prints
 the sha256 to record); that binary is git-ignored and not embedded in the
-repository or seed-server image. The helper retrieves the live catalog
-certificate from the running `iris` container, builds a package that pins it,
-and places the result in `/srv/artifacts`. When the served host directory is not
-writable by the invoking user — the normal case, since the server runs as uid
-10001 and its artifacts directory is owned by that uid — the helper places the
-package with `docker cp` rather than requiring a host ownership change. On an
-amd64 server, the arm64 build registers Docker's ARM64 emulation handler when
-it is missing, using the audited `tonistiigi/binfmt` image digest supplied via
-the required `BINFMT_IMAGE_DIGEST` environment variable; with the digest unset
-the build fails closed rather than pull an unpinned image.
+repository or seed-server image. The helper does not retrieve a catalog
+certificate for the build. It builds the deployment-neutral package and places
+it with its provenance manifest in `/srv/artifacts`. When the served host
+directory is not writable by the invoking user — the normal case, since the
+server runs as uid 10001 and its artifacts directory is owned by that uid —
+the helper places both files with `docker cp` rather than requiring a host
+ownership change. On an amd64 server, the arm64 build registers Docker's ARM64
+emulation handler when it is missing, using the audited `tonistiigi/binfmt`
+image digest supplied via the required `BINFMT_IMAGE_DIGEST` environment
+variable; with the digest unset the build fails closed rather than pull an
+unpinned image. The helper only builds and places artifacts; it never contacts
+or changes a device.
 
-Rebuild both packages after rotating the server certificate, because each
-package contains the pinned catalog certificate. The helper only builds and
-places artifacts; it never contacts or changes a device.
+After a server certificate rotation, re-onboard each deployed IOx app so the
+installer delivers the current public certificate as application data. The
+package itself remains valid and does not need rebuilding.
 
-To check whether a served package is already stale — including after a
-catalog certificate change nobody triggered locally, such as a rebuilt server
-or a fresh volume — run the read-only `tools/check-package-freshness.sh`
-(`--rebuild` fixes what it finds), or check the console's Settings → Setup
-page, which surfaces the same drift per package. See
+Check served package readiness with `tools/check-package-freshness.sh`, or in
+the Console's Settings → Device packages page backed by the setup-status API.
+A ready package has readable wrapper bytes matching its adjacent
+canonical-image provenance; this does not inspect package contents, validate a
+native signature, or compare the package against certificate age. The same
+status separately verifies that the certificate served by the live catalog
+matches the public copy available to onboarding.
+See
 [TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
 
 ## Artifact handling
 
-`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong under
-`artifacts/` for serving. The server container serves them but does not rebuild
-or mutate them automatically.
+`iris-arm64.tar` and `iris-amd64.tar` are operator-built artifacts and belong
+under `artifacts/` for serving. Keep each adjacent `.manifest` with its package;
+the readiness check binds the served bytes to that provenance. The server
+container serves them but does not rebuild or mutate them automatically.
+
+Treat a signed wrapper as immutable. If native signing changes the wrapper
+bytes, publish the signed output with a manifest recording that output's
+SHA-256 while retaining its canonical image provenance. A manifest for the
+unsigned input will correctly report a digest mismatch beside the signed
+output. This manifest is a readiness check, not a signature or an attestation
+from the signer; native signature verification remains the platform's job.
+The IOx installer keeps app-hosting verification enabled when the tar carries
+signature metadata.
+
+For a source change, rebuild the package and obtain a new signature. For a
+certificate change, re-onboard using the existing package so the installer
+replaces only the runtime trust file.

@@ -33,7 +33,8 @@ into one call that groups the underlying writes by shard.
 production function the real hot path calls (``peer_endpoints
 .record_endpoint``, ``catalog.CatalogStore.record_heartbeat`` /
 ``device_policy_view`` / ``record_telemetry``, ``credential_cache
-.CredentialResolver.view``, ``gui_fleet.FleetStore.upsert`` /
+.CredentialResolver.view`` followed by the catalog and tracker auth resolvers,
+``gui_fleet.FleetStore.upsert`` /
 ``bulk_upsert``) against synthetic state shaped like the real thing. The
 console projection goes one step further and drives the real ``gui_server``
 HTTP handler end to end (bind, login, ``GET /api/devices`` paged and
@@ -55,7 +56,8 @@ process's temp dir on the machine running this.
 runs the live IRIS lab server and real device traffic; a shared, loaded build
 host is a noisy clock. Only the DETERMINISTIC counters -- which shard files
 changed, how many rows a touched shard holds, how many credential-index
-builds a run of requests costs, how many bytes a console response carries --
+builds and index lookups a run of requests costs, how many bytes a console
+response carries --
 are asserted on, following the style ``test_keyed_state_scaling.py``
 established: bytes and files touched and index builds counted, never elapsed
 time. A comparison between two SEPARATE runs (different day, different
@@ -99,11 +101,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+import auth
 import catalog
 import credential_cache
 import gui_app
 import gui_fleet
-import gui_server
+import management_api as gui_server
 import keyed_state
 import peer_endpoints
 import secrets_store
@@ -216,7 +219,9 @@ def _seed_secrets(path, n):
     for i in range(n):
         store["devices"][_device_id(i)] = {
             "catalog_token": {"value": "%032x" % (i * 3), "created_at": 0,
-                              "expires_at": 0, "revoked": False}}
+                              "expires_at": 0, "revoked": False},
+            "announce_token": {"value": "%032x" % (i * 3 + 1), "created_at": 0,
+                               "expires_at": 0, "revoked": False}}
     secrets_store.save(store, path)
 
 
@@ -357,23 +362,82 @@ def _measure_report_persist(store, indices, seed):
             "shard_rows": tel_rows}
 
 
+class _CountedCredentialIndex(dict):
+    """Count direct lookups and reject fleet traversal during authentication."""
+
+    def __init__(self, entries):
+        super().__init__(entries)
+        self.lookups = 0
+
+    def get(self, key, default=None):
+        assert isinstance(key, bytes) and len(key) == 32
+        self.lookups += 1
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.lookups += 1
+        return super().__getitem__(key)
+
+    def __iter__(self):
+        raise AssertionError("credential resolution must not scan the fleet")
+
+    items = values = keys = __iter__
+
+
 def _measure_credential_resolve(secrets_path, indices):
-    res = credential_cache.CredentialResolver(secrets_path)
-    builds = []
+    """Measure real accepted/rejected auth requests, including cached views.
 
-    def counting(store):
-        builds.append(1)
-        return secrets_store.build_catalog_auth_index(store)
+    Building an index once is insufficient: a resolver can still scan it on
+    every request. Count lookups and forbid traversal after construction so
+    fleet-wide scans fail deterministically, regardless of timing noise.
+    """
+    resolver = credential_cache.CredentialResolver(secrets_path)
+    builds = collections.Counter()
+    builders = {
+        "catalog": secrets_store.build_catalog_auth_index,
+        "announce": secrets_store.build_announce_index,
+    }
 
-    times = []
-    index = None
-    for i in indices:
-        t0 = time.perf_counter()
-        _, index = res.view("catalog", counting)
-        times.append(time.perf_counter() - t0)
-    token = "%032x" % (indices[0] * 3)
-    assert index[token][0].id == _device_id(indices[0])
-    return {"times": times, "index_builds": len(builds)}
+    def counting(scope):
+        def build(store):
+            builds[scope] += 1
+            return _CountedCredentialIndex(builders[scope](store))
+        return build
+
+    cached_builders = {scope: counting(scope) for scope in builders}
+    paths = {}
+    for name in ("catalog", "announce_query", "announce_legacy", "announce_bearer"):
+        scope = "catalog" if name == "catalog" else "announce"
+        times, lookups = [], []
+        for i in indices:
+            valid_token = "%032x" % (i * 3 + (scope == "announce"))
+            for token, accepted in ((valid_token, True), ("unknown-token", False)):
+                t0 = time.perf_counter()
+                store, index = resolver.view(scope, cached_builders[scope])
+                before = index.lookups
+                try:
+                    if name == "catalog":
+                        context = auth.resolve_catalog_auth(store, index, token, 1000, 0)
+                    elif name == "announce_bearer":
+                        context = auth.resolve_announce_bearer(token, index, store, 1000, 0)
+                    else:
+                        param = "announce_token" if name == "announce_query" else "key"
+                        context = auth.resolve_announce_principal(
+                            param + "=" + token, index, store, 1000, 0)
+                except auth.AnnounceAuthError as exc:
+                    assert not accepted
+                    assert not exc.expired
+                    context = None
+                times.append(time.perf_counter() - t0)
+                lookups.append(index.lookups - before)
+                if accepted:
+                    assert context is not None
+                    assert context.principal == auth.Principal("device", _device_id(i))
+                    assert context.scope == scope
+                else:
+                    assert context is None
+        paths[name] = {"times": times, "lookups": lookups}
+    return {"paths": paths, "index_builds": dict(builds)}
 
 
 def _measure_bulk_reassignment(fleet, indices, all_ids):
@@ -562,8 +626,7 @@ def format_report(report, sizes):
     header += "%12s" % "growth"
     lines.append(header)
     ops = [("announce", "announce"), ("heartbeat", "heartbeat"),
-          ("policy_read", "policy_read"), ("report_persist", "report_persist"),
-          ("credential_resolve", "credential_resolve")]
+          ("policy_read", "policy_read"), ("report_persist", "report_persist")]
     for key, label in ops:
         vals = [_median_ms(report[n][key]["times"]) for n in sizes]
         row = "%-22s" % label
@@ -572,6 +635,15 @@ def format_report(report, sizes):
         growth = vals[-1] / vals[0] if vals[0] else float("inf")
         row += "%11.2fx" % growth
         lines.append(row)
+
+    for name in ("catalog", "announce_query", "announce_legacy", "announce_bearer"):
+        vals = [_median_ms(report[n]["credential_resolve"]["paths"][name]["times"])
+                for n in sizes]
+        row = "%-22s" % ("auth " + name)
+        for value in vals:
+            row += "%13.4f ms" % value
+        growth = vals[-1] / vals[0] if vals[0] else float("inf")
+        lines.append(row + "%11.2fx" % growth)
 
     unpaged_vals = [report[n]["console"]["unpaged_bytes"] for n in sizes]
     row = "%-22s" % "console unpaged"
@@ -594,6 +666,12 @@ def format_report(report, sizes):
     lines.append("fleet size grew %.0fx (%d -> %d); an O(1)-per-device "
                  "operation should stay near 1x, not track the fleet."
                  % (fleet_growth, sizes[0], sizes[-1]))
+
+    for n in sizes:
+        credentials = report[n]["credential_resolve"]
+        maximum = max(max(path["lookups"]) for path in credentials["paths"].values())
+        lines.append("auth at %d devices: %d index builds, at most %d lookups/request"
+                     % (n, sum(credentials["index_builds"].values()), maximum))
 
     lines.append("")
     lines.append("issue #125: reassigning ALL selected devices' credential "
@@ -633,6 +711,16 @@ def format_report(report, sizes):
 # Tests
 # ---------------------------------------------------------------------------
 
+def _assert_credential_work(size_report):
+    result = size_report["credential_resolve"]
+    assert result["index_builds"] == {"catalog": 1, "announce": 1}
+    assert set(result["paths"]) == {
+        "catalog", "announce_query", "announce_legacy", "announce_bearer"}
+    for path in result["paths"].values():
+        assert len(path["lookups"]) == 2 * size_report["sample"]
+        assert all(0 < count <= 2 for count in path["lookups"])
+
+
 def test_capacity_harness_per_device_cost_is_flat_across_a_tenfold_fleet():
     """Always-run half of the harness: the SAME per-device write/read
     invariants #51-#58 established (one shard touched, one shard read, one
@@ -657,8 +745,8 @@ def test_capacity_harness_per_device_cost_is_flat_across_a_tenfold_fleet():
     assert small["policy_read"]["rows_in_shard"] < FAST_SIZES[0] // 4
     assert large["policy_read"]["rows_in_shard"] < FAST_SIZES[1] // 4
 
-    assert small["credential_resolve"]["index_builds"] == 1
-    assert large["credential_resolve"]["index_builds"] == 1
+    for size_report in (small, large):
+        _assert_credential_work(size_report)
 
     # issue #125: bulk_upsert's shard-write count is bounded by SHARD_COUNT
     # regardless of how many devices are selected, where N single-device
@@ -702,7 +790,8 @@ def test_capacity_harness_ten_thousand_device_report(capsys):
         assert large[op]["single_shard"], op
         assert large[op]["shard_rows"] < LARGE_SIZES[-1] // 4, op
     assert large["policy_read"]["shard_reads"] == 1
-    assert large["credential_resolve"]["index_builds"] == 1
+    for size_report in report.values():
+        _assert_credential_work(size_report)
     paged_growth = (large["console"]["paged_bytes"]
                     / small["console"]["paged_bytes"])
     assert paged_growth < 1.3, paged_growth

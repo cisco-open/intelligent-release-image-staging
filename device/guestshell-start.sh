@@ -9,17 +9,20 @@
 # - copies the binary off /flash to an exec-capable fs (chmod denied on /flash)
 # - private swarm: DHT/PEX/LPD OFF; seeds completed files without re-hashing
 # - RPC on so iris_agent.py can addTorrent; the agent adds torrents (none on argv)
-# - idempotent: if the RPC already answers, do nothing
+# - idempotent: retain an answering daemon only when its launch line carries
+#   the current content-addressed tracker CA generation and verification flag
 set -euo pipefail
 
 STAGE_DIR="${STAGE_DIR:-/flash/guest-share/iris}"
 EXEC_DIR="${EXEC_DIR:-/home/guestshell}"
 ARIA2_SRC="${ARIA2_SRC:-$STAGE_DIR/aria2c}"
+ARIA2="$EXEC_DIR/aria2c"
 RPC_PORT="${RPC_PORT:-6800}"
 RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
 HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
 HOOK_DST="${HOOK_DST:-$EXEC_DIR/iris-peer-transfer-hook}"
 LOG="${LOG:-$STAGE_DIR/aria2c.log}"
+CATALOG_CA="$STAGE_DIR/iris-catalog.pem"
 # Device-side logging is OFF by default: flash has finite write endurance,
 # and aria2c's log is chatty and continuous for the whole life of a transfer
 # (and, with --seed-ratio=0.0 below, a staged device seeds forever, so a log
@@ -46,6 +49,75 @@ MAX_PEERS="${MAX_PEERS:-10}"     # cap BT peer connections per torrent on a devi
 # starves. Same defect fixed on the origin in server/seed-launch.sh.
 MAX_CONCURRENT="${MAX_CONCURRENT:-100}"
 BT_LISTEN_PORT="${BT_LISTEN_PORT:-}"
+
+# The catalog client and the BitTorrent tracker share the server certificate,
+# but aria2 opens tracker connections itself. Fail before touching the daemon
+# unless the installer-staged pin is a real CA bundle; otherwise onboarding
+# appears healthy while announces fail silently in the background.
+if [ ! -r "$CATALOG_CA" ] || [ ! -s "$CATALOG_CA" ]; then
+  echo "catalog certificate is missing or unreadable at $CATALOG_CA" >&2
+  exit 1
+fi
+if ! python3 -c \
+    'import ssl, sys; ssl.create_default_context(cafile=sys.argv[1])' \
+    "$CATALOG_CA" >/dev/null 2>&1; then
+  echo "catalog certificate at $CATALOG_CA is not a valid certificate bundle" >&2
+  exit 1
+fi
+
+# aria2 loads the CA bundle when the daemon starts; it does not re-read the
+# path for every tracker announce. Re-onboard atomically replaces
+# $CATALOG_CA, so comparing only that stable pathname would retain a daemon
+# pinned to the OLD bytes after certificate rotation. Copy the validated bytes
+# to a content-addressed path on the exec-capable filesystem and put THAT path
+# on aria2's argv. The digest in the pathname is then a generation stamp tied
+# directly to the exact daemon inspected below: changed bytes necessarily mean
+# a changed expected argv and a restart. Never overwrite a wrong snapshot and
+# then retain a daemon that may have loaded its old contents -- remember any
+# repair/new creation and force this invocation through replacement.
+CATALOG_CA_SHA256="$(python3 -c \
+    'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$CATALOG_CA")"
+[[ "$CATALOG_CA_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "cannot fingerprint catalog certificate at $CATALOG_CA" >&2; exit 1; }
+ARIA2_CA="$EXEC_DIR/iris-catalog-$CATALOG_CA_SHA256.pem"
+CA_SNAPSHOT_CHANGED=0
+_snapshot_sha=""
+if [ -r "$ARIA2_CA" ]; then
+  _snapshot_sha="$(python3 -c \
+      'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+      "$ARIA2_CA" 2>/dev/null || true)"
+fi
+if [ "$_snapshot_sha" != "$CATALOG_CA_SHA256" ]; then
+  _ca_tmp="$ARIA2_CA.new.$$"
+  if ! cp -f "$CATALOG_CA" "$_ca_tmp" 2>/dev/null \
+     || ! chmod 600 "$_ca_tmp" 2>/dev/null \
+     || ! mv -f "$_ca_tmp" "$ARIA2_CA" 2>/dev/null; then
+    rm -f "$_ca_tmp" 2>/dev/null || true
+    echo "cannot install catalog certificate snapshot at $ARIA2_CA" >&2
+    exit 1
+  fi
+  _installed_sha="$(python3 -c \
+      'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+      "$ARIA2_CA" 2>/dev/null || true)"
+  if [ "$_installed_sha" != "$CATALOG_CA_SHA256" ]; then
+    echo "catalog certificate changed while installing its runtime snapshot; retry" >&2
+    exit 1
+  fi
+  CA_SNAPSHOT_CHANGED=1
+fi
+# Validate the exact bytes aria2 will load, not only the staged source checked
+# above. The installer replaces the source atomically; it can change between
+# that first validation and the digest/copy, and a malformed replacement could
+# otherwise acquire a self-consistent digest pathname and reach aria2. This is
+# unconditional so a reused snapshot is held to the same fail-closed rule.
+if ! python3 -c \
+    'import ssl, sys; ssl.create_default_context(cafile=sys.argv[1])' \
+    "$ARIA2_CA" >/dev/null 2>&1; then
+  echo "catalog certificate snapshot at $ARIA2_CA is not a valid certificate bundle" >&2
+  exit 1
+fi
+unset _snapshot_sha _installed_sha _ca_tmp
 
 if [ -n "$BT_LISTEN_PORT" ]; then
   [[ "$BT_LISTEN_PORT" =~ ^[0-9]+$ ]] && [ "$BT_LISTEN_PORT" -ge 1 ] \
@@ -148,7 +220,7 @@ rpc_probe() {
 
 rpc_up() {
   # A SLOW answer is not a dead daemon. Everything below this probe treats a
-  # failure as "aria2c is not serving" and pkills it, so a probe that cannot
+  # failure as "aria2c is not serving" and replaces it, so a probe that cannot
   # tell busy from dead kills healthy daemons and drops their in-flight
   # downloads. Connection refused means nothing is listening -- a verdict on
   # its own, and one that must stay immediate (the 2026-08-20 deadlock was a
@@ -165,30 +237,130 @@ rpc_up() {
   rpc_probe || return 1
 }
 
+aria2_pid_command() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  ps -ww -o args= -p "$pid" 2>/dev/null || return 1
+}
+
+aria2_pid_is_iris_rpc() {
+  # Discovery by name is only a source of candidate PIDs. Ownership comes from
+  # inspecting that PID's current argv: it must be the exact executable this
+  # launcher owns, with RPC enabled on this launcher's configured port. This
+  # deliberately excludes another aria2 daemon owned by the same Guest Shell
+  # user, even if it also has --enable-rpc on its command line.
+  local pid="$1" cmd executable
+  cmd="$(aria2_pid_command "$pid")" || return 1
+  # ps may left-pad its args column. Paths containing whitespace are not valid
+  # Guest Shell executable locations; the production path is /home/guestshell.
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+  executable="${cmd%%[[:space:]]*}"
+  [ "$executable" = "$ARIA2" ] || return 1
+  case " $cmd " in
+    *" --enable-rpc=true "*) ;;
+    *) return 1 ;;
+  esac
+  case " $cmd " in
+    *" --rpc-listen-port=$RPC_PORT "*) return 0 ;;
+  esac
+  return 1
+}
+
+iris_aria2_pids() {
+  local pid
+  while IFS= read -r pid; do
+    aria2_pid_is_iris_rpc "$pid" && printf '%s\n' "$pid"
+  done < <(pgrep -f 'aria2c' 2>/dev/null || true)
+  # An unrelated final candidate makes the loop body's predicate false; that is
+  # a successful filtered discovery, not an error for callers running under
+  # `set -e`.
+  return 0
+}
+
+aria2_tracker_tls_ready() {
+  # A successful RPC answer proves the daemon is alive, not that it was
+  # launched with HTTPS tracker verification. Inspect each matching daemon's
+  # own command line and require the configured RPC port plus both exact TLS
+  # options on the same PID. Never log the command line: it also carries the
+  # RPC secret on Guest Shell.
+  local pid cmd
+  while IFS= read -r pid; do
+    # Re-read this exact PID rather than trusting the discovery snapshot. The
+    # check is non-mutating, but using the same predicate as replacement keeps
+    # an unrelated daemon from satisfying the healthy-IRIS decision too.
+    aria2_pid_is_iris_rpc "$pid" || continue
+    cmd="$(aria2_pid_command "$pid")" || continue
+    case " $cmd " in
+      *" --ca-certificate=$ARIA2_CA "*) ;;
+      *) continue ;;
+    esac
+    case " $cmd " in
+      *" --check-certificate=true "*) return 0 ;;
+    esac
+  done < <(iris_aria2_pids)
+  return 1
+}
+
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
   if rpc_up; then
-    echo "aria2c RPC already up on :$RPC_PORT"; exit 0
+    if [ "$CA_SNAPSHOT_CHANGED" = "0" ] && aria2_tracker_tls_ready; then
+      echo "aria2c RPC already up on :$RPC_PORT with current tracker TLS verification"
+      exit 0
+    fi
+    echo "aria2c RPC on :$RPC_PORT does not match the current tracker TLS generation — replacing it" >&2
   fi
 fi
 
-# Reaching here means the RPC probe FAILED, so any surviving aria2c is alive
-# but not serving. It must go before we relaunch: it still owns the RPC port
-# (a new instance cannot bind) and `cp -f` over a running binary fails with
-# ETXTBSY, so the stale build would keep running. Field incident 2026-08-20:
-# leaving it alive deadlocked devices for ~42 minutes — the agent hit
-# ECONNREFUSED every tick and never reached its first heartbeat.
-if pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1; then
-  echo "aria2c is running but not answering RPC on :$RPC_PORT — replacing it" >&2
-  pkill -f 'aria2c.*enable-rpc' 2>/dev/null || true
+# Reaching here means the RPC probe failed OR the answering daemon lacks the
+# required tracker TLS flags. Any surviving IRIS aria2c on this configured RPC
+# port must go before relaunch: it still owns the RPC port (a new instance
+# cannot bind) and `cp -f` over a running binary fails with ETXTBSY, so the
+# stale build would keep running. Candidate discovery is deliberately broad,
+# but signaling is PID-scoped and each PID is re-inspected immediately before
+# the signal. Never sweep another aria2 daemon merely because its argv contains
+# `enable-rpc`.
+# Field incident 2026-08-20: leaving a non-answering process alive deadlocked
+# devices for ~42 minutes — the agent hit ECONNREFUSED every tick and never
+# reached its first heartbeat.
+_iris_pids="$(iris_aria2_pids)"
+if [ -n "$_iris_pids" ]; then
+  echo "replacing the existing aria2c process on :$RPC_PORT" >&2
+  _signaled_pids=""
+  while IFS= read -r _pid; do
+    [ -n "$_pid" ] || continue
+    # PID reuse or an exec between discovery and this point must turn into a
+    # skip, never a signal aimed at the new occupant.
+    aria2_pid_is_iris_rpc "$_pid" || continue
+    _signaled_pids="${_signaled_pids}${_signaled_pids:+
+}${_pid}"
+    # Use the external utility so the Bats safety harness can replace it. The
+    # numeric PID has just been validated and is the only signal target.
+    env kill -TERM "$_pid" 2>/dev/null || true
+  done <<< "$_iris_pids"
+
   _w=0
-  while pgrep -f 'aria2c.*enable-rpc' >/dev/null 2>&1 && [ "$_w" -lt 10 ]; do
-    sleep 1; _w=$((_w + 1))
+  while [ -n "$_signaled_pids" ] && [ "$_w" -lt 10 ]; do
+    _still_running=0
+    while IFS= read -r _pid; do
+      [ -n "$_pid" ] || continue
+      if aria2_pid_is_iris_rpc "$_pid"; then
+        _still_running=1
+        break
+      fi
+    done <<< "$_signaled_pids"
+    [ "$_still_running" = "1" ] || break
+    sleep 1
+    _w=$((_w + 1))
   done
+  if [ "${_still_running:-0}" = "1" ]; then
+    echo "existing aria2c process on :$RPC_PORT did not stop" >&2
+    exit 1
+  fi
 fi
+unset _iris_pids _signaled_pids _still_running _pid _w
 
 # copy the binary to an exec-capable fs and run it
-ARIA2="$EXEC_DIR/aria2c"
 cp -f "$ARIA2_SRC" "$ARIA2" \
   || { echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2; exit 1; }
 chmod +x "$ARIA2" \
@@ -213,6 +385,8 @@ exec "$ARIA2" \
   --rpc-listen-all=false \
   --rpc-listen-port="$RPC_PORT" \
   --rpc-secret="$RPC_SECRET" \
+  --ca-certificate="$ARIA2_CA" \
+  --check-certificate=true \
   --enable-dht=false \
   --enable-peer-exchange=false \
   --bt-enable-lpd=false \

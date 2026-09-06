@@ -20,60 +20,114 @@
     <h1>Server-side setup &amp; troubleshooting</h1>
 
     <h2>First run</h2>
-    <p>Before an admin account exists, sign in with the default credential
-    <code>iris</code> / <code>irisisgreat!</code> — it works only pre-setup
-    and takes you straight to the wizard that creates the real admin account.
-    The moment an admin exists it becomes an ordinary failed login. The CLI
-    alternative from the server host:</p>
+    <p>Open the Console on HTTPS port 8080, or the port set by
+    <code>IRIS_GUI_PUBLISH</code>. Before an administrator exists, the
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/getting-started/#create-the-console-admin" target="_blank" rel="noopener">documented first-run login</a>
+    opens account setup. Complete setup from a trusted management network.
+    To create or reset the administrator from the server host, run:</p>
     <pre class="log">docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin</pre>
 
+    <h2>Server and Console</h2>
+    <p>The stack has two services: <code>iris</code> owns the catalog,
+    tracker, seeder, artifacts, credentials, and device jobs;
+    <code>console</code> serves the browser interface. Their default container
+    names are <code>iris</code> and <code>iris-console</code>. The Console
+    forwards browser <code>/api/v1</code> requests to
+    <code>https://iris:9443/internal/v1</code> using a mounted service
+    credential and the management CA.</p>
+    <p>Docker assigns private addresses on the Compose network. The service
+    name <code>iris</code> resolves there. On separate Docker hosts, the Console
+    calls the server's private address through
+    <code>IRIS_MANAGEMENT_API_URL</code>. Neither container needs a separate
+    LAN address. Devices use the server host's published ports; operators use
+    the Console host's address.</p>
+    <ul>
+      <li>Devices reach HTTPS <code>8443</code> (catalog),
+      <code>8000</code> (install artifacts), and <code>6969</code>
+      (tracker), plus TCP <code>6881</code> for image pieces.</li>
+      <li>Operators reach Console HTTPS <code>8080</code>. Compose binds
+      this port on <code>IRIS_HOST_IP</code> in the one-host stack, or
+      <code>IRIS_CONSOLE_BIND_IP</code> in the standalone Console deployment.</li>
+      <li>HTTPS <code>9101</code> serves probes and authenticated telemetry.
+      The swarm map is in the Console, not on this port.</li>
+      <li>Management HTTPS <code>9443</code> uses the Compose network or a
+      private server-host binding restricted to the Console host. Seeder RPC
+      <code>6800</code> stays on server loopback.</li>
+    </ul>
+
     <h2>Recovery checklist</h2>
+    <p>Run these commands from the repository root to check both services:</p>
+    <pre class="log">docker compose -f server/docker-compose.yml ps
+docker compose -f server/docker-compose.yml logs --tail=100 iris console</pre>
+    <p>For separate hosts, use <code>server/docker-compose.server.yml</code>
+    on the server and <code>server/docker-compose.console.yml</code> on the
+    Console host, together with each host's <code>--env-file</code>. The
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">separate-host setup guide</a>
+    covers certificates, credentials, and commands.</p>
     <ol>
-      <li>Confirm <code>docker ps</code> shows the <code>iris</code>
-      container, then read <code>docker logs iris</code> for catalog,
-      tracker, seeder, or secretfs errors.</li>
-      <li>Confirm devices can reach ports <code>8443</code> (catalog),
-      <code>8000</code> (artifacts), <code>6969</code> (tracker), and
-      <code>6881</code> (seeder); operators need <code>8080</code>
-      (this console).</li>
-      <li>Check host-path ownership: every service runs at uid 10001. An
-      image listed as <code>not readable by the server</code>, a secrets
-      store that suddenly fails to decrypt, or an agent-bundle download
-      failure after a reset is an ownership problem, not corrupt state —
-      re-chown the age key, the artifacts directory, and every kept
-      volume to <code>10001:10001</code>.</li>
-      <li>Check the audit trail (Monitoring → Audit trail) for the last
-      admin or workflow action before the symptom started.</li>
-      <li>Check service health: <code>/healthz</code> on port 9101 answers
-      basic health JSON and, when telemetry export is configured, an
-      <code>otlp_export</code> block matching the console's <em>Telemetry
-      export</em> badge.</li>
+      <li>If the Console cannot load, check the <code>console</code> logs,
+      its published port, and the browser certificate. The one-host Compose
+      stack fetches that identity from the server. The standalone Console uses
+      its local certificate and can start while the server is unavailable.</li>
+      <li>If the page loads but API requests return <code>503</code>, check
+      <code>iris</code> health and logs, the private network, and the
+      Console's management URL, private DNS or routing, firewall on 9443, and
+      read-only tier-token and management-CA mounts. Confirm the management
+      certificate covers the hostname or IP in the URL. A browser
+      certificate and the management CA serve different connections.</li>
+      <li>Use <code>/readyz</code> for readiness: on server port 9101 it
+      checks the tracker, catalog, artifact, and management listeners.
+      <code>/healthz</code> only proves the telemetry process answers.
+      Console probes on 8080 check the Console itself; they do not prove
+      the server is available.</li>
+      <li>For permission errors, confirm uid <code>10001</code> can read
+      the age identity and host image tree, and can write artifacts and
+      server volumes. Keep the age identity mode <code>600</code> or
+      <code>400</code>. A decryption error can also mean the wrong identity
+      or damaged ciphertext; check the reported cause before changing state.</li>
+      <li>Check Monitoring → Audit trail for the last settings or device
+      action, and the device job log for onboarding or undeploy failures.</li>
     </ol>
 
-    <h2>Staged IOx packages drift</h2>
-    <p>The IOx tars (<code>iris-arm64.tar</code> / <code>iris-amd64.tar</code>)
-    bake the catalog CA and agent code in at build time. After a TLS
-    certificate rotation <em>or</em> a release bump, already-staged tars are
-    stale: the app runs and TCP connects, but pinning fails and the device
-    never heartbeats. Rebuild and restage with
-    <code>tools/provision-iox-packages.sh</code>, then re-onboard the
-    affected IOx devices.</p>
+    <h2>Device packages and certificate changes</h2>
+    <p>IOx and IOS-XR use the same device-agent image, packaged as
+    <code>iris-arm64.tar</code>, <code>iris-amd64.tar</code>, and
+    <code>iris-xr.rpm</code>. Guest Shell receives the shared agent in a
+    bundle. These packages are separate from the server and Console images.</p>
+    <p>The IOx tars and XR RPM contain no deployment certificate.
+    Onboarding supplies it separately. After certificate rotation,
+    re-onboard affected devices; the packages can be reused.</p>
+    <p>After shared-agent changes, rebuild the server to refresh the Guest
+    Shell bundle, then rebuild both IOx packages and the XR RPM on the
+    Docker host. See the
+    <a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/development/#embedded-agent-packages" target="_blank" rel="noopener">package rebuild instructions</a>.
+    Settings → Device packages checks wrapper bytes against their build
+    manifests. A ready result does not prove the packages contain the latest
+    source or validate a native signature.</p>
 
     <h2>Where state lives</h2>
     <ul>
-      <li><code>/etc/iris</code> — encrypted secrets, generated TLS
-      material, and the audit trail (<code>audit.jsonl</code>).</li>
+      <li><code>/etc/iris</code> — encrypted server secrets, public TLS
+      certificates, and the plaintext audit trail (<code>audit.jsonl</code>).</li>
       <li><code>/var/lib/iris</code> — catalog state, policies, torrent
-      metadata, deployment records, deploy logs.</li>
-      <li><code>/run/iris</code> — plaintext runtime secrets, tmpfs only:
-      gone on restart by design, rebuilt from the encrypted store.</li>
-      <li><code>/var/lib/iris-images</code> — console-uploaded images.
-      Back this volume up too; a restore without it loses the uploads.</li>
+      metadata, deployment records, and job logs.</li>
+      <li><code>/run/iris</code> — decrypted server secrets on tmpfs,
+      rebuilt from the encrypted store after a restart.</li>
+      <li><code>/var/lib/iris-images</code> — uploaded images;
+      <code>/opt/images</code> — the read-only host import tree.</li>
+      <li><code>/srv/artifacts</code> — served bundles, native packages,
+      manifests, and temporary install assets.</li>
     </ul>
+    <p>The Console mounts none of that state. It mounts only the tier
+    credential and public management CA read-only. The standalone deployment
+    also mounts its own default browser certificate and key; the active TLS
+    identity stays in tmpfs. Back up uploaded images as well as server state and
+    encrypted configuration. Keep the age identity separately.</p>
 
     <h2>More detail</h2>
     <ul>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/server/" target="_blank" rel="noopener">Server</a> — services, state, bootstrap, certificates, chown rules</li>
+      <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/docker-hosts/" target="_blank" rel="noopener">Docker on separate hosts</a> — deployment, private management connection, credential rotation</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/operations/" target="_blank" rel="noopener">Operations</a> — daily commands, backups, recovery checklist</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/network-ports/" target="_blank" rel="noopener">Network ports and flows</a> — every port and what rides it</li>
       <li><a href="https://cisco-open.github.io/intelligent-release-image-staging/docs/observability/" target="_blank" rel="noopener">Observability</a> — metrics, telemetry export health, failure interpretation</li>

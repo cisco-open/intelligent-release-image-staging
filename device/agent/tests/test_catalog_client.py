@@ -113,6 +113,31 @@ def test_download_torrent(client, tmp_path):
     assert dest.read_bytes() == b"TORRENTBYTES"
 
 
+def test_torrent_bearer_negotiation_is_opt_in_and_default_request_is_legacy(
+        tmp_path):
+    class HeaderStub(_Stub):
+        seen = []
+
+        def do_GET(self):
+            if self.path == "/v1/torrents/img1.torrent":
+                HeaderStub.seen.append(
+                    self.headers.get("X-IRIS-Tracker-Auth"))
+            return super().do_GET()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), HeaderStub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d" % srv.server_address[1]
+    try:
+        legacy = catalog_client.CatalogClient(base, "tok")
+        legacy.download_torrent("img1", str(tmp_path / "legacy.torrent"))
+        container = catalog_client.CatalogClient(
+            base, "tok", tracker_bearer=True)
+        container.download_torrent("img1", str(tmp_path / "container.torrent"))
+        assert HeaderStub.seen == [None, "bearer"]
+    finally:
+        srv.shutdown()
+
+
 def test_heartbeat(client):
     assert client.heartbeat("sw1", {"version": "17.18"}) == {"ok": True}
 

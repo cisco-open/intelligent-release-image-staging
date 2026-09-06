@@ -37,7 +37,7 @@
 #                       new secrets. Destroys every device catalog token, the
 #                       admin credential and credential profiles, the RPC
 #                       secret and the TLS key/certificate every onboarded
-#                       device and prebuilt package pins. --force without
+#                       device pins at runtime. --force without
 #                       --yes only prints this warning.
 
 set -euo pipefail
@@ -104,7 +104,7 @@ AGE_KEY="$IRIS_CONFIG/tls/key.pem.age"
 # would stay locked to the old one.
 AGE_GUI_KEY="$IRIS_CONFIG/tls/gui-key.pem.age"
 
-FORCE_DESTROYS="--force --yes discards ALL existing state: every device catalog token, the admin credential and credential profiles, the RPC secret, and the TLS key + certificate that every onboarded device and prebuilt IOx/XR package pins (all devices must be re-onboarded and every package rebuilt)."
+FORCE_DESTROYS="--force --yes discards ALL existing state: every device catalog token, the admin credential and credential profiles, the RPC secret, and the TLS key + certificate that every onboarded device pins at runtime (all devices must be re-onboarded; deployment-neutral IOx/XR packages do not need rebuilding)."
 
 # ---- age helpers (plaintext only ever lives under $SCRATCH) ----
 age_encrypt() {  # plain enc recipients_csv  (atomic: tmp + rename, see secretfs)
@@ -247,7 +247,7 @@ if [ -n "$REPAIR" ]; then
   case "$REPAIR" in
     secrets) GEN_SECRETS=1 ;;
     rpc)     GEN_RPC=1 ;;
-    tls)     GEN_TLS=1; warn "regenerating tls/key.pem also rewrites tls/crt.pem: devices and prebuilt packages pinning the old certificate must be re-onboarded / rebuilt" ;;
+    tls)     GEN_TLS=1; warn "regenerating tls/key.pem also rewrites tls/crt.pem: devices pinning the old certificate must be re-onboarded; deployment-neutral IOx/XR packages do not need rebuilding" ;;
   esac
 elif [ "$FORCE" -eq 1 ]; then
   warn "$FORCE_DESTROYS"
@@ -373,7 +373,7 @@ Master key: $IRIS_AGE_KEY_FILE
     then re-encrypt the existing state (nothing is regenerated) with:
       IRIS_AGE_RECIPIENTS="$_derived_pubkey,<break-glass-pubkey>" iris-bootstrap --rekey
     Do NOT use --force for this: it mints new secrets and a new certificate,
-    which invalidates every onboarded device and prebuilt package.
+    which requires re-onboarding every device to refresh runtime trust.
 
 Age recipient(s) used: $IRIS_AGE_RECIPIENTS
   * Set IRIS_AGE_RECIPIENTS in your docker-compose.yml / environment to this

@@ -262,7 +262,16 @@ def _reconcile_input(images):
 # function, not a method on a persistent reconciler object, so the guard is
 # module-level state rather than per-instance).
 _RUN_LOCK = threading.Lock()
+_RUN_CONDITION = threading.Condition(_RUN_LOCK)
 _RUNNING = False
+# Every wait=True caller registers only after its image is durable in the
+# catalog.  A run records the latest registration it can cover immediately
+# BEFORE reading the catalog: registrations made later must force a newer
+# snapshot even if that run succeeds.  Successful coverage is kept per state
+# directory so a test/embedding with a second catalog can never borrow the
+# first catalog's result.  Failed runs are deliberately never entered here.
+_WAIT_GENERATION = 0
+_SUCCESSFUL_COVERAGE = {}
 
 
 def _failure_detail(exc):
@@ -273,7 +282,7 @@ def _failure_detail(exc):
 
 def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
                 cert_path=_CERT_PATH, timeout=_FETCH_TIMEOUT, audit_fn=None,
-                now_fn=time.time, _fetch_fn=bulkhash.fetch,
+                wait=False, now_fn=time.time, _fetch_fn=bulkhash.fetch,
                 _verify_fn=bulkhash.verify_tar, _parse_fn=bulkhash.parse,
                 _reconcile_fn=bulkhash.reconcile):
     """The single entry point for every Cisco Bulk Hash reconciliation run:
@@ -283,11 +292,19 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
     `tar_path` so the fetch step is skipped and this exact same pipeline
     runs against the uploaded file instead).
 
-    Guarded by a process-wide lock: at most one run in flight at a time. A
-    call that arrives while another is already running does nothing --
-    touches neither the catalog nor last_run -- and returns immediately
-    with `{"outcome": "already_running"}` (the in-flight run's own
-    last_run write, whenever it finishes, is unaffected).
+    Guarded by a process-wide lock: at most one run in flight at a time. By
+    default, a call that arrives while another is already running does
+    nothing -- touches neither the catalog nor last_run -- and returns
+    immediately with `{"outcome": "already_running"}` (the in-flight run's
+    own last_run write, whenever it finishes, is unaffected).  A caller that
+    must reconcile newly-created catalog content may pass ``wait=True``.  The
+    caller registers after its content is durable.  If an in-flight run has
+    not taken its catalog snapshot yet, that one successful run can cover the
+    caller; otherwise one waiter takes a fresh snapshot.  Other concurrent
+    waiters covered by that snapshot reuse its successful result instead of
+    downloading and reconciling the same feed serially.  A failed result is
+    never reused.  This is used by Console publish jobs so every newly imported
+    image is known to have been present in the successful snapshot they accept.
 
     Pipeline, each stage fail-closed: fetch the feed to a private temp file
     (skipped when `tar_path` is given) -> verify_tar (MUST succeed before
@@ -313,25 +330,55 @@ def run_refresh(source, state_dir, catalog, tar_path=None, feed_url=FEED_URL,
     `_fetch_fn`/`_verify_fn`/`_parse_fn`/`_reconcile_fn` are test-only
     injection seams (leading underscore: not part of this function's public
     API -- Tasks 4/5 must not pass them)."""
-    global _RUNNING
-    with _RUN_LOCK:
-        if _RUNNING:
-            return {"outcome": "already_running"}
-        _RUNNING = True
+    global _RUNNING, _WAIT_GENERATION
+    coverage_key = os.path.realpath(os.fspath(state_dir))
+    request_generation = None
+    with _RUN_CONDITION:
+        if wait:
+            _WAIT_GENERATION += 1
+            request_generation = _WAIT_GENERATION
+        while True:
+            if request_generation is not None:
+                covered = _SUCCESSFUL_COVERAGE.get(coverage_key)
+                if covered is not None and covered[0] >= request_generation:
+                    return dict(covered[1])
+            if not _RUNNING:
+                _RUNNING = True
+                break
+            if not wait:
+                return {"outcome": "already_running"}
+            _RUN_CONDITION.wait()
+
+    # A one-item list lets the exact pre-list_images snapshot point report its
+    # generation back without changing run_refresh's public result shape.
+    snapshot_generation = [None]
+
+    def mark_snapshot():
+        with _RUN_CONDITION:
+            snapshot_generation[0] = _WAIT_GENERATION
+
+    result = None
     try:
-        return _run_refresh_locked(
+        result = _run_refresh_locked(
             source, state_dir, catalog, tar_path=tar_path, feed_url=feed_url,
             cert_path=cert_path, timeout=timeout, audit_fn=audit_fn,
             now_fn=now_fn, fetch_fn=_fetch_fn, verify_fn=_verify_fn,
-            parse_fn=_parse_fn, reconcile_fn=_reconcile_fn)
+            parse_fn=_parse_fn, reconcile_fn=_reconcile_fn,
+            snapshot_fn=mark_snapshot)
     finally:
-        with _RUN_LOCK:
+        with _RUN_CONDITION:
+            if result is not None and result.get("outcome") == "ok" \
+                    and snapshot_generation[0] is not None:
+                _SUCCESSFUL_COVERAGE[coverage_key] = (
+                    snapshot_generation[0], dict(result))
             _RUNNING = False
+            _RUN_CONDITION.notify_all()
+    return result
 
 
 def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
                         cert_path, timeout, audit_fn, now_fn, fetch_fn,
-                        verify_fn, parse_fn, reconcile_fn):
+                        verify_fn, parse_fn, reconcile_fn, snapshot_fn):
     spath = settings_path(state_dir)
     tmp_dir = None
     try:
@@ -342,6 +389,11 @@ def _run_refresh_locked(source, state_dir, catalog, tar_path, feed_url,
             fetch_fn(feed_url, timeout, fetched_path)
         verify_fn(fetched_path, cert_path)     # raises before parse ever runs
         rows = parse_fn(fetched_path)
+        # This stamp MUST precede list_images().  A wait=True import registers
+        # only after publishing its catalog row, so every generation included
+        # here is visible to the following read.  Stamping afterward could
+        # falsely cover a row published between the read and the stamp.
+        snapshot_fn()
         images = _reconcile_input(catalog.list_images())
         verdicts = reconcile_fn(rows, images)
         matched = sum(1 for v in verdicts.values()

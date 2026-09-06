@@ -18,6 +18,7 @@ import time
 from urllib.parse import quote_from_bytes
 
 import bencode
+import catalog
 import peer_endpoints
 import peer_policy
 import secrets_store
@@ -70,14 +71,16 @@ def _rotate_seeder(sp, now=None):
 
 def _serve(tmp_path, **kwargs):
     sp = kwargs.pop("secrets_path", None) or _secrets_path(tmp_path)
+    kwargs.setdefault("scrape_authorizer",
+                      lambda _device_id, _info_hash: True)
     srv = tracker.make_server("127.0.0.1", 0, sp, **kwargs)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
 
 
-def _get(port, path):
+def _get(port, path, headers=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    c.request("GET", path)
+    c.request("GET", path, headers=headers or {})
     r = c.getresponse()
     return r.status, r.read()
 
@@ -577,6 +580,55 @@ def test_scrape_still_authenticates_and_reports(tmp_path):
         files = bencode.decode(body)[b"files"]
         stats = list(files.values())[0]
         assert stats[b"complete"] == 1
+    finally:
+        srv.shutdown()
+
+
+def test_scrape_is_bound_to_device_catalog_assignment_for_bearer_and_guest_shell(
+        tmp_path):
+    state = tmp_path / "state"
+    store = catalog.CatalogStore(str(state))
+    other_bytes = hashlib.sha1(b"other-assigned-image").digest()
+    other_hash = quote_from_bytes(other_bytes)
+    for image_id, info_hash in (("image-a", INFO_HASH_HEX),
+                                ("image-b", other_bytes.hex())):
+        store.save_image({
+            "id": image_id, "filename": image_id + ".bin", "size": 1,
+            "sha256": "00" * 32, "info_hash_hex": info_hash,
+            "cisco_signature_verified": False, "published_at": 1,
+        })
+    store.set_policy("dev-a", approved_image_id="image-a")
+    store.set_policy("dev-b", approved_image_id="image-b")
+
+    sp = _secrets_path(tmp_path)
+    token_a = _mint_device(sp, "dev-a")
+    token_b = _mint_device(sp, "dev-b")
+    srv, port = _serve(
+        tmp_path, secrets_path=sp,
+        scrape_authorizer=tracker._catalog_scrape_authorizer(str(state)))
+    try:
+        _announce(port, "a", token_a, info_hash=INFO_HASH)
+        _announce(port, "b", token_b, info_hash=other_hash)
+
+        # The unchanged Guest Shell query transport remains accepted, but its
+        # typed device credential now sees only that device's assignment.
+        assert _get(
+            port, "/scrape?info_hash=%s&announce_token=%s" %
+            (INFO_HASH, token_a))[0] == 200
+        cross_status, cross_body = _get(
+            port, "/scrape?info_hash=%s&announce_token=%s" %
+            (other_hash, token_a))
+        missing_status, missing_body = _get(
+            port, "/scrape?info_hash=%s&announce_token=%s" %
+            (quote_from_bytes(b"z" * 20), token_a))
+        assert (cross_status, cross_body) == (missing_status, missing_body)
+        assert cross_status == 404
+
+        # Unified agents use the preferred header transport under the same
+        # resource binding.
+        assert _get(
+            port, "/scrape?info_hash=%s" % other_hash,
+            {"Authorization": "Bearer " + token_b})[0] == 200
     finally:
         srv.shutdown()
 

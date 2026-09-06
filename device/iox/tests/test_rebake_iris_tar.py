@@ -134,6 +134,42 @@ def _read_member(tar_path, name):
         return t.extractfile(name).read()
 
 
+def _package_with_wrapper_member(tmp_path, scope, name):
+    """Add one signing member at an outer/nested package-wrapper level."""
+    source = _mini_package(tmp_path)
+    with tarfile.open(source) as t:
+        outer = [(m.name, t.extractfile(m).read()) for m in t if m.isfile()]
+
+    if scope == "outer":
+        outer.append((name, b"signature fixture\n"))
+    else:
+        target = ("artifacts.tar.gz" if scope == "artifacts"
+                  else "envelope_package.tar.gz")
+        nested = dict(outer)[target]
+        with tarfile.open(fileobj=io.BytesIO(nested), mode="r:gz") as t:
+            members = [(m.name, t.extractfile(m).read())
+                       for m in t if m.isfile()]
+        if scope == "envelope-artifacts":
+            envelope_artifacts = dict(members)["artifacts.tar.gz"]
+            with tarfile.open(fileobj=io.BytesIO(envelope_artifacts),
+                              mode="r:gz") as t:
+                artifacts = [(m.name, t.extractfile(m).read())
+                             for m in t if m.isfile()]
+            artifacts.append((name, b"signature fixture\n"))
+            members = [(member, _tar_bytes(artifacts, gz=True)
+                        if member == "artifacts.tar.gz" else data)
+                       for member, data in members]
+        else:
+            members.append((name, b"signature fixture\n"))
+        outer = [(member, _tar_bytes(members, gz=True)
+                  if member == target else data)
+                 for member, data in outer]
+
+    package = tmp_path / ("signed-%s-%s.tar" % (scope, name))
+    package.write_bytes(_tar_bytes(outer))
+    return package
+
+
 def _verify_chain(pkg_path):
     """Full self-consistency check of a package: every SHA256 manifest line
     matches its member, and the OCI chain (index -> manifest -> config +
@@ -181,6 +217,40 @@ def _verify_chain(pkg_path):
 
 def test_fixture_is_self_consistent(tmp_path):
     _verify_chain(_mini_package(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "scope", ["outer", "envelope", "artifacts", "envelope-artifacts"])
+@pytest.mark.parametrize("name", ["package.sign", "package.cert"])
+def test_rebake_refuses_signing_material_at_every_package_level(
+        tmp_path, scope, name):
+    package = _package_with_wrapper_member(tmp_path, scope, name)
+    replacement = tmp_path / "new.pem"
+    replacement.write_bytes(b"NEW-CERT\n")
+    output = tmp_path / "out.tar"
+
+    with pytest.raises(rb.RebakeError, match="refusing signed IOx package"):
+        rb.rebake(str(package), str(output),
+                  {"opt/iris/iris-catalog.pem": str(replacement)})
+    assert not output.exists()
+
+
+def test_sha512_manifest_order_is_preserved_without_signing_members():
+    present = ["package.yaml", "package.sign", "artifacts.tar.gz",
+               "package.cert", ".package.metadata"]
+    original = (
+        "SHA512(artifacts.tar.gz)= deadbeef\n"
+        "SHA512(package.sign)= deadbeef\n"
+        "SHA512(.package.metadata)= deadbeef\n"
+        "SHA512(package.cert)= deadbeef\n"
+        "SHA512(package.yaml)= deadbeef\n"
+    ).encode()
+
+    ordered = rb._mf_order(original, present)
+    assert ordered == ["artifacts.tar.gz", ".package.metadata", "package.yaml"]
+    manifest = rb._mf([(name, name.encode()) for name in present])
+    assert b"package.sign" not in manifest
+    assert b"package.cert" not in manifest
 
 
 def test_rebake_replaces_files_and_keeps_chain_valid(tmp_path):

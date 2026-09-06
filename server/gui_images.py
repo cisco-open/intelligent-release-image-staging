@@ -4,8 +4,8 @@
 """ImageService: the Images screen's application logic. Wraps catalog.CatalogStore
 (listing) and publish.publish (torrent/seed/catalog) with a streamed, size-capped,
 atomic upload and an in-memory background publish-job tracker. All side effects
-(publish fn, tracker-url fn, clock) are injected so the logic is unit-testable
-off-box. Stdlib only."""
+(publish fn, tracker-url fn, verification fn, clock) are injected so the logic
+is unit-testable off-box. Stdlib only."""
 import os
 import re
 import secrets
@@ -44,7 +44,7 @@ class ImageService:
                  tracker_url_fn=publish_mod.default_tracker_url,
                  publish_fn=publish_mod.publish, now_fn=time.time,
                  seeder_remove_fn=publish_mod.remove_torrent_rpc,
-                 audit_fn=None, import_root=None):
+                 audit_fn=None, import_root=None, verification_fn=None):
         self.state_dir = state_dir
         self.images_dir = images_dir
         self.import_root = import_root if import_root is not None else \
@@ -54,6 +54,7 @@ class ImageService:
         self._now = now_fn
         self._seeder_remove = seeder_remove_fn
         self._audit = audit_fn
+        self._verification = verification_fn
         self._jobs = {}
         # image_ids with an async publish still running: the catalog entry does
         # not exist until the job finishes, so this is the only thing that makes
@@ -364,6 +365,11 @@ class ImageService:
             "image_id": None,
             "started_at": int(self._now()),
             "finished_at": None,
+            # None means this ImageService has no reconciler wired (primarily
+            # small unit-test/service embeddings). Production switches this to
+            # {outcome: running} after publish and then stores the bounded
+            # Bulk Hash result plus this image's resulting verdict.
+            "verification": None,
         }
         pending_id = publish_mod.derive_id(job["filename"])
         with self._lock:
@@ -389,7 +395,29 @@ class ImageService:
                     raise RuntimeError(
                         "cannot determine tracker URL (is IRIS_HOST_IP set?)")
                 entry = self._publish_fn(image_path, self._store(), tracker_url)
-                self._finish(job_id, "done", image_id=entry.get("id"))
+                image_id = entry.get("id")
+                verification = None
+                message = ""
+                if self._verification is not None:
+                    self._mark_verifying(job_id, image_id)
+                    try:
+                        result = self._verification(entry)
+                    except Exception as exc:
+                        # The production reconciler returns failures as data,
+                        # but keep an injected/unexpected raiser from turning a
+                        # successful publish into the false claim that nothing
+                        # was published. Exception text is not reflected: it
+                        # may contain upstream request material.
+                        result = {"outcome": "fail",
+                                  "detail": "verification failed (%s)"
+                                            % exc.__class__.__name__}
+                    verification = self._verification_view(result, image_id)
+                    if verification["outcome"] != "ok":
+                        message = "published, but Cisco hash verification " \
+                                  "did not complete: %s" % \
+                                  verification.get("detail", "unknown failure")
+                self._finish(job_id, "done", image_id=image_id,
+                             message=message, verification=verification)
             except Exception as exc:  # publish is best-effort; report, don't crash
                 # Exception text is untrusted here: the job message is served
                 # to every console session and truncated into the exported
@@ -405,7 +433,53 @@ class ImageService:
         threading.Thread(target=run, daemon=True).start()
         return job_id
 
-    def _finish(self, job_id, state, image_id=None, message=""):
+    def _mark_verifying(self, job_id, image_id):
+        """Publish succeeded; make the follow-on integrity phase pollable."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job["state"] = "verifying"
+            job["image_id"] = image_id
+            job["verification"] = {"outcome": "running",
+                                   "image_state": None}
+
+    def _verification_view(self, result, image_id):
+        """Bounded, stable job projection of a Bulk Hash refresh result."""
+        if not isinstance(result, dict):
+            result = {"outcome": "fail",
+                      "detail": "verification returned an invalid result"}
+        outcome = result.get("outcome")
+        if outcome not in ("ok", "fail", "already_running"):
+            outcome = "fail"
+        view = {"outcome": outcome, "image_state": None}
+        if outcome == "ok":
+            for key in ("matched", "mismatched", "not_in_feed"):
+                value = result.get(key)
+                view[key] = value if type(value) is int and value >= 0 else None
+        else:
+            detail = str(result.get("detail") or
+                         ("another verification is already running"
+                          if outcome == "already_running" else
+                          "verification failed"))
+            view["detail"] = " ".join(detail.split())[:200]
+        try:
+            current = self.get_image(image_id) if image_id else None
+        except Exception:
+            # The refresh result remains useful even if the follow-up read
+            # fails. Most importantly, do not reclassify the already-durable
+            # publish as a publish error merely because its verdict projection
+            # could not be enriched.
+            current = None
+        verdict = current.get("hash_verification") \
+            if isinstance(current, dict) else None
+        if isinstance(verdict, dict) and verdict.get("state") in \
+                ("verified", "mismatch", "not_in_feed"):
+            view["image_state"] = verdict["state"]
+        return view
+
+    def _finish(self, job_id, state, image_id=None, message="",
+                verification=None):
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
@@ -413,6 +487,7 @@ class ImageService:
             job["state"] = state
             job["image_id"] = image_id
             job["message"] = message
+            job["verification"] = verification
             job["finished_at"] = int(self._now())
             filename = job["filename"]
             duration = job["finished_at"] - job["started_at"]

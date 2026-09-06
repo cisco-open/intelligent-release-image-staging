@@ -121,6 +121,7 @@
       <div class="nav-flyout menu" id="settings-submenu" hidden>
         <div class="nav-group">Settings</div>
         <a href="#settings/setup" class="nav subsub menu-close" id="nav-settings-setup"><svg class="nav-icon" aria-hidden="true"><use href="#i-nav-list-checks"/></svg><span class="nav-label">Setup</span></a>
+        <a href="#settings/packages" class="nav subsub menu-close" id="nav-settings-packages">Device packages</a>
         <a href="#settings/general" class="nav subsub menu-close" id="nav-settings-general">General</a>
         <a href="#settings/tls" class="nav subsub menu-close" id="nav-settings-tls">TLS &amp; trust</a>
         <a href="#settings/telemetry" class="nav subsub menu-close" id="nav-settings-telemetry">Telemetry</a>
@@ -280,7 +281,7 @@
               <option value="">Agent install: any</option>
               <option value="guestshell">Guest Shell</option>
               <option value="iox">IOx</option>
-              <option value="router">Router</option>
+              <option value="router">Guest Shell</option>
               <option value="xr-appmgr">XR appmgr container</option>
               <option value="__none">— unset —</option>
             </select>
@@ -447,11 +448,14 @@
           <label class="field" for="df-guest"><span class="field-label">App IP (Guest Shell)</span><input id="df-guest" placeholder="e.g. 10.0.2.5"></label>
           <label class="field" for="df-mask"><span class="field-label">App mask</span><input id="df-mask" placeholder="e.g. 255.255.255.0"></label>
           <label class="field" for="df-gateway"><span class="field-label">App gateway (VPG IP for routers)</span><input id="df-gateway" placeholder="e.g. 10.0.2.1" title="For router modes, this is the IP configured on VirtualPortGroup<N>"></label>
-          <label class="field" for="df-model"><span class="field-label">Model (optional)</span><input id="df-model" placeholder="e.g. C9300-48UXM / IE-3400 / C8000V"></label>
-          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform"><option value="" disabled selected>Choose an agent install</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Router (Guest Shell via VirtualPortGroup)</option><option value="xr-appmgr">XR appmgr container</option></select></label>
+          <label class="field" for="df-model"><span class="field-label">Model (optional, free text)</span><input id="df-model" placeholder="e.g. C9300-48UXM / IE-3400 / C8000V" title="Enter a model freely. Entering a model does not confirm that its hardware supports an IRIS agent."></label>
+          <label class="field" for="df-platform"><span class="field-label">Agent install</span><select id="df-platform" aria-describedby="df-platform-hint"><option value="" disabled selected>Choose an agent install</option><option value="guestshell">Guest Shell</option><option value="iox">IOx</option><option value="router">Guest Shell</option><option value="xr-appmgr">XR appmgr container</option></select></label>
           <label class="field" for="df-cred"><span class="field-label">Credential</span><select id="df-cred"><option value="">— no credential —</option></select></label>
-          <button class="btn" type="submit">Save device</button>
-          <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
+          <div class="form-actions">
+            <button class="btn" type="submit">Save device</button>
+            <button class="btn ghost" type="button" id="df-cancel">Cancel</button>
+          </div>
+          <p class="muted form-help" id="df-platform-hint"></p>
           <span class="err" id="df-err" role="alert"></span>
         </form>
         <div class="inline-form" id="cred-panel" hidden>
@@ -468,9 +472,11 @@
             <label class="field" for="cf-pass"><span class="field-label">Device password</span><input id="cf-pass" type="password" placeholder="Device password" autocomplete="new-password"></label>
             <label class="field" for="cf-pass2"><span class="field-label">Confirm password</span><input id="cf-pass2" type="password" placeholder="Confirm password" autocomplete="new-password"></label>
             <label class="field" for="cf-en"><span class="field-label">Enable secret</span><input id="cf-en" type="password" placeholder="Blank = same as password" autocomplete="new-password"></label>
-            <button class="btn" type="submit">Save profile</button>
-            <button class="btn ghost" type="button" id="cf-reset">New</button>
-            <button class="btn ghost" type="button" id="cf-close">Close</button>
+            <div class="form-actions">
+              <button class="btn" type="submit">Save profile</button>
+              <button class="btn ghost" type="button" id="cf-reset">New</button>
+              <button class="btn ghost" type="button" id="cf-close">Close</button>
+            </div>
             <span class="err" id="cf-err" role="alert"></span>
           </form>
         </div>
@@ -705,12 +711,11 @@
 
             <div class="wz-step" id="wz-step-packages" hidden>
               <h3>2. Device packages <span id="wz-pkg-chip"></span></h3>
-              <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
-                C9300 with app-hosting) install a package that pins this server's
-                certificate at build time. If that certificate changes, existing
-                packages can no longer authenticate &mdash; the app installs and reports
-                RUNNING, but the device never checks in. Guest Shell platforms re-fetch
-                the certificate on every onboard and are not affected.</p>
+              <p class="muted">IOx and IOS-XR devices install a deployment-neutral
+                package. During onboarding IRIS separately copies this server's
+                current certificate to the device. Certificate rotation requires
+                re-onboarding affected devices, but does not require rebuilding
+                their packages. Guest Shell keeps its existing onboarding flow.</p>
               <p class="muted"><strong>This step cannot be completed from the console.</strong>
                 The console container has no Docker socket, so it can detect a stale
                 package but never rebuild one. Run the command below on the Docker host,
@@ -768,16 +773,15 @@
 
           <div class="card">
           <h3>Device packages <span id="setup-pkg-chip"></span></h3>
-          <p class="muted">Devices that run the agent as an IOx app (IE-3x00, and
-            C9300 with app-hosting) install a package that pins this server's
-            certificate at build time. If that certificate changes, existing
-            packages can no longer authenticate — the app installs and reports
-            RUNNING, but the device never checks in. Guest Shell platforms
-            re-fetch the certificate on every onboard and are not affected.</p>
+          <p class="muted">IOx and IOS-XR devices install a deployment-neutral
+            package. During onboarding IRIS separately copies this server's
+            current certificate to the device, allowing one signed package to
+            be reused across deployments and certificate rotations.</p>
           <div class="table-scroll">
           <table class="tbl" id="setup-pkg-table"><tbody></tbody></table>
           </div>
           <p class="muted" id="setup-pkg-remedy"></p>
+          <p><a href="#settings/packages" class="btn ghost">Review device packages</a></p>
           </div>
 
           <div class="card">
@@ -788,6 +792,27 @@
             genuine, untampered Cisco release.</p>
           <p><a href="#setup" class="btn ghost">Configure in setup</a></p>
           </div>
+          </div>
+        </div>
+        <div id="settings-pane-packages" hidden>
+          <div class="card">
+          <h3>Device packages <span id="device-packages-chip"></span></h3>
+          <p class="muted">IOx and IOS-XR devices install deployment-neutral
+            packages. Check their bytes and build provenance here before
+            onboarding; the current server certificate is delivered separately
+            at runtime.</p>
+          <p class="muted"><strong>Builds run on the Docker host.</strong> The
+            console can inspect these artifacts but cannot rebuild them because
+            it has no Docker socket.</p>
+          <div class="table-scroll">
+          <table class="tbl" id="device-packages-table">
+            <thead><tr><th>Package</th><th>State</th><th>Artifact updated</th><th>Evidence</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          </div>
+          <p class="machine" id="device-packages-remedy"></p>
+          <p><button class="btn ghost" id="device-packages-recheck">Re-check packages</button>
+            <span class="muted" id="device-packages-msg" role="status" aria-live="polite"></span></p>
           </div>
         </div>
         <div id="settings-pane-general">
@@ -804,7 +829,9 @@
             <label class="field" for="pw-cur"><span class="field-label">Current password</span><input id="pw-cur" type="password" placeholder="Current password" autocomplete="current-password"></label>
             <label class="field" for="pw-new"><span class="field-label">New password</span><input id="pw-new" type="password" placeholder="Min 8 characters" autocomplete="new-password"></label>
             <label class="field" for="pw-confirm"><span class="field-label">Confirm new password</span><input id="pw-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password"></label>
-            <button class="btn" type="submit">Change password</button>
+            <div class="form-actions">
+              <button class="btn" type="submit">Change password</button>
+            </div>
             <span class="err" id="pw-msg" role="alert"></span>
           </form>
           </div>
@@ -824,7 +851,7 @@
           <h3>Certificate</h3>
           <p class="muted">Serves the console only — the device-facing catalog and
             artifact certificates are untouched, so enrolled devices keep working.
-            The private key is stored age-encrypted and never shown again.</p>
+            Uploaded private keys are stored age-encrypted and never shown again.</p>
           <p class="muted" id="cert-status" role="status" aria-live="polite"></p>
           <div class="dropzone" id="cert-dropzone" tabindex="0" role="button"
               aria-label="Drop a certificate and/or private key PEM file, or press Enter to browse for files">
@@ -834,12 +861,14 @@
           <form class="inline-form" id="cert-form">
             <label class="field field-wide" for="cert-pem"><span class="field-label">Certificate PEM (leaf or full chain)</span><textarea id="cert-pem" rows="4" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
             <label class="field field-wide" for="cert-key"><span class="field-label">Private key PEM</span><textarea id="cert-key" rows="4" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
-            <label id="cert-passphrase-row" hidden>Key passphrase
+            <label class="field" for="cert-passphrase" id="cert-passphrase-row" hidden><span class="field-label">Key passphrase</span>
               <input type="password" id="cert-passphrase" autocomplete="off"
                      placeholder="passphrase for the encrypted key">
             </label>
-            <button class="btn" type="submit">Replace certificate</button>
-            <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use built-in certificate</button>
+            <div class="form-actions">
+              <button class="btn" type="submit">Replace certificate</button>
+              <button class="linkish danger-link" type="button" id="cert-revert" hidden>Use deployment default certificate</button>
+            </div>
             <span class="err" id="cert-msg" role="alert"></span>
           </form>
           </div>
@@ -860,7 +889,9 @@
           </div>
           <form class="inline-form" id="trust-form">
             <label class="field field-wide" for="trust-pem"><span class="field-label">CA certificate PEM</span><textarea id="trust-pem" rows="4" spellcheck="false" placeholder="One or more -----BEGIN CERTIFICATE----- blocks"></textarea></label>
-            <button class="btn" type="submit">Add CA</button>
+            <div class="form-actions">
+              <button class="btn" type="submit">Add CA</button>
+            </div>
             <span class="err" id="trust-msg" role="alert"></span>
           </form>
           </div>
@@ -877,9 +908,11 @@
               <option value="custom">Custom URL</option>
             </select></label>
             <label class="field" for="ca-url"><span class="field-label">Custom bundle URL</span><input id="ca-url" placeholder="https://…" hidden></label>
-            <label class="muted"><input type="checkbox" id="ca-auto"> Refresh daily</label>
-            <button class="btn ghost" type="submit">Save</button>
-            <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
+            <label class="muted form-check"><input type="checkbox" id="ca-auto"> Refresh daily</label>
+            <div class="form-actions">
+              <button class="btn ghost" type="submit">Save</button>
+              <button class="btn ghost" type="button" id="ca-refresh">Download now</button>
+            </div>
             <span class="err" id="ca-msg" role="alert"></span>
           </form>
           </div>
@@ -898,9 +931,11 @@
           <p class="muted" id="td-status" role="status" aria-live="polite"></p>
           <form class="inline-form" id="td-form">
             <label class="field field-wide" for="td-endpoint"><span class="field-label">OTLP endpoint</span><input id="td-endpoint" placeholder="https://collector:4318"></label>
-            <label class="muted"><input type="checkbox" id="td-enabled"> Export enabled</label>
-            <button class="btn" type="submit">Save</button>
-            <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
+            <label class="muted form-check"><input type="checkbox" id="td-enabled"> Export enabled</label>
+            <div class="form-actions">
+              <button class="btn" type="submit">Save</button>
+              <button class="linkish danger-link" type="button" id="td-revert" hidden>Revert to deployment default</button>
+            </div>
             <span class="err" id="td-msg" role="alert"></span>
           </form>
           </template>
@@ -919,10 +954,12 @@
             <label class="field" for="ae-path"><span class="field-label">Remote path</span><input id="ae-path" placeholder="/var/backups or ~/audit"></label>
             <label class="field" for="ae-recipient"><span class="field-label">age recipient</span><input id="ae-recipient" placeholder="age1…" spellcheck="false"></label>
             <label class="field" for="ae-pass"><span class="field-label">Password</span><input id="ae-pass" type="password" placeholder="Password" autocomplete="new-password"></label>
-            <label class="muted"><input type="checkbox" id="ae-auto"> Export daily</label>
-            <button class="btn" type="submit">Save</button>
-            <button class="btn ghost" type="button" id="ae-run">Export now</button>
-            <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
+            <label class="muted form-check"><input type="checkbox" id="ae-auto"> Export daily</label>
+            <div class="form-actions">
+              <button class="btn" type="submit">Save</button>
+              <button class="btn ghost" type="button" id="ae-run">Export now</button>
+              <button class="linkish danger-link" type="button" id="ae-clear">Clear</button>
+            </div>
             <span class="err" id="ae-msg" role="alert"></span>
           </form>
           </div>
@@ -949,7 +986,9 @@
               <option value="weekly">Weekly (Mondays, UTC)</option>
             </select></label>
             <label class="field" for="iv-hour"><span class="field-label">Hour (UTC)</span><select id="iv-hour"></select></label>
-            <button class="btn" type="submit">Save</button>
+            <div class="form-actions">
+              <button class="btn" type="submit">Save</button>
+            </div>
             <span class="err" id="iv-schedule-msg" role="alert"></span>
           </form>
           </div>

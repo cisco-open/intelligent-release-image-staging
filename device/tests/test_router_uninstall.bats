@@ -23,6 +23,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"no interface VirtualPortGroup10"* ]]
   [[ "$output" == *"no app-hosting appid guestshell"* ]]
+  [[ "$output" == *"no event manager applet IRIS-ROOT-HASH"* ]]
   [[ "$output" == *"delete /force /recursive bootflash:guest-share/iris"* ]]
   [[ "$output" == *"delete /force bootflash:guest-share/bootstrap.sh"* ]]
   [[ "$output" != *"delete /force /recursive bootflash:guest-share"$'\n'* ]]
@@ -131,7 +132,7 @@ setup() {
   [[ "$output" == *"LEFT ON THE DEVICE"* ]] && \
   [[ "$output" == *"NAT_RULE"* ]] && \
   [[ "$output" == *"access-list standard IRIS-NAT"* ]] && \
-  [[ "$output" == *"re-run this undeploy"* ]]
+  [[ "$output" == *"Retry after NAT translations drain"* ]]
 }
 
 @test "force teardown removes the agent footprint and reclaims only IRIS-marked network config" {
@@ -473,7 +474,7 @@ PY2
   _router_uninstall_stub_setup
   run _router_uninstall_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"is clean and persisted"* ]]
+  [[ "$output" == *"undeploy complete:"* ]]
   merged="$(_calls_containing "$FAKE_COMMAND_LOG" '__IRIS_VERIFY_RUNNING__' \
     'show running-config' 'show app-hosting list' 'dir bootflash:guest-share')"
   [ "$merged" -eq 1 ]
@@ -487,7 +488,7 @@ PY2
   FAKE_VERIFY_OMIT_FILES=yes run _router_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"ERROR: undeploy verify did not return guest-share file listing"* ]]
-  [[ "$output" != *"is clean and persisted"* ]]
+  [[ "$output" != *"undeploy complete:"* ]]
 }
 
 @test "undeploy fails closed (never reports clean) when the RUNNING marker is missing" {
@@ -495,7 +496,7 @@ PY2
   FAKE_VERIFY_OMIT_RUNNING=yes run _router_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"ERROR: undeploy verify did not return running-config"* ]]
-  [[ "$output" != *"is clean and persisted"* ]]
+  [[ "$output" != *"undeploy complete:"* ]]
 }
 
 @test "undeploy verify does NOT falsely declare clean when residue is actually present" {
@@ -548,7 +549,7 @@ PY2
   _router_uninstall_stub_setup
   run _router_uninstall_run_live_forced
   [[ "$output" != *"device identity mismatch"* ]] || return 1
-  [[ "$output" == *"FORCE:"* ]] || return 1
+  [[ "$output" == *"Force undeploy:"* ]] || return 1
   [ "$status" -eq 0 ]
 }
 

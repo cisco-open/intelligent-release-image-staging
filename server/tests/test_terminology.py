@@ -87,7 +87,7 @@ ALLOWLIST = [
      "narrates the change using both the old and new vocabulary by design"),
 
     # -- decision 5 hard exclusions: RFC / IOS / CSV-guard sites -------
-    ("server/gui_server.py", ('attachment; filename=',),
+    ("server/management_api.py", ('attachment; filename=',),
      "Content-Disposition: attachment (RFC 6266) on the CSV export/example "
      "download headers -- hard exclusion, decision 5"),
     ("tools/gen-device-installers.sh", ('*"network_attachment"*',),
@@ -104,21 +104,35 @@ ALLOWLIST = [
      "decision 5"),
     ("server/telemetry.py", ("observed receipt",),
      "time-of-receipt sense (spec section 3B/4) -- hard exclusion, decision 5"),
-    ("server/tests/test_docs_map.py", ("stamps it on receipt",),
-     "time-of-receipt sense (\"the server stamps it on receipt\") -- hard "
-     "exclusion, decision 5"),
     ("server/tests/test_telemetry_v2_ingest.py",
      ("receipt-based validity", "_120s_receipt", "OBSERVED receipt",
       "by_receipt_120"),
      "time-of-receipt sense (validity keyed off the last OBSERVED receipt), "
      "Family C -- hard exclusion, decision 5"),
-    ("docs/zensical/observability.md", ("server on receipt",),
-     "time-of-receipt sense (\"stamped at ingest by the server on receipt\") "
-     "-- hard exclusion, decision 5"),
     ("docs/zensical/dashboards/splunk-iris-swarm.xml",
      ("SERVER's receipt clock",),
      "time-of-receipt sense (\"_time is the SERVER's receipt clock\") -- "
      "hard exclusion, decision 5"),
+
+    # -- Native IOS hash completion, not deployment/peer terminology ---
+    ("device/agent/iris_agent.py",
+     ("share can carry a native IOS hash receipt",
+      "requires a completion receipt written AFTER IOS",
+      'receipt_dir = prefix + "guest-share/iris/"',
+      "'action 030 file open result %s/result w' % receipt_dir",
+      "'action 060 file open done %s/done w' % receipt_dir",
+      "bounded IOS SHA-512 policy did not produce a receipt",
+      "This unique directory contains only this call's hash receipts"),
+     "private EEM hash completion records: a unique result/done pair proves "
+     "that the native IOS hash command completed; unrelated to retired "
+     "deployment records or peer transfer records"),
+    ("device/agent/tests/test_guestshell_root_attestation.py",
+     ("production lock, durable lease, fresh receipt and poll path",
+      "test_native_hash_uses_fresh_receipt_and_only_read_only_ios_hash",
+      "a stale receipt cannot prove a later request",
+      "test_native_hash_does_not_accept_stale_receipt_after_timeout"),
+     "tests of the private EEM hash completion records, including freshness "
+     "and timeout rejection; no deployment or peer transfer terminology"),
 
     # -- Task 2: six deliberate NETWORK_ATTACHMENT stale-wrapper -------
     # -- tripwires, and the bats pins that exercise each one -----------

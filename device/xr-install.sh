@@ -16,14 +16,14 @@
 # scp PUSH of the pre-built iris-xr.rpm straight to /harddisk:/, from a local
 # file this script reads directly (no PKI trustpoint dance, no `copy https:`
 # -- those are IOS-XE machinery this platform simply does not need. Catalog
-# TLS is verified INSIDE the container, against the cert baked into the
-# image; see device/xr/Dockerfile). This script is the console-drivable
+# TLS is verified INSIDE the container against the current public certificate
+# this installer places on harddisk: beside the RPM.  The canonical image is
+# therefore deployment-neutral and can remain signed. This script is the console-drivable
 # shape: DEVICE_IP/CATALOG_URL/CATALOG_TOKEN/DEVICE_ID/DEVICE_USER/DEVICE_PASS
-# are exactly the fields OnboardService._build_env already produces for
-# every other platform (server/gui_onboard.py), and XR_RPM_FILE defaults
-# under IRIS_ARTIFACTS_DIR the same way IRIS_CRT_FILE does for the others --
-# the console always runs in the same container as the artifact server, so
-# this script can always read the package locally.
+# are the fields the onboarding service supplies. The split console/server
+# deployment passes a host-mounted local artifacts directory explicitly;
+# this installer never assumes the console shares the artifact-server
+# container filesystem.
 #
 # IOS-XR has no separate "persist to startup" step the way classic IOS does:
 # `commit` IS the persisted state (there is no running-config/startup-config
@@ -37,10 +37,11 @@
 # Optional env (defaults):
 #   APPID=iris  SOURCE_NAME=iris-xr
 #   IRIS_ARTIFACTS_DIR=<repo>/artifacts  XR_RPM_FILE=$IRIS_ARTIFACTS_DIR/iris-xr.rpm
+#   IRIS_CRT_FILE=$IRIS_ARTIFACTS_DIR/iris-catalog.pem (public server cert)
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
 #     it for a larger assigned image set; one proven full image is 1.8GB)
 #   IRIS_TELEMETRY=on  IRIS_TELEMETRY_STREAM=off
-#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/xr/entrypoint.sh);
+#   IRIS_LOG=off -- device-side aria2c.log opt-in (see device/container/entrypoint.sh);
 #     off by default for flash write endurance. Forwarded verbatim as --env
 #     IRIS_LOG so the container the agent runs in actually sees an operator's
 #     opt-in -- previously this script dropped it silently and the entrypoint's
@@ -67,13 +68,14 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 
 IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 XR_RPM_FILE="${XR_RPM_FILE:-$IRIS_ARTIFACTS_DIR/iris-xr.rpm}"
+CATALOG_CA_FILE="${IRIS_CATALOG_CA_FILE:-${IRIS_CRT_FILE:-$IRIS_ARTIFACTS_DIR/iris-catalog.pem}}"
 # One proven full image is 1.8GB (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md
 # section 1.4); 2 GiB is a same-order-of-magnitude floor for a single image.
 # Raise it explicitly for a multi-image assignment.
 XR_MIN_FREE_BYTES="${XR_MIN_FREE_BYTES:-2147483648}"
 IRIS_TELEMETRY="${IRIS_TELEMETRY:-on}"
 IRIS_TELEMETRY_STREAM="${IRIS_TELEMETRY_STREAM:-off}"
-# Same fail-closed default as device/xr/entrypoint.sh's own IRIS_LOG parsing
+# Same fail-closed default as device/container/entrypoint.sh's IRIS_LOG parsing
 # -- this is only the plumbing that lets an operator's opt-in actually reach
 # it; the default stays off either way.
 IRIS_LOG="${IRIS_LOG:-off}"
@@ -87,8 +89,8 @@ ACTIVATE_POLL="${ACTIVATE_POLL:-10}"
 # config line.
 _no_quotes_or_newlines() {
   case "$2" in
-    *'"'*|*$'\n'*)
-      echo "ERROR: $1 must not contain a double quote or newline" >&2
+    *'"'*|*$'\n'*|*$'\r'*)
+      echo "ERROR: $1 must not contain a double quote, CR, or LF" >&2
       exit 1 ;;
   esac
   case "$2" in *[[:space:]]*)
@@ -96,6 +98,53 @@ _no_quotes_or_newlines() {
     exit 1 ;;
   esac
 }
+
+_safe_name() {
+  _no_quotes_or_newlines "$1" "$2"
+  [[ "$2" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]] \
+    || { echo "ERROR: $1 contains unsafe characters" >&2; exit 2; }
+}
+
+_safe_fact() {
+  _no_quotes_or_newlines "$1" "$2"
+  [ -z "$2" ] || [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._+:/-]*$ ]] \
+    || { echo "ERROR: $1 contains unsafe characters" >&2; exit 2; }
+}
+
+_boolean() {
+  _no_quotes_or_newlines "$1" "$2"
+  case "$2" in on|off|1|0|true|false|yes|no|ON|OFF|TRUE|FALSE|YES|NO) ;;
+    *) echo "ERROR: $1 has an invalid boolean value" >&2; exit 2 ;;
+  esac
+}
+
+_uint_between() {
+  local name="$1" value="$2" minimum="$3" maximum="$4"
+  [[ "$value" =~ ^[0-9]+$ ]] && [ "${#value}" -le "${#maximum}" ] \
+    || { echo "ERROR: $name must be an integer from $minimum to $maximum" >&2; exit 2; }
+  [ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] \
+    || { echo "ERROR: $name must be an integer from $minimum to $maximum" >&2; exit 2; }
+}
+
+_https_url() {
+  local name="$1" value="$2"
+  _no_quotes_or_newlines "$name" "$value"
+  printf '%s' "$value" | python3 -c '
+import sys
+from urllib.parse import urlsplit
+try:
+    value = urlsplit(sys.stdin.read())
+    port = value.port
+    valid = (value.scheme == "https" and value.hostname is not None
+             and value.username is None and value.password is None
+             and (port is None or 1 <= port <= 65535))
+except ValueError:
+    valid = False
+raise SystemExit(0 if valid else 1)
+' >/dev/null 2>&1 \
+    || { echo "ERROR: $name must be an https URL without credentials" >&2; exit 2; }
+}
+
 _no_quotes_or_newlines CATALOG_URL "$CATALOG_URL"
 _no_quotes_or_newlines CATALOG_TOKEN "$CATALOG_TOKEN"
 _no_quotes_or_newlines DEVICE_ID "$DEVICE_ID"
@@ -107,13 +156,51 @@ _no_quotes_or_newlines MODEL "${MODEL:-}"
 # IRIS_LOG rides the same quoted docker-run-opts token as everything else
 # above; reuse the one guard rather than trusting a bare on/off-shaped value.
 _no_quotes_or_newlines IRIS_LOG "$IRIS_LOG"
+_https_url CATALOG_URL "$CATALOG_URL"
+[[ "$CATALOG_TOKEN" =~ ^[A-Za-z0-9._~+/-]+=*$ ]] \
+  || { echo "ERROR: CATALOG_TOKEN contains unsafe characters" >&2; exit 2; }
+[[ "$DEVICE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]] \
+  || { echo "ERROR: DEVICE_ID contains unsafe characters" >&2; exit 2; }
+[[ "$DEVICE_IP" =~ ^[A-Za-z0-9._:-]+$ ]] \
+  || { echo "ERROR: DEVICE_IP is not a safe SSH host" >&2; exit 2; }
+_safe_name APPID "$APPID"
+_safe_name SOURCE_NAME "$SOURCE_NAME"
+_safe_fact MODEL "${MODEL:-}"
+_boolean IRIS_TELEMETRY "$IRIS_TELEMETRY"
+_boolean IRIS_TELEMETRY_STREAM "$IRIS_TELEMETRY_STREAM"
+_boolean IRIS_LOG "$IRIS_LOG"
+_uint_between XR_MIN_FREE_BYTES "$XR_MIN_FREE_BYTES" 1 999999999999999
+_uint_between ACTIVATE_TIMEOUT "$ACTIVATE_TIMEOUT" 1 86400
+_uint_between ACTIVATE_POLL "$ACTIVATE_POLL" 1 3600
+case "$XR_RPM_FILE" in /*) ;; *) echo "ERROR: XR_RPM_FILE must be an absolute path" >&2; exit 2 ;; esac
+case "$XR_RPM_FILE" in *$'\n'*|*$'\r'*) echo "ERROR: XR_RPM_FILE must be a single line" >&2; exit 2 ;; esac
+case "$CATALOG_CA_FILE" in /*) ;; *) echo "ERROR: IRIS_CRT_FILE/IRIS_CATALOG_CA_FILE must be an absolute path" >&2; exit 2 ;; esac
+case "$CATALOG_CA_FILE" in *$'\n'*|*$'\r'*) echo "ERROR: catalog certificate path must be a single line" >&2; exit 2 ;; esac
+
+validate_public_cert() {
+  [ -r "$1" ] || {
+    echo "ERROR: catalog certificate is not readable: $1" >&2
+    return 1
+  }
+  if grep -Eq 'BEGIN ([A-Z0-9 ]+ )?PRIVATE KEY' "$1"; then
+    echo "ERROR: catalog certificate file contains a private key; provide only the public certificate" >&2
+    return 1
+  fi
+  openssl x509 -in "$1" -noout >/dev/null 2>&1 || {
+    echo "ERROR: catalog certificate is not a valid PEM certificate: $1" >&2
+    return 1
+  }
+}
 
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER}"; : "${DEVICE_PASS:?set DEVICE_PASS}"
+  [[ "$DEVICE_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
+    || { echo "ERROR: DEVICE_USER is not a safe SSH username" >&2; exit 2; }
   [ -r "$XR_RPM_FILE" ] || {
     echo "ERROR: XR_RPM_FILE=$XR_RPM_FILE is not readable (build it with tools/build-xr-package.sh)" >&2
     exit 1
   }
+  validate_public_cert "$CATALOG_CA_FILE" || exit 1
 fi
 
 # docker-run-opts: the exact hardware-proven base ("-td --net=host -v
@@ -121,7 +208,7 @@ fi
 # per secret/identity value. NEVER --name -- appmgr's opts validator rejects
 # it outright ("Docker run invalid opts passed: unsupported arguments:
 # --name"; appmgr names the container itself). No docker-run-cmd override:
-# the image's own ENTRYPOINT (device/xr/entrypoint.sh) is what should run.
+# the image's own ENTRYPOINT (device/container/entrypoint.sh) is what should run.
 #
 # --log-driver/--log-opt: both are in appmgr's documented docker-run-opts
 # flag surface pre-24.1.1 (agentinfo/xr-support/research/xrfact-appmgr-
@@ -145,7 +232,7 @@ fi
 # logs live on (agentinfo/xr-support/research/parity/install-bootstrap-
 # parity.md), and nothing against a multi-GB harddisk: image.
 docker_run_opts() {
-  printf -- '-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s --env IRIS_LOG=%s' \
+  printf -- '-td --net=host -v /misc/disk1:/hostmount --log-driver json-file --log-opt max-size=1m --log-opt max-file=3 --env IRIS_DEVICE_PLATFORM=xr-appmgr --env IRIS_CATALOG_URL=%s --env IRIS_CATALOG_TOKEN=%s --env IRIS_DEVICE_ID=%s --env IRIS_MODEL=%s --env IRIS_VERSION=%s --env IRIS_TELEMETRY=%s --env IRIS_TELEMETRY_STREAM=%s --env IRIS_LOG=%s' \
     "$CATALOG_URL" "$CATALOG_TOKEN" "$DEVICE_ID" "${MODEL:-}" "${XR_VERSION:-}" \
     "$IRIS_TELEMETRY" "$IRIS_TELEMETRY_STREAM" "$IRIS_LOG"
 }
@@ -155,22 +242,35 @@ activate_line() {
     "$APPID" "$SOURCE_NAME" "$(docker_run_opts)"
 }
 
-if [ "$DRY" -eq 1 ]; then
-  echo "===== [1/5] preflight on \$DEVICE_IP: show version MUST classify IOS-XR; harddisk: free >= $XR_MIN_FREE_BYTES bytes ====="
-  echo "===== [2/5] scp push $XR_RPM_FILE -> \${DEVICE_USER}@\$DEVICE_IP:/harddisk:/$SOURCE_NAME.rpm ====="
-  echo "===== [3/5] register: appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm; verify show appmgr source-table lists $SOURCE_NAME ====="
-  echo "===== [4/5] activate (config; every commit guarded by lab/xr-run.sh's show-configuration-failed/abort recovery) ====="
-  echo "configure"
+activate_line_redacted() {
+  # Dry-run output is routinely copied into tickets and logs. Keep the exact
+  # appmgr command shape while withholding the live enrollment credential.
+  local CATALOG_TOKEN='<redacted>'
   activate_line
+}
+
+if [ "$DRY" -eq 1 ]; then
+  echo "[1/5] check IOS-XR and harddisk: free space (minimum $XR_MIN_FREE_BYTES bytes)"
+  echo "show version"
+  echo "dir harddisk: | include bytes free"
+  echo "[2/5] upload package and certificate to harddisk:"
+  printf 'scp -O %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
+  printf 'scp -O <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
+  echo "[3/5] register package"
+  echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
+  echo "show appmgr source-table"
+  echo "[4/5] activate app"
+  echo "configure"
+  activate_line_redacted
   echo "commit"
-  echo "===== [5/5] verify show appmgr application-table shows $APPID Up (poll up to \${ACTIVATE_TIMEOUT}s / \${ACTIVATE_POLL}s) ====="
-  echo "===== NOT DONE: no 'copy running-config startup-config' -- XR commit IS the persisted state ====="
+  echo "[5/5] verify app is Up"
+  echo "show appmgr application-table"
   exit 0
 fi
 
 RUN() { "$HERE/../lab/xr-run.sh" "$DEVICE_IP"; }   # XR commands on stdin
 
-echo "[1/5] preflight on $DEVICE_IP: classify IOS-XR, check harddisk: headroom"
+echo "[1/5] check device and storage: $DEVICE_IP"
 VERSION_OUT="$(printf 'show version\n' | RUN 2>/dev/null)"
 # Mirrors _OS_XR_RE in server/gui_onboard.py ('^\s*cisco\s+IOS[\s-]*XRv?\b'):
 # the real banner is "Cisco IOS XR Software, Version 25.4.2 LNT"
@@ -196,6 +296,7 @@ XR_VERSION="$(printf '%s\n' "$VERSION_OUT" | tr -d '\r' \
 # fails the whole pseudo-atomic commit).
 XR_VERSION="${XR_VERSION%% *}"
 _no_quotes_or_newlines XR_VERSION "$XR_VERSION"
+_safe_fact XR_VERSION "$XR_VERSION"
 DIR_OUT="$(printf 'dir harddisk: | include bytes free\n' | RUN 2>/dev/null)"
 # Cisco 8000 dir output ends "<N> kbytes total (<M> kbytes free)" -- KBYTES,
 # hardware-proven ("41968752 kbytes total (37916076 kbytes free)",
@@ -220,7 +321,7 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
   exit 1
 fi
 
-echo "[2/5] scp push $XR_RPM_FILE -> harddisk: (hardware-proven inbound-scp path)"
+echo "[2/5] upload package and certificate"
 # The router's identity is verified with the same policy the transport uses
 # (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
 # host merely answering at the address.
@@ -230,13 +331,17 @@ iris_ssh_policy "$DEVICE_IP" || exit 1
 scp_rc=0
 SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
       "$XR_RPM_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/$SOURCE_NAME.rpm" || scp_rc=$?
+if [ "$scp_rc" -eq 0 ]; then
+  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+        "$CATALOG_CA_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-catalog.pem" || scp_rc=$?
+fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: scp of $XR_RPM_FILE to $DEVICE_IP:/harddisk:/$SOURCE_NAME.rpm failed" >&2
+  echo "ERROR: scp of the XR package/catalog certificate to $DEVICE_IP:harddisk: failed" >&2
   exit 1
 fi
 
-echo "[3/5] register the package: appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
+echo "[3/5] register package: $SOURCE_NAME"
 printf 'appmgr package install rpm /harddisk:/%s.rpm\n' "$SOURCE_NAME" | RUN >/dev/null 2>&1 || true
 SRC_OUT="$(printf 'show appmgr source-table\n' | RUN 2>/dev/null || true)"
 if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
@@ -245,14 +350,14 @@ if ! printf '%s\n' "$SRC_OUT" | grep -q "$SOURCE_NAME"; then
   exit 1
 fi
 
-echo "[4/5] activate: appmgr application $APPID (source $SOURCE_NAME, host networking, harddisk: bind mount)"
+echo "[4/5] activate app: $APPID"
 {
   echo "configure"
   activate_line
   echo "commit"
 } | RUN >/dev/null
 
-echo "[5/5] waiting for $APPID to report Up (poll budget ${ACTIVATE_TIMEOUT}s)"
+echo "[5/5] wait for app: $APPID"
 elapsed=0
 app_up=0
 APP_OUT=""
@@ -271,6 +376,4 @@ if [ "$app_up" -ne 1 ]; then
   exit 1
 fi
 
-echo "done. '$APPID' is Up. It downloads $DEVICE_ID's assigned image straight to harddisk:"
-echo "      through the /hostmount bind mount (write-through, no placement step) and seeds it"
-echo "      to the swarm. Watch:  printf 'dir harddisk:\\n' | lab/xr-run.sh $DEVICE_IP"
+echo "onboard complete: $DEVICE_IP"

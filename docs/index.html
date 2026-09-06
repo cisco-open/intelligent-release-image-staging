@@ -109,7 +109,7 @@ SPDX-License-Identifier: Apache-2.0
               </div>
               <div class="peer-ring" aria-hidden="true"></div>
             </div>
-            <p>Devices fetch missing pieces from the server and from peers. Transfers resume, load spreads out, and each device verifies the final staged image.</p>
+            <p>Devices fetch missing pieces from the server and from peers. Transfers can resume after interruption. Each agent verifies and stages the image before reporting it ready.</p>
           </div>
         </div>
       </section>
@@ -118,7 +118,7 @@ SPDX-License-Identifier: Apache-2.0
         <article>
           <span>01</span>
           <h3>Faster fleet distribution</h3>
-          <p>The server no longer has to send every byte of a multi-gigabyte image to every device. Devices that have pieces can help other devices catch up.</p>
+          <p>Devices share image pieces with peers, reducing how much each device needs to download from the server.</p>
         </article>
         <article>
           <span>02</span>
@@ -137,7 +137,7 @@ SPDX-License-Identifier: Apache-2.0
           <p class="eyebrow">Workflow</p>
           <h2>Publish, assign, stage, stop.</h2>
           <p>
-            Run it your way. Every step below shows the command line — and every one is equally a few clicks in the IRIS Console: publish an image, choose who gets it, and watch the fleet stage in real time. Script it into your automation or drive it from the browser; the guarantees never change — swarm delivery, verification on the device, and a hard stop before activation.
+            Use the Console or command line to publish an image, assign it to devices, and follow staging progress. IRIS stages the image without changing the device's running software.
           </p>
         </div>
         <div class="flow-shell">
@@ -167,7 +167,7 @@ SPDX-License-Identifier: Apache-2.0
           </div>
           <div class="path-body" id="path-body" role="tabpanel" tabindex="0" aria-live="polite">
             <h3 id="path-title">Catalyst 9000 Guest Shell</h3>
-            <p id="path-copy">Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting storage.</p>
+            <p id="path-copy">Run the shared agent in Guest Shell, supervised by EEM, or use the amd64 IOx container on supported switches with app-hosting storage.</p>
             <ul id="path-list">
               <!-- Kept in step with paths.guest in app.js, which re-renders this
                    list whenever the default tab is re-selected. -->
@@ -179,9 +179,15 @@ SPDX-License-Identifier: Apache-2.0
         </div>
         <div class="section-copy">
           <p class="eyebrow">Platforms</p>
-          <h2>Same delivery model, platform-specific staging.</h2>
+          <h2>One agent across device platforms.</h2>
           <p>
-            Supported switches and routers run the agent in either Guest Shell or an IOx application, depending on the platform and available application-hosting capabilities. Cisco 8000 Series Routers running IOS-XR run the agent as an appmgr container that stages software directly to harddisk: through the swarm. Software is downloaded using the swarm and staged in local device storage. Before a router receives an access token, the system repeats its preflight checks and records the device’s management address and hardware identity. Replacing or re-enrolling a router requires it to complete onboarding again. Transfer status is available through the Swarm Map and can also be exported using OpenTelemetry to Cisco Splunk or another OTLP-compatible platform. After downloading, each device verifies the software locally. The process stages the software but does not install, activate, or reload the device.
+            IOx and IOS-XR appmgr use one device-agent container build for arm64 and amd64. Each platform has its own package and storage handling. Guest Shell runs the same agent code from a bundle.
+          </p>
+          <p>
+            The server and web Console run in separate containers on one Docker host, <a href="docs/docker-hosts/">separate Docker hosts</a>, or Kubernetes. The server manages images, assignments, and the swarm; the Console provides the browser interface. Follow device staging and peer transfers in the Swarm Map, or export telemetry to an OpenTelemetry collector.
+          </p>
+          <p>
+            The Console, catalog, tracker, artifact server, telemetry listener, and internal management API use HTTPS. Device agents verify the server certificate. Image pieces travel through the private BitTorrent swarm. See <a href="docs/network-ports/">network ports and flows</a> for firewall requirements.
           </p>
         </div>
       </section>
@@ -190,11 +196,13 @@ SPDX-License-Identifier: Apache-2.0
       <section class="docs-band">
         <div>
           <p class="eyebrow">Documentation</p>
-          <h2>Deep dives, guides, and reference details live on the documentation site.</h2>
+          <h2>Setup guides and reference.</h2>
         </div>
         <div class="doc-links">
           <a href="docs/getting-started/">Getting started</a>
           <a href="docs/architecture/">Architecture</a>
+          <a href="docs/containers/">Containers</a>
+          <a href="docs/network-ports/">Network ports</a>
           <a href="docs/security/">Security</a>
           <a href="docs/operations/">Operations</a>
         </div>

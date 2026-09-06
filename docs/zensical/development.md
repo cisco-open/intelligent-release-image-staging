@@ -12,10 +12,11 @@ This page explains where to make changes without changing the repository's core 
 
 | Path | Purpose |
 | --- | --- |
-| `server/` | Server services, web console, catalog, telemetry, Docker build, and server tests. |
+| `server/` | Stateful server tier, state-free web-console tier, Docker builds, and server tests. |
 | `device/` | Guest Shell installer, bootstrap, EEM applets, agent code, and device tests. |
-| `device/iox/` | IOx package build, install, entrypoint, and tests. |
-| `device/xr/` | IOS-XR appmgr image, entrypoint, package-build support, and tests. |
+| `device/container/` | The one device-container image definition, entrypoint, and reconcile script shared by IOx and IOS-XR appmgr. |
+| `device/iox/` | IOx wrapper-package build, install logic, and tests. |
+| `device/xr/` | IOS-XR appmgr wrapper metadata and tests. |
 | `fleet/` | CSV templates and generated per-device installer output. |
 | `tools/` | Operator helpers for bundles, installers, assignments, release packaging, and torrents. |
 | `lab/` | Lab helpers and diagnostics. |
@@ -44,7 +45,7 @@ python3 -m pip install -r requirements-dev.txt
 
 | Pin | Where | Value |
 | --- | --- | --- |
-| Test dependencies | `requirements-dev.txt` | `pytest>=8`, `PyYAML>=6` |
+| Test dependencies | `requirements-dev.txt` | `pytest>=8`, `PyYAML>=6`, `openapi-spec-validator>=0.9.0,<0.10.0` |
 
 `.github/workflows/tests.yml` installs that same file, so a clean machine and
 CI run the same set. `PyYAML` is required, not optional: the Kubernetes
@@ -61,34 +62,36 @@ ready for device testing until the packages in use have been rebuilt:
 ```bash
 docker compose -f server/docker-compose.yml up -d --build
 tools/provision-iox-packages.sh
-CATALOG_PEM=<live-certificate-only-pem> \
-  tools/build-xr-package.sh --out artifacts/
+tools/build-xr-package.sh --out artifacts/
 tools/check-package-freshness.sh
 ```
 
-The freshness command detects certificate drift, not source drift: it inspects
-the IOx certificate pins and uses a build-time proxy for the XR RPM. A green
-result cannot prove that a package contains the current agent. Rebuild after
-any shared-agent change and redeploy each affected device.
+If the existing canonical OCI archive contains older source at the same
+version, the builder refuses to replace it. For an intentional rebuild, run
+`IRIS_FORCE_DEVICE_IMAGE_BUILD=1 tools/provision-iox-packages.sh`, then build
+the XR wrapper from that updated image. To preserve the old archive, set
+`IRIS_DEVICE_IMAGE_OCI` to a new absolute output path for both wrapper builds.
 
-`device/iox/build.sh`, `tools/build-xr-package.sh` and
-`tools/make-agent-bundle.sh` each bake in `device/agent`,
-`device/verify_image.py` and their own `device/<platform>`/installer-script
-tree exactly as they sit in the checkout the script runs from — a worktree
-that has fallen behind `main` under those paths ships an older agent with
-nothing in the built image/package saying so (issue #72, and #119 for the
-third script: this is how a stale candidate worktree made it into a
-size-measurement comparison). All three now warn on stderr when that
-checkout is behind `main` (or `origin/main`) under those paths, naming the
-missing commits; set `IRIS_REQUIRE_FRESH_AGENT=1`
-to make that finding a hard build failure instead (recommended for anything
-that builds candidate images specifically to compare against a baseline),
-and `IRIS_ALLOW_STALE_AGENT_ACK=1` to build anyway under that setting (e.g.
-deliberately reproducing an older release). The check is best-effort: it is
-silent outside a git checkout, or when neither `origin/main` nor `main` can
-be resolved, and never blocks a checkout that is already at or ahead of the
-reference branch under the checked paths. See
-`tools/agent-source-freshness.sh` for the shared implementation.
+The IOx and XR wrappers are deployment-neutral: no server certificate enters
+these build commands. Each builder publishes an adjacent provenance manifest
+that binds the wrapper SHA-256 and platform to the canonical multi-platform OCI
+index, archive, and source digests. Console package readiness verifies that
+binding; it does not compare the package with the current checkout or validate
+a native signature. Rebuild after any shared-agent change and redeploy each
+affected device. Certificate rotation instead requires re-onboarding devices to deliver
+the new runtime trust anchor; it does not require rebuilding these packages.
+The final check also verifies that the live and distributed runtime
+certificates agree; it never compares certificate age with a package.
+
+`tools/build-device-image.sh`, `device/iox/build.sh`,
+`tools/build-xr-package.sh`, and `tools/make-agent-bundle.sh` check whether the
+checkout is missing agent or packaging commits from `origin/main` (or local
+`main`). They warn and name the missing commits. Set
+`IRIS_REQUIRE_FRESH_AGENT=1` to fail the build on that finding, or
+`IRIS_ALLOW_STALE_AGENT_ACK=1` to deliberately build an older version.
+The check has no effect outside a Git checkout or when neither reference
+branch is available. It does not fetch updates. See
+`tools/agent-source-freshness.sh`.
 
 ## Release process
 
@@ -116,6 +119,27 @@ python3 -m venv /tmp/iris-docs-venv
 ```
 
 Both commands read `zensical.toml`, so run them from the repository root rather than from `docs/`.
+
+The Console's `?` menu also links two bundled guides:
+`server/webroot/help-device.html` and `server/webroot/help-server.html`.
+Update those alongside the manual when troubleshooting steps change. They
+ship in the Console image and require a Console rebuild to appear in a
+deployment. The public homepage uses `docs/index.html` and `docs/app.js`;
+Zensical does not build either file.
+
+The OpenAPI 3.2 contract comes from `server/api_routes.py` and
+`server/openapi_contract.py`. Install the test dependencies, then regenerate
+and check it after a contract change:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 server/openapi_contract.py > docs/zensical/openapi.yaml
+python3 -m pytest server/tests/test_openapi_contract.py server/tests/test_openapi_validation.py -q
+```
+
+The checks validate the document, its request and response schemas, and the
+runtime route inventory. The validator's schemas ship with the test dependency;
+validation does not download schemas or add a runtime dependency.
 
 Two versions are pinned so a local build matches the published one. Change either only deliberately:
 

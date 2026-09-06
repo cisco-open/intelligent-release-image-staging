@@ -4,11 +4,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Tests for device/iox/{install.sh, entrypoint.sh, build.sh}
+# Tests for the shared container entrypoint plus device/iox/{install.sh,build.sh}
 # Findings addressed:
 #   #1 (CRITICAL)  install.sh run-opts must pass IRIS_DEVICE_SSH_HOST / IRIS_DEVICE_SSH_USER
 #   #2 (IMPORTANT) entrypoint.sh supervisor must restart a crashed aria2c
-#   #3 (IMPORTANT) build.sh must NOT fetch the pinned cert with `curl -sk` (-k flag)
+#   #3 (IMPORTANT) the canonical build must be deployment-neutral
 #   #4 (RE-VERIFY) secret-rotation ordering in entrypoint.sh — verdict documented below
 
 # ---------------------------------------------------------------------------
@@ -17,8 +17,8 @@
 setup() {
   IOX_DIR="$BATS_TEST_DIRNAME/../iox"
   INSTALL="$IOX_DIR/install.sh"
-  ENTRYPOINT="$IOX_DIR/entrypoint.sh"
-  BUILD="$IOX_DIR/build.sh"
+  ENTRYPOINT="$BATS_TEST_DIRNAME/../container/entrypoint.sh"
+  BUILD="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/tools/build-device-image.sh"
 
   export DEVICE_IP=192.0.2.1 VLAN=100 \
     SVI_IP=192.0.2.253 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.254 \
@@ -80,14 +80,14 @@ _appid_block_output() {
 @test "install.sh uses one numbered run-opts line per environment variable" {
   run _appid_block_output
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts [1-8] ' | tr -d ' ')" -eq 8 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^  run-opts ' | tr -d ' ')" -eq 11 ]
   ! printf '%s\n' "$output" | grep -Eq 'run-opts.* -e .* -e '
 }
 
 @test "install.sh explicitly passes the telemetry setting" {
   run _appid_block_output
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 8 "-e IRIS_TELEMETRY=on"'* ]]
+  [[ "$output" == *'run-opts 9 "-e IRIS_TELEMETRY=on"'* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -190,142 +190,57 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 }
 
 # ---------------------------------------------------------------------------
-# Finding #3 — build.sh must NOT fetch the pinned cert with -k (TLS disabled)
+# Finding #3 / #136 — catalog trust is runtime material, never a build input
 # ---------------------------------------------------------------------------
 
-@test "build.sh cert fetch does not use curl -sk (combined silent+insecure short flag)" {
-  # The original bug was `curl -sk` — the combined short flag that silently
-  # disables TLS verification with no indication of why.  The fix may use
-  # `--insecure` (long form, explicit) paired with fingerprint verification,
-  # which makes the self-signed-server workaround visible and auditable.
-  # We reject the combined -sk / -ks / -Sk etc. short-flag form; the explicit
-  # --insecure long form is permitted only when fingerprint verification is
-  # also present in the file.
-  if grep -n 'curl ' "$BUILD" | grep -qE '\-[a-zA-Z]*k[a-zA-Z]'; then
-    echo "Found curl with combined -k short flag in build.sh (use --insecure instead):"
-    grep -n 'curl ' "$BUILD" | grep -E '\-[a-zA-Z]*k[a-zA-Z]'
-    return 1
-  fi
-  # If --insecure is used, fingerprint verification must also be present.
-  if grep -n 'curl ' "$BUILD" | grep -q '\-\-insecure'; then
-    grep -q 'CATALOG_PEM_FINGERPRINT\|openssl x509.*fingerprint' "$BUILD" \
-      || { echo "curl --insecure present without fingerprint verification"; return 1; }
-  fi
-}
-
-@test "build.sh verifies fetched cert fingerprint before accepting it" {
-  # After dropping -k the build must validate the downloaded cert against a
-  # known fingerprint (via CATALOG_PEM_FINGERPRINT + openssl x509 comparison).
-  grep -q 'CATALOG_PEM_FINGERPRINT' "$BUILD"
-  grep -q 'openssl x509.*fingerprint\|fingerprint.*openssl x509' "$BUILD"
-}
-
-# ---------------------------------------------------------------------------
-# Finding #2 (R5) — build.sh fingerprint normalization
-#   openssl emits "SHA256 Fingerprint=AA:BB:..."
-#   documented / operator-supplied format is "SHA256:AA:BB:..."
-#   Both must compare equal after normalization.
-# ---------------------------------------------------------------------------
-
-@test "build.sh fingerprint check passes when CATALOG_PEM_FINGERPRINT uses documented SHA256:xx:yy format" {
-  # Generate a real self-signed cert and verify the documented format is accepted.
-  # This test extracts build.sh's actual normalization logic (the 'got' + 'want'
-  # sed/tr pipeline) so it would catch a regression in the real script.
-  TMPD="$(mktemp -d)"
-  trap 'rm -rf "$TMPD"' EXIT
-  openssl req -x509 -newkey rsa:2048 -keyout "$TMPD/key.pem" -out "$TMPD/cert.pem" \
-    -days 1 -nodes -subj "/CN=test" 2>/dev/null
-
-  # Derive the documented operator format from openssl's output:
-  # openssl -> "AA:BB:..." ; documented -> "SHA256:AA:BB:..."
-  BARE_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$TMPD/cert.pem" \
-             | sed 's/.*Fingerprint=//' | tr -d ' \r')"
-  DOCUMENTED_FP="SHA256:${BARE_FP}"
-
-  # Run build.sh's exact extraction+normalization block from the script source.
-  # Grep out the two pipeline lines from build.sh and evaluate them with our cert.
-  GOT_PIPELINE="$(grep -A2 'got=.*openssl x509.*fingerprint' "$BUILD" | head -3)"
-  WANT_PIPELINE="$(grep -A3 'want=.*CATALOG_PEM_FINGERPRINT' "$BUILD" | head -4)"
-
-  run bash -c "
-    CATALOG_PEM_FINGERPRINT='${DOCUMENTED_FP}'
-    got=\"\$(openssl x509 -noout -fingerprint -sha256 -in '${TMPD}/cert.pem' \
-           | sed 's/.*Fingerprint=//' | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    want=\"\$(echo \"\$CATALOG_PEM_FINGERPRINT\" \
-          | sed 's/^[Ss][Hh][Aa]256[: ]*[Ff][Ii][Nn][Gg][Ee][Rr][Pp][Rr][Ii][Nn][Tt]=//
-                 s/^[Ss][Hh][Aa]256://' \
-          | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    [ \"\$got\" = \"\$want\" ]
-  "
-  [ "$status" -eq 0 ]
-}
-
-@test "build.sh fingerprint check fails on a deliberate mismatch" {
-  TMPD2="$(mktemp -d)"
-  trap 'rm -rf "$TMPD2"' EXIT
-  openssl req -x509 -newkey rsa:2048 -keyout "$TMPD2/key.pem" -out "$TMPD2/cert.pem" \
-    -days 1 -nodes -subj "/CN=test2" 2>/dev/null
-
-  # Use the actual normalization from build.sh; a wrong fingerprint must exit 1.
-  run bash -c "
-    CATALOG_PEM_FINGERPRINT='SHA256:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'
-    got=\"\$(openssl x509 -noout -fingerprint -sha256 -in '${TMPD2}/cert.pem' \
-           | sed 's/.*Fingerprint=//' | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    want=\"\$(echo \"\$CATALOG_PEM_FINGERPRINT\" \
-          | sed 's/^[Ss][Hh][Aa]256[: ]*[Ff][Ii][Nn][Gg][Ee][Rr][Pp][Rr][Ii][Nn][Tt]=//
-                 s/^[Ss][Hh][Aa]256://' \
-          | tr -d ' \r' | tr '[:lower:]' '[:upper:]')\"
-    [ \"\$got\" = \"\$want\" ]
-  "
+@test "canonical builder has no catalog certificate fetch or fingerprint input" {
+  run grep -E 'CATALOG_PEM|iris-catalog\.pem|openssl x509.*fingerprint|curl .*insecure' "$BUILD"
   [ "$status" -ne 0 ]
 }
 
-@test "build.sh comment does not claim 'Fetch WITHOUT -k' (the cert fetch uses --insecure)" {
-  # The comment incorrectly says 'Fetch WITHOUT -k' while the code uses --insecure
-  # which IS -k. The corrected comment must not make the false claim.
-  ! grep -q 'Fetch WITHOUT -k' "$BUILD"
+@test "unified image does not copy or default a deployment certificate" {
+  dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
+  run grep -E '^COPY .*iris-catalog\.pem|IRIS_CATALOG_CA=' "$dockerfile"
+  [ "$status" -ne 0 ]
 }
 
 @test "build.sh supports arm64 and amd64 IOx images" {
-  grep -q 'arm64|aarch64)' "$BUILD"
-  grep -q 'amd64|x86_64)' "$BUILD"
-  grep -q 'linux/arm64' "$BUILD"
-  grep -q 'linux/amd64' "$BUILD"
+  grep -q 'amd64:x86_64:iris-agent.tgz' "$BUILD"
+  grep -q 'arm64:aarch64:iris-agent-arm.tgz' "$BUILD"
+  grep -q -- '--platform linux/amd64,linux/arm64' "$BUILD"
 }
 
 @test "amd64 package descriptor declares x86_64" {
   grep -q '^  cpuarch: x86_64$' "$IOX_DIR/package-amd64.yaml"
 }
 
-@test "IOx Dockerfile uses a multi-architecture Python base" {
+@test "unified Dockerfile uses a digest-pinned multi-architecture Python base" {
   # The app is built for BOTH aarch64 (IE3x00) and x86_64 (Catalyst 9000)
   # from one Dockerfile, so the base must be an official multi-arch
-  # python:3.12-slim-* image and never an arch-pinned namespace. The Debian
-  # suite is deliberately not asserted here — that belongs to the base-image
-  # bump check in server/tests/test_dockerfile_base_image.py, which also
-  # holds this file in lockstep with server/Dockerfile.
-  grep -qE '^FROM python:3\.12-slim-[a-z]+$' "$IOX_DIR/Dockerfile"
-  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$IOX_DIR/Dockerfile"
+  # Alpine keeps both manifests small and the index digest pins the base.
+  dockerfile="$BATS_TEST_DIRNAME/../container/Dockerfile"
+  grep -qE '^FROM python:3\.12-alpine[0-9.]+@sha256:[0-9a-f]{64}$' "$dockerfile"
+  ! grep -qE '^FROM (arm64v8|amd64|i386|arm32v7)/' "$dockerfile"
 }
 
 # ---------------------------------------------------------------------------
 # IRIS-12-005 -- values that ride inside the quoted run-opts lines are
 # validated before anything touches the device (the XR installer already did
 # this; the IOx one pasted them blind, IOS dropped the malformed line, and
-# the app died on its entrypoint's required-env guard AFTER [1/9] had torn
+# the app died on its entrypoint's required-env guard AFTER [2/7] had torn
 # down the working app).
 # ---------------------------------------------------------------------------
 
 @test "install.sh rejects a DEVICE_SSH_PASS containing a double quote" {
   DEVICE_SSH_PASS='pa"ss' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote, CR, or LF"* ]]
 }
 
 @test "install.sh rejects a DEVICE_SSH_PASS containing a newline" {
   DEVICE_SSH_PASS=$'pa\nss' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ]
-  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote or newline"* ]]
+  [[ "$output" == *"DEVICE_SSH_PASS must not contain a double quote, CR, or LF"* ]]
 }
 
 @test "install.sh allows whitespace inside DEVICE_SSH_PASS (it stays quoted)" {
@@ -364,29 +279,29 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
 @test "install.sh defaults IRIS_LOG to off and forwards it in the run-opts" {
   run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=off"'* ]]
+  [[ "$output" == *'run-opts 11 "-e IRIS_LOG=off"'* ]]
 }
 
 @test "install.sh forwards an operator's IRIS_LOG=on opt-in in the run-opts" {
   IRIS_LOG=on run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
-  [[ "$output" == *'run-opts 10 "-e IRIS_LOG=on"'* ]]
+  [[ "$output" == *'run-opts 11 "-e IRIS_LOG=on"'* ]]
 }
 
 @test "install.sh rejects an IRIS_LOG value that would break the run-opts quoting, and whitespace" {
   IRIS_LOG='on"' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"IRIS_LOG must not contain"* ]] || return 1
+  [[ "$output" == *"IRIS_LOG has an invalid boolean value"* ]] || return 1
   IRIS_LOG='on off' run bash "$INSTALL" --dry-run
   [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"IRIS_LOG contains whitespace"* ]]
+  [[ "$output" == *"IRIS_LOG has an invalid boolean value"* ]]
 }
 
 @test "install.sh's quoting guard runs before the first device session" {
-  # structural: the guard precedes the [1/9] teardown AND the identity probe
+  # structural: the guard precedes the [2/7] teardown AND the identity probe
   guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"
   probe="$(grep -n "printf 'show version" "$INSTALL" | head -1 | cut -d: -f1)"
-  step1="$(grep -n '\[1/9\] teardown' "$INSTALL" | head -1 | cut -d: -f1)"
+  step1="$(grep -n '\[2/7\] remove existing app' "$INSTALL" | head -1 | cut -d: -f1)"
   [ -n "$guard" ] && [ -n "$probe" ] && [ -n "$step1" ]
   [ "$guard" -lt "$probe" ] && [ "$guard" -lt "$step1" ]
 }

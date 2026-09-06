@@ -1,0 +1,55 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Server host for a Console on another host. Docker Compose 2.24.4+ is required.
+# Run from the repository root with the explicit file and environment:
+#   docker compose --env-file server/server.env -f server/docker-compose.server.yml up -d --build
+# See docs/zensical/docker-hosts.md for provisioning, bootstrap, and rotation.
+name: iris-server
+services:
+  iris:
+    extends:
+      file: docker-compose.yml
+      service: iris
+    environment:
+      IRIS_CONSOLE_URL: "${IRIS_CONSOLE_URL:?Set IRIS_CONSOLE_URL to the browser-facing HTTPS URL}"
+      IRIS_MANAGEMENT_API_GENERATE_TOKEN: "0"
+      IRIS_MANAGEMENT_API_GENERATE_CERT: "0"
+      IRIS_MANAGEMENT_API_CERT: "/run/iris-management-tls/tls.crt"
+      IRIS_MANAGEMENT_API_KEY: "/run/iris-management-tls/tls.key"
+      IRIS_MANAGEMENT_API_CA_EXPORT: ""
+      IRIS_GUI_FALLBACK_GENERATE: "0"
+    ports:
+      # Use a private address on this host; allow only the Console host through
+      # the firewall. The management API stays unpublished in the base Compose.
+      - "${IRIS_MANAGEMENT_BIND_IP:?Set IRIS_MANAGEMENT_BIND_IP to a private address on this server}:9443:9443"
+    # Replace the inherited list to remove the same-host shared CA volume.
+    # State, images, artifacts, and the age identity exist only on this host.
+    volumes: !override
+      - iris-state:/var/lib/iris
+      - iris-config:/etc/iris
+      - "${IRIS_IMAGE_ROOT:-/opt/images}:/opt/images:ro"
+      - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
+      - iris-images:/var/lib/iris-images
+      - type: bind
+        source: "${IRIS_TIER_AUTH_DIR:?Set IRIS_TIER_AUTH_DIR to the server token directory}"
+        target: /run/iris-tier
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${IRIS_MANAGEMENT_TLS_DIR:?Set IRIS_MANAGEMENT_TLS_DIR to the server TLS directory}"
+        target: /run/iris-management-tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - "${IRIS_OBSERVABILITY_TOKEN_FILE_HOST:-/dev/null}:/run/secrets/iris_observability_token:ro"
+      - "${IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST:-/dev/null}:/run/secrets/iris_observability_previous_token:ro"
+      - "${IRIS_OTLP_HEADERS_FILE_HOST:-/dev/null}:/run/secrets/iris_otlp_headers:ro"
+volumes:
+  iris-state:
+  iris-config:
+  iris-images:
+secrets:
+  iris_age_key:
+    file: "${IRIS_AGE_KEY_FILE_HOST:?Set IRIS_AGE_KEY_FILE_HOST to the host path of the age identity}"

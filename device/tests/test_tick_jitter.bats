@@ -4,19 +4,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Cadence jitter + failure backoff (issue #59): device/iox/entrypoint.sh and
-# device/xr/entrypoint.sh drive the agent on a fixed tick. A fleet of
+# Cadence jitter + failure backoff (issue #59): the unified device container
+# drives the agent on a fixed tick. A fleet of
 # containers that starts or restarts together keeps every device's timer in
 # the same phase indefinitely -- turning an ordinary tick into a fleet-wide
 # burst of policy GETs, heartbeats, and tracker re-announces. Both
-# entrypoints now (a) dither every ordinary tick +/-JITTER_PCT% of TICK, (b)
+# entrypoint now (a) dithers every ordinary tick +/-JITTER_PCT% of TICK, (b)
 # spread the FIRST tick across the whole TICK window once at startup, and
 # (c) back off exponentially, capped, after the agent tick fails outright.
 
 setup() {
   DEVICE="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   REPO="$(cd "$DEVICE/.." && pwd)"
-  ENTRYPOINTS="$DEVICE/iox/entrypoint.sh $DEVICE/xr/entrypoint.sh"
+  ENTRYPOINTS="$DEVICE/container/entrypoint.sh"
   TMP="$(mktemp -d)"
 }
 
@@ -129,11 +129,17 @@ _run_bounded() {   # $1 = seconds, $2.. = command
 catalog_url = https://198.51.100.1:8443
 catalog_token = t
 device_id = d1
+device_platform = iox
+device_ssh_host = 192.0.2.1
+device_ssh_user = test
+device_ssh_pass = test
 EOF
   run _run_bounded 12 env PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
+      IRIS_DEVICE_PLATFORM=iox IRIS_CONTAINER_TESTING=1 \
+      IRIS_CATALOG_CA="$REPO/server/certs/cisco_bulkhash_verify.pem" \
       IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$TMP/stage" IRIS_TICK_SECONDS=1 \
       IRIS_STARTUP_JITTER=0 \
-      bash "$DEVICE/iox/entrypoint.sh"
+      bash "$DEVICE/container/entrypoint.sh"
   [ "$status" -eq 124 ]   # killed at the bound -- the tick loop is infinite by design
   [[ "$output" == *"agent tick returned non-zero"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"failure streak 1)"* ]] || { echo "$output"; return 1; }
@@ -147,11 +153,15 @@ catalog_url = https://198.51.100.1:8443
 catalog_token = t
 device_id = d1
 mode = xr
+device_platform = xr-appmgr
+target_fs = harddisk:
 EOF
   run _run_bounded 12 env PATH="$PATH" PYTHONPATH="$REPO/device/agent" \
-      IRIS_XR_SKIP_MOUNT_CHECK=1 IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$TMP/stage" \
+      IRIS_DEVICE_PLATFORM=xr-appmgr IRIS_CONTAINER_TESTING=1 \
+      IRIS_CATALOG_CA="$REPO/server/certs/cisco_bulkhash_verify.pem" \
+      IRIS_TEST_SKIP_MOUNT_CHECK=1 IRIS_AGENT_CONF="$CONF" IRIS_STAGE_DIR="$TMP/stage" \
       IRIS_TICK_SECONDS=1 IRIS_STARTUP_JITTER=0 \
-      bash "$DEVICE/xr/entrypoint.sh"
+      bash "$DEVICE/container/entrypoint.sh"
   [ "$status" -eq 124 ]   # killed at the bound -- the tick loop is infinite by design
   [[ "$output" == *"agent tick returned non-zero"* ]] || { echo "$output"; return 1; }
   [[ "$output" == *"failure streak 1)"* ]] || { echo "$output"; return 1; }

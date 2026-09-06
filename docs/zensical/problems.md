@@ -1,0 +1,177 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Problem type registry
+
+IRIS JSON API errors use [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457.html).
+The `type` URI ends with one of the fragments below, and the same stable value
+appears in the `code` extension. Clients should branch on `type` or `code`, not
+on the human-readable `title` or `detail`. A response can omit `detail`; when it
+is present, it is deliberately redacted.
+
+The BitTorrent tracker is the one protocol-format exception: its errors remain
+BEP-compatible bencoded failure dictionaries. Anonymous `/healthz` and
+`/readyz` probes disclose only an `ok` boolean.
+
+## authentication-required
+
+The operation requires a credential that was absent or invalid.
+
+## artifact-authentication-required
+
+The artifact operation requires valid HTTP Basic device credentials.
+
+## artifact-forbidden
+
+Access to the requested staging artifact is forbidden.
+
+## artifact-not-found
+
+The requested staging artifact does not exist.
+
+## artifact-request-failed
+
+The artifact server could not complete an otherwise valid request.
+
+## artifact-resource-forbidden
+
+The device credential is not bound to the requested artifact resource.
+
+## catalog-authentication-required
+
+The catalog operation requires a valid device bearer credential.
+
+## console-certificate-unavailable
+
+No usable browser-facing Console certificate is available.
+
+## console-session-required
+
+The browser operation requires a valid Console session cookie.
+
+## content-length-required
+
+The request must provide a valid `Content-Length` and cannot use chunked
+transfer encoding for this operation.
+
+## credential-store-unavailable
+
+The credential store could not be read or validated, so access failed closed.
+
+## csrf-validation-failed
+
+The state-changing browser request lacks the session's valid CSRF value.
+
+## forbidden
+
+The authenticated principal is not allowed to perform the operation.
+
+## internal-error
+
+The server encountered an internal failure. Details never expose exception or
+filesystem text.
+
+## invalid-authorization-request
+
+The Console tier's header-only authorization preflight was malformed.
+
+## invalid-content-length
+
+The supplied `Content-Length` is not a valid non-negative integer.
+
+## invalid-request
+
+The request syntax or parameters are invalid.
+
+## invalid-request-body
+
+The request body cannot be decoded as the schema required by the operation.
+
+## invalid-tracker-auth-selector
+
+The catalog torrent request selected an unsupported tracker authentication
+mode.
+
+## management-api-unavailable
+
+The Console tier cannot establish its authenticated, CA-verified management
+API hop.
+
+## management-authentication-required
+
+The internal operation requires the current or bounded-overlap management
+bearer credential.
+
+## method-not-allowed
+
+The resource exists but does not support the requested HTTP method. Consult
+the response's `Allow` header.
+
+## observability-authentication-required
+
+The observability operation requires its independently scoped bearer
+credential.
+
+## payload-too-large
+
+The declared or received request body exceeds that operation's documented
+limit.
+
+## precondition-failed
+
+An HTTP precondition such as `If-Match` did not match current state.
+
+## range-not-satisfiable
+
+The requested byte range cannot be served.
+
+## rate-limit-exceeded
+
+The caller exceeded an operation's rate limit. Retry only after the duration
+in `Retry-After`.
+
+## request-body-not-supported
+
+This operation does not accept a request body.
+
+## request-timeout
+
+The client did not complete the request within the server's bounded deadline.
+
+## resource-conflict
+
+The request conflicts with current resource state or reuses an idempotency key
+for a different operation.
+
+## resource-not-found
+
+The authenticated resource does not exist.
+
+## route-not-found
+
+No registered API route matches the request. Authentication is checked before
+this distinction is disclosed.
+
+## service-unavailable
+
+A required service or state store is temporarily unavailable. Retry only after
+the duration in `Retry-After`.
+
+## telemetry-status-unavailable
+
+The authenticated telemetry status projection could not be produced.
+
+## unprocessable-content
+
+The body is syntactically valid but violates the operation's semantic rules.
+
+## unsupported-media-type
+
+The operation does not support the request's media type.
+
+## upstream-operation-failed
+
+An authenticated operation could not be completed by its upstream dependency.

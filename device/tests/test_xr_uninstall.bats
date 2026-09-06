@@ -14,7 +14,7 @@
 # a topical one -- session 1/2 ("setup": early probe, unconditional-but-
 # adjudicated deactivate -- NOTHING destructive to the package or files
 # rides this login) and session 2/2 ("sweep+verify": the destructive
-# commands -- source uninstall, delete the RPM, empty-then-delete the work
+# commands -- source uninstall, delete the RPM and runtime certificate, empty-then-delete the work
 # dir -- PLUS the sidecar sweep (three unconditional harddisk: root globs),
 # PLUS the final three-way verify). Session 2 is composed and sent ONLY when
 # session 1's paired adjudication did NOT conclude the app is a confirmed
@@ -77,10 +77,11 @@ setup() {
   [[ "$output" != *"appmgr package uninstall package"* ]]
 }
 
-@test "dry-run removes the RPM and empties-then-removes the work dir, via native delete /noprompt" {
+@test "dry-run removes the RPM, runtime certificate, and work dir via native delete /noprompt" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$output" == *"delete /noprompt harddisk:/iris-catalog.pem"* ]] || return 1
   [[ "$output" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
   [[ "$output" == *"delete /noprompt harddisk:/iris-work"* ]]
 }
@@ -111,9 +112,8 @@ setup() {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"show appmgr application-table"* ]] || return 1
-  [[ "$output" == *"unconditional no appmgr application"* ]] || return 1
-  [[ "$output" == *"already absent before deactivate: benign idempotent-skip"* ]] || return 1
-  [[ "$output" == *"still active and rejected: fail-closed, refuse to continue"* ]]
+  [[ "$output" == *"no appmgr application iris"* ]] || return 1
+  [[ "$output" == *"session 2/2: continue after deactivation succeeds"* ]]
 }
 
 # Fix-wave item 2 (dry-run honesty): dry-run calls setup_request()/
@@ -135,14 +135,14 @@ setup() {
 }
 
 # Fix-wave item 1 (CRITICAL restructure): dry-run's session 1/2 portion
-# (everything before the "composite session 2/2" banner) must never contain
+# (everything before the "session 2/2" banner) must never contain
 # a destructive command -- the same safety boundary the live path now
 # enforces structurally via sweep_verify_request()'s include_destructive
 # gate.
 @test "dry-run's session 1/2 portion contains no destructive command" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
-  session1="$(printf '%s\n' "$output" | sed '/composite session 2\/2/q')"
+  session1="$(printf '%s\n' "$output" | sed '/session 2\/2/q')"
   if printf '%s\n' "$session1" | grep -qE 'appmgr package uninstall source|delete /noprompt harddisk:'; then
     return 1
   fi
@@ -208,7 +208,9 @@ setup() {
   # router's VirtualPortGroup/NAT can be).
   for line in "show appmgr application-table" "no appmgr application iris" \
               "appmgr package uninstall source iris-xr" \
-              "delete /noprompt harddisk:/iris-xr.rpm" "delete /noprompt harddisk:/iris-work"; do
+              "delete /noprompt harddisk:/iris-xr.rpm" \
+              "delete /noprompt harddisk:/iris-catalog.pem" \
+              "delete /noprompt harddisk:/iris-work"; do
     [[ "$plain" == *"$line"* ]] || return 1
     [[ "$forced" == *"$line"* ]] || return 1
   done
@@ -688,7 +690,7 @@ _xr_call_body() {
   _xr_uninstall_stub_setup
   run _xr_uninstall_run_live
   [ "$status" -eq 0 ]
-  [[ "$output" == *"undeploy complete"* ]]
+  [[ "${lines[${#lines[@]}-1]}" = "undeploy complete: 192.0.2.10" ]]
 }
 
 # Pin mapping (old -> new): "live: [1/5] probes app-table, deactivates once,
@@ -719,7 +721,7 @@ _xr_call_body() {
   # possibly still present -- those steps keep their own || true tolerance).
   run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"app already absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   log="$(cat "$FAKE_COMMAND_LOG")"
   [[ "$log" == *"no appmgr application iris"* ]] || return 1
@@ -784,6 +786,7 @@ _xr_call_body() {
   second_call="$(_xr_call_body 2)"
   [[ "$second_call" == *"appmgr package uninstall source iris-xr"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-xr.rpm"* ]] || return 1
+  [[ "$second_call" == *"delete /noprompt harddisk:/iris-catalog.pem"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-work/*"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/iris-work"* ]] || return 1
   [[ "$second_call" == *"delete /noprompt harddisk:/*.torrent"* ]] || return 1
@@ -838,7 +841,7 @@ _xr_call_body() {
   _xr_uninstall_stub_setup
   FAKE_DEACTIVATE_REJECTED=yes run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"app already absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
   # contrast with the real-failure test above: benign means session 2 IS
   # composed and the destructive commands DO run -- there is nothing left on
@@ -881,7 +884,7 @@ _xr_call_body() {
   FAKE_PROBE_RC=124 run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"transport exited 124"* ]] || return 1
-  if printf '%s\n' "$output" | grep -q '\[1/5\].*no appmgr application'; then
+  if printf '%s\n' "$output" | grep -q '\[1/5\] deactivate app'; then
     return 1
   fi
 }
@@ -1023,7 +1026,7 @@ _xr_call_body() {
 # same blob and returned the next TYPED line as the "section" ($FILES became
 # the literal string `dir harddisk:`), every residue check read no-match as
 # nothing-there, and the run exited 0 announcing a clean teardown with all
-# seven destructive commands already sent.
+# eight destructive commands already sent.
 #
 # The premise is not exotic. Since the markers became `!` comments they emit no
 # output of their own, so a marker only ever reaches the transcript via the pty
@@ -1037,7 +1040,7 @@ _xr_call_body() {
   [ "$status" -ne 0 ] || return 1
   # It must NOT be read as "the app was already absent" -- that verdict is the
   # gateway to composing and sending the destructive session.
-  if printf '%s\n' "$output" | grep -q 'already deactivated/absent'; then
+  if printf '%s\n' "$output" | grep -q 'app already absent'; then
     return 1
   fi
   if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
@@ -1120,7 +1123,7 @@ _xr_call_body() {
   _xr_uninstall_stub_setup
   FAKE_APP_ROW_1="% Invalid input detected at '^' marker." run _xr_uninstall_run_live
   [ "$status" -ne 0 ] || return 1
-  if printf '%s\n' "$output" | grep -q 'already deactivated/absent'; then
+  if printf '%s\n' "$output" | grep -q 'app already absent'; then
     return 1
   fi
   if printf '%s\n' "$output" | grep -q 'undeploy complete'; then
@@ -1203,6 +1206,15 @@ _xr_call_body() {
     12345 -rw-------. 1 root root 1024 Aug 27 12:00 iris-xr.rpm" run _xr_uninstall_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"iris-xr.rpm"* ]]
+}
+
+@test "live: fails when the runtime catalog certificate is still listed on harddisk:" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 -rw-r--r--. 1 root root 1024 Sep 04 12:00 iris-catalog.pem" run _xr_uninstall_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"artifacts still present"* ]] || return 1
+  [[ "$output" == *"iris-catalog.pem"* ]]
 }
 
 @test "live: verify fails closed when a marker section never comes back" {
@@ -1293,7 +1305,7 @@ RP/0/RP0/CPU0:8010-R4#" \
 # directory, live-reproduced run 5). This is the BARE listing, with no
 # session chrome around it -- kept alongside the run-6 fixture below, which
 # adds that chrome back.
-@test "live: iris-work present but EMPTY is accepted as inert residue -- note printed, still converges" {
+@test "live: iris-work present but EMPTY is accepted without a residue note" {
   _xr_uninstall_stub_setup
   FAKE_DIR_HARDDISK="Directory of harddisk:/
     12345 -rw-------. 1 root root 512 Aug 27 12:00 iris-work" \
@@ -1304,7 +1316,7 @@ No files in directory
     run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
-  [[ "$output" == *"note: empty iris-work directory left behind"* ]] || return 1
+  [[ "$output" != *"note: empty iris-work directory left behind"* ]] || return 1
   if printf '%s\n' "$output" | grep -q 'artifacts still present'; then
     return 1
   fi
@@ -1331,7 +1343,7 @@ RP/0/RP0/CPU0:8010-R4#" \
     run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
   [[ "$output" == *"undeploy complete"* ]] || return 1
-  [[ "$output" == *"note: empty iris-work directory left behind"* ]] || return 1
+  [[ "$output" != *"note: empty iris-work directory left behind"* ]] || return 1
   if printf '%s\n' "$output" | grep -q 'artifacts still present'; then
     return 1
   fi
@@ -1363,7 +1375,7 @@ RP/0/RP0/CPU0:8010-R4#" \
   _xr_uninstall_stub_setup
   FAKE_APP_ROW_1='RP/0/RP0/CPU0:iris-lab-8010#' run _xr_uninstall_run_live
   [ "$status" -eq 0 ] || return 1
-  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"app already absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]]
 }
 
@@ -1412,7 +1424,7 @@ iris  docker  iris-xr  Up  app_manager' run _xr_uninstall_run_live
   # present, and log the idempotent-skip message. An unescaped '.' would
   # match "irisAx" (any-character wildcard), skipping this message and
   # proceeding as if the app were genuinely found present.
-  [[ "$output" == *"already deactivated/absent"* ]] || return 1
+  [[ "$output" == *"app already absent"* ]] || return 1
   [[ "$output" == *"undeploy complete"* ]]
 }
 

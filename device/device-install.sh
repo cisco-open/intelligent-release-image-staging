@@ -238,10 +238,10 @@ trustpoint_block() {
 }
 
 if [ "$DRY" -eq 1 ]; then
-  echo "===== IOS CONFIG (apply via lab/device-run.sh $DEVICE_IP) ====="; ios_config
-  echo "===== PKI TRUSTPOINT (pasted over SSH FIRST, before any copy) ====="; trustpoint_block
-  echo "===== AGENT CONFIG (staged on $STAGE_HOST:8000 (https), copied to $STAGE/iris-agent.conf) ====="; agent_conf
-  echo "===== INSTALL COPIES (over verified https) ====="
+  echo "===== IOS configuration ====="; ios_config
+  echo "===== Certificate trust ====="; trustpoint_block
+  echo "===== Agent configuration ====="; agent_conf
+  echo "===== Copy agent files over HTTPS ====="
   IOS_ROOT="${IOS_FS}/guest-share"
   for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
               "staging/$RPC_SECRET_FILE:rpc-secret" "$BUNDLE:bundle.tgz" \
@@ -249,8 +249,9 @@ if [ "$DRY" -eq 1 ]; then
     src="${pair%%:*}"; dst="${pair##*:}"
     printf 'copy https://%s:8000/%s %s/%s\n' "$STAGE_HOST" "$src" "$IOS_ROOT" "$dst"
   done
-  echo "===== guestshell enable + stage $BUNDLE + launch aria2c (see script) ====="
-  echo "===== PERSIST: copy running-config startup-config (after successful onboarding) ====="
+  echo "===== Start Guest Shell ====="
+  echo "===== Save startup-config ====="
+  echo "copy running-config startup-config"
   exit 0
 fi
 
@@ -269,7 +270,7 @@ ssh_host() {                       # run a command on STAGE_HOST
   return "$rc"
 }
 
-echo "[1/7] flash pre-check on $DEVICE_IP"
+echo "[1/6] check storage on $DEVICE_IP"
 # One SSH login for all three read-only pre-checks (flash free space, ip
 # routing, device clock) instead of up to three -- same consolidation as
 # _default_router_preflight in server/gui_onboard.py. IOS XE echoes these
@@ -312,7 +313,7 @@ PRECHECK_OUT="$(precheck_request | "$HERE/../lab/device-run.sh" "$DEVICE_IP" || 
 FLASH_RAW="$(printf '%s' "$PRECHECK_OUT" | precheck_section FLASH)" || true
 printf '%s\n' "$FLASH_RAW" | grep -i 'bytes free' || true
 
-echo "[pre] prerequisite checks (ip routing, device clock)"
+echo "check routing and device clock"
 # 2026-08-20 incident: an IE-3400 lost `ip routing` on re-image; onboarding still
 # reported success (agent running) while the app's VLAN traffic had no L3 path
 # out of the box — a silent, invisible failure the operator burned hours
@@ -345,7 +346,7 @@ if [ -n "$clock_year" ] && [ "$clock_year" -lt 2024 ]; then
   echo "PREREQ WARNING: device clock is $clock_year — TLS certificate validation may fail; set the clock or NTP"
 fi
 
-echo "[2/7] stage per-device agent config into artifacts/ (served on :8000 by the container)"
+echo "[2/6] prepare agent configuration"
 ART="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 # the agent's pinned CA = the SAME bare crt.pem; served as the fifth artifact and
 # pulled over the now-trusted HTTPS (a runtime convenience copy — trust itself
@@ -370,7 +371,7 @@ else
   ssh_host "cat > ~/iris/artifacts/iris-catalog.pem" < "$IRIS_CRT_FILE"
 fi
 
-echo "[3/7] apply IOS config ($MANAGEMENT_TYPE app-hosting, file prompt, EEM timers)"
+echo "[3/6] configure IRIS ($MANAGEMENT_TYPE)"
 { echo "configure terminal"; ios_config; } | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null
 
 # HARDWARE-LEARNED (C9300, 2026-07-04): <fs>guest-share must exist BEFORE
@@ -381,10 +382,10 @@ echo "[3/7] apply IOS config ($MANAGEMENT_TYPE app-hosting, file prompt, EEM tim
 # Root-owned is fine for the ROOT (IOS does the copies, the guest only reads
 # and creates its own subdir). Idempotent: "already exists" is swallowed. The
 # blank line answers the "Create directory" prompt on boxes that don't have
-# `file prompt quiet` applied yet ([3/7] has, but belt-and-braces).
+# `file prompt quiet` applied yet ([3/6] has, but belt-and-braces).
 printf 'mkdir %sguest-share\n\n' "$IOS_FS" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" >/dev/null 2>&1 || true
 
-echo "[4/7] guestshell enable (IOx cold start can take several minutes on a fresh device)"
+echo "[4/6] start Guest Shell (may take several minutes)"
 for i in $(seq 1 30); do
   state="$(printf 'show app-hosting list\n' | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null | grep -i guestshell || true)"
   case "$state" in
@@ -401,7 +402,7 @@ for i in $(seq 1 30); do
   sleep 15
 done
 
-echo "[5/7] push PKI trustpoint over SSH (FIRST), then drop files over verified https"
+echo "[5/6] copy certificate and agent files"
 # Trust-anchor distribution: paste the bare server cert into trustpoint IRIS and
 # select it as the HTTP client's secure trustpoint, over the EXISTING SSH session,
 # BEFORE any `copy https:`. Idempotent (no-then-re-add). Non-circular by construction
@@ -477,7 +478,7 @@ for pair in "bootstrap.sh:bootstrap.sh" "staging/$CONF:iris-agent.conf" \
   [ "$ok" -eq 1 ] || { echo "  ERROR: copy of $src failed after 3 attempts" >&2; exit 1; }
 done
 
-echo "[6/7] persist successful onboarding to startup-config"
+echo "[6/6] save startup-config"
 save_out="$(printf 'copy running-config startup-config\n' \
            | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>&1 || true)"
 case "$save_out" in
@@ -487,7 +488,4 @@ case "$save_out" in
      exit 1 ;;
 esac
 
-echo "[7/7] done. Within ~60s the IRIS-AGENT timer bootstraps the agent (unpack bundle,"
-echo "      start aria2c), pulls '$DEVICE_ID's assigned image, verifies it, and places"
-echo "      it at flash root via native EEM. Watch with:"
-echo "      printf 'show logging | include IRIS\\n' | lab/device-run.sh $DEVICE_IP"
+echo "onboard complete: $DEVICE_IP"

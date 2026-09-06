@@ -22,12 +22,12 @@ const workflow = {
   },
   verify: {
     title: "Verify on the device",
-    body: "The agent checks the downloaded file's sha256 against the catalog's known-good value, then copies it to device storage — a plain copy attested by exact byte size.",
-    command: "copy <staged-file> <device-storage>:<image>.bin",
+    body: "The agent checks the downloaded file's SHA-256 against the catalog. IOS-XE then copies it to the target filesystem and checks its size; XR stages it directly on harddisk:.",
+    command: "SHA-256 check → platform storage → staged heartbeat",
   },
   report: {
-    title: "Report staged and stop",
-    body: "The device reports that the image is staged. IRIS does not install, activate, change boot variables, or reload.",
+    title: "Report staged",
+    body: "The device reports that the image is staged and can keep seeding while assigned. IRIS does not install, activate, change boot variables, or reload.",
     command: "POST https://<server-ip>:8443/v1/devices/<device>/heartbeat",
   },
 };
@@ -35,7 +35,7 @@ const workflow = {
 const paths = {
   guest: {
     title: "Catalyst 9000 Guest Shell",
-    copy: "Generate a per-device installer, bootstrap Guest Shell, and let EEM keep the staging agent alive — or run the amd64 IOx app on switches with app-hosting storage.",
+    copy: "Run the shared agent in Guest Shell, supervised by EEM, or use the amd64 IOx container on supported switches with app-hosting storage.",
     items: [
       "Installs catalog trust material.",
       "Downloads image pieces through the private swarm.",
@@ -44,36 +44,36 @@ const paths = {
   },
   iox: {
     title: "Industrial Ethernet IOx",
-    copy: "Package the same staging model as an IOx Docker app and use SSH-to-self for IOS copy commands.",
+    copy: "Run the shared IOx/XR device image as an IOx app. The agent uses SSH-to-self for IOS file placement.",
     items: [
-      "Serves operator-built `iris-arm64.tar` from artifacts.",
+      "Receives iris-arm64.tar over SCP during onboarding.",
       "Downloads image pieces through the private swarm.",
       "Stages approved images to device storage.",
     ],
   },
   router: {
     title: "Catalyst 8000 Guest Shell",
-    copy: "Bring up Guest Shell through a VirtualPortGroup in routed or NAT management type, with preflight repeated before token mint and deployment records bound to device identity.",
+    copy: "Run the shared agent in Guest Shell through a routed or NAT VirtualPortGroup.",
     items: [
-      "Repeats preflight before token mint.",
+      "Checks device prerequisites before onboarding.",
       "Downloads image pieces through the private swarm.",
       "Stages approved images to device storage.",
     ],
   },
   server: {
-    title: "Server and console",
-    copy: "Run the catalog, private tracker, initial seeder, artifact server, console, telemetry, and encrypted state store.",
+    title: "Server and Console",
+    copy: "Run the server and browser Console on one Docker host, separate Docker hosts, or Kubernetes. The Console calls the server over authenticated HTTPS.",
     items: [
-      "Introduces image metadata and private torrents.",
-      "Keeps aria2 RPC local-only.",
-      "Exposes fleet progress in the console.",
+      "The server stores images and state and seeds the swarm.",
+      "The Console serves the UI without mounting server data.",
+      "Devices contact the server's catalog and tracker directly.",
     ],
   },
   xr: {
     title: "Cisco 8000 Series appmgr",
-    copy: "Run the agent as an appmgr Docker application with host networking, pushing iris-xr.rpm to harddisk: over scp and bind-mounting the router's own filesystem — no Guest Shell involved.",
+    copy: "Run the shared IOx/XR device image under appmgr, using the router's network and harddisk: storage.",
     items: [
-      "Pushes iris-xr.rpm to harddisk: as an appmgr Docker application.",
+      "Receives iris-xr.rpm over SCP during onboarding.",
       "Downloads image pieces through the private swarm directly onto harddisk:.",
       "Stages the software but does not install, activate, or reload the device.",
     ],

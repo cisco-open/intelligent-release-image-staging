@@ -163,15 +163,12 @@ def install_options_for(model, os_family=None):
     of what the model prefix would otherwise suggest) and never ``None``
     (which would read as "no opinion" and let validate_record wave it
     through). Widening past the 8000 series is a v2 change to this one
-    branch, not a rewrite of the guardrail. The console's model-driven
-    auto-select and its symmetric exit (app.js's refreshInstallOptions)
-    key on this answer being the exact single-element list ``["xr-appmgr"]``
-    too, so widening XR support to return anything else -- more platforms,
-    or a family beyond the 8000 series -- must update that client-side
-    coupling in lockstep.
+    branch, not a rewrite of the guardrail. The Console intersects this answer
+    with the install choices for the operator's selected management type.
+    A model answer never changes that type or its network fields.
 
     None means the model is blank or not a family this table recognizes, so no
-    guardrail applies -- the console still offers Auto, and validate_record
+    model-specific guardrail applies, and validate_record
     does not restrict the explicit platform choice for hardware this table has
     no opinion on. Otherwise, the list is every platform _MODEL_INSTALL_TABLE
     names for that family (not just its auto-resolution default -- e.g. a
@@ -972,8 +969,8 @@ class OnboardService:
         # for iox devices, which always run _PLATFORM_RECIPES["iox"].
         self.device_install = device_install or os.environ.get("IRIS_DEVICE_INSTALL") or os.path.join(
             self.repo_root, "device", "device-install.sh")
-        self.crt_public = crt_public or os.environ.get(
-            "IRIS_CRT_PUBLIC", "/etc/iris/tls/crt.pem")
+        self.crt_public = crt_public or os.environ.get("IRIS_CRT_PUBLIC") or os.path.join(
+            os.environ.get("IRIS_CONFIG") or "/etc/iris", "tls", "crt.pem")
         self.host_ip = host_ip if host_ip is not None else os.environ.get(
             "IRIS_HOST_IP", "")
         self.catalog_url = catalog_url or os.environ.get("IRIS_CATALOG_URL") or (
@@ -1165,14 +1162,15 @@ class OnboardService:
             "DEVICE_PASS": cred["device_pass"],
             "DEVICE_ENABLE": cred.get("enable_secret") or cred["device_pass"],
             "IRIS_CRT_FILE": self.crt_public,
-            # The console always runs in the SAME container as the artifact
-            # server (docker-entrypoint launches both), so device-install.sh's
-            # step [2/7] can always stage the per-device config directly --
+            # The state-owning management worker remains in the server tier
+            # beside the artifact volume, so device-install.sh can stage its
+            # temporary inputs locally before the verified SCP delivery --
             # ssh-to-self / HOST_USER is never needed for console onboarding.
             # IRIS_ARTIFACTS_DIR tells the installer where that server actually
-            # serves from (default /srv/artifacts, bind-mounted from the host).
+            # stores compatibility artifacts (default /srv/artifacts,
+            # bind-mounted from the host).
             "IRIS_STAGE_LOCAL": "1",
-            "IRIS_ARTIFACTS_DIR": os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts"),
+            "IRIS_ARTIFACTS_DIR": self.artifacts_dir,
         })
         if target.get("model"):
             env["MODEL"] = target["model"]
@@ -1193,6 +1191,13 @@ class OnboardService:
         # business in the environment of every installer and its ssh children.
         env.pop("HOST_USER", None)
         env.pop("HOST_PASS", None)
+        # Direct CLI callers may choose a CA file, but service onboarding must
+        # use the same current public certificate selected by its own config.
+        env.pop("IRIS_CATALOG_CA_FILE", None)
+        # The server's IRIS_LOG is a directory. IOx/XR installers use that
+        # name for a device logging boolean, so leave their default intact.
+        # An explicit per-job device option can still override it below.
+        env.pop("IRIS_LOG", None)
         # Console-driven feature flags (e.g. the telemetry checkboxes) applied
         # last: explicit operator intent beats any inherited process env.
         if env_extra:
@@ -2066,7 +2071,18 @@ class OnboardService:
         The next session re-verifies and re-pins the peer's NEW key on first
         contact -- the same trust-on-first-use flow a brand-new device gets,
         never a switch to unverified connections."""
-        dev = self.fleet.get_device(device_id) if self.fleet else None
+        try:
+            dev = self.fleet.get_device(device_id) if self.fleet else None
+        except Exception as exc:
+            # gui_fleet imports this module for shared model/platform
+            # validation, so importing its exception at module scope would
+            # create a circular import. Resolve it only on this uncommon
+            # storage-failure path and preserve the method's non-raising
+            # ``(False, message)`` contract for a corrupt fleet shard.
+            import gui_fleet
+            if isinstance(exc, gui_fleet.FleetStateError):
+                return False, "fleet state unavailable"
+            raise
         if dev is None:
             return False, "no such device"
         peer = (dev.get("device_ip") or "").strip()

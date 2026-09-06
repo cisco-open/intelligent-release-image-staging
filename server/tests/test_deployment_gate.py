@@ -25,6 +25,7 @@ def _catalog_with_torrent(tmp_path, deployment_open):
     s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
+    s.set_policy("dev-g", approved_image_id="img1")
     os.environ["IRIS_HOST_IP"] = "10.5.5.5"
     return catalog.Catalog(s, str(tmp_path / "secrets.json"),
                            deployment_open=deployment_open)
@@ -102,6 +103,7 @@ def test_make_server_can_start_closed(tmp_path):
     s.save_image({"id": "img1", "filename": "img1.bin", "size": 5,
                   "sha256": "ab" * 32, "cisco_signature_verified": False,
                   "info_hash_hex": "cc" * 20, "published_at": 111})
+    s.set_policy("dev-g", approved_image_id="img1")
     os.environ["IRIS_HOST_IP"] = "10.5.5.5"
     srv = catalog.make_server("127.0.0.1", 0, s, sp, deployment_open=False)
     threading.Thread(target=srv.serve_forever, daemon=True).start()

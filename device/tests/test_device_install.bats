@@ -272,23 +272,23 @@ setup() {
 }
 
 # --- co-located staging (#13): the console runs in the SAME container as the
-# artifact server, so step [2/7] must be able to stage locally without ssh
+# artifact server, so step [2/6] must be able to stage locally without ssh
 # and without HOST_USER/HOST_PASS, honoring IRIS_ARTIFACTS_DIR for where the
 # artifact server actually serves from (not a repo-relative path that doesn't
-# exist in the container). See device-install.sh step [2/7].
+# exist in the container). See device-install.sh step [2/6].
 
 setup_stage_local() {
-  # a real (non-dry-run) invocation only needs to get PAST step [2/7]; stub
-  # lab/device-run.sh so step [1/7]'s flash pre-check is a harmless no-op and
-  # step [3/7]+ (which needs a real device) never gets reached because we
-  # kill the script right after [2/7] finishes. The [pre] PREREQ step now
-  # sits between [1/7] and [2/7] (routed by default), so the stub must also
+  # a real (non-dry-run) invocation only needs to get PAST step [2/6]; stub
+  # lab/device-run.sh so step [1/6]'s flash pre-check is a harmless no-op and
+  # step [3/6]+ (which needs a real device) never gets reached because we
+  # kill the script right after [2/6] finishes. The [pre] PREREQ step now
+  # sits between [1/6] and [2/6] (routed by default), so the stub must also
   # answer the ip-routing / clock checks — FAKE_IP_ROUTING defaults "yes" and
   # FAKE_CLOCK_LINE defaults to a recent year so every pre-existing test below
   # still sails past [pre] unmodified; only the dedicated PREREQ tests further
   # down override those.
   #
-  # [1/7]+[pre] now ride ONE combined SSH session (marker __IRIS_PRECHECK_)
+  # [1/6]+[pre] now ride ONE combined SSH session (marker __IRIS_PRECHECK_)
   # instead of up to three — see device-install.sh. The stub recognizes that
   # single request by the marker prefix and answers all of its sections
   # (FLASH always, ROUTING only when the request actually asked for it, i.e.
@@ -377,9 +377,9 @@ run_with_timeout() {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
-  # step [4/7] (guestshell wait) polls up to ~7 minutes on a stub that never
+  # step [4/6] (guestshell wait) polls up to ~7 minutes on a stub that never
   # reports RUNNING; bound the run and grep captured output -- we only care
-  # that [2/7] succeeded (staged files + no HOST_USER fatal) before the
+  # that [2/6] succeeded (staged files + no HOST_USER fatal) before the
   # script moves on, not that later steps complete.
   run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
     DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
@@ -418,8 +418,8 @@ run_with_timeout() {
 # the container ever runs an install, and that root is a read-only mount in
 # the co-located console/container case (only artifacts/staging is writable).
 # device-install.sh must NOT try to re-copy those two already-provisioned
-# files — it should skip them and still complete step [2/7] cleanly.
-@test "IRIS_STAGE_LOCAL=1 with already-provisioned root files + read-only root: [2/7] succeeds, no re-copy attempted" {
+# files — it should skip them and still complete step [2/6] cleanly.
+@test "IRIS_STAGE_LOCAL=1 with already-provisioned root files + read-only root: [2/6] succeeds, no re-copy attempted" {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
@@ -532,9 +532,9 @@ _inband() {
   [ "$status" -eq 0 ]
 }
 
-@test "PREREQ checks land before step [2/7] stages the agent config" {
-  pre_line="$(grep -n '^echo "\[pre\] prerequisite checks' "$INSTALL" | head -1 | cut -d: -f1)"
-  step2_line="$(grep -n '^echo "\[2/7\]' "$INSTALL" | head -1 | cut -d: -f1)"
+@test "PREREQ checks land before step [2/6] stages the agent config" {
+  pre_line="$(grep -n '^echo "check routing and device clock' "$INSTALL" | head -1 | cut -d: -f1)"
+  step2_line="$(grep -n '^echo "\[2/6\]' "$INSTALL" | head -1 | cut -d: -f1)"
   [ -n "$pre_line" ] && [ -n "$step2_line" ] && [ "$pre_line" -lt "$step2_line" ]
 }
 
@@ -558,7 +558,7 @@ _inband() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"PREREQ: ip routing is disabled on this switch"* ]]
-  # must fail BEFORE staging — [pre] sits ahead of [2/7]
+  # must fail BEFORE staging — [pre] sits ahead of [2/6]
   [ "$(find "$ARTDIR" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 0 ]
 }
 
@@ -580,7 +580,7 @@ _inband() {
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
 }
 
-@test "ip routing present: real run proceeds past the check to step [2/7]" {
+@test "ip routing present: real run proceeds past the check to step [2/6]" {
   setup_stage_local
   unset HOST_USER HOST_PASS
 
@@ -650,7 +650,7 @@ cmds="\$(cat)"
 printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
 case "\$cmds" in
   *'__IRIS_PRECHECK_'*)
-    # [1/7]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
+    # [1/6]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
     # answer all three sections so the real run sails past the PREREQ gate.
     echo '__IRIS_PRECHECK_FLASH__'
     echo 'bytes free stub'
@@ -686,12 +686,12 @@ EOF
   grep -qF "staging/rpc-secret-$cap" "$BATS_TEST_TMPDIR/device-commands"
 }
 
-# --- SSH session consolidation ([1/7] flash pre-check + [pre] ip routing +
+# --- SSH session consolidation ([1/6] flash pre-check + [pre] ip routing +
 # [pre] device clock, formerly up to three separate lab/device-run.sh logins,
 # now one combined session keyed by the __IRIS_PRECHECK_ marker -- same
 # pattern as _default_router_preflight in server/gui_onboard.py). ---
 
-@test "[1/7]+[pre] pre-checks issue exactly ONE device-run.sh session, not up to three" {
+@test "[1/6]+[pre] pre-checks issue exactly ONE device-run.sh session, not up to three" {
   setup_stage_local
   unset HOST_USER HOST_PASS
   CALLLOG="$BATS_TEST_TMPDIR/precheck-calls"
@@ -725,7 +725,7 @@ STUB
     IRIS_CRT_FILE="$CRTFILE" \
     bash "$STUBDIR/device/device-install.sh"
 
-  # got past [2/7] (staging succeeded), i.e. past the whole pre-check block
+  # got past [2/6] (staging succeeded), i.e. past the whole pre-check block
   [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
   # exactly one device-run.sh invocation carried the precheck marker -- were
   # this the old code, flash/routing/clock would show up as THREE
@@ -766,7 +766,7 @@ STUB
   [ "$status" -ne 0 ]
   [[ "$output" == *"PREREQ: could not verify ip routing"* ]]
   [[ "$output" != *"PREREQ: ip routing is disabled"* ]]
-  # must fail BEFORE staging -- [pre] sits ahead of [2/7]
+  # must fail BEFORE staging -- [pre] sits ahead of [2/6]
   [ "$(find "$ARTDIR" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 0 ]
 }
 

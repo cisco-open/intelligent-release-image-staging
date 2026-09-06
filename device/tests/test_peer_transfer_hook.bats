@@ -58,6 +58,9 @@ run_hook() {
   grep -qx -- '1000000' "$TMPD/curl-argv.txt"
   grep -qx -- '--connect-timeout' "$TMPD/curl-argv.txt"
   grep -qx -- '--max-time' "$TMPD/curl-argv.txt"
+  grep -qx -- '--data-binary' "$TMPD/curl-argv.txt"
+  grep -qx -- '@-' "$TMPD/curl-argv.txt"
+  ! grep -q 's3cret' "$TMPD/curl-argv.txt"
 }
 
 @test "the size bound leaves room for the envelope under the reader's cap" {

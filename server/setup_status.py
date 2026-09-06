@@ -4,45 +4,59 @@
 
 """Post-install setup status for the console (spec 2026-08-24).
 
-Why this module exists: the IOx device packages bake ``iris-catalog.pem`` in at
-BUILD time, so any change to the catalog certificate silently invalidates every
-previously built package. The device still installs and the app still reports
-RUNNING -- it simply can never authenticate, and the only evidence is a
-TOKEN-REFRESH-FAIL line in the DEVICE's syslog. Nothing server-side otherwise
-distinguishes "never onboarded" from "onboarded but rejecting our certificate".
+IOx and IOS-XR packages are deployment-neutral: their catalog trust anchor is
+supplied during onboarding, never baked into a package. Package readiness is
+therefore based on readable wrapper bytes and the adjacent build-provenance
+manifest that binds those bytes to the canonical OCI image. Certificate
+rotation does not make a package stale.
 
-Guest Shell platforms are immune because provision-served.sh regenerates their
-artifacts (including the pem) at every container start; the IOx packages are
-precisely the artifacts it cannot produce.
+The TLS certificate check has a separate, narrower purpose. It compares the
+certificate served by the live services with the public copy distributed at
+runtime, because a disagreement still breaks every new onboard.
 
 Stdlib only. Every function is pure and independently testable: nothing here
 touches HTTP, and the caller supplies all paths.
 
 GOVERNING RULE: never report ``ok`` on missing evidence. Unreadable, absent and
-unparseable all degrade to a non-ok state, because a false green here is the
-failure this module exists to prevent.
+unparseable inputs all degrade to a non-ok state.
 """
-import calendar
 import hashlib
 import os
+import re
 import ssl
-import tarfile
-import time
 
-# Packages the console reports on. These are the artifacts the container CANNOT
-# rebuild itself (see provision-served.sh), which is exactly why they drift.
 IOX_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar")
-_CERT_MEMBER = "iris-catalog.pem"
-
-# The IOS-XR agent package (device/xr-install.sh, tools/build-xr-package.sh).
-# Unlike the two IOx tars, it is not a plain tar of a tar.gz -- it is an RPM
-# produced by the ios-xr/xr-appmgr-build tool, whose internal layout this
-# stdlib-only module has no way to parse (no rpm/cpio reader here, and this
-# module does not shell out). So its baked certificate can never be PINNED
-# the way package_fingerprint() pins the IOx tars -- see _xr_package_item's
-# docstring for what is checked instead, and its "detail" text for exactly
-# what is not.
 XR_PACKAGE = "iris-xr.rpm"
+REMEDY = "tools/provision-iox-packages.sh"
+REMEDY_XR = "tools/build-xr-package.sh --out artifacts/"
+
+_PACKAGE_SPECS = (
+    ("iris-amd64.tar", "iox", "linux/amd64", REMEDY),
+    ("iris-arm64.tar", "iox", "linux/arm64", REMEDY),
+    (XR_PACKAGE, "xr-appmgr", "linux/amd64", REMEDY_XR),
+)
+_PROVENANCE_FORMAT = "iris-device-wrapper-v1"
+_PROVENANCE_MAX_BYTES = 64 * 1024
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_OCI_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_REQUIRED_PROVENANCE = {
+    "format", "wrapper_kind", "wrapper_file", "wrapper_sha256", "platform",
+    "canonical_index_digest", "canonical_archive_sha256",
+    "canonical_source_sha256",
+}
+_READY_DETAIL = (
+    "Readable package bytes match the adjacent build-provenance manifest; "
+    "package contents and native signatures are not inspected, and the "
+    "sidecar is not authenticated here."
+)
+_REASON_DETAIL = {
+    "empty": "The package file is empty.",
+    "unreadable": "The package bytes could not be read.",
+    "provenance-absent": "The adjacent provenance manifest is missing.",
+    "provenance-unreadable": "The adjacent provenance manifest could not be read.",
+    "provenance-invalid": "The adjacent provenance manifest is malformed or for another wrapper.",
+    "wrapper-digest-mismatch": "The package bytes do not match the adjacent provenance manifest.",
+}
 
 
 _CERT_BEGIN = "-----BEGIN CERTIFICATE-----"
@@ -87,212 +101,111 @@ def fingerprint_pem(pem_text):
     return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
 
 
-def _der_tlv(data, offset):
-    """The DER element at *offset* as (tag, value_offset, length, next_offset).
-
-    Raises IndexError/ValueError on malformed input; every caller here treats
-    that as "unparseable", which the governing rule turns into a non-ok state.
-    """
-    tag = data[offset]
-    index = offset + 1
-    first = data[index]
-    index += 1
-    if first & 0x80:
-        count = first & 0x7F
-        if count == 0 or count > 4:
-            raise ValueError("unsupported DER length")
-        length = int.from_bytes(data[index:index + count], "big")
-        index += count
-    else:
-        length = first
-    if index + length > len(data):
-        raise ValueError("DER length overruns the buffer")
-    return tag, index, length, index + length
-
-
-def certificate_not_before(pem_text):
-    """The certificate's own notBefore as epoch seconds, or None.
-
-    Why this is worth a hand-rolled DER walk in a stdlib-only module: the XR
-    RPM's freshness can only be judged by comparing its build time against the
-    certificate, and the obvious baseline -- the mtime of the pem file on disk
-    -- is wrong. The served pem is a STAGED COPY, re-written on every bring-up,
-    so its mtime records the last staging operation and says nothing about when
-    the certificate came into existence. Baselining on it reported "Needs
-    rebuild" for an RPM built ELEVEN MINUTES AFTER the very certificate it was
-    accused of predating (operator report 2026-08-31), purely because a later
-    bring-up re-copied the pem. notBefore is the certificate's real birthday and
-    no copy can move it.
-
-    Walks Certificate -> tbsCertificate -> validity -> notBefore: skip the
-    optional [0] EXPLICIT version, then serialNumber, signature and issuer, and
-    the next element is validity, whose first member is notBefore.
-    """
-    block = _first_certificate_block(pem_text)
-    if block is None:
-        return None
-    try:
-        der = ssl.PEM_cert_to_DER_cert(block)
-        _tag, cert_value, _len, _next = _der_tlv(der, 0)
-        _tag, tbs_value, _len, _next = _der_tlv(der, cert_value)
-        tag, _value, _len, after = _der_tlv(der, tbs_value)
-        if tag == 0xA0:                       # [0] EXPLICIT version
-            _tag, _value, _len, after = _der_tlv(der, after)
-        _tag, _value, _len, after = _der_tlv(der, after)   # signature alg
-        _tag, _value, _len, after = _der_tlv(der, after)   # issuer
-        _tag, validity, _len, _next = _der_tlv(der, after)
-        tag, value, length, _next = _der_tlv(der, validity)
-        raw = der[value:value + length].decode("ascii")
-    except (ValueError, TypeError, IndexError, UnicodeDecodeError):
-        return None
-    try:
-        if tag == 0x17:                       # UTCTime: YYMMDDHHMMSSZ
-            two = int(raw[:2])
-            # RFC 5280: 00-49 is 20xx, 50-99 is 19xx.
-            year = 2000 + two if two < 50 else 1900 + two
-            parsed = time.strptime("%04d%s" % (year, raw[2:12]), "%Y%m%d%H%M%S")
-        elif tag == 0x18:                     # GeneralizedTime: YYYYMMDDHHMMSSZ
-            parsed = time.strptime(raw[:14], "%Y%m%d%H%M%S")
-        else:
-            return None
-    except (ValueError, IndexError):
-        return None
-    return calendar.timegm(parsed)
-
-
-def read_pem_not_before(path):
-    """notBefore epoch of the PEM at *path*, or None if missing/unreadable/bad."""
-    try:
-        with open(path, "r") as handle:
-            return certificate_not_before(handle.read())
-    except OSError:
-        return None
-
-
 def read_pem_fingerprint(path):
     """Fingerprint of the PEM at *path*, or None if missing/unreadable/bad."""
     try:
         with open(path) as handle:
             return fingerprint_pem(handle.read())
-    except OSError:
+    except (OSError, UnicodeError):
         return None
 
 
-def package_fingerprint(tar_path):
-    """The catalog certificate an IOx package PINS, as (fingerprint, reason).
-
-    reason is "" on success, else one of: absent, unreadable, no-artifacts,
-    no-cert, bad-cert. Only the pem bytes are read -- the ~60 MB package is
-    never unpacked to disk.
-
-    Two places are consulted, in order. First the PINNED-CERT PROBE MEMBER:
-    a top-level ``iris-catalog.pem`` inside ``artifacts.tar.gz``, which
-    device/iox/build.sh deliberately packages next to rootfs.tar for exactly
-    this reader (and tools/check-package-freshness.sh, which mirrors it).
-    Failing that, the classic docker-archive ``rootfs.tar`` is walked
-    layer by layer for ``opt/iris/iris-catalog.pem``, the path the Dockerfile
-    bakes the cert at -- so a package built without the probe member (builds
-    between 2026-09-02's packaging slimming and the member's restoration,
-    review finding IRIS-12-001) still reports the certificate it really
-    pins instead of a permanent "no-cert" that reads as STALE forever. Both
-    walks stream member-by-member and stop at the first match.
-    """
-    baked_path = "opt/iris/" + _CERT_MEMBER
-
-    def _pem_from_rootfs(rootfs_file):
-        """Stream a classic docker-archive (manifest.json + layer tars) and
-        return the baked pem bytes from the first layer carrying it, or
-        None. Layers are recognised by shape (a tar member that is itself a
-        tar), not by name: skopeo writes ``<digest>.tar`` plus legacy
-        ``<id>/layer.tar`` symlinks, docker-save writes ``<id>/layer.tar``."""
-        with tarfile.open(fileobj=rootfs_file, mode="r|") as rootfs:
-            for member in rootfs:
-                if not member.isfile() or not member.name.endswith(".tar"):
-                    continue
-                layer_file = rootfs.extractfile(member)
-                if layer_file is None:
-                    continue
-                try:
-                    with tarfile.open(fileobj=layer_file, mode="r|") as layer:
-                        for entry in layer:
-                            if (entry.isfile()
-                                    and entry.name.lstrip("./") == baked_path):
-                                pem = layer.extractfile(entry)
-                                return pem.read() if pem is not None else None
-                except tarfile.TarError:
-                    continue      # not a layer tar (a config/metadata blob)
-        return None
-
-    if not os.path.exists(tar_path):
-        return None, "absent"
+def _parse_provenance(path):
+    """Return one bounded, duplicate-free wrapper manifest or a reason."""
     try:
-        with tarfile.open(tar_path, mode="r:*") as outer:
-            try:
-                inner_file = outer.extractfile("artifacts.tar.gz")
-            except KeyError:
-                inner_file = None
-            if inner_file is None:
-                return None, "no-artifacts"
-            with tarfile.open(fileobj=inner_file, mode="r:gz") as inner:
-                # Stream member-by-member and stop at the first match instead
-                # of getmembers(), which walks the ENTIRE inner archive
-                # (packages run ~60 MB) before we ever look at a name.
-                member = None
-                rootfs_member = None
-                for m in inner:
-                    if os.path.basename(m.name) == _CERT_MEMBER:
-                        member = m
-                        break
-                    if (rootfs_member is None
-                            and os.path.basename(m.name) == "rootfs.tar"):
-                        rootfs_member = m
-                pem_bytes = None
-                if member is not None:
-                    pem_file = inner.extractfile(member)
-                    if pem_file is not None:
-                        pem_bytes = pem_file.read()
-                if pem_bytes is None and rootfs_member is not None:
-                    rootfs_file = inner.extractfile(rootfs_member)
-                    if rootfs_file is not None:
-                        pem_bytes = _pem_from_rootfs(rootfs_file)
-                if pem_bytes is None:
-                    return None, "no-cert"
-                fingerprint = fingerprint_pem(
-                    pem_bytes.decode("utf-8", "replace"))
-    except (tarfile.TarError, OSError, EOFError):
-        return None, "unreadable"
-    if fingerprint is None:
-        return None, "bad-cert"
-    return fingerprint, ""
+        with open(path, "rb") as handle:
+            raw = handle.read(_PROVENANCE_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None, "provenance-absent"
+    except OSError:
+        return None, "provenance-unreadable"
+    if len(raw) > _PROVENANCE_MAX_BYTES:
+        return None, "provenance-invalid"
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return None, "provenance-invalid"
+    values = {}
+    for line in lines:
+        if not line or "=" not in line:
+            return None, "provenance-invalid"
+        key, value = line.split("=", 1)
+        if not key or not value or key in values:
+            return None, "provenance-invalid"
+        values[key] = value
+    if not _REQUIRED_PROVENANCE.issubset(values):
+        return None, "provenance-invalid"
+    return values, ""
 
 
-# Worst-of ordering. Higher wins, so a stale package is never masked by an
+def package_readiness(path, name, kind, platform, remedy):
+    """Read and bind one native wrapper to its adjacent provenance sidecar.
+
+    The sidecar is intentionally outside the native envelope so a signing
+    service can treat the package as immutable. This verifies byte identity
+    and canonical-image provenance metadata; it does not parse package contents
+    or claim that a native signature is valid.
+    """
+    entry = {"name": name, "fingerprint": None, "built_at": None,
+             "remedy": remedy, "provenance": None}
+    try:
+        with open(path, "rb") as handle:
+            stat_result = os.fstat(handle.fileno())
+            # Keep the existing wire field; this is the served artifact's
+            # mtime, not an attested build timestamp.
+            entry["built_at"] = int(stat_result.st_mtime)
+            if stat_result.st_size == 0:
+                entry.update(state="unknown", reason="empty",
+                             detail=_REASON_DETAIL["empty"])
+                return entry
+            digest = hashlib.sha256()
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except FileNotFoundError:
+        entry.update(state="absent", reason="absent")
+        return entry
+    except OSError:
+        entry.update(state="unknown", reason="unreadable",
+                     detail=_REASON_DETAIL["unreadable"])
+        return entry
+
+    values, reason = _parse_provenance(path + ".manifest")
+    if reason:
+        entry.update(state="unknown", reason=reason,
+                     detail=_REASON_DETAIL[reason])
+        return entry
+    if (values["format"] != _PROVENANCE_FORMAT
+            or values["wrapper_kind"] != kind
+            or values["wrapper_file"] != name
+            or values["platform"] != platform
+            or not _HEX_SHA256.fullmatch(values["wrapper_sha256"])
+            or not _OCI_SHA256.fullmatch(values["canonical_index_digest"])
+            or not _HEX_SHA256.fullmatch(values["canonical_archive_sha256"])
+            or not _HEX_SHA256.fullmatch(values["canonical_source_sha256"])):
+        entry.update(state="unknown", reason="provenance-invalid",
+                     detail=_REASON_DETAIL["provenance-invalid"])
+        return entry
+    if digest.hexdigest() != values["wrapper_sha256"]:
+        entry.update(state="stale", reason="wrapper-digest-mismatch",
+                     detail=_REASON_DETAIL["wrapper-digest-mismatch"])
+        return entry
+
+    entry["state"] = "ok"
+    entry["detail"] = _READY_DETAIL
+    entry["provenance"] = {
+        "canonical_index_digest": values["canonical_index_digest"],
+        "canonical_archive_sha256": values["canonical_archive_sha256"],
+        "canonical_source_sha256": values["canonical_source_sha256"],
+    }
+    return entry
+
+
+# Worst-of ordering. Higher wins, so an invalid package is never masked by an
 # unreadable sibling and "cannot determine" never resolves to done.
 _RANK = {"ok": 0, "absent": 1, "unknown": 2, "unset": 3, "stale": 4}
-
-REMEDY = "tools/provision-iox-packages.sh"
-# CATALOG_PEM must point at the CURRENT live certificate (certificate block
-# only) when this runs -- see docs/zensical/aiagent.md step 6 and its reset-
-# flow note for the full discipline.
-REMEDY_XR = "tools/build-xr-package.sh --out artifacts/"
-
-_REASON_STATE = {
-    "absent": "absent",
-    "unreadable": "unknown",
-    "no-artifacts": "unknown",
-    "no-cert": "unknown",
-    "bad-cert": "unknown",
-}
-
-_XR_DETAIL_FRESH = "Built after the current certificate; contents not inspected."
-_XR_DETAIL_STALE = "Built before the current certificate; contents not inspected."
-_XR_DETAIL_NO_REFERENCE = (
-    "Current certificate could not be read, so build time cannot be "
-    "compared against it; contents are not inspected for this package "
-    "type regardless.")
-_XR_DETAIL_UNREADABLE = (
-    "Build time could not be read; contents are not inspected for this "
-    "package type regardless.")
 
 
 def _worst(states):
@@ -300,66 +213,6 @@ def _worst(states):
     if not states:
         return "unknown"
     return max(states, key=lambda s: _RANK.get(s, 2))
-
-
-def _xr_package_item(artifacts_dir, served_cert_path, reference):
-    """The device-packages row for the IOS-XR agent RPM.
-
-    HONESTY CONSTRAINT: package_fingerprint()'s cert-pinning check reads a
-    named member out of the IOx tars' inner artifacts.tar.gz -- a shape the
-    XR RPM (built by ios-xr/xr-appmgr-build, see tools/build-xr-package.sh)
-    does not share, and this stdlib-only module has no RPM/cpio reader to
-    give it one. So this can never say "this RPM pins certificate X" the
-    way the two tar rows do. What it CAN honestly check is the RPM's build
-    time against the certificate currently served: built at/after the
-    certificate's own mtime is the best available evidence the RPM was
-    produced with the live cert (REMEDY_XR's CATALOG_PEM argument is how a
-    real build ties the two together); built before it is evidence the RPM
-    predates a rotation and may still pin the old one. Either way, "detail"
-    says plainly that only build time was compared, never contents -- the
-    governing rule (never report ok on missing evidence) applies to what
-    "ok" is allowed to imply, not just to whether it fires at all.
-    """
-    path = os.path.join(artifacts_dir, XR_PACKAGE)
-    entry = {"name": XR_PACKAGE, "fingerprint": None, "built_at": None,
-             "remedy": REMEDY_XR}
-    if not os.path.exists(path):
-        entry["state"] = "absent"
-        entry["reason"] = "absent"
-        return entry
-    try:
-        built_at = os.path.getmtime(path)
-    except OSError:
-        entry["state"] = "unknown"
-        entry["reason"] = "unreadable"
-        entry["detail"] = _XR_DETAIL_UNREADABLE
-        return entry
-    entry["built_at"] = int(built_at)
-    if reference is None:
-        # Same condition IOX_PACKAGES rows use for "no-reference": the
-        # served certificate itself could not be read, so there is nothing
-        # to compare against -- not specific to this package.
-        entry["state"] = "unknown"
-        entry["reason"] = "no-reference"
-        entry["detail"] = _XR_DETAIL_NO_REFERENCE
-        return entry
-    # The certificate's own notBefore, never the pem file's mtime: that file is
-    # a staged copy re-written on every bring-up, so its mtime tracks the last
-    # staging rather than the certificate's life, and a re-copy alone would
-    # brand a perfectly good RPM stale (operator report 2026-08-31).
-    cert_born = read_pem_not_before(served_cert_path)
-    if cert_born is None:
-        entry["state"] = "unknown"
-        entry["reason"] = "no-reference"
-        entry["detail"] = _XR_DETAIL_NO_REFERENCE
-        return entry
-    if built_at >= cert_born:
-        entry["state"] = "ok"
-        entry["detail"] = _XR_DETAIL_FRESH
-    else:
-        entry["state"] = "stale"
-        entry["detail"] = _XR_DETAIL_STALE
-    return entry
 
 
 def _telemetry_status(override_endpoint, override_enabled,
@@ -416,34 +269,9 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
     mismatch = (reference is not None and distributed is not None
                 and reference != distributed)
 
-    items = []
-    for name in IOX_PACKAGES:
-        fingerprint, reason = package_fingerprint(
-            os.path.join(artifacts_dir, name))
-        entry = {"name": name, "fingerprint": fingerprint, "built_at": None,
-                 "remedy": REMEDY}
-        path = os.path.join(artifacts_dir, name)
-        try:
-            entry["built_at"] = int(os.path.getmtime(path))
-        except OSError:
-            pass
-        if reason:
-            entry["state"] = _REASON_STATE.get(reason, "unknown")
-            entry["reason"] = reason
-        elif reference is None:
-            # We cannot say whether this pins the right certificate, so we do
-            # not say it is fine.
-            entry["state"] = "unknown"
-            entry["reason"] = "no-reference"
-        elif fingerprint == reference:
-            entry["state"] = "ok"
-        else:
-            entry["state"] = "stale"
-        items.append(entry)
-    # The XR agent RPM (device/xr-install.sh) ships from this same directory
-    # and is exactly as vulnerable to a stale-cert build as the two tars --
-    # see _xr_package_item's docstring for why it is checked differently.
-    items.append(_xr_package_item(artifacts_dir, served_cert_path, reference))
+    items = [package_readiness(
+        os.path.join(artifacts_dir, name), name, kind, platform, remedy)
+        for name, kind, platform, remedy in _PACKAGE_SPECS]
 
     packages = {
         "state": _worst([i["state"] for i in items]),
@@ -451,10 +279,12 @@ def build_status(artifacts_dir, served_cert_path, distributed_cert_path,
         "items": items,
         "remedy": REMEDY,
     }
-    if distributed is None and reference is not None:
-        # Not knowing what devices are told to trust is missing evidence, so
-        # this can never leave us at ok -- but it must not DEMOTE a worse
-        # finding either: a stale package is the more urgent fact.
+    if reference is None:
+        packages["state"] = _worst([packages["state"], "unknown"])
+        packages["reason"] = "served-cert-unavailable"
+    elif distributed is None:
+        # Not knowing what devices are told to trust is missing evidence, but
+        # it does not change any package item's deployment-neutral readiness.
         packages["state"] = _worst([packages["state"], "unknown"])
         packages["reason"] = "distributed-cert-unavailable"
     elif mismatch:

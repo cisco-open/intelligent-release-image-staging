@@ -6,27 +6,36 @@ SPDX-License-Identifier: Apache-2.0
 
 # Getting Started
 
-This path brings up the IRIS server, publishes an image, generates device installers, and assigns an image to a device. Docker Compose is the server runtime.
+This path brings up the IRIS server and Console tiers, publishes an image,
+onboards devices, and assigns an image to a device. Docker Compose
+runs the two-container stack on one host by default. To place the Console on another
+host, follow [Docker on separate hosts](docker-hosts.md).
 
-It uses the command line throughout because it starts from an empty host. Once the server is running, everything after bring-up can also be done in the browser — see [Web Console](console.md).
+For an assistant-led deployment that chooses and verifies either Docker
+layout, use [AI-guided PoC](aiagent.md).
+
+Start from the command line on an empty host. Once both services are running
+and the required device packages are built, use the browser for image import, device onboarding, and assignments — see
+[Web Console](console.md). Native package builds still run on the Docker host.
 
 ## Prerequisites
 
 | Requirement | Notes |
 | --- | --- |
-| Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server container. The runtime tmpfs uses the `uid=`, `gid=`, and `mode=` mount options, which older engines reject. |
+| Linux host with Docker Engine 23.0 or newer and Docker Compose | Runs the IRIS server and Console containers. Their runtime tmpfs mounts use the `uid=`, `gid=`, and `mode=` options, which older engines reject. |
 | Reachable server IP | Devices must reach the host on the published IRIS ports. |
 | Handed-in `aria2c` binary | Not downloaded or built by this repository. `tools/get-aria2c.sh amd64` installs the pinned static binary before the first build — the Dockerfile's `COPY bin/aria2c` step fails without it. |
 | `age` identity | Encrypts server secrets at rest. Keep the private identity outside the repository. |
 | Cisco image files | Store outside Git, normally under `/opt/images`. The tree must be readable and traversable by uid `10001`. The required license tier for the target platform is outside IRIS's scope — check [cisco.com](https://www.cisco.com/). |
-| Device credentials | Used only for installation or GUI-driven onboarding. Do not commit real credentials. |
-| `BINFMT_IMAGE_DIGEST` — only if you deploy IE-3x00 IOx | The bring-up below stages **both** IOx packages, and the arm64 build needs Docker's ARM64 emulation. On an amd64 host that has never registered it, the build fails closed rather than pull an unpinned image, and the bring-up command exits non-zero *after* the server is already up and reachable. Export the audited `tonistiigi/binfmt` sha256 digest — see [IOx: Build and stage for Console onboarding](iox.md#build-and-stage-for-console-onboarding) — or skip the arm64 package if you deploy no IE-3x00. |
+| Device credentials | Used by server-side device operations. IOx also needs an IOS-XE credential for agent SSH-to-self. Do not commit real credentials. |
+| Device-image build inputs | The IOx/XR builder always creates an amd64 + arm64 OCI image, so both pinned `aria2c` binaries and a builder able to run both architectures are required. On an amd64 host, the IOx staging helper can register ARM64 emulation using an audited `BINFMT_IMAGE_DIGEST`; see [IOx builds](iox.md#build-and-stage-for-console-onboarding). |
 
 ## Configure the server
 
 Create the secret identity and export the values Docker Compose expects:
 
 ```bash
+umask 077
 mkdir -p ~/.config/iris
 age-keygen -o ~/.config/iris/age.txt
 age-keygen -y ~/.config/iris/age.txt
@@ -36,35 +45,52 @@ export IRIS_AGE_KEY_FILE_HOST=$HOME/.config/iris/age.txt
 export IRIS_AGE_RECIPIENTS=<primary-age-public-key>,<break-glass-age-public-key>
 ```
 
+Compose publishes the Console only on `IRIS_HOST_IP`, rather than on every
+interface of a multi-homed host. Choose the intended IRIS-facing address and
+restrict its TCP 8080 firewall rule to trusted operator sources.
+
 ## Give the runtime user the host paths
 
-Every service in the container runs as the fixed uid/gid `10001` with all Linux
+Both server and Console services run as the fixed uid/gid `10001` with all Linux
 capabilities dropped. The image cannot chown host paths, so grant that uid the
-two host paths that cross the container boundary before the first start, and
-again whenever either one is recreated:
+age identity file and writable artifacts directory that cross the container
+boundary before the first start, and again whenever either is recreated:
 
 ```bash
 # from the repository root
-sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"   # keep it mode 600
-sudo chown -R 10001:10001 "${IRIS_ARTIFACTS_HOST_DIR:-artifacts}"
+mkdir -p artifacts
+sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"                 # keep it mode 600
+sudo chown -R 10001:10001 artifacts
 ```
+
+If you enable authenticated Prometheus scraping, create another raw token with
+the same private umask, export its host path, and mount the identical value as
+the scraper's bearer credentials file:
+
+```bash
+openssl rand -hex 32 > ~/.config/iris/observability-token
+export IRIS_OBSERVABILITY_TOKEN_FILE_HOST=$HOME/.config/iris/observability-token
+sudo chown 10001 "$IRIS_OBSERVABILITY_TOKEN_FILE_HOST"
+```
+
+The optional previous-token host path is needed only during rotation; see
+[Telemetry export](telemetry-export.md).
 
 Compose reads the same directory as `${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}`,
 resolved relative to `server/docker-compose.yml` — the repository's `artifacts/`
-directory either way. Without these two, the server starts and then cannot read
-its key material or write served artifacts; see
+directory either way. If you override `IRIS_ARTIFACTS_HOST_DIR`, create and chown
+that resolved directory instead. Without access to these paths, the server
+cannot read its key material or write served artifacts; see
 [Host paths to chown on every deploy](server.md#host-paths-to-chown-on-every-deploy).
 
-A fresh install needs nothing more — a new named volume inherits the image's
-`10001` ownership. Volumes carried over from an earlier root-runtime release stay
-root-owned and need a one-time migration first:
-[Upgrading from a root-runtime deployment](server.md#upgrading-from-a-root-runtime-deployment).
+A new named volume inherits the image's `10001` ownership. For restored or
+manually created volumes, check [Volume permissions](server.md#volume-permissions).
 
 ## Start the server
 
-`start-compose-server.sh` builds the image, so hand in the pinned `aria2c`
-binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
-Then build the image, initialize a fresh encrypted config volume, start the
+`start-compose-server.sh` builds the server and Console images, so hand in the
+pinned `aria2c` binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
+Then build the images, initialize a fresh encrypted config volume, start the
 stack, and prepare both IOx packages from the repository root:
 
 ```bash
@@ -81,43 +107,69 @@ add a break-glass recipient later, run
 `IRIS_AGE_RECIPIENTS=<primary>,<break-glass> iris-bootstrap --rekey`, which
 re-encrypts the existing store without touching any token, key, or the pinned
 certificate. `--force --yes` is disaster recovery only: it mints new secrets and
-a new certificate, so every onboarded device must be re-onboarded and every
-prebuilt package rebuilt. Both recipients on the first bootstrap avoids all of
-this.
-The running container exposes the tracker, catalog, artifact server, seeder data
-port, console, and telemetry endpoints. Plaintext secrets are decrypted into
-`/run/iris` tmpfs at runtime and encrypted under the `iris-config` volume at
-rest.
+a new certificate, so every onboarded device must be re-onboarded with the new
+runtime trust anchor. The deployment-neutral IOx and XR packages can be reused
+unless their agent source also changed. Set both recipients on the first
+bootstrap so either identity can recover the store.
+
+The server container exposes the tracker, catalog, artifact server, seeder data
+port, and telemetry endpoints. The separate state-free Console publishes 8080
+and reaches the server's internal 9443 management API with a file-mounted,
+rotatable credential over pinned HTTPS. The age-encrypted server store lives
+on `iris-config` and is decrypted into `/run/iris` tmpfs; the Console does not
+mount that volume. The separate tier credential persists in `iris-tier-auth`.
 
 `start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
 container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
-`iris-amd64.tar` for Catalyst 9300 IOx, both pinned to the current server certificate.
+`iris-amd64.tar` for Catalyst 9300 IOx, both as deployment-neutral wrappers of
+the same canonical device image. Onboarding supplies the current public server
+certificate separately as IOx application data.
 
-!!! warning "The arm64 package needs ARM64 emulation"
-    That step builds arm64 first. On an amd64 host with no ARM64 binfmt handler
-    registered it stops at
-    `set BINFMT_IMAGE_DIGEST to an audited tonistiigi/binfmt sha256 digest`,
-    and because it runs *after* the health gate the failure is easy to miss: the
-    console is already reachable, the command exits non-zero, and **neither**
-    IOx package exists. Export `BINFMT_IMAGE_DIGEST` before running the
-    bring-up, or — if you only deploy Guest Shell C9300s and no IE-3x00 — skip
-    the IOx packages entirely and stage the amd64 one on its own later with
-    `tools/stage-iox-package.sh --arch amd64`. Verify what was actually built
-    with `tools/check-package-freshness.sh`, or the console's Settings › Setup
-    *Device packages* card.
+The helper builds arm64 first. If emulation or a build input is missing, it
+exits nonzero after the stack has started; a reachable Console does not mean
+packages are ready. Fix the reported prerequisite and rerun
+`tools/provision-iox-packages.sh`. A Guest Shell-only deployment can bring up
+the two services without native package builds:
+
+```bash
+docker compose -f server/docker-compose.yml build --pull
+docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap
+docker compose -f server/docker-compose.yml up -d
+```
+
+For IOS-XR, also run `tools/build-xr-package.sh --out artifacts/`; the startup
+helper does not build the RPM. Check the artifacts and manifests in
+**Settings → Device packages** before onboarding. Readiness checks wrapper
+bytes against their build manifests and checks the distributed runtime
+certificate separately. It does not detect newer agent source or verify native
+signatures. After source changes, follow the complete
+[package rebuild procedure](development.md#embedded-agent-packages), including
+replacement of an existing canonical image when needed.
 
 ## Create the console admin
 
-Open `https://<server-ip>:8080/` and sign in with the default credential
-`iris` / `irisisgreat!`. This only works before an admin account exists — it
-does not create a session, it takes you straight to first-run setup to create
-the real admin account. Or set the admin account from the container instead:
+Open `https://<server-ip>:8080/` and sign in with the default first-run
+credential `iris` / `irisisgreat!`. This works only before an admin account
+exists. It does not create a session; it returns a one-use setup grant that
+expires after ten minutes and takes you to account creation. Creating the admin
+permanently ends that special behavior.
+
+!!! warning "Complete the first-run claim on a trusted network"
+    Whoever reaches a brand-new Console first can claim the administrator
+    account. The Compose host binding excludes other host interfaces, but does
+    not authenticate callers that can reach `IRIS_HOST_IP`. Keep port 8080
+    restricted to a trusted management network and complete this step
+    immediately after deployment.
+
+Or set the admin account from the container instead:
 
 ```bash
 docker compose -f server/docker-compose.yml exec iris iris-gui-admin admin
 ```
 
-For scripted setup, provide the password with `IRIS_GUI_ADMIN_PASSWORD`.
+For scripted setup, pass `IRIS_GUI_ADMIN_PASSWORD` into the `iris-gui-admin`
+process; setting it only in the host shell does not pass it through
+`docker compose exec`.
 
 ## Publish an image
 
@@ -155,8 +207,8 @@ Create an inventory from the template:
 cp fleet/devices.csv.example fleet/devices.csv
 ```
 
-The inventory contains network onboarding information only, as an
-management-type-aware CSV v2. Each device declares `routed`, `inband`,
+The inventory contains network onboarding information only, as a
+management-type-aware CSV. Each device declares `routed`, `inband`,
 `router-routed`, `router-nat`, or `xr-host` as its `management_type`:
 
 ```text
@@ -165,12 +217,14 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 
 Fill the routed columns (`iris_vlan`, `svi_*`) for routed devices, or the inband
 columns (`inband_vlan`, `app_*`) for inband devices. The Add Device form requires
-an explicit `platform`: `guestshell`, `iox`, `router`, or `xr-appmgr`; it narrows
-the choices from `model` rather than silently choosing one. Existing inventory
+an explicit management type and `platform`: `guestshell`, `iox`, `router`, or
+`xr-appmgr`. Management type controls which network fields appear and bounds
+the installer choices; model can narrow those choices further. Model is free
+text and changing it does not change management type. Existing inventory
 and CSV imports may leave the field blank as an inventory-only transition state,
 in which case onboarding resolves known IOS-XE models and refuses uncertainty.
 See
-[Inventory (CSV v2)](management-type.md#inventory-csv-v2).
+[Inventory](management-type.md#inventory).
 
 For a Catalyst 8000 router, use `router-routed` with a VPG number, plus routes
 you provide between the app subnet and IRIS, or `router-nat` with an outside
@@ -181,26 +235,12 @@ designed for the Catalyst 8000 family and lab-tested on Catalyst 8000V; see
 
 For a Cisco 8000-series IOS-XR router, use `management_type=xr-host` and
 `platform=xr-appmgr`; leave every VLAN, SVI, app-address, VPG, and NAT field
-empty. Build `artifacts/iris-xr.rpm` before onboarding.
+empty. XR uses the router's host network, so no app IP is needed. Build
+`artifacts/iris-xr.rpm` and its manifest before onboarding.
 
-Management-type-aware onboarding runs through the **Console** (or API), which creates
-a durable deployment record and drives teardown from it. The legacy CLI generator below is
-routed-only and refuses a v2 (`management_type`) header:
-
-```bash
-# legacy routed inventory only
-tools/gen-device-installers.sh path/to/legacy-routed.csv
-```
-
-It takes the old positional columns
-`device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip`, and no template for that
-format ships — `fleet/devices.csv.example` is CSV v2 and the generator refuses
-it. It exists for sites that still hold such a file; anything new goes through
-the console.
-
-It requires the running `iris` container to mint enrollment tokens and read
-the server certificate; set `IRIS_CONTAINER=<name>` if yours is named
-differently.
+Onboard through the **Console** or API. The server creates a durable deployment
+record, delivers enrollment credentials and certificate trust, and uses the
+record to determine what it owns during undeploy.
 
 ## Assign images
 
@@ -225,7 +265,13 @@ tools/apply-assignments.sh fleet/assignments.csv
 This requires the running `iris` container by that name; set
 `IRIS_CONTAINER=<name>` if yours differs.
 
-Agents poll the catalog on a short interval, download the approved image, verify it, and stage it on the target storage. A changed assignment **parks** the previous image rather than deleting it: its torrent stops and its staging copy is freed, but the copy already placed on the storage root is deliberately kept, and is reclaimed only when a later placement needs the room. Size storage for the images you want resident at once — see [Unassigned image park](device-agents.md#unassigned-image-park).
+Agents poll the catalog, transfer assigned images, verify them, and stage them
+on the device filesystem. Removing an assignment stops that image's torrent
+and clears its working copy, including when the last assignment is removed.
+IOS-XE keeps the placed root file for reuse. XR removes root files recorded as
+IRIS downloads; operator-adopted files and files with unknown ownership remain.
+See [Unassigned image park](device-agents.md#unassigned-image-park) for storage
+and ownership rules.
 
 ## Open the console
 

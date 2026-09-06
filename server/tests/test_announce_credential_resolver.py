@@ -272,6 +272,8 @@ def test_dedicated_revoked_credential_is_not_classified_expired():
     assert ei.value.expired is False
 
 
+
+
 def test_legacy_scan_all_expired_candidates_classified_expired():
     now = 1_000_000
     store = _store()

@@ -8,6 +8,7 @@ metadata:
   name: iris-seed-server
   labels:
     app.kubernetes.io/name: iris-seed-server
+    app.kubernetes.io/component: server
     app.kubernetes.io/part-of: iris
 spec:
   # The tracker registry is in memory and aria2 RPC is pod-local. Keep one
@@ -22,6 +23,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: iris-seed-server
+        app.kubernetes.io/component: server
         app.kubernetes.io/part-of: iris
     spec:
       automountServiceAccountToken: false
@@ -46,10 +48,11 @@ spec:
         fsGroup: 10001
       initContainers:
         - name: bootstrap
-          image: iris:docker-alpha
-          # Always, not IfNotPresent: the tag is a mutable placeholder, and
-          # IfNotPresent would keep whatever a node cached under that name.
-          imagePullPolicy: Always
+          # Kustomize replaces this fail-closed placeholder with the operator's
+          # registry name and immutable digest. The init and runtime containers
+          # deliberately use the same image bytes.
+          image: iris-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
           args:
             - iris-bootstrap
           envFrom:
@@ -78,24 +81,38 @@ spec:
               memory: 512Mi
       containers:
         - name: iris
-          # PLACEHOLDER TAG. This repo has no image-publish step, so nothing
-          # keeps `iris:docker-alpha` in step with the source tree -- the
-          # Compose path builds `iris:latest` locally and this tag is whatever
-          # was last built by hand under that name. Re-tag/rebuild from the
-          # current tree before deploying, or a cluster silently runs old
-          # code. Same applies to the initContainer above. imagePullPolicy is
-          # Always for the same reason: with a mutable tag, IfNotPresent pins
-          # each node to whatever it cached first. Rebuilding under the same
-          # tag still needs `kubectl -n iris rollout restart deployment/iris-seed-server`
-          # to make the pod re-pull.
-          image: iris:docker-alpha
-          imagePullPolicy: Always
+          # Kustomize replaces this fail-closed placeholder. A digest, rather
+          # than a mutable tag, makes a rollout's server bytes reproducible.
+          image: iris-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
                 name: iris-seed-server
           env:
             - name: IRIS_AGE_KEY_FILE
               value: /run/secrets/iris_age_key
+            - name: IRIS_MANAGEMENT_API_TOKEN_FILE
+              value: /run/secrets/iris-tier-auth/current
+            - name: IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE
+              value: /run/secrets/iris-tier-auth/previous
+            - name: IRIS_MANAGEMENT_API_CERT
+              value: /run/secrets/iris-management-tls/tls.crt
+            - name: IRIS_MANAGEMENT_API_KEY
+              value: /run/secrets/iris-management-tls/tls.key
+            # Prometheus is optional, but enabling it never makes /metrics
+            # anonymous.  This separate principal is deliberately not the
+            # management-tier credential; current+previous files permit a
+            # bounded, two-phase rotation for scrapers.
+            - name: IRIS_OBSERVABILITY_TOKEN_FILE
+              value: /run/secrets/iris-observability-auth/current
+            - name: IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE
+              value: /run/secrets/iris-observability-auth/previous
+            # Optional outbound collector authentication. Keep header values
+            # in a Secret-mounted file rather than a ConfigMap, environment
+            # value, command argument, or URL. A missing optional Secret reads
+            # as no headers; authenticated OTLP itself still requires HTTPS.
+            - name: IRIS_OTLP_HEADERS_FILE
+              value: /run/secrets/iris-otlp-headers/headers
           ports:
             - name: tracker
               containerPort: 6969
@@ -109,22 +126,16 @@ spec:
             - name: bittorrent
               containerPort: 6881
               protocol: TCP
-            - name: console
-              containerPort: 8080
+            - name: management-api
+              containerPort: 9443
               protocol: TCP
             - name: health
               containerPort: 9101
               protocol: TCP
-          # /readyz, NOT /healthz. /healthz answers 200 unconditionally by
-          # design (telemetry.py: "container HEALTHCHECK and orchestrator
-          # probes are status-code based"), and it only ever proved that the
-          # telemetry server on :9101 was alive. The tracker, catalog, artifact
-          # server and console are SEPARATE listeners started by
-          # docker-entrypoint.sh, so any of them could die with all three
-          # probes still passing: a pod whose artifact server was gone stayed
-          # Ready, was never restarted, and every device failed at [5/7] with
-          # "cannot connect". /readyz TCP-probes the listeners named by
-          # IRIS_HEALTH_LISTENERS and answers 503 with the offenders listed.
+          # /readyz gates startup/readiness by checking only listeners owned by
+          # this pod. The separately deployed console is intentionally absent:
+          # neither tier may make the other's cold start impossible. /healthz
+          # is the liveness signal for this process and stays informational.
           #
           # timeoutSeconds is 10, not 3: /readyz makes one TCP connect per
           # declared listener with a 2s timeout each, so its own worst case
@@ -134,6 +145,7 @@ spec:
             httpGet:
               path: /readyz
               port: health
+              scheme: HTTPS
             periodSeconds: 5
             timeoutSeconds: 10
             failureThreshold: 60
@@ -141,13 +153,15 @@ spec:
             httpGet:
               path: /readyz
               port: health
+              scheme: HTTPS
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /readyz
+              path: /healthz
               port: health
+              scheme: HTTPS
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 3
@@ -163,6 +177,18 @@ spec:
               mountPath: /run/iris
             - name: age-key
               mountPath: /run/secrets
+              readOnly: true
+            - name: tier-auth
+              mountPath: /run/secrets/iris-tier-auth
+              readOnly: true
+            - name: management-tls
+              mountPath: /run/secrets/iris-management-tls
+              readOnly: true
+            - name: observability-auth
+              mountPath: /run/secrets/iris-observability-auth
+              readOnly: true
+            - name: otlp-headers
+              mountPath: /run/secrets/iris-otlp-headers
               readOnly: true
             # Every server-side device session shells out to lab/device-run.sh,
             # which writes a mktemp transcript copy AND its enable-escalation
@@ -206,3 +232,38 @@ spec:
             items:
               - key: identity
                 path: iris_age_key
+        - name: tier-auth
+          secret:
+            secretName: iris-tier-auth
+            defaultMode: 0440
+            items:
+              - key: current
+                path: current
+              - key: previous
+                path: previous
+        - name: management-tls
+          secret:
+            secretName: iris-management-tls
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: observability-auth
+          secret:
+            secretName: iris-observability-auth
+            defaultMode: 0440
+            items:
+              - key: current
+                path: current
+              - key: previous
+                path: previous
+        - name: otlp-headers
+          secret:
+            secretName: iris-otlp-headers
+            defaultMode: 0440
+            optional: true
+            items:
+              - key: headers
+                path: headers

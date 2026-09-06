@@ -1,0 +1,72 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+# Isolate every IRIS pod by default. The allow policies below describe the
+# supported flows explicitly. Egress remains open because device SSH, OTLP and
+# DNS destinations are deployment-specific and cannot be safely guessed here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iris-default-deny-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: iris
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+# Device protocols and the optional operator/Prometheus telemetry surface keep
+# their existing external reachability. Restrict source CIDRs at the
+# LoadBalancer/firewall for the actual deployment; this base cannot know them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iris-server-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: iris-seed-server
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 6969
+          protocol: TCP
+        - port: 8443
+          protocol: TCP
+        - port: 8000
+          protocol: TCP
+        - port: 6881
+          protocol: TCP
+        - port: 9101
+          protocol: TCP
+    - from:
+        # With only a podSelector this means matching pods in this namespace.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: iris-console
+              app.kubernetes.io/component: console
+      ports:
+        - port: 9443
+          protocol: TCP
+---
+# Operators reach only the browser tier. It authenticates its own browser
+# routes and uses the separately authenticated policy above for server calls.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iris-console-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: iris-console
+      app.kubernetes.io/component: console
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP

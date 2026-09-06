@@ -14,6 +14,8 @@ setup() {
   TMP="$(mktemp -d)"
   SRC="$TMP/guest-share"; STAGE="$SRC/iris"
   mkdir -p "$STAGE"
+  cp "$BATS_TEST_DIRNAME/../server/certs/cisco_bulkhash_verify.pem" \
+    "$STAGE/iris-catalog.pem"
   # stub guestshell-start so bootstrap never launches a real aria2c
   printf '#!/usr/bin/env bash\necho started >> "%s/gss.log"\n' "$TMP" > "$STAGE/guestshell-start.sh"
   chmod +x "$STAGE/guestshell-start.sh"

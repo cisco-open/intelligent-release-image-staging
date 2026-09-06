@@ -8,8 +8,8 @@
 #
 # IRIS_HOST_IP is ALWAYS the machine running docker (the devices must be able to
 # reach it). It is baked into the catalog's self-signed TLS certificate, which is
-# generated on first start — if you change it later, delete the config volume so
-# the cert regenerates.
+# generated on first start. An address change requires a certificate covering
+# the new address and updated device trust; see docs/zensical/operations.md.
 #
 # Publish an image (run inside the container; IRIS_IMAGE_ROOT is mounted at
 # /opt/images). Runtime secret paths are declared in the container environment,
@@ -30,8 +30,8 @@
 # THROWAWAY container, not through this service: `compose run` inherits the
 # cap_drop below, so the chown is denied even as --user 0 — and `chown -R` still
 # exits 0, so the failure looks like success. Volume names carry the compose
-# project prefix (`iris_` from the `name:` below; `server_` on a deployment
-# created before that line existed — see the migration note there):
+# project prefix (`server_` from the explicit `name:` below and from the
+# historical directory-derived default):
 #   docker run --rm -u 0 \
 #     -v server_iris-state:/var/lib/iris \
 #     -v server_iris-config:/etc/iris \
@@ -98,15 +98,15 @@ services:
       # the docker host's IP, used in the TLS cert SAN — REQUIRED, no default
       IRIS_HOST_IP: "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP, e.g. IRIS_HOST_IP=10.0.0.5 docker compose up}"
       # External observability is OPT-IN. The swarm map lives in the Console
-      # (:8080 -> Swarm tab; the old :9101/swarmmap now serves a pointer page);
-      # the Prometheus-format /metrics endpoint + OTLP push only turn on when
-      # IRIS_OBSERVABILITY=1.
+      # (:8080 -> Swarm tab). The Prometheus-format /metrics endpoint and
+      # OTLP push only turn on when IRIS_OBSERVABILITY=1.
       # Use this if you already run an OpenTelemetry collector and backend
       # (e.g., Splunk); leave unset otherwise.
       IRIS_OBSERVABILITY: "${IRIS_OBSERVABILITY:-}"
-      # When observability is on, point at your OTel collector's OTLP/HTTP
-      # endpoint, e.g. IRIS_OTLP_ENDPOINT=http://<collector-ip>:4318. Inert
-      # unless IRIS_OBSERVABILITY=1.
+      # When observability is on, point at your collector's HTTPS OTLP/HTTP
+      # endpoint, e.g. https://collector.example.com:4318. See
+      # docs/zensical/splunk.md for certificates and authentication.
+      # Inert unless IRIS_OBSERVABILITY=1.
       IRIS_OTLP_ENDPOINT: "${IRIS_OTLP_ENDPOINT:-}"
       # Seeder/telemetry poll cadence in seconds (default 15). On a fast
       # link a whole image can transfer inside one interval -- a 1 GB image at
@@ -115,9 +115,7 @@ services:
       # appear. Lower it (2-5s) on fast fabrics or for a live demo; the cost is
       # more aria2 RPC calls.
       IRIS_SAMPLE_INTERVAL: "${IRIS_SAMPLE_INTERVAL:-}"
-      # Overrides the :9101 pointer page's console link verbatim (e.g. on a
-      # shared host publishing the console on a non-default port). Unset ->
-      # the moved_page() default of https://<IRIS_HOST_IP>:8080/.
+      # Lets Settings report a separately published console address/port.
       IRIS_CONSOLE_URL: "${IRIS_CONSOLE_URL:-}"
       # The published console host port, so the Settings page can show the real
       # one (the container always listens on 8080 internally).
@@ -140,14 +138,13 @@ services:
       # "unset" to the reader on the other side, the code's own default is
       # restated as the fallback rather than the empty string.
       IRIS_HTTP_TIMEOUT: "${IRIS_HTTP_TIMEOUT:-}"
-      # int() with no guard in tracker.py, and an empty value would build
-      # "http://<host>:/announce" in the catalog -- restate the default.
+      # int() with no guard in tracker.py, and an empty value would build an
+      # invalid HTTPS announce authority in the catalog -- restate the default.
       # Changing it needs the 6969 port mapping below changed to match.
       IRIS_TRACKER_PORT: "${IRIS_TRACKER_PORT:-6969}"
       IRIS_TRACKER_ANNOUNCE: "${IRIS_TRACKER_ANNOUNCE:-}"
       IRIS_REQUIRE_IDENTITY_GATE: "${IRIS_REQUIRE_IDENTITY_GATE:-}"
       IRIS_ENDPOINT_TTL: "${IRIS_ENDPOINT_TTL:-}"
-      IRIS_GUI_ALLOW_PLAINTEXT: "${IRIS_GUI_ALLOW_PLAINTEXT:-}"
       IRIS_CATALOG_ALLOW_PLAINTEXT: "${IRIS_CATALOG_ALLOW_PLAINTEXT:-}"
       IRIS_ARTIFACTS_ALLOW_PLAINTEXT: "${IRIS_ARTIFACTS_ALLOW_PLAINTEXT:-}"
       IRIS_HEALTH_LISTENERS: "${IRIS_HEALTH_LISTENERS:-}"
@@ -176,14 +173,31 @@ services:
       # proxy, so both restate the code default.
       IRIS_METRICS_PORT: "${IRIS_METRICS_PORT:-9101}"
       IRIS_METRICS_HOST: "${IRIS_METRICS_HOST:-0.0.0.0}"
-      IRIS_SWARM_URL: "${IRIS_SWARM_URL:-http://127.0.0.1:9101/swarm}"
-      IRIS_SWARM_PUBLIC: "${IRIS_SWARM_PUBLIC:-}"
+      IRIS_SWARM_URL: "${IRIS_SWARM_URL:-https://127.0.0.1:9101/swarm}"
       # OTLP collector authentication. Values are secrets: prefer the _FILE
       # form with a Docker secret over putting the header in server/.env.
       IRIS_OTLP_HEADERS: "${IRIS_OTLP_HEADERS:-}"
-      IRIS_OTLP_HEADERS_FILE: "${IRIS_OTLP_HEADERS_FILE:-}"
+      IRIS_OTLP_HEADERS_FILE: "/run/secrets/iris_otlp_headers"
       IRIS_OTLP_DEVICE_METRICS: "${IRIS_OTLP_DEVICE_METRICS:-}"
       IRIS_EVENTS_URL_TEMPLATE: "${IRIS_EVENTS_URL_TEMPLATE:-}"
+      # Authenticated console-to-management hop. Compose provisions the
+      # current token in a narrow named volume and exports only the public
+      # management certificate to a second narrow volume. Neither contains
+      # catalog/device state. Rotation installs a new current.json while
+      # retaining the old value as previous.json for one restart window.
+      IRIS_MANAGEMENT_API_TOKEN_FILE: "/run/iris-tier/current.json"
+      IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE: "/run/iris-tier/previous.json"
+      IRIS_MANAGEMENT_API_GENERATE_TOKEN: "1"
+      IRIS_MANAGEMENT_API_CERT: "/run/iris/tls/management-crt.pem"
+      IRIS_MANAGEMENT_API_KEY: "/run/iris/tls/key.pem"
+      IRIS_MANAGEMENT_API_GENERATE_CERT: "1"
+      IRIS_GUI_FALLBACK_GENERATE: "1"
+      IRIS_GUI_FALLBACK_CERT: "/run/iris/tls/console-fallback.pem"
+      IRIS_MANAGEMENT_API_CA_EXPORT: "/run/iris-management-ca/ca.pem"
+      # Prometheus is optional but never anonymous when enabled. Supply a
+      # mode-0600 observability-scoped token file on the host.
+      IRIS_OBSERVABILITY_TOKEN_FILE: "/run/secrets/iris_observability_token"
+      IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE: "/run/secrets/iris_observability_previous_token"
       # At-rest encryption (age). The master identity is mounted as a Docker
       # secret (read-only, RAM-backed); plaintext is decrypted to a tmpfs at
       # /run/iris and never touches the persistent iris-config volume.
@@ -209,14 +223,11 @@ services:
       IMAGES_ROOT: "/opt/images"
       IMAGES_DIR: "/opt/images/iosxe/c9300"
     ports:
-      - "6969:6969"     # tracker (http)
+      - "6969:6969"     # tracker (https)
       - "8443:8443"     # catalog (https)
       - "8000:8000"     # artifact server (agent bundle + per-device configs)
       - "6881:6881"     # seeder's BitTorrent data port (peers fetch pieces here)
-      - "9101:9101"     # telemetry: Prometheus /metrics + /healthz (scrape target)
-      # published side overridable — shared hosts may already have :8080 taken
-      # (e.g. Jenkins); the container always listens on 8080 internally.
-      - "${IRIS_GUI_PUBLISH:-8080}:8080"     # web console (https)
+      - "9101:9101"     # telemetry HTTPS: Prometheus /metrics + probes
       # NOTE: the seeder's aria2 RPC (:6800) is intentionally NOT published — it
       # binds localhost-only inside the container (spec §5). Publish images with
       # `docker compose exec` (see header), which reaches it on 127.0.0.1:6800.
@@ -238,23 +249,13 @@ services:
       # source — so self-provisioning it is expected.
       - "${IRIS_ARTIFACTS_HOST_DIR:-../artifacts}:/srv/artifacts"
       - iris-images:/var/lib/iris-images
-      # Cisco-licensed console typeface (Sharp Sans Bold). .dockerignore keeps
-      # it OUT of the build context and every image layer -- Cisco's license
-      # does not permit redistributing it inside the image (or the release
-      # tarball; tools/make-release.sh's allowlist excludes it too) -- so the
-      # console falls back to its default font stack (font-display: swap,
-      # server/webroot/styles.css) without it. A deployment that
-      # INDEPENDENTLY holds the Sharp Sans license restores it at RUNTIME,
-      # never inside the image, by pointing IRIS_SHARP_SANS_FONT_HOST at the
-      # .woff2 file on the Compose host:
-      #   IRIS_SHARP_SANS_FONT_HOST=/path/to/SharpSans-Bold.woff2 \
-      #     docker compose -f server/docker-compose.yml up -d
-      # Left unset, this mounts /dev/null (present on every Linux host) --
-      # a harmless, always-present no-op every other deployment never has to
-      # think about: the console reads an empty file, the browser rejects it
-      # as an invalid font and falls back exactly as it does when the path
-      # is absent altogether.
-      - "${IRIS_SHARP_SANS_FONT_HOST:-/dev/null}:/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"
+      - iris-tier-auth:/run/iris-tier
+      - iris-management-ca:/run/iris-management-ca
+      - "${IRIS_OBSERVABILITY_TOKEN_FILE_HOST:-/dev/null}:/run/secrets/iris_observability_token:ro"
+      - "${IRIS_OBSERVABILITY_PREVIOUS_TOKEN_FILE_HOST:-/dev/null}:/run/secrets/iris_observability_previous_token:ro"
+      # Optional raw Name=Value OTLP collector headers. /dev/null is a safe
+      # empty default; otlp.read_headers_env treats an empty file as no auth.
+      - "${IRIS_OTLP_HEADERS_FILE_HOST:-/dev/null}:/run/secrets/iris_otlp_headers:ro"
     # plaintext secrets live ONLY here, in RAM — never on the iris-config
     # volume. The mount options make the tmpfs owned by the non-root runtime
     # uid and private to it — without them docker mounts it root:root and the
@@ -264,6 +265,8 @@ services:
       - /run/iris:uid=10001,gid=10001,mode=0700
     secrets:
       - iris_age_key
+    expose:
+      - "9443"          # management API, reachable only on the Compose network
     # survives crashes AND host/docker restarts (only a manual `docker stop` sticks)
     restart: unless-stopped
     # log rotation: everything (tracker/catalog/seeder) goes to stdout; docker keeps
@@ -273,10 +276,56 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  console:
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: server/Dockerfile.console
+    image: iris-console:latest
+    container_name: "${IRIS_CONSOLE_CONTAINER:-iris-console}"
+    init: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      iris:
+        condition: service_healthy
+    environment:
+      IRIS_GUI_HOST: "0.0.0.0"
+      IRIS_GUI_PORT: "8080"
+      IRIS_GUI_CERT: "/run/iris-console/cert.pem"
+      IRIS_GUI_ALLOW_PLAINTEXT: "${IRIS_GUI_ALLOW_PLAINTEXT:-}"
+      IRIS_MANAGEMENT_API_URL: "https://iris:9443"
+      IRIS_MANAGEMENT_API_TOKEN_FILE: "/run/iris-tier/current.json"
+      IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE: "/run/iris-tier/previous.json"
+      IRIS_MANAGEMENT_API_CA: "/run/iris-management-ca/ca.pem"
+    ports:
+      # Publish only on the explicitly configured IRIS host address. The
+      # Console still listens on every interface inside its isolated container
+      # so Docker forwarding works, but it is not exposed through every host
+      # NIC (including an unintended public or lab-facing interface).
+      - "${IRIS_HOST_IP:?Set IRIS_HOST_IP to this server's IP}:${IRIS_GUI_PUBLISH:-8080}:8080"
+    volumes:
+      - iris-tier-auth:/run/iris-tier:ro
+      - iris-management-ca:/run/iris-management-ca:ro
+      # Optional licensed font remains a runtime-only console mount.
+      - "${IRIS_SHARP_SANS_FONT_HOST:-/dev/null}:/opt/iris/server/webroot/fonts/SharpSans-Bold.woff2:ro"
+    tmpfs:
+      - /run/iris-console:uid=10001,gid=10001,mode=0700
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   iris-state:
   iris-config:
   iris-images:
+  iris-tier-auth:
+  iris-management-ca:
 secrets:
   iris_age_key:
     # path on the docker host to the age IDENTITY (private key) file, umask 077.

@@ -95,10 +95,7 @@
        (`latest`), never as a delta over the window. The boards exist to keep
        the history of a transfer after the swarm goes idle, and a window delta
        reads 0 for a finished transfer while making the headline depend on where
-       the operator dragged the time picker. The old window-delta guard over
-       earliest/latest is retired outright: it reported an entire cumulative
-       value as if it had accrued inside the window whenever a counter stepped
-       down. -->
+       the operator dragged the time picker. -->
   <search id="mbase">
     <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name IN ("iris_origin_sent_bytes_total","iris_origin_sent_bytes","iris_peer_attributed_bytes_total","iris_peer_attributed_bytes","iris_peer_unattributed_bytes_total","iris_peer_unattributed_bytes","iris_swarm_peers_attributed","iris_swarm_peers_saturated") AND image="$img$" BY metric_name, image, info_hash | eval fam=replace(metric_name,"_total$","")</query>
     <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
@@ -270,19 +267,13 @@
              send. DERIVED, not observed. The origin term is the ALL-TIME
              cumulative counter value (mstats latest), never a window delta, so
              the slice survives an idle swarm and does not move with the time
-             picker; the SPL window-delta guard d=if(l>=e,l-e,l) is gone,
-             because it reported a whole cumulative counter as if it had accrued
-             inside the window whenever the counter stepped down.
+             picker.
              If either input is missing the quantity is null and the pie is not
-             drawn at all: the old coalesce(origin,0) / coalesce(delivered,0)
-             pair printed "Origin (measured) 0 MiB" and credited 100% of
-             delivery to peers whenever the origin metric was absent. The clamp
+             drawn at all. The clamp
              at zero applies only to the drawn slice, never to the inputs.
              Being a residual, it absorbs re-sends, hashfail waste and any clock
              skew between the two sources; if the over-tracing excess tile
-             is nonzero this figure is suspect. Lab reference (7x C8000V,
-             928 MiB image): origin 4618.5 MiB, peers 1877.5 MiB of
-             6496.0 MiB delivered. -->
+             is nonzero this figure is suspect. -->
       </chart>
     </panel>
     <panel>
@@ -299,7 +290,7 @@
              tiles beside it: a floor on fleet delivery in the numerator's
              denominator, an all-time origin counter, and a residual that
              absorbs re-sends and hashfail waste. Missing input reads no data,
-             never 0%. Lab reference 28.9%. -->
+             never 0%. -->
       </single>
     </panel>
     <panel>
@@ -373,11 +364,8 @@
         <option name="charting.axisTitleY.text">% of origin bytes traced to a device</option>
         <option name="charting.chart.nullValueMode">gaps</option>
         <option name="charting.legend.placement">bottom</option>
-        <!-- traced / origin-sent, both read as cumulative values. The
-             (traced + untraced) form is retired: untraced is
-             max(0, origin - traced), so that ratio is algebraically pinned
-             to at most 100% and cannot show over-tracing. This one can rise
-             above 100%, and when it does the over-tracing excess tile is
+        <!-- traced / origin-sent, both read as cumulative values. This ratio
+             can rise above 100%, and when it does the over-tracing excess tile is
              the panel to read. No denominator clamp: a missing origin plots a
              gap, not a number. -->
       </chart>
@@ -497,7 +485,7 @@
     </panel>
     <panel>
       <title>Image size (measured)</title>
-      <description>iris_image_size_bytes{image,info_hash}, sourced from the catalog entry's own `size` field. Emitted by the hub from the catalog store. A missing series means that image has no published catalog entry; the panel reads "no data" rather than guessing. There is no hardcoded constant, no textbox fallback and no substitute — the retired image_size_bytes textbox input was deleted for exactly that reason. Informational and progress-only: the fleet-delivery totals on this board are defined so they never depend on it.</description>
+      <description>iris_image_size_bytes{image,info_hash}, sourced from the catalog entry's own `size` field. Emitted by the hub from the catalog store. A missing series reads "no data". This size is used for information and progress; the fleet-delivery totals do not depend on it.</description>
       <table>
         <search>
           <query>| mstats latest(_value) AS v WHERE index=iris_metrics metric_name="iris_image_size_bytes" AND image="$img$" BY image, info_hash</query>
@@ -627,9 +615,7 @@
              under the label "unresolved".
              A device with no traced origin edge reads as 100% peer-served,
              which is a tracing artefact, not a fact: read the tracing
-             coverage and ledger-cap tiles next to this table. Lab reference:
-             per-device peer share ranged 18.7% to 55.9% across seven identical
-             devices pulling one 928 MiB image. -->
+             coverage and ledger-cap tiles next to this table. -->
       </table>
     </panel>
   </row>

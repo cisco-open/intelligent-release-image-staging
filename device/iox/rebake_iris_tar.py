@@ -6,24 +6,23 @@
 
 """Replace files inside an already-built IOx package offline.
 
-Why this exists: an IOx package bakes the catalog CA (iris-catalog.pem) and the
-agent code into the image at BUILD time, and building a fresh package needs an
-arm64 Docker build + Cisco's ioxclient. When the server is re-keyed (new TLS
-cert) or the agent code gets a fix, an environment WITHOUT that toolchain is
-stuck: the deployed IE-3400 agents pin a dead cert and can never talk to the
-catalog again. The package format itself carries no signatures — it is tar +
-gzip + SHA256 manifests all the way down — so a rebuild-in-place is possible
-anywhere Python runs:
+Why this exists: an IOx package bakes the agent code into its image, and
+building a fresh package needs a multi-architecture container builder plus
+Cisco's ioxclient.  A deployment-neutral IRIS package receives its catalog CA
+through IOx application data at onboard time; older packages also baked that
+certificate and remain readable by this compatibility tool.  An environment
+without the original toolchain can replace files in an *unsigned* package by
+recomputing the tar/gzip/SHA manifest chain. IOx also supports signed packages
+carrying package.sign and/or package.cert; this tool refuses those because
+changing any covered byte would invalidate the existing signature:
 
     outer IOx package tar
       package.yaml / artifacts.mf / .package.metadata / package.mf
       envelope_package.tar.gz      (copies of the above four)
       artifacts.tar.gz
         rootfs.tar                 (the image archive, one of two layouts)
-        iris-catalog.pem           (the PINNED-CERT PROBE MEMBER: the same
-                                    cert-only bytes baked at
-                                    opt/iris/iris-catalog.pem, re-added by
-                                    build.sh for the freshness readers)
+        iris-catalog.pem           (legacy package only: the old pinned-cert
+                                    probe member matching the image copy)
         package.yaml               (whatever else ioxclient tarred)
 
 rootfs.tar comes in two layouts, both handled:
@@ -78,13 +77,28 @@ class RebakeError(Exception):
     pass
 
 
-# Top-level artifacts.tar.gz members that duplicate a baked container path
-# (build.sh's pinned-cert probe member): replaced alongside the layer copy.
+# Top-level artifacts.tar.gz members that duplicate a baked container path in
+# legacy packages: replaced alongside the layer copy.
 _PROBE_MEMBERS = {"iris-catalog.pem": "opt/iris/iris-catalog.pem"}
+_SIGNATURE_MEMBERS = frozenset(("package.sign", "package.cert"))
 
 
 def _sha(b):
     return hashlib.sha256(b).hexdigest()
+
+
+def _is_signature_member(name):
+    """True for IOx signing material at any package-wrapper path."""
+    return str(name).rstrip("/").rsplit("/", 1)[-1] in _SIGNATURE_MEMBERS
+
+
+def _refuse_signature_members(members, scope):
+    """Fail closed before rewriting a signed IOx package."""
+    found = sorted({m.name for m in members if _is_signature_member(m.name)})
+    if found:
+        raise RebakeError(
+            "refusing signed IOx package: %s contains %s"
+            % (scope, ", ".join(found)))
 
 
 def _read_tar(data):
@@ -338,7 +352,11 @@ def _rebake_rootfs_oci(members, byname, replacements, hit):
 
 def _mf(entries):
     """entries: ordered (name, bytes) -> ioxclient-style SHA256 manifest."""
-    return ("".join("SHA256(%s)= %s\n" % (n, _sha(b)) for n, b in entries)).encode()
+    # CAF forbids the signature/certificate members from appearing in a
+    # package manifest. Signed inputs are rejected before this point, and this
+    # second gate keeps the invariant local to every manifest we generate.
+    return ("".join("SHA256(%s)= %s\n" % (n, _sha(b)) for n, b in entries
+                    if not _is_signature_member(n))).encode()
 
 
 def _update_metadata(meta_bytes, compressed, uncompressed):
@@ -352,9 +370,13 @@ def _update_metadata(meta_bytes, compressed, uncompressed):
 
 
 def _mf_order(mf_bytes, present):
-    """Preserve the original manifest's line order; fall back to sorted."""
-    names = re.findall(r"^SHA256\(([^)]+)\)=", mf_bytes.decode(), re.MULTILINE)
-    return [n for n in names if n in present] or sorted(present)
+    """Preserve SHA256/SHA512 manifest order; fall back to sorted."""
+    safe_present = [n for n in present if not _is_signature_member(n)]
+    names = re.findall(r"^SHA(?:256|512)\(([^)]+)\)=",
+                       mf_bytes.decode(), re.MULTILINE)
+    ordered = [n for n in names
+               if n in safe_present and not _is_signature_member(n)]
+    return ordered or sorted(safe_present)
 
 
 def rebake(in_path, out_path, replacements):
@@ -363,20 +385,40 @@ def rebake(in_path, out_path, replacements):
     contents = {p: open(f, "rb").read() for p, f in replacements.items()}
 
     with tarfile.open(in_path) as t:
-        outer_order = [m.name for m in t if m.isfile()]
+        outer_members = list(t)
+        _refuse_signature_members(outer_members, "outer package")
+        outer_order = [m.name for m in outer_members if m.isfile()]
         outer = {}
-        t2 = tarfile.open(in_path)
-        for m in t2:
+        for m in outer_members:
             if m.isfile():
-                outer[m.name] = (m, t2.extractfile(m).read())
+                outer[m.name] = (m, t.extractfile(m).read())
 
     # artifacts.tar.gz holds rootfs.tar plus whatever else ioxclient tarred
     # from build.sh's packaging dir (package.yaml, and the pinned-cert probe
     # member iris-catalog.pem). Keep every member, in order.
     with tarfile.open(fileobj=io.BytesIO(outer["artifacts.tar.gz"][1]),
                       mode="r:gz") as t:
+        art_infos = list(t)
+        _refuse_signature_members(art_infos, "artifacts.tar.gz")
         art_members = [(m, t.extractfile(m).read() if m.isfile() else None)
-                       for m in t]
+                       for m in art_infos]
+    # A signed package can repeat its signing material inside the envelope.
+    # Inspect that wrapper before doing any in-memory rootfs rebuild as well.
+    with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"][1]),
+                      mode="r:gz") as t:
+        env_infos = list(t)
+        _refuse_signature_members(env_infos, "envelope_package.tar.gz")
+        env_order = [m.name for m in env_infos if m.isfile()]
+        env = {m.name: t.extractfile(m).read()
+               for m in env_infos if m.isfile()}
+    # Do not assume the envelope's artifacts copy is byte-identical to the
+    # outer one before we validate it. A mismatched signed copy would otherwise
+    # be silently replaced by the clean outer archive below.
+    env_artifacts = env.get("artifacts.tar.gz")
+    if env_artifacts is not None and env_artifacts != outer["artifacts.tar.gz"][1]:
+        with tarfile.open(fileobj=io.BytesIO(env_artifacts), mode="r:gz") as t:
+            _refuse_signature_members(
+                list(t), "envelope_package.tar.gz/artifacts.tar.gz")
     art_by_name = {ti.name: data for ti, data in art_members if data is not None}
     if "rootfs.tar" not in art_by_name:
         raise RebakeError("artifacts.tar.gz carries no rootfs.tar")
@@ -408,21 +450,18 @@ def rebake(in_path, out_path, replacements):
     # artifacts.tar.gz + artifacts.mf (the manifest keeps its original scope
     # and line order; a member it never listed is not added to it)
     art_gz = gzip.compress(_write_tar(new_art), mtime=0)
-    art_present = [n for n, _ in art_files]
+    art_present = [n for n, _ in art_files if not _is_signature_member(n)]
     art_mf = _mf([(n, dict(art_files)[n])
                   for n in _mf_order(outer["artifacts.mf"][1], art_present)])
     uncompressed = sum(len(d) for _, d in art_files)
 
     # inner envelope: refresh metadata sizes + manifest, keep member order
-    with tarfile.open(fileobj=io.BytesIO(outer["envelope_package.tar.gz"][1]),
-                      mode="r:gz") as t:
-        env_order = [m.name for m in t if m.isfile()]
-        env = {m.name: t.extractfile(m).read() for m in t if m.isfile()}
     env["artifacts.tar.gz"] = art_gz
     env["artifacts.mf"] = art_mf
     env[".package.metadata"] = _update_metadata(env[".package.metadata"],
                                                 len(art_gz), uncompressed)
-    inner_named = [n for n in env if n != "package.mf"]
+    inner_named = [n for n in env
+                   if n != "package.mf" and not _is_signature_member(n)]
     env["package.mf"] = _mf([(n, env[n]) for n in
                              _mf_order(env["package.mf"], inner_named)])
     ebuf = io.BytesIO()
@@ -440,7 +479,8 @@ def rebake(in_path, out_path, replacements):
     new_outer["envelope_package.tar.gz"] = envelope
     new_outer[".package.metadata"] = _update_metadata(
         new_outer[".package.metadata"], len(art_gz), uncompressed)
-    outer_named = [n for n in new_outer if n != "package.mf"]
+    outer_named = [n for n in new_outer
+                   if n != "package.mf" and not _is_signature_member(n)]
     new_outer["package.mf"] = _mf([(n, new_outer[n]) for n in
                                    _mf_order(new_outer["package.mf"], outer_named)])
 

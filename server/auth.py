@@ -2,10 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Token auth shared by the tracker (announce ?key=) and catalog (Bearer header).
-Tokens are resolved via the secrets store's reverse index — a dict keyed by the
-random token value (secrets_store.record_for) — then validated for scope and
-expiry/revoke state."""
+"""Token auth shared by tracker and catalog.
+
+New agents carry credentials in Authorization headers.  The tracker also keeps
+the previous query-token resolver solely for unchanged Guest Shell bundles;
+both paths use a digest-keyed, collision-detecting index and verify the matched
+credential with a constant-time comparison.
+"""
 from typing import NamedTuple
 from urllib.parse import parse_qs, parse_qsl
 
@@ -80,7 +83,7 @@ def _resolve_valid_credential(index, store, value, now, grace):
     *store* is unused here (the *index* already carries the resolved record);
     it is retained only to keep the positional signature stable for existing
     callers/tests. Do not rely on it for resolution."""
-    entry = index.get(value)
+    entry = _ss.credential_for(index, value)
     if entry is None:
         return None
     principal, secret_name, record, legacy = entry
@@ -98,7 +101,7 @@ def _known_expired(index, value, now, grace):
     credential that timed out" from "unknown/garbage" or "revoked" for the
     refused-announce counters. Never influences the auth decision itself,
     and never returns or logs the value."""
-    entry = index.get(value)
+    entry = _ss.credential_for(index, value)
     if entry is None:
         return False
     _principal, _secret_name, record, _legacy = entry
@@ -180,7 +183,7 @@ def resolve_catalog_auth(store, index, token, now, grace):
 
     *index* is the STRICT catalog auth index
     (``secrets_store.build_catalog_auth_index``): a mapping
-    ``{value: (Principal, secret_name, record)}`` that already fails token-free
+    ``{digest: (Principal, secret_name, record)}`` that already fails token-free
     on duplicate value ownership. This is the sole catalog authorization
     surface (spec §6) — never the broad ``secrets_store.build_index``.
 
@@ -193,9 +196,7 @@ def resolve_catalog_auth(store, index, token, now, grace):
     strict index already carries the live record, so resolution is driven
     entirely by *index*.
     """
-    if token is None:
-        return None
-    entry = index.get(token)
+    entry = _ss.credential_for(index, token)
     if entry is None:
         return None
     principal, secret_name, record = entry
@@ -203,6 +204,31 @@ def resolve_catalog_auth(store, index, token, now, grace):
         return None
     return AuthContext(principal=principal, secret_name=secret_name,
                        scope="catalog")
+
+
+def resolve_announce_bearer(token, index, store, now=None, grace=None,
+                            legacy_id=None):
+    """Resolve a header-carried announce credential without scanning the fleet.
+
+    The strict digest index selects at most one record, whose live credential
+    is verified before checking expiry, revocation, and principal scope.
+    """
+    now = 0 if now is None else now
+    grace = 0 if grace is None else grace
+    if not isinstance(token, str) or not token:
+        raise AnnounceAuthError("missing announce credential")
+    hit = _ss.credential_for(index, token)
+    if hit is None:
+        raise AnnounceAuthError("invalid announce credential")
+    principal, secret_name, record, legacy = hit
+    if not _ss.valid(record, now, grace):
+        err = AnnounceAuthError("invalid announce credential")
+        expires_at = record.get("expires_at", 0)
+        err.expired = bool(
+            not record.get("revoked") and expires_at != 0
+            and now >= expires_at + grace)
+        raise err
+    return _context((principal, secret_name, legacy), legacy_id)
 
 
 def authorize(index, store, token, device_id, scope, now, grace):

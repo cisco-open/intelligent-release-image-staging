@@ -6,97 +6,151 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kubernetes
 
-The seed-server image can run on Kubernetes without changing the IRIS protocol
-or splitting the services into separate pods. The alpha manifests live under
-`kubernetes/` and use Kustomize.
+Docker can use the same separation on independent hosts; see
+[Docker on separate hosts](docker-hosts.md).
+
+The server and Console images run as separate Kubernetes Deployments and
+Services. The alpha manifests live under `kubernetes/` and use Kustomize; the
+server owns persistent state; the Console reaches it through authenticated
+HTTPS on the internal management Service.
 
 ## Topology
 
 | Resource | Purpose |
 | --- | --- |
-| Deployment | One amd64 pod running tracker, catalog, seeder, artifacts, console, and telemetry. |
-| Init container | Runs idempotent `iris-bootstrap` against the data PVC. |
-| PVC | Stores catalog state, encrypted configuration, images, and served artifacts. |
-| Secret | Supplies the age identity outside the PVC. |
-| Memory `emptyDir` | Holds decrypted runtime secrets under `/run/iris`. |
-| LoadBalancer Service | Preserves the public IRIS ports and device source addresses. |
+| `iris-seed-server` Deployment | One amd64 pod running tracker, catalog, seeder, artifacts, telemetry, and the internal management API. |
+| `iris-console` Deployment | One state-free Console pod serving browser HTTPS and its same-origin API gateway. |
+| Server init container | Runs idempotent `iris-bootstrap` against the data PVC. |
+| PVC | Stores catalog state, encrypted configuration, images, and served artifacts; mounted by server only. |
+| Secrets | Supply the age identity, management and observability current/previous tokens, and two distinct TLS identities outside the PVC. |
+| Memory `emptyDir` | Holds decrypted server runtime secrets under `/run/iris`. |
+| Two LoadBalancer Services | Publish device/server ports separately from the operator Console. |
+| ClusterIP Service | Publishes management HTTPS on 9443 inside the cluster; NetworkPolicy restricts its ingress to Console pods. |
+| NetworkPolicies | Permit the declared ingress paths and deny incidental cross-tier access. |
 
-The deployment uses `replicas: 1` with a `Recreate` strategy. The tracker peer
-registry is in memory, catalog state is file-backed, and the seeder RPC is local
-to the container. More replicas would split coordination state rather than add
-capacity.
+```mermaid
+flowchart LR
+    Device["Devices"] -->|"6969, 8443, 8000, 6881"| Server["Server Deployment"]
+    Operator["Operator browser"] -->|"8080"| Console["Console Deployment"]
+    Console -->|"authenticated HTTPS 9443"| Api["Internal management Service"]
+    Api --> Server
+    Server --> PVC["RWO data PVC"]
+```
 
-Deployment records (the applied-lifecycle state that drives undeploy) are
-file-backed under `IRIS_STATE` (`/data/state`) on the PVC, and Console artifact
-staging uses `/data/artifacts` on the same PVC. Because there is a single
-replica, a pod restart marks any in-flight (`planned`/`applying`) deployment record
-`unknown` and requires reconciliation instead of blindly retrying a device
-operation. See
+The server Deployment uses `replicas: 1` with `Recreate`. The tracker peer
+registry is in memory, catalog state is file-backed, and seeder RPC is local to
+the server pod. More replicas would split coordination state rather than add
+capacity. Console can restart independently without interrupting devices. Pods receive
+private cluster addresses and use Service DNS; devices and browsers use the
+LoadBalancer addresses. Neither pod needs its own external IP.
+
+Deployment records live under `IRIS_STATE` (`/data/state`) on the PVC, and
+server-side onboarding stages artifacts under `/data/artifacts`. Console
+reaches both through the management API and never mounts the PVC. A server pod
+restart marks in-flight deployment records `unknown` and requires
+reconciliation rather than blindly retrying a device operation. See
 [Management Type and VLAN Ownership](management-type.md).
 
-IOx onboarding (routed or inband, on IE-3400 or Catalyst 9300) needs
-`iris-arm64.tar` and/or `iris-amd64.tar` staged under `/data/artifacts` on the
-PVC. IOS-XR onboarding likewise needs `iris-xr.rpm` there. Kubernetes does not
-run the host-side package builders, so build the required packages elsewhere
-(`tools/provision-iox-packages.sh` and `tools/build-xr-package.sh --out
-artifacts/`) and copy them in with `kubectl cp`. Guest Shell onboarding,
-including Catalyst 8000 router VPG deployments, needs no prebuilt package.
-
-Rebuild and re-copy those packages after any certificate rotation or shared
-agent change. Each package bakes both at build time; see
-[TLS rotation and device packages](operations.md#tls-rotation-and-device-packages).
-
-The published console port shown on the Settings page follows `IRIS_CONSOLE_URL`
-when set (otherwise it defaults to the Service's `8080`); set it if you front
-the console on a different external port.
+IOx onboarding needs `iris-arm64.tar` and/or `iris-amd64.tar` under
+`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. Copy each package's
+adjacent `.manifest` as well, because readiness binds the served wrapper bytes
+to their canonical OCI provenance. Kubernetes does not run host-side package
+builders. Build the deployment-neutral packages elsewhere and copy them to the
+server pod with `kubectl cp --no-preserve`. Rebuild and re-copy every package
+after a shared-agent or common image-definition change, and rebuild/redeploy
+the server image to refresh its Guest Shell bundle. A certificate rotation
+does not require rebuilding them: server startup refreshes the distributed
+`/data/artifacts/iris-catalog.pem`; re-onboard devices so IOx app data or the
+IOS-XR harddisk bind mount receives the new runtime trust anchor. Package
+readiness checks bytes against manifests, not whether the source has changed;
+use the [rebuild procedure](development.md#embedded-agent-packages).
 
 ## External address
 
-Reserve a stable, device-reachable IPv4 address before bootstrapping. Put that
-exact value in `kubernetes/iris-seed-server.env` as `IRIS_HOST_IP`, and configure the
-LoadBalancer to use the same address with the mechanism provided by the cluster.
-IRIS uses it in the certificate SAN, torrent tracker URLs, and seeder announces.
+Reserve stable device/server and operator-Console addresses before bootstrap.
+Put the device-reachable address in `kubernetes/iris-seed-server.env` as
+`IRIS_HOST_IP`, and configure the server LoadBalancer to use it. IRIS uses it
+in the catalog certificate, tracker announce URL, and seeder endpoint.
 
-The Service sets `externalTrafficPolicy: Local`. The tracker uses a connection's
-source address when a device does not send an explicit peer IP, so source NAT
-would cause it to advertise an unreachable cluster or node address. See the
-Kubernetes documentation on
-[source IP behavior](https://kubernetes.io/docs/tutorials/services/source-ip/).
+The server Service sets `externalTrafficPolicy: Local`. The tracker uses the
+connection source address when a device does not send an explicit peer IP, so
+source NAT could advertise an unreachable node address. See Kubernetes
+[source-IP behavior](https://kubernetes.io/docs/tutorials/services/source-ip/).
+Port 6969 is an HTTPS listener using the same server certificate devices pin
+for the catalog; the Service remains a layer-4 TCP mapping and terminates no
+TLS itself.
+
+The management Service is ClusterIP-only and port 9443 is absent from both
+LoadBalancers. Its ingress NetworkPolicy selects only Console pods. The API also requires a scoped service credential and pinned TLS. These
+NetworkPolicies require a CNI that enforces them. The base policies allow any
+source on the published server ports and on Console 8080; restrict operator,
+device, and monitoring source ranges at the LoadBalancer or firewall. Egress
+is unrestricted because SSH, DNS, and optional feed/telemetry destinations
+depend on the deployment.
+
+## Small lab with K3s
+
+A single amd64 Linux host can run K3s with MetalLB providing the two
+LoadBalancer addresses. Reserve two addresses on the node's layer-2 network,
+outside its DHCP pool: one for devices and one for the Console. Choose distinct
+Pod, Service, and Docker subnets that do not overlap the host or device networks.
+
+Configure K3s before starting it:
+
+```yaml
+# /etc/rancher/k3s/config.yaml
+disable:
+  - traefik
+  - servicelb
+kube-proxy-arg:
+  - proxy-mode=iptables
+  - nodeport-addresses=127.0.0.0/8
+secrets-encryption: true
+write-kubeconfig-mode: "0600"
+```
+
+IRIS uses direct TCP Services, so it needs no ingress controller. Disabling
+ServiceLB lets MetalLB handle LoadBalancer Services without occupying the
+node's host ports. Keep K3s's embedded NetworkPolicy controller enabled; do
+not set `disable-network-policy`. The NodePort setting limits NodePort access
+to loopback while clients use the LoadBalancer addresses. See
+[K3s networking services](https://docs.k3s.io/networking/networking-services)
+and [server configuration](https://docs.k3s.io/cli/server).
+
+Install a pinned MetalLB release using its
+[installation guide](https://metallb.io/installation/). Create an
+`IPAddressPool` containing the two reserved addresses and an
+`L2Advertisement` for that pool. Set `autoAssign: false` and give each IRIS
+Service explicit `metallb.io/address-pool` and `metallb.io/loadBalancerIPs`
+annotations in a Kustomize overlay. Retain `externalTrafficPolicy: Local` and
+restrict the Console's `loadBalancerSourceRanges` to operator networks. See
+[MetalLB configuration](https://metallb.io/configuration/).
+
+For local storage, create a dedicated directory owned by `10001:10001` with
+mode `0700`. Bind it through a local PersistentVolume with node affinity,
+`Retain` reclaim policy, and a storage class using `WaitForFirstConsumer`.
+Match the PVC's storage class and request to that volume. The base request is
+`50Gi`; a smaller lab overlay can use `10Gi` if its images and artifacts fit.
+A directory-backed local volume does not impose a disk quota, so check free
+space on the host. Back up its contents and the separately held age identity.
+See [Kubernetes local volumes](https://kubernetes.io/docs/concepts/storage/volumes/#local).
+
+K3s can share this host with Docker when its LoadBalancer addresses differ
+from Docker's published host address. Keep IRIS pods on the cluster network
+without `hostNetwork` or `hostPort`. Preserve Docker firewall rules and verify
+both Docker endpoints and Kubernetes source-IP handling after installation.
+Keep the management Service internal on 9443. This layout uses one node and
+local storage; it does not provide host failover.
 
 ## Unprivileged runtime
 
-The pod runs as the unprivileged identity baked into the server image. The pod
-`securityContext` sets `runAsNonRoot: true` together with `runAsUser`,
-`runAsGroup`, and `fsGroup` of `10001`. The container and the init container each
-drop `ALL` capabilities with `allowPrivilegeEscalation: false`, and both inherit
-the `RuntimeDefault` seccomp profile from the pod. `namespace.yaml` labels the
-namespace `pod-security.kubernetes.io/enforce: restricted`, so a manifest edit
-that reintroduces root or a privileged setting is refused at admission instead of
-being applied quietly.
+Both pods run as uid/gid `10001`, drop all capabilities, disallow privilege
+escalation, and inherit `RuntimeDefault` seccomp. The namespace enforces the
+restricted Pod Security profile. All listeners bind above 1024.
 
-Keep `runAsUser` and `runAsGroup` equal to the image's uid and gid — `10001`, the
-`iris` user baked into the server image
-([Runtime identity](server.md#runtime-identity)). When both sides agree, ownership
-is deterministic across the PVC, the Secret mount, and anything copied in with
-`kubectl cp`; change one without the other and the process cannot read its own
-files. Every listener binds above 1024 (6969, 8443, 8000, 6881, 8080, 9101), so
-nothing in the pod needs a privileged port.
-
-`fsGroup` is what makes the mounted volumes usable. The kubelet group-owns the
-PVC-backed `/data` tree for gid 10001, and it also changes how the age-key Secret
-is projected: the files arrive as mode `0440` owned `root:10001` rather than the
-`0400` `root:root` declared in `deployment.yaml`. That group read is precisely
-what lets the non-root process read the identity and decrypt configuration. A
-Secret readable only by root fails at startup.
-
-!!! warning "Verify `fsGroup` support before the first deploy"
-    Applying `fsGroup` to a PVC is the storage driver's decision, not the
-    kubelet's. A CSI driver whose `fsGroupPolicy` is `None` ignores it: `/data`
-    stays root-owned and the pod cannot write catalog state, images, or
-    artifacts at uid 10001. Check the driver behind your storage class, then
-    confirm ownership from inside the running pod. If the driver does not apply
-    `fsGroup`, pre-create the volume's ownership out of band or choose a storage
-    class whose driver honors it.
+The server uses `fsGroup: 10001` so its PVC and age-key projection are usable
+by the non-root process. The Console has no PVC. Whether a PVC honors `fsGroup`
+depends on the storage driver's `fsGroupPolicy`; verify it before first deploy:
 
 ```bash
 kubectl get csidriver \
@@ -106,52 +160,157 @@ kubectl -n iris exec deployment/iris-seed-server -- \
   ls -ld /data /data/state /data/images /data/artifacts /run/secrets/iris_age_key
 ```
 
+If the driver does not apply the group, pre-create volume ownership out of band
+or use a storage class that supports it. Do not make either container root to
+work around storage ownership.
+
 ## Secrets and storage
 
-Create the namespace and age identity Secret before applying the full
-Kustomization:
+Before applying the Kustomization, replace the address/recipient sentinels in
+`iris-seed-server.env`, set its `IRIS_CONSOLE_URL` to the full external Console
+HTTPS URL, configure `iris-console.env`, and set both image names and immutable
+digests in `kustomization.yaml`. The server IP and Console URL can be different;
+Settings reports both. Build the images from
+`server/Dockerfile` and `server/Dockerfile.console` and publish them to a
+registry reachable by every node. Configure the LoadBalancers and source
+restrictions for the reserved addresses.
+
+Create the namespace, age identity, both token pairs, and both TLS identities.
+Use a protected directory outside the repository in place of `/secure/path`
+below. The management certificate must have DNS SANs for `iris-server-api`, `iris-server-api.iris`, and
+`iris-server-api.iris.svc`; its private key goes only to the server, while
+Console receives only the issuing CA. The separate Console certificate must
+cover the exact DNS name or IP address operators use in their browser:
 
 ```bash
-age-keygen -o iris-age.txt
-age-keygen -y iris-age.txt
+umask 077
+age-keygen -o /secure/path/iris-age.txt
+age-keygen -y /secure/path/iris-age.txt
+openssl rand -hex 32 > /secure/path/management-current
+openssl rand -hex 32 > /secure/path/observability-current
+: > /secure/path/management-previous
+: > /secure/path/observability-previous
 
 kubectl apply -f kubernetes/namespace.yaml
 kubectl -n iris create secret generic iris-age \
-  --from-file=identity=iris-age.txt
+  --from-file=identity=/secure/path/iris-age.txt
+kubectl -n iris create secret generic iris-tier-auth \
+  --from-file=current=/secure/path/management-current \
+  --from-file=previous=/secure/path/management-previous
+kubectl -n iris create secret generic iris-observability-auth \
+  --from-file=current=/secure/path/observability-current \
+  --from-file=previous=/secure/path/observability-previous
+# Optional: outbound OTLP collector authentication.
+kubectl -n iris create secret generic iris-otlp-headers \
+  --from-file=headers=/secure/path/otlp-headers
+kubectl -n iris create secret tls iris-management-tls \
+  --cert=/secure/path/server-api.crt --key=/secure/path/server-api.key
+kubectl -n iris create configmap iris-management-ca \
+  --from-file=ca.crt=/secure/path/server-api-ca.crt
+kubectl -n iris create secret tls iris-console-tls \
+  --cert=/secure/path/console.crt --key=/secure/path/console.key
+```
+
+Set `IRIS_AGE_RECIPIENTS` to the public recipient printed above plus a separately
+held break-glass recipient, then apply:
+
+```bash
 kubectl apply -k kubernetes
 ```
 
-Replace the recipient and external-address sentinels in `iris-seed-server.env`,
-and change the image mapping in `kustomization.yaml` to a registry image
-reachable by every cluster node. The env file is turned into the ConfigMap by
-kustomize's `configMapGenerator`, so editing it and re-applying rolls the pod
-onto the new values. The image tag is a mutable placeholder pulled with
-`imagePullPolicy: Always`; after rebuilding under the same tag run
-`kubectl -n iris rollout restart deployment/iris-seed-server` to re-pull. The default PVC request is `50Gi`; size it for the images
-that must remain available for seeding.
+After both Deployments are ready, open the Console from the trusted management
+network and sign in with the default first-run credential `iris` /
+`irisisgreat!`. The login creates no session; it returns a one-use setup grant
+that expires after ten minutes and leads to administrator creation. Creating
+the administrator permanently ends this special behavior.
+
+!!! warning "The first reachable caller can claim a fresh Console"
+    Restrict the Console LoadBalancer to trusted operators and complete setup
+    immediately after deployment. Do not make a brand-new Console reachable
+    from an untrusted network while no administrator exists.
+
+The base manifests require both `current` files even when external monitoring
+is disabled. The initially empty `previous` files satisfy the projections
+until the first rotation. A scoped JSON `management` record makes a management-token
+mis-mount auditable. Keep observability files as raw token values so Prometheus
+can consume `current` directly with `authorization.credentials_file`; the
+server assigns those files the `observability` scope when it validates them,
+so their values are not accepted by the management API.
+
+Management-token rotation is two phase: put the new token in `current` and the
+former token in `previous`, recreate/apply `iris-tier-auth` from both files,
+and restart both Deployments. The Console tries `current` first and can use
+`previous` after a management-authentication rejection, so either pod can
+receive the new Secret projection first. Before retiring the overlap, confirm
+that both pods have the replacement in their mounted `current` file and verify
+an authenticated Console request. Readiness or a successful request alone can
+still reflect the previous token. Then empty `previous`, recreate/apply the
+Secret, and restart both again. Do not begin another rotation before completing
+these checks. The [rotation commands](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/kubernetes/README.md#management-tier-bearer-token)
+include the mounted-file check without printing credentials. Use
+`kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`
+for each update so the command works for an existing Secret. Observability
+rotation follows the same current/previous overlap, but
+only the server Deployment and external scraper need to move. The server
+rereads both observability files on each request. Missing, unreadable,
+wrongly-scoped, or weak credentials fail closed; rotation never opens an
+anonymous fallback.
+
+Only a management-authentication rejection permits the Console's token
+fallback. Browser session and CSRF failures are returned unchanged. A mutation
+uses the token accepted by its authorization preflight; its body is sent once.
+
+The optional `iris-otlp-headers` Secret is different from the observability
+pair: it authenticates outbound OTLP pushes, not inbound Prometheus scrapes.
+Its `headers` key contains the comma-separated `Name=Value` header spec and is
+mounted only by the server. Do not put it in a ConfigMap, URL, or command
+argument. With the Secret absent IRIS sends no collector header; with it
+present, the configured OTLP endpoint must use HTTPS. Re-apply that Secret and
+restart only `iris-seed-server` to rotate it.
+
+`iris-console-tls` is mounted read-only only by the Console. Its key never
+enters the server pod, PVC, ConfigMap, or image. On a normal start the Console
+checks the authenticated management API for an operator-installed override.
+If the server is unavailable during cold start, or explicitly reports that
+the default is active, the Console validates this Secret and copies it into
+its memory-backed runtime directory. A malformed or authentication-failed API
+response is not treated as a reason to fall back.
+
+Each env file is a hashed `configMapGenerator` input, so an edit and re-apply
+rolls the affected Deployment. Keep deployment images pinned to immutable
+registry digests. The default server PVC request is `50Gi`; size it for
+retained images.
 
 ## Health and operation
 
-Startup, readiness, and liveness probes use `http://<pod>:9101/readyz`, which
-TCP-probes the tracker, catalog, artifact server and console listeners and
-answers 503 naming any that are down (`/healthz` answers 200 unconditionally
-and proves only that the telemetry server is alive — curl `/readyz`, not
-`/healthz`, when diagnosing a `Readiness probe failed` event). Set
-`IRIS_HEALTH_LISTENERS` in `iris-seed-server.env` to `name:port,name:port` to
-narrow that probe set, or to the literal `off` to check nothing, for a
-deployment that runs a subset of the services. The
-same port serves the swarm and peer-distribution counters at `/metrics` when
-`IRIS_OBSERVABILITY=1` is set in `iris-seed-server.env` ([Telemetry
-export](telemetry-export.md)); the peer ledger they are read from lives under
-`IRIS_STATE` on the PVC, so the totals survive a pod restart. The
-external Service publishes ports 6969, 8443, 8000, 6881, 8080, and 9101. Port
-6800 remains pod-local. Remote `/swarm` through the Service answers `403` by
-default — swarm data is console-gated; set `IRIS_SWARM_PUBLIC=1` in the pod
-environment or use the console (probes and `/healthz` are unaffected).
+Server startup/readiness probes call `https://<server-pod>:9101/readyz`, which
+checks tracker, catalog, artifact, and management listeners. Server liveness
+calls `/healthz`, proving the telemetry process is alive without restarting the
+pod for a dependency-readiness failure. Console probes call its local
+`/readyz` and `/healthz` on 8080. Console readiness checks local serving files,
+a valid credential file, and the presence of its management CA file, not
+server availability; the independent
+`iris-console-tls` identity lets it start while the server is cold. API
+requests arriving while server is down get a redacted 503 with `Retry-After`.
+
+After a rollout, verify an authenticated Console API request before starting
+device jobs. Allow Service routing and the server connection to settle; pod
+readiness checks the individual tier, while this confirms the complete path.
+
+The server LoadBalancer publishes 6969, 8443, 8000, 6881, and 9101; the Console
+LoadBalancer publishes 8080. Metrics export is optional, but the base Service
+publishes 9101 for probes regardless. Ports 6800 and 9443 remain internal.
+Metrics require monitoring authentication. `/healthz` and `/readyz` disclose
+no state; login/setup have their own credential/grant checks. The existing
+Guest Shell bootstrap, CA, and agent-bundle HTTPS downloads are separate static
+endpoints and are anonymous; per-install staging-artifact
+paths still carry their resource capability in the filename.
 
 ```bash
 kubectl -n iris rollout status deployment/iris-seed-server
+kubectl -n iris rollout status deployment/iris-console
 kubectl -n iris logs deployment/iris-seed-server -c iris
+kubectl -n iris logs deployment/iris-console
 POD="$(kubectl -n iris get pod -l app.kubernetes.io/name=iris-seed-server \
   -o jsonpath='{.items[0].metadata.name}')"
 kubectl -n iris cp --no-preserve <image>.bin \
@@ -160,13 +319,7 @@ kubectl -n iris exec deployment/iris-seed-server -- \
   iris-publish /data/images/<image>.bin
 ```
 
-Keep `--no-preserve` on the copy so the file lands with the pod's own uid and a
-default mode instead of carrying the host file's ownership and mode. The same
-applies to the IOx app packages copied into `/data/artifacts`.
-
-The configmap points both `IRIS_IMAGES_DIR` and `IMAGES_ROOT` at `/data/images`.
-The import scan walks each distinct tree once, so a file copied there is offered
-for import exactly once rather than colliding with itself.
-
-Back up the PVC and offline age identity together. Treat a public IP change as
-a certificate and device-trust rotation, not as a transparent Service update.
+Back up the server PVC and keep the age identity in separate protected storage.
+Include the independently supplied Secrets in your recovery plan. Treat a
+public IP change as certificate and device-trust rotation, not a transparent Service
+update.

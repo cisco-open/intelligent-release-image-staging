@@ -100,7 +100,7 @@ setup() {
 }
 
 @test "real router install has a post-apply readback gate before persistence" {
-  grep -qF 'verify applied config and persist' "$INSTALL"
+  grep -qF 'verify configuration and save startup-config' "$INSTALL"
   grep -qF 'show running-config' "$INSTALL"
   grep -qF 'config_block "VirtualPortGroup$VPG_NUMBER"' "$INSTALL"
   grep -qF 'router configuration is incomplete' "$INSTALL"
@@ -108,7 +108,7 @@ setup() {
 
 @test "re-onboard destroys a pre-existing guestshell before applying config" {
   # 2026-08-20 incident (iris8kv-1/-2): a re-onboard over a guestshell that was
-  # already RUNNING left it on its OLD networking — step [4/7] saw RUNNING and
+  # already RUNNING left it on its OLD networking — step [4/6] saw RUNNING and
   # never re-enabled, so the freshly applied app-hosting gateway never reached
   # the guest and the agent had no egress. The installer must destroy any
   # pre-existing guestshell BEFORE applying config so enable always builds the
@@ -116,8 +116,8 @@ setup() {
   run grep -n 'guestshell destroy' "$INSTALL"
   [ "$status" -eq 0 ]
   destroy_line="$(grep -n 'guestshell destroy' "$INSTALL" | head -1 | cut -d: -f1)"
-  config_line="$(grep -n '^echo "\[3/7\] apply IOS config' "$INSTALL" | head -1 | cut -d: -f1)"
-  enable_line="$(grep -n '^echo "\[4/7\] guestshell enable' "$INSTALL" | head -1 | cut -d: -f1)"
+  config_line="$(grep -n '^echo "\[3/6\] configure IRIS' "$INSTALL" | head -1 | cut -d: -f1)"
+  enable_line="$(grep -n '^echo "\[4/6\] start Guest Shell' "$INSTALL" | head -1 | cut -d: -f1)"
   [ -n "$destroy_line" ] && [ -n "$config_line" ] && [ -n "$enable_line" ]
   [ "$destroy_line" -lt "$config_line" ]
   [ "$config_line" -lt "$enable_line" ]
@@ -135,7 +135,7 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-# --- SSH session consolidation: step [6/7]'s three read-only verify checks
+# --- SSH session consolidation: step [6/6]'s three read-only verify checks
 # (show running-config, show app-hosting list, dir bootflash:guest-share[/iris])
 # now ride one lab/device-run.sh login using the same __IRIS_PREFLIGHT_-style
 # markers as _default_router_preflight in server/gui_onboard.py, instead of
@@ -299,7 +299,7 @@ print(sum(1 for b in blocks[start_i + 1:end_i] if target in b))
 PY2
 }
 
-@test "step [6/7] verify merges running-config, app-hosting state, and file listing into ONE call" {
+@test "step [6/6] verify merges running-config, app-hosting state, and file listing into ONE call" {
   _router_install_stub_setup
   run _router_install_run_live
   [ "$status" -eq 0 ]
@@ -313,14 +313,14 @@ PY2
   [ "$total_running" -eq 1 ]
 }
 
-@test "step [6/7] verify fails closed when the RUNNING marker is missing from the response" {
+@test "step [6/6] verify fails closed when the RUNNING marker is missing from the response" {
   _router_install_stub_setup
   FAKE_VERIFY_OMIT_RUNNING=yes run _router_install_run_live
   [ "$status" -ne 0 ]
   [[ "$output" == *"ERROR: router verify did not return running-config"* ]]
 }
 
-@test "step [6/7] verify fails closed when the FILES marker is missing from the response" {
+@test "step [6/6] verify fails closed when the FILES marker is missing from the response" {
   # A dropped/truncated section must never be read as "empty output" -- an
   # empty FILES section would otherwise sail through the require_text checks
   # incorrectly (an install that never actually verified the copied files).
@@ -347,13 +347,13 @@ PY2
 
 @test "guestshell enable-wait poll is a loop of separate calls, not one call in source" {
   # Runtime-proving this without real 15s sleeps is impractically slow;
-  # structurally confirm the poll call still lives inside the step [4/7] for
-  # loop and was not folded into verify_request()/the step [6/7] merge.
-  step4_line="$(grep -n '^echo "\[4/7\] guestshell enable' "$INSTALL" | head -1 | cut -d: -f1)"
-  step5_line="$(grep -n '^echo "\[5/7\] install trustpoint' "$INSTALL" | head -1 | cut -d: -f1)"
+  # structurally confirm the poll call still lives inside the step [4/6] for
+  # loop and was not folded into verify_request()/the step [6/6] merge.
+  step4_line="$(grep -n '^echo "\[4/6\] start Guest Shell' "$INSTALL" | head -1 | cut -d: -f1)"
+  step5_line="$(grep -n '^echo "\[5/6\] copy certificate' "$INSTALL" | head -1 | cut -d: -f1)"
   # The iteration count is a tunable (it moved when the flat 15s wait became a
   # ramp), so match the loop, not the number -- and search inside the step
-  # [4/7] window so the earlier destroy-wait loop cannot be picked up instead.
+  # [4/6] window so the earlier destroy-wait loop cannot be picked up instead.
   for_rel="$(sed -n "${step4_line},${step5_line}p" "$INSTALL" \
     | grep -n 'for i in \$(seq 1 [0-9][0-9]*); do' | head -1 | cut -d: -f1)"
   for_line=""
