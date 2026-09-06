@@ -39,11 +39,14 @@ SCHEMA = 1
 MAX_ACLS = 64
 MAX_RULES_PER_ACL = 256
 OUTBOX_CAP = 256
+MAX_ROLES = 256
+MAX_ROLE_PEERS = 64
 RESERVED_QUARANTINE = "quarantine"
 
 _ACL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_ROLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _ACTIONS = ("permit", "deny")
-_MATCH_TYPES = ("device", "service", "host", "cidr", "any")
+_MATCH_TYPES = ("device", "service", "host", "cidr", "any", "role")
 
 _QUARANTINE_RULES = [{"seq": 10, "action": "deny", "match": {"type": "any"}}]
 
@@ -69,7 +72,11 @@ class RevisionConflict(Exception):
 
 
 PolicyResult = collections.namedtuple(
-    "PolicyResult", ["document", "degraded", "fail_closed"])
+    "PolicyResult", ["document", "degraded", "fail_closed", "roles"],
+    defaults=(None,))
+
+CompiledRoles = collections.namedtuple(
+    "CompiledRoles", ["acl_by_role", "role_of", "restricted", "sorted_rules"])
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +119,82 @@ def _validate_rule(rule):
         ipaddress.IPv4Address(value)
     elif mtype == "cidr":
         ipaddress.IPv4Network(value, strict=False)
+    elif mtype == "role" and not _ROLE_NAME_RE.fullmatch(value):
+        raise PolicyError("bad role name")
+
+
+def _validate_roles(roles):
+    """Validate the optional role model without materialising defaults.
+
+    Keeping the entire section optional preserves the byte-for-byte legacy
+    document. QoS values are validated by the QoS grammar; this function owns
+    the role names, references, membership map and network hints.
+    """
+    if not isinstance(roles, dict):
+        raise PolicyError("bad roles")
+    if set(roles) - {"defs", "role_of", "qos_default", "qos_device"}:
+        raise PolicyError("bad roles key")
+    defs = roles.get("defs", {})
+    if not isinstance(defs, dict) or len(defs) > MAX_ROLES:
+        raise PolicyError("bad role defs")
+    for name, definition in defs.items():
+        if not isinstance(name, str) or not _ROLE_NAME_RE.fullmatch(name):
+            raise PolicyError("bad role name")
+        if not isinstance(definition, dict):
+            raise PolicyError("bad role definition")
+        if set(definition) - {
+                "restricted", "peers", "origin", "nets", "on_stale", "qos"}:
+            raise PolicyError("bad role definition key")
+        restricted = definition.get("restricted", False)
+        if not isinstance(restricted, bool):
+            raise PolicyError("restricted must be bool")
+        origin = definition.get("origin", True)
+        if not isinstance(origin, bool):
+            raise PolicyError("origin must be bool")
+        peers = definition.get("peers", [name])
+        if not isinstance(peers, list) or len(peers) > MAX_ROLE_PEERS:
+            raise PolicyError("bad role peers")
+        seen_peers = set()
+        for peer in peers:
+            if not isinstance(peer, str) or not _ROLE_NAME_RE.fullmatch(peer):
+                raise PolicyError("bad peer role name")
+            if peer in seen_peers:
+                raise PolicyError("duplicate role peer")
+            seen_peers.add(peer)
+            if peer not in defs:
+                raise PolicyError("peer references unknown role")
+        nets = definition.get("nets", [])
+        if not isinstance(nets, list):
+            raise PolicyError("bad role nets")
+        for net in nets:
+            if not isinstance(net, str):
+                raise PolicyError("bad role net")
+            try:
+                ipaddress.IPv4Network(net, strict=False)
+            except (ipaddress.AddressValueError, ValueError):
+                raise PolicyError("bad role net")
+        if "qos" in definition and not isinstance(definition["qos"], dict):
+            raise PolicyError("bad role qos")
+
+    role_of = roles.get("role_of", {})
+    if not isinstance(role_of, dict):
+        raise PolicyError("bad role_of")
+    for device_id, role in role_of.items():
+        if not isinstance(device_id, str) or not device_id:
+            raise PolicyError("bad role device id")
+        if not isinstance(role, str) or not _ROLE_NAME_RE.fullmatch(role):
+            raise PolicyError("bad role assignment")
+        if role not in defs:
+            raise PolicyError("assignment to unknown role")
+    if not isinstance(roles.get("qos_default", {}), dict):
+        raise PolicyError("bad qos_default")
+    qos_device = roles.get("qos_device", {})
+    if not isinstance(qos_device, dict):
+        raise PolicyError("bad qos_device")
+    for device_id, qos in qos_device.items():
+        if not isinstance(device_id, str) or not device_id \
+                or not isinstance(qos, dict):
+            raise PolicyError("bad device qos")
 
 
 def validate_document(doc):
@@ -157,6 +240,8 @@ def validate_document(doc):
     outbox = doc.get("operation_outbox")
     if not isinstance(outbox, list) or len(outbox) > OUTBOX_CAP:
         raise PolicyError("bad operation_outbox")
+    if "roles" in doc:
+        _validate_roles(doc["roles"])
     return doc
 
 
@@ -164,11 +249,86 @@ def validate_document(doc):
 # Pure evaluator
 # ---------------------------------------------------------------------------
 
-def _assigned_acl(doc, principal):
+def _virtual_role_acl(name, definition, unknown=False):
+    if unknown:
+        return {
+            "virtual": True,
+            "role": name,
+            "role_unknown": True,
+            "rules": [{"seq": 40, "action": "deny",
+                       "match": {"type": "any"}}],
+        }
+    rules = [{"seq": 10, "action": "permit",
+              "match": {"type": "role", "value": name}}]
+    if definition.get("origin", True):
+        rules.append({"seq": 20, "action": "permit",
+                      "match": {"type": "service", "value": "seeder"}})
+    for peer in definition.get("peers", [name]):
+        if peer != name:
+            rules.append({"seq": 30, "action": "permit",
+                          "match": {"type": "role", "value": peer}})
+    rules.append({"seq": 40, "action": "deny", "match": {"type": "any"}})
+    return {"virtual": True, "role": name, "role_unknown": False,
+            "rules": rules}
+
+
+def compile_roles(doc):
+    """Compile virtual role ACLs and pre-sort stored ACL rules.
+
+    The result is deliberately detached from persistence: it is returned on
+    :class:`PolicyResult`, never cached globally and never inserted into *doc*.
+    Invalid raw dictionaries can still be evaluated by ad-hoc callers; a
+    device mapped to an unknown role receives a deny-only virtual ACL so that
+    corruption cannot turn a restriction into implicit permit.
+    """
+    roles = doc.get("roles", {}) if isinstance(doc, dict) else {}
+    if not isinstance(roles, dict):
+        roles = {}
+    defs = roles.get("defs", {})
+    role_of = roles.get("role_of", {})
+    if not isinstance(defs, dict):
+        defs = {}
+    if not isinstance(role_of, dict):
+        role_of = {}
+    role_of = dict(role_of)
+
+    acl_by_role = {}
+    restricted = set()
+    for name, definition in defs.items():
+        if isinstance(definition, dict) and definition.get("restricted", False):
+            restricted.add(name)
+            acl_by_role[name] = _virtual_role_acl(name, definition)
+    unknown_roles = {role for role in role_of.values()
+                     if isinstance(role, str) and role not in defs}
+    for role in sorted(unknown_roles):
+        restricted.add(role)
+        acl_by_role[role] = _virtual_role_acl(role, {}, unknown=True)
+
+    sorted_rules = {}
+    acls = doc.get("acls", {}) if isinstance(doc, dict) else {}
+    if isinstance(acls, dict):
+        for name, acl in acls.items():
+            if isinstance(acl, dict) and isinstance(acl.get("rules"), list):
+                sorted_rules[name] = sorted(
+                    acl["rules"], key=lambda rule: rule.get("seq", 0))
+    return CompiledRoles(acl_by_role, role_of, frozenset(restricted),
+                         sorted_rules)
+
+
+def _compiled_roles(doc, compiled):
+    return compiled if compiled is not None else compile_roles(doc)
+
+
+def _assigned_acl(doc, principal, compiled=None):
     """Return the ACL bound to ``principal`` or ``None``. Only device and
     service principals have an assignment slot; legacy has none (spec 0a)."""
+    compiled = _compiled_roles(doc, compiled)
     if principal.type == "device":
         name = doc.get("assignments", {}).get(principal.id)
+        if name is not None:
+            return doc.get("acls", {}).get(name)
+        role = compiled.role_of.get(principal.id)
+        return compiled.acl_by_role.get(role)
     elif principal.type == "service":
         name = doc.get("seeder_assignment")
     else:  # legacy
@@ -178,7 +338,7 @@ def _assigned_acl(doc, principal):
     return doc.get("acls", {}).get(name)
 
 
-def _rule_matches(rule, principal, ipv4):
+def _rule_matches(rule, principal, ipv4, compiled=None, subject_role=None):
     match = rule["match"]
     mtype = match["type"]
     if mtype == "any":
@@ -187,6 +347,11 @@ def _rule_matches(rule, principal, ipv4):
         return principal.type == "device" and principal.id == match["value"]
     if mtype == "service":
         return principal.type == "service" and principal.id == match["value"]
+    if mtype == "role":
+        if subject_role is None and compiled is not None \
+                and principal.type == "device":
+            subject_role = compiled.role_of.get(principal.id)
+        return principal.type == "device" and subject_role == match["value"]
     if mtype == "host":
         return ipv4 == match["value"]
     if mtype == "cidr":
@@ -198,34 +363,70 @@ def _rule_matches(rule, principal, ipv4):
     return False
 
 
-def evaluate(doc, principal, ipv4):
+def evaluate(doc, principal, ipv4, compiled=None):
     """Evaluate ``principal`` + ``ipv4`` against its assigned ACL. Returns
     ``(decision, matched_seq)``; no match is ``("permit", None)``."""
-    return evaluate_for(doc, principal, principal, ipv4)
+    return evaluate_for(doc, principal, principal, ipv4, compiled=compiled)
 
 
-def evaluate_for(doc, owner_principal, subject_principal, subject_ipv4):
+def evaluate_for(doc, owner_principal, subject_principal, subject_ipv4,
+                 compiled=None):
     """Evaluate ``subject`` against the ACL assigned to ``owner``."""
-    acl = _assigned_acl(doc, owner_principal)
+    compiled = _compiled_roles(doc, compiled)
+    acl = _assigned_acl(doc, owner_principal, compiled=compiled)
     if acl is None:
         return ("permit", None)
-    for rule in sorted(acl["rules"], key=lambda r: r["seq"]):
-        if _rule_matches(rule, subject_principal, subject_ipv4):
+    acl_name = effective_acl_name(doc, owner_principal, compiled=compiled)
+    rules = compiled.sorted_rules.get(acl_name, acl["rules"])
+    subject_role = (compiled.role_of.get(subject_principal.id)
+                    if subject_principal.type == "device" else None)
+    for rule in rules:
+        if _rule_matches(rule, subject_principal, subject_ipv4,
+                         compiled=compiled, subject_role=subject_role):
             return (rule["action"], rule["seq"])
     return ("permit", None)
 
 
+def effective_acl_name(doc, principal, compiled=None):
+    """Name the single stored or virtual ACL effective for ``principal``."""
+    compiled = _compiled_roles(doc, compiled)
+    if principal.type == "device":
+        assigned = doc.get("assignments", {}).get(principal.id)
+        if assigned is not None:
+            return assigned if assigned in doc.get("acls", {}) else None
+        role = compiled.role_of.get(principal.id)
+        if role in compiled.acl_by_role:
+            return "role:%s" % role
+        return None
+    if principal.type == "service":
+        assigned = doc.get("seeder_assignment")
+        if assigned is not None:
+            return assigned if assigned in doc.get("acls", {}) else None
+    return None
+
+
+def acl_source(doc, principal, compiled=None):
+    """Describe whether the effective ACL came from an assignment or role."""
+    compiled = _compiled_roles(doc, compiled)
+    name = effective_acl_name(doc, principal, compiled=compiled)
+    if name is None:
+        return "none"
+    if name.startswith("role:"):
+        return name
+    return "assignment:%s" % name
+
+
 def mutual_permit(doc, requester_principal, requester_ipv4,
-                  candidate_principal, candidate_ipv4):
+                  candidate_principal, candidate_ipv4, compiled=None):
     """True iff the requester's ACL permits the candidate AND the candidate's
     ACL permits the requester (spec 7). A ``fail_closed`` sentinel document
     (see :func:`load_policy`) denies all mutual discovery."""
     if doc.get("_fail_closed"):
         return False
     req = evaluate_for(doc, requester_principal,
-                       candidate_principal, candidate_ipv4)[0]
+                       candidate_principal, candidate_ipv4, compiled)[0]
     cand = evaluate_for(doc, candidate_principal,
-                        requester_principal, requester_ipv4)[0]
+                        requester_principal, requester_ipv4, compiled)[0]
     return req == "permit" and cand == "permit"
 
 
@@ -304,15 +505,20 @@ def load_policy(auth_path, lkg_path):
     lkg_exists = os.path.exists(lkg_path)
     if not auth_exists and not lkg_exists:
         initialize(auth_path, lkg_path)
-        return PolicyResult(base_document(), degraded=False, fail_closed=False)
+        document = base_document()
+        return PolicyResult(document, degraded=False, fail_closed=False,
+                            roles=compile_roles(document))
     authoritative = _read_valid(auth_path)
     if authoritative is not None:
-        return PolicyResult(authoritative, degraded=False, fail_closed=False)
+        return PolicyResult(authoritative, degraded=False, fail_closed=False,
+                            roles=compile_roles(authoritative))
     lkg = _read_valid(lkg_path)
     if lkg is not None:
-        return PolicyResult(lkg, degraded=True, fail_closed=False)
-    return PolicyResult(_fail_closed_document(), degraded=True,
-                        fail_closed=True)
+        return PolicyResult(lkg, degraded=True, fail_closed=False,
+                            roles=compile_roles(lkg))
+    document = _fail_closed_document()
+    return PolicyResult(document, degraded=True, fail_closed=True,
+                        roles=compile_roles(document))
 
 
 # ---------------------------------------------------------------------------

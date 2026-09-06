@@ -49,6 +49,8 @@ class TestBaseDocument:
         assert doc["seeder_assignment"] is None
         assert doc["operation_outbox"] == []
         assert doc["schema"] == 1
+        assert "roles" not in doc
+        assert "roles_present" not in doc
 
     def test_validate_accepts_base(self):
         peer_policy.validate_document(_base())  # no raise
