@@ -277,11 +277,15 @@ server compares credentials in constant time before route lookup, body
 buffering, or state access.
 
 Rotation keeps a bounded two-token window: retain the former record as
-`previous.json`, atomically install the replacement as `current.json`, verify
-an authenticated Console request, then remove `previous.json`. Both processes
+`previous.json`, atomically install the replacement as `current.json`, confirm
+both tiers received it, verify an authenticated Console request, then remove
+`previous.json`. The files must have distinct paths and file identities. Both processes
 reread the files on every request, so Compose needs no restart; Kubernetes
 rotates the equivalent `current`/`previous` Secret keys in two
-rollouts so every replica sees an overlap. Missing, unreadable, wrongly scoped,
+rollouts so every replica sees an overlap. If the Console receives the update
+first, it can use the previous token after the server rejects the current
+management credential. It keeps the accepted token through a mutation's
+preflight and forwarding, without replaying the body. Missing, unreadable, wrongly scoped,
 or unmatched material fails closed. TLS is independently fail closed: the
 Console pins the management CA and cannot opt into plaintext for this hop.
 

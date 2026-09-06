@@ -29,8 +29,23 @@ def _paths():
     if not current or not previous:
         raise tier_auth.CredentialUnavailable(
             "management credential paths are not configured")
-    if os.path.dirname(os.path.abspath(current)) != \
-            os.path.dirname(os.path.abspath(previous)):
+    # Both actions require separate slots: replacing or unlinking an alias of
+    # current would remove the overlap or the active credential. Resolve path
+    # aliases, then compare existing inodes to catch hard links as well.
+    same_file = os.path.realpath(current) == os.path.realpath(previous)
+    if not same_file:
+        try:
+            same_file = os.path.samefile(current, previous)
+        except FileNotFoundError:
+            pass  # The overlap file need not exist yet.
+        except OSError:
+            raise tier_auth.CredentialUnavailable(
+                "management credential paths are unavailable") from None
+    if same_file:
+        raise tier_auth.CredentialUnavailable(
+            "management credential paths must be distinct")
+    if os.path.realpath(os.path.dirname(current) or ".") != \
+            os.path.realpath(os.path.dirname(previous) or "."):
         raise tier_auth.CredentialUnavailable(
             "management credential paths must share one directory")
     return current, previous

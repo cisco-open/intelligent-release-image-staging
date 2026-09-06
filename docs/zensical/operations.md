@@ -488,15 +488,25 @@ to transfer the new value before removing the old one.
 
 Rotation uses the current/previous overlap and is intentionally two phase:
 
-1. Copy the current scoped JSON record to `previous.json`, generate a new random
-   value of at least 32 bytes, and atomically replace `current.json`. In Compose
-   those files live in the tier-auth named volume; in Kubernetes they are the
-   two projected Secret keys.
-2. Wait for both readiness checks and make one authenticated browser request
-   through `/api/v1/session`. The Compose processes reread both files on every
-   request; Kubernetes should roll Console and server while the overlap exists.
-3. Remove `previous.json` (or its Secret key), verify again, and securely retire
-   any out-of-band copy of the old value.
+1. Preserve the current scoped JSON record as `previous.json`, then atomically
+   replace `current.json` with a random value of at least 32 bytes. Compose's
+   `iris-management-token rotate` makes the overlap durable before replacement
+   and rejects paths that refer to the same file. Kubernetes uses the two
+   projected Secret keys.
+2. Confirm both tiers have received the new `current` file and make an
+   authenticated browser request through `/api/v1/session`. The processes
+   reread their files for requests. Kubernetes should roll Console and server
+   while the overlap exists and check the mounted values; see its
+   [rotation procedure](kubernetes.md#secrets-and-storage).
+3. Remove `previous.json` for Docker or empty the Kubernetes `previous` key,
+   verify again, and securely retire any out-of-band copy of the old value.
+   Keep the Kubernetes key present because both pods project it.
+
+The Console tries the current token first and can use the previous token only
+after a management-authentication rejection. It retains the token accepted by
+authorization preflight when forwarding a mutation. It never retries a streamed
+request body. Readiness or successful API access alone does not prove the new
+token has reached both tiers, because the previous token may still work.
 
 The server rereads the pair and compares both in constant time. A missing,
 unreadable, too-short, wrongly scoped, or unmatched value returns a redacted

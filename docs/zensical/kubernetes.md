@@ -239,8 +239,15 @@ so their values are not accepted by the management API.
 
 Management-token rotation is two phase: put the new token in `current` and the
 former token in `previous`, recreate/apply `iris-tier-auth` from both files,
-and restart both Deployments. Verify an authenticated Console request, then
-empty `previous`, recreate/apply the Secret, and restart both again. Use
+and restart both Deployments. The Console tries `current` first and can use
+`previous` after a management-authentication rejection, so either pod can
+receive the new Secret projection first. Before retiring the overlap, confirm
+that both pods have the replacement in their mounted `current` file and verify
+an authenticated Console request. Readiness or a successful request alone can
+still reflect the previous token. Then empty `previous`, recreate/apply the
+Secret, and restart both again. Do not begin another rotation before completing
+these checks. The [rotation commands](https://github.com/cisco-open/intelligent-release-image-staging/blob/main/kubernetes/README.md#management-tier-bearer-token)
+include the mounted-file check without printing credentials. Use
 `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -`
 for each update so the command works for an existing Secret. Observability
 rotation follows the same current/previous overlap, but
@@ -248,6 +255,10 @@ only the server Deployment and external scraper need to move. The server
 rereads both observability files on each request. Missing, unreadable,
 wrongly-scoped, or weak credentials fail closed; rotation never opens an
 anonymous fallback.
+
+Only a management-authentication rejection permits the Console's token
+fallback. Browser session and CSRF failures are returned unchanged. A mutation
+uses the token accepted by its authorization preflight; its body is sent once.
 
 The optional `iris-otlp-headers` Secret is different from the observability
 pair: it authenticates outbound OTLP pushes, not inbound Prometheus scrapes.

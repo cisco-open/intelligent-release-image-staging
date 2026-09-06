@@ -244,7 +244,8 @@ Keep the old credential accepted until the Console uses the replacement:
 
 1. On the server host, run `iris_server exec iris iris-management-token rotate`.
    This writes the old value to `previous.json` and atomically replaces
-   `current.json` in the server's `IRIS_TIER_AUTH_DIR`.
+   `current.json` in the server's `IRIS_TIER_AUTH_DIR`. The files must be
+   distinct; aliases are rejected before either rotation or retirement.
 2. Transfer the new `current.json` to the Console host through verified SSH.
    Place it in that host's tier-auth directory under a temporary filename,
    set ownership `10001:10001` and mode 600, then rename it to `current.json`

@@ -128,10 +128,18 @@ Rotate without a flag day:
 
 1. Generate a new token file. Copy the old `current` file to `previous`, put
    the new value in `current`, and re-apply `iris-tier-auth` from both files.
-2. Restart and wait for both Deployments. The console sends `current`; the
-   management API temporarily accepts `current` and `previous`.
-3. After both rollouts and any in-flight calls finish, empty `previous`,
-   re-apply the Secret, and restart both Deployments again.
+2. Restart and wait for both Deployments. The Console tries `current` first
+   and can use `previous` if the server rejects the new management token.
+   The server accepts both during the overlap.
+3. Check that both pods have the replacement in their mounted `current` file,
+   then make an authenticated Console request. Readiness alone is insufficient:
+   a request can still succeed using the previous token.
+4. After those checks and any in-flight calls finish, empty `previous`,
+   re-apply the Secret, and restart both Deployments again. Do not begin
+   another rotation until this one is complete.
+
+[Secret projection updates are eventually consistent](https://kubernetes.io/docs/concepts/configuration/secret/#using-secrets-as-files-from-a-pod).
+The Console's fallback covers either pod receiving the new pair first.
 
 ```bash
 cp iris-tier-auth/current iris-tier-auth/previous
@@ -145,6 +153,22 @@ kubectl -n iris rollout restart \
 kubectl -n iris rollout status deployment/iris-seed-server
 kubectl -n iris rollout status deployment/iris-console
 
+# Check the shipped single-replica Deployments without printing credentials.
+expected_digest="$(sha256sum iris-tier-auth/current)" || exit 1
+expected_digest="${expected_digest%% *}"
+for deployment in iris-seed-server iris-console; do
+  mounted_digest="$(kubectl -n iris exec deployment/"$deployment" -- \
+    sha256sum /run/secrets/iris-tier-auth/current)" || exit 1
+  if [ "${mounted_digest%% *}" != "$expected_digest" ]; then
+    echo "$deployment has not received the replacement; keep the overlap" >&2
+    exit 1
+  fi
+done
+```
+
+Open Devices in the Console and confirm it loads. Then retire the overlap:
+
+```bash
 : > iris-tier-auth/previous
 kubectl -n iris create secret generic iris-tier-auth \
   --from-file=current=iris-tier-auth/current \
@@ -152,7 +176,12 @@ kubectl -n iris create secret generic iris-tier-auth \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n iris rollout restart \
   deployment/iris-seed-server deployment/iris-console
+kubectl -n iris rollout status deployment/iris-seed-server
+kubectl -n iris rollout status deployment/iris-console
 ```
+
+Confirm authenticated Console access again. The Console does not retry browser
+session or CSRF failures, and it never replays a streamed mutation or upload.
 
 ### Management API TLS
 

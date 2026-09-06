@@ -216,6 +216,10 @@ Configure IRIS:
    The management certificate covers the internal Service names; the browser
    certificate covers the external Console URL. Neither private key belongs
    in a ConfigMap or image.
+   During token rotation, retain the previous value until both pods have the
+   new current value and authenticated Console access passes. The Console can
+   temporarily use the previous token, so readiness alone cannot confirm that
+   both projections have updated.
 5. Build the needed device packages and stage them with their manifests in
    the server's artifact storage before onboarding devices.
 

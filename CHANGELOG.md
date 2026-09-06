@@ -16,6 +16,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   digest-keyed indexes and a constant-time check of the selected credential.
 - Persist the previous management credential before replacing the current
   credential so a host crash preserves the Console's rotation overlap.
+- Reject aliased management credential paths before rotation or retirement.
+- Keep Console requests working when its token update reaches it before the
+  server. Try the previous token only after a management-authentication
+  rejection, and keep the accepted token through request forwarding.
 
 ### Deployment
 - Run the Docker server and Console on separate hosts with independent Compose

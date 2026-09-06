@@ -146,3 +146,89 @@ def test_rotate_refuses_symlink_current_without_disclosing_value(tmp_path):
     assert result.returncode == 1
     assert value not in result.stdout + result.stderr
     assert not previous.exists()
+
+
+@pytest.mark.parametrize("action", ["rotate", "retire-previous"])
+@pytest.mark.parametrize("alias", [
+    "identical", "relative", "dot", "dotdot", "directory-symlink",
+    "directory-symlink-dotdot",
+    "file-symlink", "hardlink",
+])
+def test_actions_reject_aliased_credential_paths_without_changes(
+        tmp_path, monkeypatch, action, alias):
+    directory = tmp_path / "credentials"
+    directory.mkdir()
+    current = directory / "current.json"
+    value = "secret-" + "d" * 60
+    original = (json.dumps({"scope": "management", "token": value}) + "\n").encode()
+    current.write_bytes(original)
+    current.chmod(0o600)
+    monkeypatch.chdir(tmp_path)
+    if alias == "identical":
+        previous = current
+    elif alias == "relative":
+        previous = current.relative_to(tmp_path)
+    elif alias == "dot":
+        previous = str(directory) + "/./current.json"
+    elif alias == "dotdot":
+        (directory / "nested").mkdir()
+        previous = str(directory) + "/nested/../current.json"
+    elif alias == "directory-symlink":
+        linked_directory = tmp_path / "linked-credentials"
+        linked_directory.symlink_to(directory, target_is_directory=True)
+        previous = linked_directory / "current.json"
+    elif alias == "directory-symlink-dotdot":
+        nested = directory / "nested"
+        nested.mkdir()
+        linked_directory = tmp_path / "linked-nested"
+        linked_directory.symlink_to(nested, target_is_directory=True)
+        previous = str(linked_directory) + "/../current.json"
+    elif alias == "file-symlink":
+        previous = directory / "previous.json"
+        previous.symlink_to(current)
+    else:
+        previous = directory / "previous.json"
+        os.link(current, previous)
+
+    def snapshot(path):
+        metadata = os.lstat(path)
+        return (metadata.st_dev, metadata.st_ino, metadata.st_nlink,
+                metadata.st_mode, metadata.st_size, metadata.st_mtime_ns,
+                metadata.st_ctime_ns)
+
+    before = [snapshot(path) for path in (current, previous)]
+    entries = sorted(path.name for path in directory.iterdir())
+    result = _run(action, current, previous)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "iris-management-token: management credential paths must be distinct\n")
+    assert value not in result.stdout + result.stderr
+    assert current.read_bytes() == original
+    assert Path(previous).read_bytes() == original
+    assert [snapshot(path) for path in (current, previous)] == before
+    assert sorted(path.name for path in directory.iterdir()) == entries
+
+
+def test_rotation_and_retirement_accept_distinct_files_through_directory_alias(tmp_path):
+    directory = tmp_path / "credentials"
+    directory.mkdir()
+    linked_directory = tmp_path / "linked-credentials"
+    linked_directory.symlink_to(directory, target_is_directory=True)
+    current = directory / "current.json"
+    previous = linked_directory / "previous.json"
+    old = "old-" + "e" * 60
+    current.write_text(json.dumps({"scope": "management", "token": old}) + "\n",
+                       encoding="utf-8")
+    current.chmod(0o600)
+
+    result = _run("rotate", current, previous)
+    assert result.returncode == 0, result.stderr
+    new, overlap = tier_auth.load_pair(str(current), str(previous))
+    assert new != old.encode()
+    assert overlap == old.encode()
+    result = _run("retire-previous", current, previous)
+    assert result.returncode == 0, result.stderr
+    assert not previous.exists()
+    assert tier_auth.load_pair(str(current)) == (new, None)

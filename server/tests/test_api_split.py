@@ -327,12 +327,24 @@ def test_management_does_not_fall_back_to_device_certificate(tmp_path, monkeypat
             management_token_file=str(token))
 
 
-def test_remote_console_reports_and_reloads_its_own_certificate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("projection_order", ["current-only", "server-first", "console-first"])
+def test_remote_console_reports_and_reloads_its_own_certificate(
+        tmp_path, monkeypatch, projection_order):
     management_cert, management_key = _certificate(tmp_path, "management")
     default_cert, default_key = _certificate(tmp_path, "browser-default")
     custom_cert, custom_key = _certificate(tmp_path, "browser-custom")
     token = tmp_path / "tier-token"
     _write_secret(token, "t" * 64)
+    server_token = tmp_path / "server-token"
+    server_previous = tmp_path / "server-previous"
+    console_previous = tmp_path / "console-previous"
+    _write_secret(server_token, "t" * 64)
+    if projection_order == "server-first":
+        _write_secret(server_token, "n" * 64)
+        _write_secret(server_previous, "t" * 64)
+    elif projection_order == "console-first":
+        _write_secret(token, "n" * 64)
+        _write_secret(console_previous, "t" * 64)
     monkeypatch.setenv("IRIS_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     monkeypatch.setenv("IRIS_GUI_CERT", str(tmp_path / "server-custom.pem"))
@@ -344,17 +356,19 @@ def test_remote_console_reports_and_reloads_its_own_certificate(tmp_path, monkey
     app.set_admin("admin", "password-for-test")
     management = management_api.make_server(
         "127.0.0.1", 0, app, certfile=str(management_cert),
-        keyfile=str(management_key), management_token_file=str(token))
+        keyfile=str(management_key), management_token_file=str(server_token),
+        management_previous_token_file=str(server_previous))
     _thread(management)
     backend = "https://localhost:%d" % management.server_address[1]
     runtime = tmp_path / "console-runtime.pem"
     gui_server.fetch_console_certificate(
         backend, str(token), str(management_cert), str(runtime),
-        default_certfile=str(default_cert), default_keyfile=str(default_key))
+        default_certfile=str(default_cert), default_keyfile=str(default_key),
+        previous_token_file=str(console_previous))
     console = gui_server.make_server(
         "127.0.0.1", 0, backend, str(token), str(management_cert),
         certfile=str(runtime), default_certfile=str(default_cert),
-        default_keyfile=str(default_key))
+        default_keyfile=str(default_key), previous_token_file=str(console_previous))
     _thread(console)
     port = console.server_address[1]
 

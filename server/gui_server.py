@@ -106,12 +106,62 @@ def _backend_parts(url):
     return parts.hostname, parts.port or 443, prefix
 
 
-def _current_token(path):
-    current, _ = tier_auth.load_pair(path)
+def _token_pair(path, previous_path=None):
     try:
-        return current.decode("utf-8")
+        current, previous = tier_auth.load_pair(path, previous_path)
+        tokens = (current.decode("utf-8"),
+                  previous.decode("utf-8") if previous is not None else None)
     except UnicodeError:
         raise ConsoleConfigurationError("management credential is invalid") from None
+    # Bearer credentials must fit a single HTTP header without whitespace or
+    # control characters. Reject malformed mounted values before networking,
+    # where header-validation errors might otherwise include the credential.
+    if any(token is not None and any(not 33 <= ord(char) <= 126 for char in token)
+           for token in tokens):
+        raise ConsoleConfigurationError("management credential is invalid")
+    return tokens
+
+
+def _current_token(path):
+    return _token_pair(path)[0]
+
+
+def _management_request(host, port, context, method, target, headers, tokens,
+                        *, body=None, timeout=10):
+    """Retry only a rejected tier credential, before any browser body is read.
+
+    Callers may supply only a bodyless request or the bounded authorization
+    preflight document. A streamed browser mutation never enters this helper.
+    Return the accepted credential so preflight and mutation use the same one.
+    """
+    current, previous = tokens
+    candidates = (current,) if previous is None else (current, previous)
+    for token in candidates:
+        conn = http.client.HTTPSConnection(host, port, context=context,
+                                           timeout=timeout)
+        try:
+            outgoing = dict(headers, Authorization="Bearer " + token)
+            conn.request(method, target, body=body, headers=outgoing)
+            response = conn.getresponse()
+            prefix = b""
+            if (token == current and previous is not None
+                    and response.status == 401
+                    and response.getheader("WWW-Authenticate", "").strip() == "Bearer"
+                    and response.getheader("Content-Type", "").split(";", 1)[0]
+                    == "application/problem+json"):
+                prefix = response.read(_MAX_BODY + 1)
+                try:
+                    problem = json.loads(prefix) if len(prefix) <= _MAX_BODY else None
+                except (ValueError, UnicodeError):
+                    problem = None
+                if (isinstance(problem, dict) and problem.get("type") ==
+                        api_problem.TYPE_BASE + "management-authentication-required"):
+                    conn.close()
+                    continue
+            return conn, response, token, prefix
+        except Exception:
+            conn.close()
+            raise
 
 
 def _atomic_write(path, data):
@@ -162,7 +212,8 @@ def _certificate_info(path, source):
 
 def fetch_console_certificate(api_url, token_file, ca_file, output_path,
                               timeout=10, default_certfile=None,
-                              default_keyfile=None, allow_unavailable_default=True):
+                              default_keyfile=None, allow_unavailable_default=True,
+                              previous_token_file=None):
     """Fetch the active console identity through the authenticated API.
 
     The combined PEM is written only to the console's runtime filesystem.  It
@@ -170,19 +221,17 @@ def fetch_console_certificate(api_url, token_file, ca_file, output_path,
     """
     host, port, prefix = _backend_parts(api_url)
     context = _tls_client_context(ca_file)
-    token = _current_token(token_file)
-    conn = http.client.HTTPSConnection(host, port, context=context,
-                                       timeout=timeout)
+    tokens = _token_pair(token_file, previous_token_file)
+    conn = None
     use_default = False
     try:
-        headers = {"Authorization": "Bearer " + token,
-                   "Accept": "application/x-pem-file"}
+        headers = {"Accept": "application/x-pem-file"}
         if default_certfile:
             headers["X-IRIS-Default-Certificate"] = "available"
-        conn.request("GET", prefix + "/internal/v1/console-certificate",
-                     headers=headers)
-        response = conn.getresponse()
-        body = response.read(1024 * 1024 + 1)
+        conn, response, _, buffered = _management_request(
+            host, port, context, "GET", prefix + "/internal/v1/console-certificate",
+            headers, tokens, timeout=timeout)
+        body = buffered + response.read(1024 * 1024 + 1 - len(buffered))
         source = response.getheader("X-IRIS-Certificate-Source", "")
     except (OSError, ssl.SSLError, http.client.HTTPException):
         # Console readiness must not depend on the server tier during a cold
@@ -196,7 +245,8 @@ def fetch_console_certificate(api_url, token_file, ca_file, output_path,
         use_default = True
         body, source = b"", "default"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     if not use_default:
         if response.status == 204 and source == "default" and default_certfile:
             use_default = True
@@ -268,7 +318,7 @@ class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
 
 def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 default_certfile=None, default_keyfile=None,
-                cert_source="built-in"):
+                cert_source="built-in", previous_token_file=None):
     backend_host, backend_port, backend_prefix = _backend_parts(api_url)
 
     class Handler(BaseHTTPRequestHandler):
@@ -362,7 +412,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                            "Invalid Content-Length")
             return int(raw), None
 
-        def _upstream_headers(self, request_length):
+        def _upstream_headers(self, request_length, token):
             outgoing = {}
             for name, value in self.headers.items():
                 low = name.lower()
@@ -370,7 +420,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         "authorization", "content-length"):
                     continue
                 outgoing[name] = value
-            outgoing["Authorization"] = "Bearer " + _current_token(token_file)
+            outgoing["Authorization"] = "Bearer " + token
             # Exactly one BFF-validated framing header crosses the tier hop.
             outgoing["Content-Length"] = str(request_length)
             outgoing["Host"] = self.headers.get("Host", "")
@@ -385,7 +435,6 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             payload = json.dumps({"method": self.command, "path": target},
                                  separators=(",", ":")).encode()
             headers = {
-                "Authorization": "Bearer " + _current_token(token_file),
                 "Content-Type": "application/json",
                 "Content-Length": str(len(payload)),
             }
@@ -398,20 +447,23 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             headers["X-IRIS-Client-IP"] = self.client_address[0]
             headers["X-IRIS-Client-Scheme"] = (
                 "https" if srv.tls_active else "http")
-            conn = http.client.HTTPSConnection(
-                backend_host, backend_port, context=context, timeout=self.timeout)
+            conn = None
             try:
-                conn.request("POST", backend_prefix +
-                             "/internal/v1/authorizations",
-                             body=payload, headers=headers)
-                response = conn.getresponse()
-                body = response.read(64 * 1024 + 1)
+                conn, response, token, buffered = _management_request(
+                    backend_host, backend_port, context, "POST",
+                    backend_prefix + "/internal/v1/authorizations", headers,
+                    _token_pair(token_file, previous_token_file),
+                    body=payload, timeout=self.timeout)
+                body = buffered + response.read(_MAX_BODY + 1 - len(buffered))
+                if len(body) > _MAX_BODY:
+                    raise ConsoleConfigurationError("authorization response is oversized")
                 response_headers = response.getheaders()
                 status, reason = response.status, response.reason
             finally:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             if status == 204:
-                return True
+                return token
             # Do not drain an untrusted rejected body: a client can declare a
             # length and then trickle nothing, pinning a worker before it gets
             # the already-known 401/403.  Close after the header-only verdict.
@@ -423,7 +475,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             if self.command != "HEAD" and len(body) <= 64 * 1024:
                 self.wfile.write(body)
             self.close_connection = True
-            return False
+            return None
 
         def _proxy(self):
             target = api_routes.console_to_management(self.command, self.path)
@@ -436,10 +488,15 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             # retain identical session/CSRF behavior before the uniform wire
             # error is disclosed.
             declared_body = framing_error is not None or request_length != 0
-            if self.command in ("POST", "PUT", "PATCH", "DELETE") \
+            authorized_token = None
+            # HEAD responses omit the problem document that distinguishes
+            # tier authentication from browser authentication. Select its
+            # credential through the same header-only preflight as mutations.
+            if self.command in ("POST", "PUT", "PATCH", "DELETE", "HEAD") \
                     or declared_body:
                 try:
-                    if not self._authorize_mutation(target):
+                    authorized_token = self._authorize_mutation(target)
+                    if authorized_token is None:
                         return
                 except (OSError, ssl.SSLError, http.client.HTTPException,
                         tier_auth.CredentialUnavailable,
@@ -464,36 +521,47 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                                  "Request body not supported")
                 self.close_connection = True
                 return
-            context = _tls_client_context(ca_file)
-            conn = http.client.HTTPSConnection(
-                backend_host, backend_port, context=context, timeout=self.timeout)
+            conn = None
             try:
-                conn.putrequest(self.command, backend_prefix + target,
-                                skip_host=True, skip_accept_encoding=True)
-                for name, value in self._upstream_headers(
-                        request_length).items():
-                    conn.putheader(name, value)
-                conn.endheaders()
-                remaining = request_length
-                # A byte arriving just inside the inactivity timeout must not
-                # occupy one of the bounded BFF workers forever. Small JSON
-                # requests get 30s total; larger operator uploads receive a
-                # bounded allowance proportional to size, capped at four hours.
-                body_deadline = time.monotonic() + min(
-                    _BODY_TOTAL_MAX,
-                    30 + request_length / float(64 * 1024))
-                while remaining > 0:
-                    budget = body_deadline - time.monotonic()
-                    if budget <= 0:
-                        raise TimeoutError("request body deadline exceeded")
-                    self.connection.settimeout(min(_BODY_IDLE_TIMEOUT, budget))
-                    chunk = self.rfile.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        raise ConnectionError("request body ended early")
-                    conn.send(chunk)
-                    remaining -= len(chunk)
-                self.connection.settimeout(self.timeout)
-                response = conn.getresponse()
+                context = _tls_client_context(ca_file)
+                buffered = b""
+                if authorized_token is None:
+                    tokens = _token_pair(token_file, previous_token_file)
+                    conn, response, _, buffered = _management_request(
+                        backend_host, backend_port, context, self.command,
+                        backend_prefix + target,
+                        self._upstream_headers(request_length, tokens[0]),
+                        tokens, timeout=self.timeout)
+                else:
+                    conn = http.client.HTTPSConnection(
+                        backend_host, backend_port, context=context,
+                        timeout=self.timeout)
+                    conn.putrequest(self.command, backend_prefix + target,
+                                    skip_host=True, skip_accept_encoding=True)
+                    for name, value in self._upstream_headers(
+                            request_length, authorized_token).items():
+                        conn.putheader(name, value)
+                    conn.endheaders()
+                    remaining = request_length
+                    # A byte arriving just inside the inactivity timeout must not
+                    # occupy one of the bounded BFF workers forever. Small JSON
+                    # requests get 30s total; larger operator uploads receive a
+                    # bounded allowance proportional to size, capped at four hours.
+                    body_deadline = time.monotonic() + min(
+                        _BODY_TOTAL_MAX,
+                        30 + request_length / float(64 * 1024))
+                    while remaining > 0:
+                        budget = body_deadline - time.monotonic()
+                        if budget <= 0:
+                            raise TimeoutError("request body deadline exceeded")
+                        self.connection.settimeout(min(_BODY_IDLE_TIMEOUT, budget))
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ConnectionError("request body ended early")
+                        conn.send(chunk)
+                        remaining -= len(chunk)
+                    self.connection.settimeout(self.timeout)
+                    response = conn.getresponse()
                 public_path = urlsplit(self.path).path
                 refresh = (response.status < 300 and public_path ==
                            "/api/v1/settings/gui-cert" and
@@ -522,7 +590,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                                     api_url, token_file, ca_file, certfile,
                                     default_certfile=default_certfile,
                                     default_keyfile=default_keyfile,
-                                    allow_unavailable_default=False)
+                                    allow_unavailable_default=False,
+                                    previous_token_file=previous_token_file)
                                 applied = srv.reload_tls(source)
                             except (ConsoleConfigurationError,
                                     tier_auth.CredentialUnavailable):
@@ -559,6 +628,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 if body is not None:
                     self.wfile.write(body)
                     return
+                if buffered and self.command != "HEAD":
+                    self.wfile.write(buffered)
                 reader = getattr(response, "read1", response.read)
                 while True:
                     chunk = reader(65536)
@@ -577,7 +648,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                 self.close_connection = True
                 return
             finally:
-                conn.close()
+                if conn is not None:
+                    conn.close()
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -586,7 +658,7 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             elif path == "/readyz":
                 ready = os.path.isdir(WEBROOT) and os.path.isfile(ca_file)
                 try:
-                    _current_token(token_file)
+                    _token_pair(token_file, previous_token_file)
                 except (tier_auth.CredentialUnavailable,
                         ConsoleConfigurationError):
                     ready = False
@@ -670,6 +742,8 @@ def main():
     port = int(os.environ.get("IRIS_GUI_PORT", "8080"))
     api_url = os.environ.get("IRIS_MANAGEMENT_API_URL", "").strip()
     token_file = os.environ.get("IRIS_MANAGEMENT_API_TOKEN_FILE", "").strip()
+    previous_token_file = os.environ.get(
+        "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE", "").strip() or None
     ca_file = os.environ.get("IRIS_MANAGEMENT_API_CA", "").strip()
     certfile = os.environ.get("IRIS_GUI_CERT", "/run/iris-console/cert.pem")
     default_certfile = os.environ.get("IRIS_GUI_DEFAULT_CERT", "").strip() or None
@@ -681,12 +755,14 @@ def main():
             source = fetch_console_certificate(
                 api_url, token_file, ca_file, certfile,
                 default_certfile=default_certfile,
-                default_keyfile=default_keyfile)
+                default_keyfile=default_keyfile,
+                previous_token_file=previous_token_file)
         server = make_server(host, port, api_url, token_file, ca_file,
                              certfile=None if plaintext else certfile,
                              default_certfile=default_certfile,
                              default_keyfile=default_keyfile,
-                             cert_source="custom" if source == "custom" else "built-in")
+                             cert_source="custom" if source == "custom" else "built-in",
+                             previous_token_file=previous_token_file)
     except (ConsoleConfigurationError, tier_auth.CredentialUnavailable) as exc:
         print("iris-console: %s; refusing to start" % exc,
               file=sys.stderr, flush=True)

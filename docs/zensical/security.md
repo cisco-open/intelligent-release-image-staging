@@ -124,6 +124,11 @@ The credential is valid nowhere else and never appears in an environment value,
 URL, process argument, exception, or audit entry. Browser session and CSRF
 checks remain independently required.
 
+The Console tries the current token first. Only an explicit management-tier
+authentication rejection permits one attempt with the previous token; browser
+authentication failures, TLS failures and server errors do not. A mutation
+retains the token accepted by preflight and sends its body once.
+
 The default Compose stack exposes port 9443 only on its project network.
 Across Docker hosts, bind it to the server's private management address and
 allow only the Console host through the firewall. Kubernetes uses a ClusterIP
