@@ -39,16 +39,19 @@ SECRET_TYPES = {
         "scope": "catalog",
         "ttl":   _DEFAULT_TTL,   # 7 days by default
         "auth":  "bearer",
+        "bits":  128,
     },
     "announce_token": {
         "scope": "announce",
         "ttl":   0,              # never expires
         "auth":  "announce_key",
+        "bits":  128,
     },
     "rpc_secret": {
         "scope": "local",
         "ttl":   0,              # never expires
         "auth":  None,
+        "bits":  128,
     },
     "instr_key": {
         "scope": "instructions",
@@ -56,6 +59,17 @@ SECRET_TYPES = {
         "auth": None,
         "bits": 256,
     },
+}
+
+# Credential widths are deliberately a closed registry rather than a default
+# on SECRET_TYPES.  A newly registered credential must choose and be reviewed
+# for an explicit width before minting can use it; key material cannot silently
+# inherit the bearer-token width.
+_SECRET_BITS = {
+    "catalog_token": 128,
+    "announce_token": 128,
+    "rpc_secret": 128,
+    "instr_key": 256,
 }
 
 INSTR_KEY_TTL = 2592000
@@ -522,8 +536,22 @@ def mint(store, device_id, secret_name, now):
 
     device_id == "seeder" writes under store["seeder"].
     """
-    stype = SECRET_TYPES[secret_name]
-    bits = stype.get("bits", 128)
+    try:
+        stype = SECRET_TYPES[secret_name]
+    except (KeyError, TypeError) as exc:
+        raise CredentialMintError("unsupported secret type") from exc
+    try:
+        bits = _SECRET_BITS[secret_name]
+    except (KeyError, TypeError) as exc:
+        raise CredentialMintError("unsupported secret bit count") from exc
+    try:
+        declared_bits = stype["bits"]
+    except (KeyError, TypeError):
+        raise CredentialMintError("unsupported secret bit count")
+    if type(declared_bits) is not int:
+        raise CredentialMintError("unsupported secret bit count")
+    if declared_bits != bits:
+        raise CredentialMintError("unsupported secret bit count")
     if type(bits) is not int or bits not in _SUPPORTED_SECRET_BITS \
             or bits % 8:
         raise CredentialMintError("unsupported secret bit count")

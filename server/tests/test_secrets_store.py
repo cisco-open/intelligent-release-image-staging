@@ -11,6 +11,10 @@ import pytest
 import secrets_store
 
 
+class _IntSubclass(int):
+    """An int subclass that must not pass the credential-width contract."""
+
+
 # ---------------------------------------------------------------------------
 # Task 1: load/save/build_index
 # ---------------------------------------------------------------------------
@@ -143,6 +147,106 @@ def test_mint_announce_token_no_expiry():
     secrets_store.mint(store, "dev-1", "announce_token", now)
     rec = store["devices"]["dev-1"]["announce_token"]
     assert rec["expires_at"] == 0  # ttl==0 → never expires
+
+
+@pytest.mark.parametrize(
+    "secret_name,expected_bits",
+    [("catalog_token", 128), ("announce_token", 128),
+     ("rpc_secret", 128), ("instr_key", 256)],
+)
+def test_mint_uses_explicit_width_for_every_supported_type(
+        monkeypatch, secret_name, expected_bits):
+    calls = []
+
+    def entropy(nbytes):
+        calls.append(nbytes)
+        return "ab" * nbytes
+
+    monkeypatch.setattr(secrets_store.secrets, "token_hex", entropy)
+    store = {"devices": {}, "seeder": {}}
+    value = secrets_store.mint(store, "dev-1", secret_name, 1_000_000)
+
+    assert calls == [expected_bits // 8]
+    assert len(value) == expected_bits // 4
+    record = store["devices"]["dev-1"][secret_name]
+    if secret_name == "instr_key":
+        assert set(record) == {
+            "value", "key_id", "created_at", "expires_at", "revoked",
+            "_scope",
+        }
+    else:
+        ttl = secrets_store.SECRET_TYPES[secret_name]["ttl"]
+        assert record == {
+            "value": value, "created_at": 1_000_000,
+            "expires_at": 1_000_000 + ttl if ttl else 0,
+            "revoked": False,
+        }
+
+
+@pytest.mark.parametrize(
+    "secret_name,malformed_bits",
+    [("catalog_token", 128.0), ("announce_token", True),
+     ("rpc_secret", _IntSubclass(128)), ("instr_key", 256.0)],
+)
+def test_mint_rejects_malformed_registered_width_before_entropy_or_mutation(
+        monkeypatch, secret_name, malformed_bits):
+    monkeypatch.setitem(
+        secrets_store.SECRET_TYPES[secret_name], "bits", malformed_bits)
+    calls = []
+    monkeypatch.setattr(
+        secrets_store.secrets, "token_hex",
+        lambda nbytes: calls.append(nbytes) or "ab" * nbytes,
+    )
+    store = {"devices": {}, "seeder": {}}
+
+    with pytest.raises(secrets_store.CredentialMintError,
+                       match="unsupported secret bit count"):
+        secrets_store.mint(store, "dev-1", secret_name, 1_000_000)
+    assert calls == []
+    assert store == {"devices": {}, "seeder": {}}
+
+
+@pytest.mark.parametrize(
+    "secret_name,mismatched_bits", [("catalog_token", 256),
+                                     ("instr_key", 128)],
+)
+def test_mint_rejects_mismatched_registered_width_before_entropy_or_mutation(
+        monkeypatch, secret_name, mismatched_bits):
+    monkeypatch.setitem(
+        secrets_store.SECRET_TYPES[secret_name], "bits", mismatched_bits)
+    calls = []
+    monkeypatch.setattr(
+        secrets_store.secrets, "token_hex",
+        lambda nbytes: calls.append(nbytes) or "ab" * nbytes,
+    )
+    store = {"devices": {}, "seeder": {}}
+
+    with pytest.raises(secrets_store.CredentialMintError,
+                       match="unsupported secret bit count"):
+        secrets_store.mint(store, "dev-1", secret_name, 1_000_000)
+    assert calls == []
+    assert store == {"devices": {}, "seeder": {}}
+
+
+@pytest.mark.parametrize("secret_name", ["not_registered", "future_key"])
+def test_mint_rejects_unknown_or_future_type_before_entropy(
+        monkeypatch, secret_name):
+    if secret_name == "future_key":
+        monkeypatch.setitem(
+            secrets_store.SECRET_TYPES, secret_name,
+            {"scope": "instructions", "ttl": 0, "auth": None,
+             "bits": 128},
+        )
+    calls = []
+    monkeypatch.setattr(
+        secrets_store.secrets, "token_hex",
+        lambda nbytes: calls.append(nbytes) or "ab" * nbytes,
+    )
+    store = {"devices": {}, "seeder": {}}
+    with pytest.raises(secrets_store.CredentialMintError):
+        secrets_store.mint(store, "dev-1", secret_name, 1_000_000)
+    assert calls == []
+    assert store == {"devices": {}, "seeder": {}}
 
 
 def test_mint_unique_values():
