@@ -100,6 +100,8 @@ RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
     /opt/iris/server/iris-assign \
     /opt/iris/server/iris-bootstrap \
+    /opt/iris/server/iris-instructions \
+    /opt/iris/server/iris-instr-key \
     /opt/iris/server/iris-management-token \
     /opt/iris/server/rotate_seeder_announce.py \
     /opt/iris/server/pack-agent-bundle.sh \

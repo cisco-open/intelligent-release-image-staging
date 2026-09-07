@@ -100,6 +100,31 @@ def main(argv=None):
                 or not secrets_store.valid(rpc, now, 0):
             secrets_store.mint(store, device_id, "rpc_secret", now)
 
+        # The per-device instruction key is likewise delivered only by the
+        # authenticated refresh bag. Explicit re-enrollment is the authorized
+        # repair path for an absent, malformed, revoked, or expired lineage.
+        # A retained current keeps only a sound, live previous overlap.
+        instruction = dev.get("instr_key")
+        replace_instruction = "instr_key" not in dev
+        if not replace_instruction:
+            try:
+                secrets_store.validate_instruction_key_record(instruction)
+                replace_instruction = not secrets_store.valid(
+                    instruction, now, 0)
+            except secrets_store.InstructionKeyError:
+                replace_instruction = True
+        if replace_instruction:
+            dev.pop("instr_key_prev", None)
+            secrets_store.mint(store, device_id, "instr_key", now)
+        elif "instr_key_prev" in dev:
+            try:
+                _, previous = secrets_store.validate_instruction_key_pair(
+                    instruction, dev["instr_key_prev"])
+                if previous["revoked"] or now >= previous["expires_at"]:
+                    dev.pop("instr_key_prev", None)
+            except secrets_store.InstructionKeyError:
+                dev.pop("instr_key_prev", None)
+
         # Persist durable-FIRST: the at-rest .age ciphertext is the only copy
         # that survives a restart.  If the tmpfs plaintext were written first and
         # the durable encrypt then failed, a restart would decrypt the stale
@@ -115,9 +140,9 @@ def main(argv=None):
             secretfs.persist_store(
                 store, secrets_path,
                 recipients_csv=recipients, enc_path=enc_path)
-        except Exception as exc:
-            print("error: durable persist failed, enrollment NOT minted: %s"
-                  % exc, file=sys.stderr)
+        except Exception:
+            print("error: durable persist failed, enrollment NOT minted",
+                  file=sys.stderr)
             return 1
 
     print(token)

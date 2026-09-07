@@ -2275,7 +2275,8 @@ class Catalog:
             # rotate_catalog/mint always write revoked=False, so rotating now
             # would silently un-revoke the device (hand it a fresh live token).
             # Abort instead — this closes the TOCTOU the lock made deterministic.
-            if current_record is not None and current_record.get("revoked"):
+            if isinstance(current_record, dict) \
+                    and current_record.get("revoked"):
                 try:
                     audit.append_event(
                         self.audit_path, "refresh_fail", device_id,
@@ -2305,11 +2306,51 @@ class Catalog:
                 return self._json(401, {"error": "unauthorized"})
 
             recovering = ctx.secret_name == "catalog_token_prev"
+
+            # Validate the complete instruction lineage against this same
+            # under-lock snapshot before rotating either credential. Missing
+            # legacy material is provisioned once; present malformed or
+            # revoked state is never treated as a fresh device.
+            instruction_minted = False
+            has_instruction = "instr_key" in device_secrets
+            has_previous_instruction = "instr_key_prev" in device_secrets
+            if not has_instruction and has_previous_instruction:
+                return self._json(
+                    503, {"error": "instruction key unavailable"})
+            try:
+                if has_instruction:
+                    if has_previous_instruction:
+                        instruction, previous_instruction = (
+                            secrets_store.validate_instruction_key_pair(
+                                device_secrets["instr_key"],
+                                device_secrets["instr_key_prev"]))
+                    else:
+                        instruction, previous_instruction = (
+                            secrets_store.validate_instruction_key_pair(
+                                device_secrets["instr_key"]))
+                else:
+                    instruction = None
+                    previous_instruction = None
+            except secrets_store.InstructionKeyError:
+                return self._json(
+                    503, {"error": "instruction key unavailable"})
+            if instruction is not None and instruction["revoked"]:
+                return self._json(409, {"error": "device revoked"})
+            if instruction is None:
+                try:
+                    secrets_store.mint(store, device_id, "instr_key", now)
+                except secrets_store.CredentialMintError:
+                    return self._json(
+                        503, {"error": "instruction key unavailable"})
+                instruction = device_secrets["instr_key"]
+                instruction_minted = True
+
             if recovering:
                 # The server already committed this successor. Reissue the
                 # current bag unchanged so a lost 200 or failed device conf
                 # rewrite can converge on the next tick.
                 new_val = current_val
+                catalog_rotated = False
             else:
                 old_record = current_record
                 old_val = current_val
@@ -2333,13 +2374,12 @@ class Catalog:
 
                 new_val = secrets_store.rotate_catalog(
                     store, device_id, now, overlap)
+                catalog_rotated = True
 
-                # Persist durable-FIRST: the at-rest .age ciphertext is the only
-                # copy that survives a restart, so it must be written (and confirmed)
-                # before the live tmpfs plaintext is swapped in.  If the durable
-                # write fails, persist_store leaves the tmpfs store untouched and
-                # raises; we then report failure rather than a phantom rotation that
-                # a restart would silently roll back.
+            if catalog_rotated or instruction_minted:
+                # Persist durable-FIRST. Recovery can reach this path solely to
+                # commit a missing legacy instruction key, so it cannot rely on
+                # rotation-only locals such as ``old_val``.
                 recipients = os.environ.get("IRIS_AGE_RECIPIENTS", "")
                 enc_path = os.environ.get(
                     "IRIS_SECRETS_ENC", "/etc/iris/secrets.json.age")
@@ -2347,15 +2387,15 @@ class Catalog:
                     secretfs.persist_store(
                         store, secrets_path,
                         recipients_csv=recipients, enc_path=enc_path)
-                except Exception as exc:
-                    # Durable write failed: nothing was committed to the live store,
-                    # so there is no rotation to roll back and no divergence.  Audit
-                    # the failed persist and refuse to report success.
+                except Exception:
+                    # The persistence helper reported failure and may have
+                    # attempted its documented old-live rollback after a
+                    # durable rename. Never claim success or echo tool output.
                     try:
                         audit.append_event(
                             self.audit_path, "refresh_fail", device_id,
                             secret_name="catalog_token",
-                            old_id=_audit_id(old_val),
+                            old_id=_audit_id(token),
                             src_ip=src_ip,
                             detail="durable persist failed",
                             result="fail",
@@ -2363,9 +2403,10 @@ class Catalog:
                     except Exception:
                         pass
                     return self._json(
-                        500, {"error": "durable persist failed: %s" % exc})
+                        500, {"error": "durable persist failed"})
 
-                # Audit the refresh (only after the rotation is durably committed)
+            if catalog_rotated:
+                # Audit only after the catalog rotation is durably committed.
                 audit.append_event(
                     self.audit_path, "refresh", device_id,
                     secret_name="catalog_token",
@@ -2374,27 +2415,33 @@ class Catalog:
                     src_ip=src_ip,
                 )
 
-        # Build the response bag: catalog_token + expires_at, plus
-        # announce_token / rpc_secret ONLY when the device actually has them.
-        # The agent persists a returned secret when `bag.get(name) is not None`
-        # (iris_agent._refresh_impl), so it can keep its current working value
-        # for a field the server omits.  Sending "" for an absent record would
-        # be `not None` and make the agent overwrite its live announce_token /
-        # rpc_secret with "", stranding it off the swarm and the aria2 RPC.
-        device_secrets = store.get("devices", {}).get(device_id, {})
-        # After rotate, the NEW record is in the store under catalog_token
-        new_cat_rec = device_secrets.get("catalog_token", {})
-        bag = {
-            "catalog_token": new_val,
-            "expires_at": new_cat_rec.get("expires_at", 0),
-        }
-        ann_val = device_secrets.get("announce_token", {}).get("value")
-        if ann_val:
-            bag["announce_token"] = ann_val
-        rpc_val = device_secrets.get("rpc_secret", {}).get("value")
-        if rpc_val:
-            bag["rpc_secret"] = rpc_val
-        return self._json(200, bag)
+            # Build one coherent response from the validated in-lock snapshot.
+            # Existing optional values retain their omit-when-absent contract;
+            # each instruction object is all-or-omitted and carries no custody
+            # metadata beyond its nonsecret key ID.
+            new_cat_rec = device_secrets.get("catalog_token", {})
+            bag = {
+                "catalog_token": new_val,
+                "expires_at": new_cat_rec.get("expires_at", 0),
+                "instr_key": secrets_store.instruction_key_projection(
+                    instruction),
+            }
+            previous_projection = None
+            if previous_instruction is not None:
+                previous_projection = secrets_store.instruction_key_projection(
+                    previous_instruction, now=now, previous=True)
+            if previous_projection is not None:
+                bag["instr_key_prev"] = previous_projection
+            ann = device_secrets.get("announce_token")
+            ann_val = ann.get("value") if isinstance(ann, dict) else None
+            if ann_val:
+                bag["announce_token"] = ann_val
+            rpc = device_secrets.get("rpc_secret")
+            rpc_val = rpc.get("value") if isinstance(rpc, dict) else None
+            if rpc_val:
+                bag["rpc_secret"] = rpc_val
+            response = self._json(200, bag)
+        return response
 
     @staticmethod
     def _json(status, obj):

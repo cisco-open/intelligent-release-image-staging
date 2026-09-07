@@ -12,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+import contextlib
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +38,20 @@ def _mint_catalog_token(secrets_path, device_id, now=None):
     tok = secrets_store.mint(store, device_id, "catalog_token", now)
     secrets_store.save(store, secrets_path)
     return tok
+
+
+def _instruction_record(value, created_at, expires_at=None, revoked=False):
+    """Build the frozen Task 12 instruction record without logging its value."""
+    if expires_at is None:
+        expires_at = created_at + 2592000
+    return {
+        "value": value,
+        "key_id": hashlib.sha256(bytes.fromhex(value)).hexdigest(),
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "revoked": revoked,
+        "_scope": "instructions",
+    }
 
 
 def _store(tmp_path):
@@ -569,7 +585,7 @@ def _serve_with_device(tmp_path, device_id="dev-1"):
 
 
 def test_token_refresh_returns_new_token_and_secret_bag(tmp_path):
-    """POST /v1/devices/<id>/token-refresh → new catalog_token + all 4 keys."""
+    """Refresh lazily provisions and returns the closed instruction-key bag."""
     os.environ["IRIS_AGE_RECIPIENTS"] = ""
     srv, port, old_tok = _serve_with_device(tmp_path, "dev-1")
     try:
@@ -578,15 +594,26 @@ def test_token_refresh_returns_new_token_and_secret_bag(tmp_path):
             "/v1/devices/dev-1/token-refresh",
             token=old_tok,
             body=b"{}")
-        assert status == 200, body_bytes
+        assert status == 200
         resp = json.loads(body_bytes)
         assert "catalog_token" in resp
         assert "expires_at" in resp
         assert "announce_token" in resp
         assert "rpc_secret" in resp
+        assert set(resp["instr_key"]) == {"value", "key_id"}
+        assert "instr_key_prev" not in resp
         assert resp["catalog_token"] != old_tok
     finally:
         srv.shutdown()
+
+    persisted = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-1"]
+    assert resp["instr_key"] == {
+        "value": persisted["instr_key"]["value"],
+        "key_id": persisted["instr_key"]["key_id"],
+    }
+    with open(str(tmp_path / "audit.jsonl"), encoding="utf-8") as stream:
+        audit_text = stream.read()
+    assert persisted["instr_key"]["value"] not in audit_text
 
 
 def test_token_refresh_omits_absent_announce_and_rpc(tmp_path):
@@ -608,7 +635,7 @@ def test_token_refresh_omits_absent_announce_and_rpc(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-bare/token-refresh",
             token="tok", body=b"{}")
-        assert status == 200, body
+        assert status == 200
         resp = json.loads(body)
         assert "catalog_token" in resp and resp["catalog_token"] != "tok"
         # The absent secrets must NOT be present as empty strings.
@@ -632,12 +659,258 @@ def test_token_refresh_includes_present_announce_and_rpc(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-full/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         resp = json.loads(body)
         assert resp.get("announce_token"), "present announce_token was dropped"
         assert resp.get("rpc_secret"), "present rpc_secret was dropped"
     finally:
         srv.shutdown()
+
+
+def _serve_with_instruction_records(tmp_path, current, previous=None,
+                                    device_id="dev-instr"):
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    token = secrets_store.mint(store, device_id, "catalog_token", now)
+    secrets_store.mint(store, device_id, "announce_token", now)
+    secrets_store.mint(store, device_id, "rpc_secret", now)
+    dev = store["devices"][device_id]
+    if current is not None:
+        dev["instr_key"] = current
+    if previous is not None:
+        dev["instr_key_prev"] = previous
+    secrets_store.save(store, sp)
+    srv = catalog.make_server(
+        "127.0.0.1", 0, _store(tmp_path), sp,
+        audit_path=str(tmp_path / "audit.jsonl"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1], token
+
+
+def test_token_refresh_delivers_expired_current_and_live_previous(tmp_path):
+    now = int(time.time())
+    current = _instruction_record(
+        "11" * 32, now - 2592001, now - 1)
+    previous = _instruction_record(
+        "12" * 32, now - 200, now + 200)
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        bag = json.loads(body)
+        assert bag["instr_key"] == {
+            "value": current["value"], "key_id": current["key_id"]}
+        assert bag["instr_key_prev"] == {
+            "value": previous["value"], "key_id": previous["key_id"]}
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("previous_state", ["absent", "expired", "boundary",
+                                             "revoked"])
+def test_token_refresh_omits_ineligible_instruction_previous(
+        tmp_path, previous_state):
+    now = int(time.time())
+    current = _instruction_record("13" * 32, now - 100)
+    previous = None
+    if previous_state != "absent":
+        expiry = now if previous_state == "boundary" else now - 1
+        if previous_state == "revoked":
+            expiry = now + 100
+        previous = _instruction_record(
+            "14" * 32, now - 200, expiry,
+            revoked=previous_state == "revoked")
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        assert "instr_key_prev" not in json.loads(body)
+    finally:
+        srv.shutdown()
+
+
+@pytest.mark.parametrize("previous_state", ["live", "expired", "revoked"])
+def test_token_refresh_refuses_duplicate_instruction_pair_before_omission(
+        tmp_path, previous_state):
+    now = int(time.time())
+    current = _instruction_record("1a" * 32, now - 100)
+    previous = dict(current)
+    if previous_state == "live":
+        previous["expires_at"] = now + 100
+    elif previous_state == "expired":
+        previous["expires_at"] = now - 1
+    else:
+        previous["expires_at"] = now + 100
+        previous["revoked"] = True
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_previous_token_recovery_refuses_duplicate_instruction_pair(
+        tmp_path):
+    now = int(time.time())
+    current = _instruction_record("1b" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = _secrets_path(tmp_path)
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 200
+        with secrets_store.store_lock(path):
+            stored = secrets_store.load(path)
+            duplicate = dict(stored["devices"]["dev-instr"]["instr_key"])
+            duplicate["expires_at"] = now + 100
+            stored["devices"]["dev-instr"]["instr_key_prev"] = duplicate
+            secrets_store.save(stored, path)
+        before = Path(path).read_bytes()
+
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert Path(path).read_bytes() == before
+
+
+def test_token_refresh_refuses_present_null_instruction_previous(tmp_path):
+    now = int(time.time())
+    current = _instruction_record("1c" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = _secrets_path(tmp_path)
+    with secrets_store.store_lock(path):
+        stored = secrets_store.load(path)
+        stored["devices"]["dev-instr"]["instr_key_prev"] = None
+        secrets_store.save(stored, path)
+    before = Path(path).read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+    finally:
+        srv.shutdown()
+    assert Path(path).read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["missing-current", "bad-current-id",
+                                    "extra-current-field", "bad-previous"])
+def test_token_refresh_refuses_malformed_or_inconsistent_instruction_state(
+        tmp_path, damage):
+    now = int(time.time())
+    current = _instruction_record("15" * 32, now - 100)
+    previous = _instruction_record("16" * 32, now - 50, now + 100)
+    if damage == "missing-current":
+        current = None
+    elif damage == "bad-current-id":
+        current["key_id"] = "canary-malicious-field"
+        previous = None
+    elif damage == "extra-current-field":
+        current["extra"] = "canary-malicious-field"
+        previous = None
+    else:
+        previous["value"] = "canary-malicious-field"
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, current, previous)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 503
+        assert json.loads(body)["error"] == "service unavailable"
+        assert b"canary" not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_token_refresh_refuses_revoked_instruction_current_without_disclosure(
+        tmp_path):
+    now = int(time.time())
+    current = _instruction_record("17" * 32, now - 100, revoked=True)
+    srv, port, token = _serve_with_instruction_records(tmp_path, current)
+    path = Path(_secrets_path(tmp_path))
+    before = path.read_bytes()
+    try:
+        status, _, body = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+        assert status == 409
+        assert json.loads(body)["error"] == "device revoked"
+        assert current["value"].encode() not in body
+    finally:
+        srv.shutdown()
+    assert path.read_bytes() == before
+
+
+def test_instruction_rotation_winning_lock_is_preserved_by_refresh(
+        tmp_path, monkeypatch):
+    now = int(time.time())
+    old_instruction = _instruction_record("18" * 32, now - 100)
+    srv, port, token = _serve_with_instruction_records(
+        tmp_path, old_instruction)
+    path = _secrets_path(tmp_path)
+    real_lock = secrets_store.store_lock
+    reached = threading.Event()
+
+    @contextlib.contextmanager
+    def announced_lock(lock_path):
+        reached.set()
+        with real_lock(lock_path):
+            yield
+
+    monkeypatch.setattr(secrets_store, "store_lock", announced_lock)
+    result = {}
+
+    def refresh():
+        result["status"], _, result["body"] = _req(
+            port, "POST", "/v1/devices/dev-instr/token-refresh",
+            token=token, body=b"{}")
+
+    try:
+        with real_lock(path):
+            thread = threading.Thread(target=refresh)
+            thread.start()
+            assert reached.wait(timeout=3)
+            rotated = secrets_store.load(path)
+            secrets_store.rotate_instruction_key(rotated, "dev-instr", now + 1)
+            secrets_store.save(rotated, path)
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert result["status"] == 200
+        bag = json.loads(result["body"])
+    finally:
+        srv.shutdown()
+
+    final = secrets_store.load(path)["devices"]["dev-instr"]
+    assert bag["instr_key"]["key_id"] == final["instr_key"]["key_id"]
+    assert bag["instr_key_prev"]["key_id"] == old_instruction["key_id"]
+    assert final["catalog_token"]["value"] != token
 
 
 def test_refresh_audit_ids_are_hashes_not_token_prefixes(tmp_path):
@@ -651,7 +924,7 @@ def test_refresh_audit_ids_are_hashes_not_token_prefixes(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-1/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         new_tok = json.loads(body)["catalog_token"]
 
         with open(str(tmp_path / "audit.jsonl")) as f:
@@ -682,7 +955,7 @@ def test_token_refresh_prev_stash_uses_int_epochs(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-int/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
     finally:
         srv.shutdown()
 
@@ -835,15 +1108,16 @@ def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
         status, _, first_body = _req(
             port, "POST", "/v1/devices/dev-lost/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, first_body
+        assert status == 200
         first_bag = json.loads(first_body)
         current_tok = first_bag["catalog_token"]
+        instruction = first_bag["instr_key"]
 
         # Model a lost/truncated response: the next request still carries OLD.
         status, _, retry_body = _req(
             port, "POST", "/v1/devices/dev-lost/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, retry_body
+        assert status == 200
         assert json.loads(retry_body) == first_bag
     finally:
         srv.shutdown()
@@ -851,6 +1125,45 @@ def test_lost_refresh_response_retry_reissues_current_token(tmp_path):
     final = secrets_store.load(_secrets_path(tmp_path))["devices"]["dev-lost"]
     assert final["catalog_token"]["value"] == current_tok
     assert final["catalog_token_prev"]["value"] == old_tok
+    assert instruction == {
+        "value": final["instr_key"]["value"],
+        "key_id": final["instr_key"]["key_id"],
+    }
+
+
+def test_previous_token_recovery_lazily_persists_missing_instruction_key(
+        tmp_path):
+    """A legacy store can first encounter Task 12 on the recovery branch."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    srv, port, old_token = _serve_with_device(tmp_path, "dev-recovery-lazy")
+    path = _secrets_path(tmp_path)
+    try:
+        status, _, first_body = _req(
+            port, "POST", "/v1/devices/dev-recovery-lazy/token-refresh",
+            token=old_token, body=b"{}")
+        assert status == 200
+        current_token = json.loads(first_body)["catalog_token"]
+
+        # Reconstruct the valid legacy shape that can exist during a rolling
+        # upgrade: current+recovery catalog credentials but no instruction key.
+        with secrets_store.store_lock(path):
+            legacy = secrets_store.load(path)
+            legacy["devices"]["dev-recovery-lazy"].pop("instr_key")
+            secrets_store.save(legacy, path)
+
+        status, _, recovery_body = _req(
+            port, "POST", "/v1/devices/dev-recovery-lazy/token-refresh",
+            token=old_token, body=b"{}")
+        assert status == 200
+        recovery_bag = json.loads(recovery_body)
+        assert recovery_bag["catalog_token"] == current_token
+        assert set(recovery_bag["instr_key"]) == {"value", "key_id"}
+    finally:
+        srv.shutdown()
+
+    persisted = secrets_store.load(path)["devices"]["dev-recovery-lazy"]
+    assert recovery_bag["instr_key"]["key_id"] == (
+        persisted["instr_key"]["key_id"])
 
 
 def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
@@ -869,7 +1182,7 @@ def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-write-fail/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         current_tok = json.loads(body)["catalog_token"]
 
         # Advance only the persisted previous-token deadline beyond overlap
@@ -884,7 +1197,7 @@ def test_previous_token_recovers_after_conf_write_failure_on_next_tick(
         status, _, retry_body = _req(
             port, "POST", "/v1/devices/dev-write-fail/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, retry_body
+        assert status == 200
         assert json.loads(retry_body)["catalog_token"] == current_tok
     finally:
         srv.shutdown()
@@ -1061,7 +1374,7 @@ def test_revoke_wins_over_previous_token_recovery(tmp_path):
         status, _, body = _req(
             port, "POST", "/v1/devices/dev-recover-revoke/token-refresh",
             token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
 
         result = {}
 
@@ -1177,7 +1490,7 @@ def test_concurrent_token_refresh_keeps_all_new_tokens(tmp_path):
             status, _, body = _req(
                 port, "POST", "/v1/devices/%s/token-refresh" % did,
                 token=old_toks[did], body=b"{}")
-            assert status == 200, body
+            assert status == 200
             with lock:
                 new_toks[did] = json.loads(body)["catalog_token"]
         except Exception as exc:  # pragma: no cover - surfaced via assert
@@ -1265,6 +1578,7 @@ def test_token_refresh_durable_write_failure_keeps_old_token(tmp_path,
     assert final["devices"]["dev-dur"]["catalog_token"]["value"] == old_tok
     # No half-applied rotation: no catalog_token_prev stash either.
     assert "catalog_token_prev" not in final["devices"]["dev-dur"]
+    assert "instr_key" not in final["devices"]["dev-dur"]
 
 
 # ---------------------------------------------------------------------------
@@ -1429,7 +1743,7 @@ def test_token_refresh_reencrypts_to_at_rest_age_volume(tmp_path, monkeypatch):
         status, _, body = _req(port, "POST",
                                "/v1/devices/dev-enc/token-refresh",
                                token=old_tok, body=b"{}")
-        assert status == 200, body
+        assert status == 200
         new_tok = json.loads(body)["catalog_token"]
         assert new_tok != old_tok
     finally:
@@ -1517,6 +1831,7 @@ def test_token_refresh_replace_after_encrypt_failure_keeps_old_token(
     final = secrets_store.load(sp)
     assert final["devices"]["dev-rep"]["catalog_token"]["value"] == old_tok
     assert "catalog_token_prev" not in final["devices"]["dev-rep"]
+    assert "instr_key" not in final["devices"]["dev-rep"]
 
     # Durable .age was rolled back to the OLD store: a restart's decrypt would
     # reproduce the old token (durable is NOT left ahead of live).

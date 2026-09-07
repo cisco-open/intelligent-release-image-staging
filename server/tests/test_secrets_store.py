@@ -261,6 +261,9 @@ def test_revoke_sets_all_device_records():
     store = {"devices": {}, "seeder": {}}
     secrets_store.mint(store, "dev-1", "catalog_token", 0)
     secrets_store.mint(store, "dev-1", "announce_token", 0)
+    secrets_store.mint(store, "dev-1", "instr_key", 0)
+    store["devices"]["dev-1"]["instr_key_prev"] = dict(
+        store["devices"]["dev-1"]["instr_key"])
     secrets_store.revoke(store, "dev-1")
     for rec in store["devices"]["dev-1"].values():
         assert rec["revoked"] is True
@@ -299,6 +302,48 @@ def test_secret_types_registry():
     assert st["catalog_token"]["ttl"] > 0
     assert st["announce_token"]["ttl"] == 0
     assert st["rpc_secret"]["ttl"] == 0
+    assert st["instr_key"] == {
+        "scope": "instructions",
+        "ttl": 2592000,
+        "auth": None,
+        "bits": 256,
+    }
+
+
+def test_non_dictionary_owned_record_is_not_retired_or_a_revoke_crash():
+    store = {
+        "devices": {
+            "damaged": {
+                "catalog_token": {
+                    "value": "cat", "created_at": 0,
+                    "expires_at": 0, "revoked": True,
+                },
+                "instr_key": None,
+            }
+        },
+        "seeder": {},
+    }
+    assert secrets_store.revoked_device_principals(store) == set()
+    secrets_store.revoke(store, "damaged")
+    assert store["devices"]["damaged"]["catalog_token"]["revoked"] is True
+    assert store["devices"]["damaged"]["instr_key"] is None
+
+
+def test_legacy_truthy_revocation_still_retires_device():
+    store = {
+        "devices": {
+            "legacy": {
+                "catalog_token": _make_record("cat", revoked=1),
+                "announce_token": _make_record("ann", revoked=1),
+                "rpc_secret": _make_record("rpc", revoked=1),
+            }
+        },
+        "seeder": {},
+    }
+    assert not any(secrets_store.valid(record, 1, 0)
+                   for record in store["devices"]["legacy"].values())
+    assert secrets_store.revoked_device_principals(store) == {
+        "device:legacy"}
 
 
 # ---------------------------------------------------------------------------
