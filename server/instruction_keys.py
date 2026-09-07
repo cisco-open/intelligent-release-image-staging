@@ -1294,6 +1294,28 @@ def _load_keylist_snapshot_locked(paths, roots=None, *, timeout=SSH_TIMEOUT,
             "metadata_consistent": consistent}
 
 
+def read_keylist_snapshot(paths):
+    """Read exact installed delivery bytes and identity under custody lock.
+
+    The installed artifact is authoritative during metadata crash recovery.
+    This reader uses the same bounded parse and consistency rules as custody,
+    but does not reverify roots, repair metadata, or install anything.
+    """
+    try:
+        with _custody_lock(paths):
+            snapshot = _load_keylist_snapshot_locked(paths)
+            if snapshot is None:
+                return None
+            parsed = snapshot["parsed"]
+            return {
+                "bytes": bytes(snapshot["bytes"]),
+                "keylist_seq": parsed["metadata"]["keylist_seq"],
+                "artifact_sha256": parsed["artifact_sha256"],
+            }
+    except OSError as exc:
+        raise InstructionKeyError("installed keylist is unreadable") from exc
+
+
 def install_keylist(paths, artifact, roots, *, now=None, timeout=SSH_TIMEOUT,
                     ssh_keygen="ssh-keygen"):
     now = int(time.time()) if now is None else now

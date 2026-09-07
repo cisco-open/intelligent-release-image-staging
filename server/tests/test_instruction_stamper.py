@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import copy
 import datetime as dt
 import fcntl
 import hashlib
@@ -2049,8 +2050,8 @@ def test_task13_s12_live_enums_require_exact_strings_and_preserve_safe_fallback(
     "sample-extra", "aria-extra", "aria-int-bool", "aria-int-float",
     "peer-port-bool", "peer-port-float", "peer-port-high", "peer-rate-bool",
     "peer-rate-high", "peer-progress-bool", "peer-progress-high",
-    "peer-client-long", "truncated", "peer-row-cap", "future-receipt",
-    "retention-bool", "retention-low", "receipt-mismatch", "seq-mismatch",
+    "peer-client-long", "truncated", "peer-row-cap", "future-observed-time",
+    "retention-bool", "retention-low", "received-time-mismatch", "seq-mismatch",
 ])
 def test_live_snapshot_requires_closed_exact_nested_types(
         damage, tmp_path):
@@ -2094,13 +2095,13 @@ def test_live_snapshot_requires_closed_exact_nested_types(
         sample["peer_connections_truncated"] = True
     elif damage == "peer-row-cap":
         sample["peer_connections"] = [dict(peer) for _ in range(33)]
-    elif damage == "future-receipt":
+    elif damage == "future-observed-time":
         sample["observed_received_at"] = NOW + 1
     elif damage == "retention-bool":
         sample["retention_seconds"] = True
     elif damage == "retention-low":
         sample["retention_seconds"] = live_samples.TICK_SECONDS
-    elif damage == "receipt-mismatch":
+    elif damage == "received-time-mismatch":
         sample["received_at"] = NOW - 1
     elif damage == "seq-mismatch":
         sample["last_observed_seq"] += 1
@@ -2281,3 +2282,223 @@ def test_role_publication_retry_reestablishes_artifact_and_index_durability(
     if active_state_identity is not None:
         assert (os.stat(paths.role_state).st_ino,
                 Path(paths.role_state).read_bytes()) == active_state_identity
+
+
+def _task14_role_fixture(tmp_path):
+    paths, _fleet, cat, producer, _marker, _certificate, _blob = _setup(tmp_path)
+    producer.stamp_device("device-1")
+    stamp = copy.deepcopy(_raw_stamp(cat))
+    artifact = Path(paths.roles) / (stamp["role"] + "@" + stamp["role_gen"])
+    return paths, stamp, artifact
+
+
+def test_task14_role_snapshot_exact_artifact_and_independent_nested_copies(tmp_path):
+    read = stamper.read_role_artifact_snapshot
+    paths, stamp, artifact = _task14_role_fixture(tmp_path)
+    body, signature = instructions.parse_role(artifact.read_bytes())
+    expected = {"body_bytes": body, "signature_bytes": signature,
+                "role": instructions.parse_json(body),
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
+    first = read(paths, stamp)
+    assert first == expected
+    first["role"]["control"]["telemetry_pause"] = True
+    first["role"]["qos"]["max_peers"] = 999
+    first["body_bytes"] = b"caller replacement"
+    assert read(paths, stamp) == expected
+
+
+@pytest.mark.parametrize("damage", ["extra", "missing-part", "boolean-serial",
+                                         "unsafe-role", "bad-generation", "part-time"])
+def test_task14_role_snapshot_validates_complete_stamp_before_paths(
+        tmp_path, monkeypatch, damage):
+    read = stamper.read_role_artifact_snapshot
+    paths, stamp, _artifact = _task14_role_fixture(tmp_path)
+    if damage == "extra":
+        stamp["extra"] = 1
+    elif damage == "missing-part":
+        del stamp["part"]
+    elif damage == "boolean-serial":
+        stamp["instr_serial"] = True
+    elif damage == "unsafe-role":
+        stamp["role"] = "../../outside"
+    elif damage == "bad-generation":
+        stamp["role_gen"] = "../outside"
+    else:
+        stamp["part"]["server_time"] += 1
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("invalid stamp reached producer paths or custody lock")
+
+    monkeypatch.setattr(stamper, "role_lock", forbidden)
+    monkeypatch.setattr(stamper, "_read_role_state", forbidden)
+    with pytest.raises(stamper.StamperError) as error:
+        read(paths, stamp)
+    assert error.value.code == "role_unavailable"
+
+
+def test_task14_role_snapshot_locks_complete_read_without_producer_side_effects(
+        tmp_path, monkeypatch):
+    import builtins
+
+    read = stamper.read_role_artifact_snapshot
+    paths, stamp, artifact = _task14_role_fixture(tmp_path)
+    protected = [artifact, Path(paths.role_state)]
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in protected}
+    real_open = builtins.open
+    opened = []
+
+    def locked_open(path, *args, **kwargs):
+        if os.fspath(path) in {str(artifact), paths.role_state}:
+            with real_open(paths.role_lock, "rb") as independent:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(independent.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            opened.append(os.fspath(path))
+        return real_open(path, *args, **kwargs)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("GET snapshot invoked producer mutation or secrets custody")
+
+    monkeypatch.setattr(builtins, "open", locked_open)
+    for name in ("_fsync_directory", "reconcile_roles", "_policy_references",
+                 "_atomic_bytes", "_atomic_json"):
+        monkeypatch.setattr(stamper, name, forbidden)
+    monkeypatch.setattr(secrets_store, "store_lock", forbidden)
+    monkeypatch.setattr(instruction_keys, "sign_instruction", forbidden)
+    read(paths, stamp)
+    assert opened == [paths.role_state, str(artifact)]
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in protected} == before
+    with open(paths.role_lock, "rb") as independent:
+        fcntl.flock(independent.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(independent.fileno(), fcntl.LOCK_UN)
+
+
+def test_task14_role_snapshot_missing_named_artifact_has_distinct_public_error(tmp_path):
+    read = stamper.read_role_artifact_snapshot
+    missing_type = stamper.RoleArtifactMissing
+    assert issubclass(missing_type, stamper.StamperError)
+    paths, stamp, artifact = _task14_role_fixture(tmp_path)
+    artifact.unlink()
+    with pytest.raises(missing_type):
+        read(paths, stamp)
+
+
+def test_task14_role_snapshot_bounds_artifact_read_before_parsing(tmp_path, monkeypatch):
+    import builtins
+
+    read = stamper.read_role_artifact_snapshot
+    paths, stamp, artifact = _task14_role_fixture(tmp_path)
+    artifact.write_bytes(b"x" * (instructions.INSTR_RESPONSE_MAX + 2))
+    real_open = builtins.open
+    reads = []
+
+    class BoundedArtifact:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.stream.close()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def read(self, size=-1):
+            assert 0 <= size
+            reads.append(size)
+            assert sum(reads) <= instructions.INSTR_RESPONSE_MAX + 1
+            return self.stream.read(size)
+
+    def bounded_open(path, *args, **kwargs):
+        stream = real_open(path, *args, **kwargs)
+        return BoundedArtifact(stream) if os.fspath(path) == str(artifact) else stream
+
+    monkeypatch.setattr(builtins, "open", bounded_open)
+    with pytest.raises(stamper.StamperError) as error:
+        read(paths, stamp)
+    assert error.value.code == "role_unavailable"
+    assert sum(reads) <= instructions.INSTR_RESPONSE_MAX + 1
+
+
+@pytest.mark.parametrize("damage", [
+    "missing-state", "missing-metadata", "pending-metadata", "extra-generation-field",
+    "metadata-role", "metadata-epoch", "metadata-issued", "metadata-expiry",
+    "metadata-semantic-digest", "metadata-certificate-digest", "artifact-digest",
+    "stamp-body-digest", "stamp-epoch", "signature-only", "signature-structure",
+    "body-identity", "oversize", "artifact-directory", "unreadable",
+])
+def test_task14_role_snapshot_rejects_corrupt_identity_signature_and_state(
+        tmp_path, monkeypatch, damage):
+    import builtins
+
+    read = stamper.read_role_artifact_snapshot
+    missing_type = stamper.RoleArtifactMissing
+    paths, stamp, artifact = _task14_role_fixture(tmp_path)
+    state_path = Path(paths.role_state)
+    state = json.loads(state_path.read_text())
+    metadata = state["generations"][stamp["role_gen"]]
+    if damage == "missing-state":
+        state_path.unlink()
+    elif damage == "missing-metadata":
+        state["generations"].clear()
+    elif damage == "pending-metadata":
+        metadata.update(state="pending", temp_name=".pending-" + stamp["role_gen"],
+                        unreferenced_at=None)
+    elif damage == "extra-generation-field":
+        metadata["generation"] = stamp["role_gen"]
+    elif damage == "metadata-role":
+        metadata["role"] = "another-role"
+    elif damage == "metadata-epoch":
+        metadata["epoch"] -= 1
+    elif damage == "metadata-issued":
+        metadata["issued_at"] += 1
+    elif damage == "metadata-expiry":
+        metadata["expires_at"] -= 1
+    elif damage == "metadata-semantic-digest":
+        metadata["semantic_body_sha256"] = "0" * 64
+    elif damage == "metadata-certificate-digest":
+        metadata["cert_sha256"] = "0" * 64
+    elif damage == "artifact-digest":
+        metadata["artifact_sha256"] = "0" * 64
+    elif damage == "stamp-body-digest":
+        stamp["role_body_sha256"] = "0" * 64
+    elif damage == "stamp-epoch":
+        stamp["epoch"] -= 1
+    elif damage in {"signature-only", "signature-structure", "body-identity"}:
+        body, signature = instructions.parse_role(artifact.read_bytes())
+        if damage == "signature-only":
+            signature = _signature(b"different certificate")
+        elif damage == "signature-structure":
+            signature = b"not an armored ssh signature"
+        else:
+            parsed = instructions.parse_json(body)
+            parsed["role"] = "another-role"
+            body = instructions.canonical_json(parsed)
+        changed = instructions.frame_role(body, signature)
+        artifact.write_bytes(changed)
+        if damage != "signature-only":
+            # Remove the outer digest failure: structural and identity checks
+            # must still reject even with internally updated artifact metadata.
+            metadata["artifact_sha256"] = hashlib.sha256(changed).hexdigest()
+    elif damage == "oversize":
+        artifact.write_bytes(b"x" * (instructions.INSTR_RESPONSE_MAX + 1))
+    elif damage == "artifact-directory":
+        artifact.unlink()
+        artifact.mkdir()
+    elif damage == "unreadable":
+        real_open = builtins.open
+
+        def denied(path, *args, **kwargs):
+            if os.fspath(path) == str(artifact):
+                raise PermissionError("injected unavailable artifact")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", denied)
+    if damage != "missing-state":
+        state_path.write_text(json.dumps(state))
+    with pytest.raises(stamper.StamperError) as error:
+        read(paths, stamp)
+    assert not isinstance(error.value, missing_type)
+    assert error.value.code == "role_unavailable"

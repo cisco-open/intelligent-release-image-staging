@@ -58,6 +58,23 @@ CONTROL_RANGES = {
     "telemetry_every_ticks": (1, 60),
 }
 
+# Device assertions are distinct from the server's desired QoS values above.
+# These are the seven global/default aria2 observations; individual active
+# downloads contribute only anonymous, bounded drift facts.
+APPLIED_FIELDS = (
+    "bt_max_peers", "max_upload_limit", "max_download_limit", "overall_up",
+    "overall_down", "request_peer_speed_limit", "max_concurrent",
+)
+INSTR_STATES = frozenset((
+    "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+    "rollback_rejected", "floor_reset", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "verifier_missing", "lkg_rejected", "lkg_unreadable",
+    "oversize", "reasserted", "instr_unavailable", "instr_pending",
+    "instr_forbidden", "tracker-only",
+))
+INSTR_REASONS = frozenset(("unknown_key", "bad_mac"))
+QOS_DRIFT_MAX_ROWS = 47
+
 
 class InstructionError(ValueError):
     """An instruction value is malformed or cannot be authenticated."""
@@ -337,6 +354,87 @@ def _i63(value, name):
             or value < 0 or value > MAX_I63:
         raise InstructionError("invalid %s" % name)
     return value
+
+
+def _attestation_integers(value, fields):
+    _closed(value, fields)
+    return {name: _i63(value[name], name) for name in fields}
+
+
+def _attestation_drift_pair(value):
+    pair = _attestation_integers(value, ("expected", "observed"))
+    if pair["expected"] == pair["observed"]:
+        raise InstructionError("drift values must differ")
+    return pair
+
+
+def _attestation_drift(value):
+    _closed(value, ("options",), ("blocklist_revision", "blocklist_rules"))
+    rows = value["options"]
+    if not isinstance(rows, list) or len(rows) > QOS_DRIFT_MAX_ROWS:
+        raise InstructionError("invalid drift observations")
+    clean = {"options": []}
+    for row in rows:
+        _closed(row, ("option", "expected", "observed"))
+        if not isinstance(row["option"], str) \
+                or row["option"] not in APPLIED_FIELDS:
+            raise InstructionError("invalid drift option")
+        pair = _attestation_drift_pair({
+            "expected": row["expected"], "observed": row["observed"]})
+        clean["options"].append(dict(pair, option=row["option"]))
+    for name in ("blocklist_revision", "blocklist_rules"):
+        if name in value:
+            clean[name] = _attestation_drift_pair(value[name])
+    if not rows and len(clean) == 1:
+        raise InstructionError("empty drift observations")
+    return clean
+
+
+def sanitize_instruction_attestation(data):
+    """Project copied, bounded device assertions, omitting invalid units.
+
+    This is not compliance verification. Unknown top-level fields are ignored;
+    unknown nested fields reject their complete applied/drift observation. No
+    identifier, peer address, arbitrary aria2 option or free text is retained.
+    """
+    if not isinstance(data, dict):
+        return {}
+    clean = {}
+    if "applied" in data:
+        try:
+            clean["applied"] = _attestation_integers(data["applied"], APPLIED_FIELDS)
+        except InstructionError:
+            pass
+    state = data.get("instr_state")
+    if isinstance(state, str) and state in INSTR_STATES:
+        if state == "key_rejected":
+            reason = data.get("instr_reason")
+            if isinstance(reason, str) and reason in INSTR_REASONS:
+                clean.update(instr_state=state, instr_reason=reason)
+        elif "instr_reason" not in data:
+            clean["instr_state"] = state
+    if "instr_serial" in data:
+        try:
+            clean["instr_serial"] = _i63(data["instr_serial"], "instr_serial")
+        except InstructionError:
+            pass
+    level = data.get("verify_level")
+    if isinstance(level, str) and level in ("sig", "none"):
+        clean["verify_level"] = level
+    if "blocklist_rules" in data or "blocklist_revision" in data:
+        pair = {name: data[name] for name in (
+            "blocklist_rules", "blocklist_revision") if name in data}
+        try:
+            clean.update(_attestation_integers(
+                pair, ("blocklist_rules", "blocklist_revision")))
+        except InstructionError:
+            pass
+    if "qos_drift" in data:
+        try:
+            clean["qos_drift"] = _attestation_drift(data["qos_drift"])
+        except InstructionError:
+            pass
+    return clean
 
 
 def _digest64(value, name):

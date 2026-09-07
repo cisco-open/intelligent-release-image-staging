@@ -1648,3 +1648,151 @@ def test_second_correction_huge_epoch_clock_has_stable_error(tmp_path):
             match="instruction epoch clock is invalid"):
         keys.new_epoch(paths, now=10 ** 1000)
     assert not Path(paths.state_dir).exists()
+
+
+def _task14_installed_keylist(tmp_path):
+    """A real root-signed, installed fixture; GET does not repeat custody."""
+    paths = _paths(tmp_path)
+    roots = _root_map(tmp_path)
+    artifact = _artifact(b"", 8, NOW, "root-a", roots["root-a"])
+    keys.install_keylist(paths, artifact, _root_public(roots), now=NOW)
+    return paths, roots, artifact
+
+
+def test_task14_keylist_snapshot_exact_bytes_sequence_digest_and_copies(tmp_path):
+    read = keys.read_keylist_snapshot
+    paths, _roots, artifact = _task14_installed_keylist(tmp_path)
+    expected = {"bytes": artifact, "keylist_seq": 8,
+                "artifact_sha256": hashlib.sha256(artifact).hexdigest()}
+    first = read(paths)
+    assert first == expected
+    first["keylist_seq"] = 100
+    first["bytes"] = b"caller replacement"
+    assert read(paths) == expected
+
+
+def test_task14_keylist_snapshot_uninitialized_and_lost_established(tmp_path):
+    read = keys.read_keylist_snapshot
+    assert read(_paths(tmp_path / "fresh")) is None
+    paths, _roots, _artifact_bytes = _task14_installed_keylist(tmp_path / "used")
+    Path(paths.keylist_current).unlink()
+    with pytest.raises(keys.InstructionKeyError):
+        read(paths)
+
+
+@pytest.mark.parametrize("metadata_state", ["absent", "behind"])
+def test_task14_keylist_snapshot_artifact_authoritative_crash_states(
+        tmp_path, metadata_state):
+    read = keys.read_keylist_snapshot
+    paths, roots, _old = _task14_installed_keylist(tmp_path)
+    newer = _artifact(b"", 9, NOW + 1, "root-a", roots["root-a"])
+    Path(paths.keylist_current).write_bytes(newer)
+    if metadata_state == "absent":
+        Path(paths.keylist_state).unlink()
+    before = (Path(paths.keylist_state).read_bytes()
+              if Path(paths.keylist_state).exists() else None)
+    snapshot = read(paths)
+    assert snapshot == {"bytes": newer, "keylist_seq": 9,
+                        "artifact_sha256": hashlib.sha256(newer).hexdigest()}
+    assert (Path(paths.keylist_state).read_bytes()
+            if Path(paths.keylist_state).exists() else None) == before
+
+
+@pytest.mark.parametrize("damage", [
+    "state-ahead", "artifact-digest", "krl-digest", "issued-at", "root-id",
+    "artifact-malformed", "artifact-oversize", "state-malformed",
+    "state-oversize", "artifact-directory", "state-directory",
+])
+def test_task14_keylist_snapshot_rejects_corruption_and_contradictions(
+        tmp_path, damage):
+    read = keys.read_keylist_snapshot
+    paths, _roots, _artifact_bytes = _task14_installed_keylist(tmp_path)
+    artifact_path, state_path = Path(paths.keylist_current), Path(paths.keylist_state)
+    state = json.loads(state_path.read_text())
+    if damage == "state-ahead":
+        state["keylist_seq"] += 1
+    elif damage == "artifact-digest":
+        state["artifact_sha256"] = "0" * 64
+    elif damage == "krl-digest":
+        state["krl_sha256"] = "0" * 64
+    elif damage == "issued-at":
+        state["issued_at"] -= 1
+    elif damage == "root-id":
+        state["verified_root_id"] = "root-b"
+        state["root_attestations"]["root-b"] = dict(
+            state["root_attestations"]["root-a"])
+    if damage in {"state-ahead", "artifact-digest", "krl-digest", "issued-at", "root-id"}:
+        state_path.write_text(json.dumps(state))
+    elif damage == "artifact-malformed":
+        artifact_path.write_bytes(b"not a keylist\n")
+    elif damage == "artifact-oversize":
+        artifact_path.write_bytes(b"x" * (keys.MAX_KEYLIST_BYTES + 1))
+    elif damage == "state-malformed":
+        state_path.write_text('{"keylist_seq":8,"keylist_seq":9}')
+    elif damage == "state-oversize":
+        state_path.write_bytes(b" " * (keys.MAX_METADATA_BYTES + 1))
+    else:
+        target = artifact_path if damage == "artifact-directory" else state_path
+        target.unlink()
+        target.mkdir()
+    with pytest.raises(keys.InstructionKeyError):
+        read(paths)
+
+
+def test_task14_keylist_snapshot_holds_custody_lock_and_does_not_reverify_or_write(
+        tmp_path, monkeypatch):
+    import fcntl
+
+    read = keys.read_keylist_snapshot
+    paths, _roots, artifact = _task14_installed_keylist(tmp_path)
+    protected = [Path(paths.keylist_current), Path(paths.keylist_state)]
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in protected}
+    real_parse = keys.parse_keylist_artifact
+    real_state = keys._read_keylist_state
+    calls = []
+
+    def assert_locked():
+        with open(paths.keylist_lock, "rb") as independent:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(independent.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def locked_parse(value):
+        assert_locked()
+        calls.append("artifact")
+        return real_parse(value)
+
+    def locked_state(path):
+        assert_locked()
+        calls.append("state")
+        return real_state(path)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("snapshot must not repeat or mutate root custody")
+
+    monkeypatch.setattr(keys, "parse_keylist_artifact", locked_parse)
+    monkeypatch.setattr(keys, "_read_keylist_state", locked_state)
+    for name in ("discover_roots", "verify_signature", "install_keylist",
+                 "sign_instruction", "_atomic_write", "_atomic_write_json"):
+        monkeypatch.setattr(keys, name, forbidden)
+    assert read(paths)["bytes"] == artifact
+    assert calls == ["artifact", "state"]
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in protected} == before
+    with open(paths.keylist_lock, "rb") as independent:
+        fcntl.flock(independent.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(independent.fileno(), fcntl.LOCK_UN)
+
+
+def test_task14_keylist_snapshot_unreadable_state_is_not_uninitialized(
+        tmp_path, monkeypatch):
+    read = keys.read_keylist_snapshot
+    paths, _roots, _artifact_bytes = _task14_installed_keylist(tmp_path)
+    real_open = keys.os.open
+
+    def denied(path, *args, **kwargs):
+        if os.fspath(path) == paths.keylist_current:
+            raise PermissionError("injected unreadable artifact")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(keys.os, "open", denied)
+    with pytest.raises(keys.InstructionKeyError):
+        read(paths)

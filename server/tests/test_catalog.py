@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import catalog
+import instructions
 import keyed_state
 import secrets_store
 
@@ -3943,3 +3944,178 @@ def test_task13_quarantine_auto_unassign_carries_instruction_stamp(tmp_path):
     assert row["approved_image_ids"] == []
     assert row["plans"] == {}
     assert row["instr"] == stamp
+
+
+# --- Task 14: one raw policy snapshot and catalog regression seams ---------
+
+def _task14_stamp(serial=7):
+    issued, expires = 100, 200
+    return {
+        "epoch": 100, "instr_serial": serial, "policy_revision": 3,
+        "platform": "guestshell", "role": "default",
+        "role_gen": "a" * 64, "role_body_sha256": "b" * 64,
+        "key_id": "c" * 64, "verify_level": "sig",
+        "issued_at": issued, "expires_at": expires, "degraded": False,
+        "part": {"peers": {"mode": "tracker-only",
+                            "include_origin": False,
+                            "allowed_expires_at": expires},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": issued}}
+
+
+def _task14_write_policy_rows(store, rows):
+    grouped = {}
+    for device_id, row in rows.items():
+        grouped.setdefault(keyed_state.bucket_of(device_id), {})[device_id] = row
+    for bucket, shard_rows in grouped.items():
+        path = (Path(keyed_state.shard_dir(store.policy_path)) /
+                ("%02x.json" % bucket))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(shard_rows, allow_nan=False))
+
+
+def test_task14_raw_policy_snapshot_migrates_structurally_raw_first_and_durable(
+        tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    policy = state / "policy.json"
+    policy.write_text(json.dumps({
+        "device-a": {"approved_image_id": "legacy"},
+        # Structurally valid and therefore migrated by the raw view, while a
+        # later strict policy consumer must reject the malformed stamp.
+        "device-b": {"approved_image_id": None, "instr": {"epoch": 1}},
+    }))
+    shard_dir = Path(keyed_state.shard_dir(str(policy)))
+    shard_dir.mkdir()
+    bucket = keyed_state.bucket_of("device-a")
+    (shard_dir / ("%02x.json" % bucket)).write_text(json.dumps({
+        "device-a": {"approved_image_id": "newer-shard"}}))
+    barriers = []
+    real_fsync = keyed_state._fsync_directory
+
+    def counted(directory):
+        barriers.append(os.fspath(directory))
+        return real_fsync(directory)
+
+    monkeypatch.setattr(keyed_state, "_fsync_directory", counted)
+    store = catalog.CatalogStore(str(state))
+    assert store.read_policy_row_snapshot("device-a") == {
+        "approved_image_id": "newer-shard"}
+    assert barriers and Path(str(policy) + ".migrated").exists()
+    assert policy.exists() and "not valid JSON" in policy.read_text()
+    first = store.read_policy_row_snapshot("device-b")
+    assert first["instr"] == {"epoch": 1}
+    first["instr"]["epoch"] = 99
+    assert store.read_policy_row_snapshot("device-b")["instr"] == {"epoch": 1}
+    with pytest.raises(catalog.StateFileError):
+        store.get_policy("device-b")
+
+
+def test_task14_raw_policy_snapshot_rejects_recursive_nonfinite_duplicate_and_shape(
+        tmp_path, monkeypatch):
+    cases = (
+        '{"device-a":{"nested":[1e999]}}',
+        '{"device-a":{},"device-a":{}}',
+        '[]',
+        '{"device-a":[]}',
+    )
+    for index, payload in enumerate(cases):
+        state = tmp_path / str(index)
+        state.mkdir()
+        policy = state / "policy.json"
+        original = payload.encode()
+        policy.write_bytes(original)
+        store = catalog.CatalogStore(str(state))
+        with pytest.raises(catalog.StateFileError):
+            store.read_policy_row_snapshot("device-a")
+        assert policy.read_bytes() == original
+        assert not Path(str(policy) + ".migrated").exists()
+        shard_dir = Path(keyed_state.shard_dir(str(policy)))
+        assert not shard_dir.exists() or not list(shard_dir.glob("*.json"))
+
+    state = tmp_path / "copy-errors"
+    state.mkdir()
+    store = catalog.CatalogStore(str(state))
+    row = {"approved_image_id": None, "approved_image_ids": [],
+           "copy_failure": True}
+    _task14_write_policy_rows(store, {"device-a": row})
+    real_deepcopy = catalog.copy.deepcopy
+    for error_type in (RecursionError, OverflowError):
+        def fail_copy(_value, selected=error_type):
+            raise selected("synthetic copy depth failure")
+
+        monkeypatch.setattr(catalog.copy, "deepcopy", fail_copy)
+        with pytest.raises(catalog.StateFileError):
+            store.read_policy_row_snapshot("device-a")
+        with pytest.raises(catalog.StateFileError):
+            store.device_policy_view_from_row("device-a", row)
+    monkeypatch.setattr(catalog.copy, "deepcopy", real_deepcopy)
+
+
+def test_task14_device_policy_projection_adds_only_stored_instr_rev_with_one_read(
+        tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    stamp = _task14_stamp()
+    _task14_write_policy_rows(store, {"device-a": {
+        "approved_image_id": None, "approved_image_ids": [],
+        "plans": {}, "instr": stamp}})
+    view = store.device_policy_view("device-a")
+    assert view == {"approved_image_id": None, "approved_image_ids": [],
+                    "plans": {},
+                    "instr_rev": {"epoch": 100, "instr_serial": 7}}
+    row = store.read_policy_row_snapshot("device-a")
+    assert store.device_policy_view_from_row("device-a", row) == view
+    row["instr"] = {"epoch": 1}
+    with pytest.raises(catalog.StateFileError):
+        store.device_policy_view_from_row("device-a", row)
+
+
+def test_task14_complete_handler_policy_read_counts_and_legacy_behavior(
+        tmp_path, monkeypatch):
+    real_read = catalog.CatalogStore.read_policy_row_snapshot
+    srv, port = _serve(tmp_path, "tok", device_id="device-a")
+    store = catalog.CatalogStore(str(tmp_path))
+    counts = []
+
+    def counted(state, device_id):
+        if state.policy_path == store.policy_path:
+            counts.append(device_id)
+        return real_read(state, device_id)
+
+    monkeypatch.setattr(catalog.CatalogStore, "read_policy_row_snapshot",
+                        counted)
+    try:
+        checks = (
+            ("GET", "/v1/devices/device-a/policy", None, 200, 1),
+            ("GET", "/v1/devices/device-a/instructions", None, 404, 1),
+            ("GET", "/v1/devices/device-a/instruction-keylist", None, 404, 0),
+            ("POST", "/v1/devices/device-a/heartbeat", "{}", 200, 1),
+        )
+        for method, path, body, expected, reads in checks:
+            counts[:] = []
+            status, _, _ = _req(port, method, path, token="tok", body=body)
+            assert status == expected and len(counts) == reads
+        counts[:] = []
+        status, _, body = _req(port, "GET", "/v1/images", token="tok")
+        assert status == 200 and json.loads(body)["images"][0]["id"] == "img1"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_task14_heartbeat_uses_authoritative_attestation_sanitizer():
+    data = {
+        "current_image_id": "img1", "instr_state": "key_rejected",
+        "instr_reason": "bad_mac", "instr_serial": 4,
+        "verify_level": "sig",
+        "applied": {name: index for index, name in enumerate(
+            instructions.APPLIED_FIELDS, 1)},
+    }
+    expected = instructions.sanitize_instruction_attestation(data)
+    sanitized = catalog.sanitize_heartbeat(data, "192.0.2.1")
+    assert {key: sanitized[key] for key in expected} == expected
+    assert set(sanitized) == {
+        "current_image_id", "free_flash_bytes", "version", "stage_state",
+        "stage_error", "target_fs", "model", "telemetry_enabled",
+        "telemetry_stream_enabled", "staged_image_ids", "errored_image_ids",
+        "swarm_ip", *expected}

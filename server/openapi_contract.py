@@ -15,6 +15,7 @@ import re
 
 import api_problem
 import api_routes
+import instructions
 import peer_policy
 
 
@@ -28,6 +29,129 @@ POLICY_MUTATIONS = {
     ("POST", "/devices/{device_id}/role"),
     ("POST", "/devices/bulk-role"),
 }
+
+INSTRUCTION_RESOURCES = (
+    "/v1/devices/{device_id}/instructions",
+    "/v1/devices/{device_id}/instruction-keylist",
+)
+
+
+def _instruction_resource(route):
+    return (route.service == "catalog" and route.method == "GET"
+            and route.path in INSTRUCTION_RESOURCES)
+
+
+def _instruction_headers(success=True):
+    headers = {
+        "Cache-Control": {"schema": {"type": "string", "const":
+            "private, no-store" if success else "no-store"}},
+        "Vary": {"schema": {"type": "string", "const": "Authorization"}},
+        "Date": {"schema": {"type": "string"},
+                 "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                 "example": "Mon, 07 Sep 2026 12:00:00 GMT"},
+        "X-Content-Type-Options": {
+            "schema": {"type": "string", "const": "nosniff"}},
+    }
+    if success:
+        headers["ETag"] = {
+            "schema": {"type": "string", "pattern": '^"sha256-[0-9a-f]{64}"$'},
+            "description": "Strong SHA-256 digest of the exact selected response bytes",
+            "example": '"sha256-' + "0" * 64 + '"',
+        }
+    return headers
+
+
+def _instruction_problem_variants(route, status):
+    keylist = route.path == INSTRUCTION_RESOURCES[1]
+    return {
+        401: (("catalog-authentication-required", "Catalog authentication required"),),
+        403: (("instruction-device-forbidden", "Instruction access forbidden"),),
+        404: (("instruction-keylist-missing", "Instruction keylist missing"),)
+             if keylist else (("instruction-stamp-missing", "Instruction stamp missing"),),
+        409: (("stale_pointer", "Stale instruction pointer"),),
+        429: (("instruction-rate-limit-exceeded", "Instruction request rate limit exceeded"),),
+        503: (("credential-store-unavailable", "Credential store unavailable"),
+              ("instruction-keylist-unavailable", "Instruction keylist unavailable")
+              if keylist else ("instruction-state-unavailable", "Instruction state unavailable")),
+    }[status]
+
+
+def _instruction_integer(minimum=0):
+    return {"type": "integer", "minimum": minimum, "maximum": instructions.MAX_I63}
+
+
+def _instruction_pair_schema():
+    return {
+        "type": "object", "required": ["expected", "observed"],
+        "additionalProperties": False,
+        "properties": {name: _instruction_integer() for name in ("expected", "observed")},
+        "description": "Non-Boolean integers; expected and observed must differ. Equality is rejected by the runtime sanitizer.",
+    }
+
+
+def _instruction_attestation_request(schema, legacy):
+    """Document the authoritative vocabulary and complete omission units."""
+    applied_names = list(instructions.APPLIED_FIELDS)
+    pair = _instruction_pair_schema()
+    option = _instruction_pair_schema()
+    option["required"] = ["option", "expected", "observed"]
+    option["properties"]["option"] = {"type": "string", "enum": applied_names}
+    properties = schema["properties"]
+    properties.update({
+        "applied": {
+            "type": "object", "required": applied_names,
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in applied_names},
+            "description": "Seven complete global/default aria2 observations, not per-GID claims. Omitted until successful assertion; retained for known LKG/fallback settings. Invalid objects are omitted as a whole.",
+        },
+        "instr_state": {"type": "string", "enum": sorted(instructions.INSTR_STATES)},
+        "instr_reason": {"type": "string", "enum": sorted(instructions.INSTR_REASONS)},
+        "instr_serial": _instruction_integer(),
+        "verify_level": {"type": "string", "enum": ["sig", "none"]},
+        "blocklist_rules": _instruction_integer(),
+        "blocklist_revision": _instruction_integer(),
+        "qos_drift": {
+            "type": "object", "required": ["options"], "additionalProperties": False,
+            "properties": {
+                "options": {"type": "array", "maxItems": instructions.QOS_DRIFT_MAX_ROWS,
+                            "items": option},
+                "blocklist_revision": pair, "blocklist_rules": pair,
+            },
+            "anyOf": [
+                {"properties": {"options": {"minItems": 1}}},
+                {"required": ["blocklist_revision"]},
+                {"required": ["blocklist_rules"]},
+            ],
+            "description": "One bounded fact; preserves option order and duplicate observations. At most seven global/default plus four options for each of ten active GIDs. GIDs, scopes, indexes, addresses and arbitrary option names are never transmitted. Active GIDs contribute only bt_max_peers, max_upload_limit, max_download_limit or request_peer_speed_limit. Any invalid row or pair omits the whole fact.",
+        },
+    })
+    schema["dependentRequired"] = {
+        "blocklist_rules": ["blocklist_revision"],
+        "blocklist_revision": ["blocklist_rules"],
+    }
+    schema["allOf"] = [{
+        "if": {"required": ["instr_state"],
+               "properties": {"instr_state": {"const": "key_rejected"}}},
+        "then": {"required": ["instr_reason"]},
+        "else": {"not": {"required": ["instr_reason"]}},
+    }]
+    schema["description"] = (
+        "Instruction fields are optional device assertions, not verified compliance. "
+        "The server omits invalid state/reason and blocklist pairs as units; legacy "
+        "agents omit all instruction fields. Integers exclude Boolean values and "
+        "fractional or floating-point input. Device role/platform, keys, signatures, "
+        "peer lists and opaque aria2 option dictionaries are never accepted as attestation.")
+    applied = dict(legacy, instr_state="applied", instr_serial=7, verify_level="sig",
+                   applied={name: index for index, name in enumerate(applied_names)},
+                   blocklist_rules=12, blocklist_revision=3,
+                   qos_drift={"options": [{"option": "max_upload_limit",
+                                          "expected": 8192, "observed": 16384}]})
+    return {"schema": schema, "examples": {
+        "applied": {"value": applied},
+        "keyRejected": {"value": dict(legacy, instr_state="key_rejected",
+                                      instr_reason="unknown_key")},
+        "legacy": {"value": legacy},
+    }}
 
 
 def _policy_mutation(route):
@@ -300,6 +424,8 @@ def _problem_variants(route, status):
     a missing browser session from an unavailable tier/device credential. The
     mature handler still supplies the status-level code for business errors.
     """
+    if _instruction_resource(route):
+        return _instruction_problem_variants(route, status)
     suffix = _resource_suffix(route)
     if route.service == "artifact":
         if status == 403 and route.security == "legacyGuestShell":
@@ -409,6 +535,27 @@ def _problem_response(route, status):
         "x-iris-problem-codes": [code for code, _title in variants],
         "content": {"application/problem+json": media},
     }
+    if _instruction_resource(route):
+        schemas = [{
+            "type": "object", "required": ["type", "title", "status", "code"],
+            "additionalProperties": False,
+            "properties": {name: {"const": value} for name, value in doc.items()},
+        } for doc in documents]
+        media["schema"] = schemas[0] if len(schemas) == 1 else {"oneOf": schemas}
+        response["headers"] = _instruction_headers(success=False)
+        if status == 401:
+            response["headers"]["WWW-Authenticate"] = {
+                "schema": {"type": "string", "const": "Bearer"}, "example": "Bearer"}
+        if status in (409, 429, 503):
+            response["headers"]["Retry-After"] = {
+                "schema": {"type": "integer", "minimum": 1},
+                "example": 1 if status == 429 else 10,
+                "description": "Computed seconds until one limiter token is available"
+                               if status == 429 else "Retry after ten seconds",
+            }
+            if status != 429:
+                response["headers"]["Retry-After"]["schema"]["const"] = 10
+        return response
     if status in (429, 503):
         response["headers"] = {
             "Retry-After": {"description": "Seconds before a retry when known",
@@ -628,6 +775,13 @@ def _query_parameters(route):
             "schema": {"type": "string", "const": "bearer"},
             "example": "bearer",
         })
+    if _instruction_resource(route):
+        params.append({
+            "name": "If-None-Match", "in": "header", "required": False,
+            "schema": {"type": "string"},
+            "description": "RFC 9110 weak comparison for GET: accepts a weak or strong tag, a comma-separated list, or wildcard *. Multiple field lines form one list. Invalid syntax and nonmatches return the ordinary response. Authentication, limiter admission and current state/key validation precede matching.",
+            "example": 'W/"sha256-' + "0" * 64 + '"',
+        })
     return params
 
 
@@ -794,6 +948,9 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if route.service == "catalog" and path.endswith("/heartbeat"):
+        return {"required": required_body, "content": {
+            "application/json": _instruction_attestation_request(schema, example)}}
     if suffix == "/settings/image-verification":
         schema["properties"]["mode"].update(
             {"enum": ["off", "daily", "weekly"]})
@@ -1129,6 +1286,13 @@ def _json_success_example(route):
 def _success(route):
     path = route.path
     suffix = _resource_suffix(route)
+    if _instruction_resource(route):
+        artifact = "IRIS-KEYLIST/1" if path == INSTRUCTION_RESOURCES[1] else "IRIS-INSTR/1"
+        return "200", {
+            "description": "Exact " + artifact + " framed bytes",
+            "headers": _instruction_headers(),
+            "content": {"application/octet-stream": _media({}, "<" + artifact + " bytes>")},
+        }
     if path.endswith("/authorizations"):
         return "204", {"description": "Headers authorized; no response body"}
     if path.endswith("/console-certificate"):
@@ -1579,6 +1743,31 @@ def _success(route):
         response["headers"] = {"ETag": {
             "schema": {"type": "string"},
             "example": '"iris-peer-policy-5"'}}
+    if route.service == "catalog" and suffix in (
+            "/v1/devices/{device_id}/policy", "/v1/devices/{device_id}/heartbeat"):
+        media = response["content"]["application/json"]
+        properties = media["schema"]["properties"]
+        properties["instr_rev"] = {
+            "type": "object", "required": ["epoch", "instr_serial"],
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in ("epoch", "instr_serial")},
+            "description": "Pointer from the complete stored stamp only; absent before stamping. Role/cadence failure does not remove a valid pointer.",
+        }
+        properties["keylist_seq"] = dict(_instruction_integer(1), description=(
+            "Monotonic sequence parsed from the installed signed artifact; omitted "
+            "when uninitialized or unavailable without failing policy/heartbeat."))
+        legacy = media.pop("example")
+        current = dict(legacy, instr_rev={"epoch": 1788782400, "instr_serial": 7},
+                       keylist_seq=8)
+        media["examples"] = {"instructionsAvailable": {"value": current},
+                             "legacyOrUnavailable": {"value": legacy}}
+        if suffix.endswith("/heartbeat"):
+            properties["stream_every"] = {
+                "type": "integer", "minimum": 1, "maximum": 60,
+                "description": "The one server-resolved telemetry cadence reused for observation validation, retention and response; global settings supply the fallback."}
+            properties["stream_pause"] = {"type": "boolean"}
+            media["examples"]["fallbackCadence"] = {
+                "value": {"ok": True, "stream_every": 4, "stream_pause": False}}
     return "200", response
 
 
@@ -1634,6 +1823,11 @@ def _operation(route):
         op["requestBody"] = body
     success_status, success = _success(route)
     op["responses"][success_status] = success
+    if _instruction_resource(route):
+        op["responses"]["304"] = {
+            "description": "Selected representation matches If-None-Match after current authorization, limiter and state checks; no body, Content-Type or Content-Length",
+            "headers": _instruction_headers(),
+        }
     if route.method == "DELETE" and _policy_mutation(route):
         op["responses"]["200"]["description"] = "Dry-run candidate and confirmation preview"
         op["responses"]["204"] = {"description": "Role deleted; no body",
@@ -1681,6 +1875,9 @@ def _error_statuses(route):
     subset of its family's declared codes. This remains explicit rather than
     an unbounded OpenAPI ``default`` response.
     """
+    if _instruction_resource(route):
+        return ((401, 403, 404, 429, 503) if route.path == INSTRUCTION_RESOURCES[1]
+                else (401, 403, 404, 409, 429, 503))
     suffix = _resource_suffix(route)
     policy_errors = _policy_errors(route)
     if policy_errors is not None:
@@ -1864,6 +2061,17 @@ def _resource_path_exception(route):
 
 def _description(route):
     notes = [route.summary + "."]
+    if _instruction_resource(route):
+        notes.extend([
+            "Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence.",
+            "Both instruction routes share one process-local per-device token bucket: burst 2, refill one token per 10 seconds, 20,000 device bound, and 20-second idle pruning. Body, 304 and later resource-error requests all consume a token; authentication/authorization failures do not. Retry-After on 429 is max(1, ceil((1 - tokens) * 10)). Restart resets the limiter; multiple processes or replicas multiply the allowance. The supported deployment uses one catalog process/replica.",
+            "No instruction-key material, role artifacts, signatures or trust roots have separate delivery aliases. IRIS stages images only.",
+        ])
+        if route.path == INSTRUCTION_RESOURCES[0]:
+            notes.append("Reconstructs at most 256 KiB from one stored stamp and its validated immutable role artifact. The exact stamped non-revoked current key remains eligible regardless of rotation-trigger expiry; a non-revoked previous key is eligible only before its overlap deadline. Every response, including cache hits and 304, rechecks complete state and key eligibility. Missing stamp/named file returns counted 404; an unavailable stamped key returns stale_pointer 409. server_time equals stored issued_at; current HTTP Date does not change envelope bytes. The process-memory ciphertext cache is bounded at 256 entries and 16 MiB; per-device ciphertext is never persisted.")
+        else:
+            notes.append("Serves at most 128 KiB of the exact installed root-signed keylist, including a KRL of at most 80 KiB. Both artifact and metadata absent means uninitialized 404; established artifact loss or contradictory/corrupt state means 503. An artifact ahead of its metadata remains authoritative and serveable. No signature verification, root discovery or repair occurs on GET.")
+        return " ".join(notes)
     if route.service == "console":
         notes.append("Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding.")
     elif route.service == "management":

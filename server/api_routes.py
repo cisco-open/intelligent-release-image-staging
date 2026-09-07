@@ -141,6 +141,8 @@ ROUTES = tuple(
     Route("catalog", "GET", "/v1/images/{image_id}", "deviceBearer", "Read assigned image"),
     Route("catalog", "GET", "/v1/torrents/{image_id}", "deviceBearer", "Download personalized torrent"),
     Route("catalog", "GET", "/v1/devices/{device_id}/policy", "deviceBearer", "Read device policy"),
+    Route("catalog", "GET", "/v1/devices/{device_id}/instructions", "deviceBearer", "Read sealed device instructions"),
+    Route("catalog", "GET", "/v1/devices/{device_id}/instruction-keylist", "deviceBearer", "Read installed instruction keylist"),
     Route("catalog", "POST", "/v1/devices/{device_id}/heartbeat", "deviceBearer", "Record heartbeat"),
     Route("catalog", "POST", "/v1/devices/{device_id}/telemetry", "deviceBearer", "Record telemetry"),
     Route("catalog", "POST", "/v1/devices/{device_id}/token-refresh", "deviceBearer", "Rotate device token"),

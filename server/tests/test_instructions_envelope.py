@@ -5,6 +5,7 @@
 """Frozen byte and closed-schema contracts for Task 13 instructions."""
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -341,3 +342,182 @@ print(hashlib.sha256(instructions.seal_parts(h,p,rb,b"sig",key)).hexdigest())
                                 check=True, capture_output=True, text=True)
         values.append(result.stdout.strip())
     assert values[0] == values[1]
+
+
+_TASK14_APPLIED = (
+    "bt_max_peers", "max_upload_limit", "max_download_limit", "overall_up",
+    "overall_down", "request_peer_speed_limit", "max_concurrent",
+)
+_TASK14_STATES = {
+    "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+    "rollback_rejected", "floor_reset", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "verifier_missing", "lkg_rejected", "lkg_unreadable",
+    "oversize", "reasserted", "instr_unavailable", "instr_pending",
+    "instr_forbidden", "tracker-only",
+}
+_TASK14_MAX = (1 << 63) - 1
+
+
+def _task14_attestation():
+    return {
+        "applied": {name: index for index, name in enumerate(_TASK14_APPLIED)},
+        "instr_state": "applied", "instr_serial": 7, "verify_level": "sig",
+        "blocklist_rules": 12, "blocklist_revision": 3,
+        "qos_drift": {
+            "options": [{"option": "max_upload_limit", "expected": 1, "observed": 2}],
+            "blocklist_revision": {"expected": 3, "observed": 4},
+            "blocklist_rules": {"expected": 12, "observed": 13},
+        },
+    }
+
+
+def test_task14_instruction_attestation_authoritative_constants():
+    assert set(instructions.APPLIED_FIELDS) == set(_TASK14_APPLIED)
+    assert len(instructions.APPLIED_FIELDS) == 7
+    assert set(instructions.INSTR_STATES) == _TASK14_STATES
+    assert set(instructions.INSTR_REASONS) == {"unknown_key", "bad_mac"}
+    assert instructions.QOS_DRIFT_MAX_ROWS == 47
+    assert instructions.MAX_I63 == _TASK14_MAX
+
+
+def test_task14_instruction_attestation_complete_projection_is_copied_and_private():
+    sanitize = instructions.sanitize_instruction_attestation
+    expected = _task14_attestation()
+    supplied = copy.deepcopy(expected)
+    supplied.update({"role": "untrusted-role", "platform": "xr-appmgr",
+                     "gid": "untrusted-id", "key_id": "0" * 64,
+                     "key": "never stored", "signature": "never stored",
+                     "envelope": "never stored", "peers": ["192.0.2.1"],
+                     "aria2_options": {"arbitrary": "never stored"}})
+    before = copy.deepcopy(supplied)
+    result = sanitize(supplied)
+    assert result == expected
+    assert supplied == before
+    result["applied"]["max_concurrent"] = 99
+    result["qos_drift"]["options"][0]["observed"] = 77
+    assert supplied == before
+    assert sanitize({}) == {}
+
+
+@pytest.mark.parametrize("state", sorted(_TASK14_STATES))
+def test_task14_instruction_attestation_exact_states_and_reason_dependency(state):
+    sanitize = instructions.sanitize_instruction_attestation
+    candidate = {"instr_state": state}
+    if state == "key_rejected":
+        assert sanitize(candidate) == {}
+        for reason in ("unknown_key", "bad_mac"):
+            complete = dict(candidate, instr_reason=reason)
+            assert sanitize(complete) == complete
+    else:
+        assert sanitize(candidate) == candidate
+        assert sanitize(dict(candidate, instr_reason="unknown_key")) == {}
+
+
+@pytest.mark.parametrize("candidate", [
+    {"instr_state": "pre-instructions"}, {"instr_state": "pointer_skew"},
+    {"instr_state": "qos_drift"}, {"instr_state": "future-state"},
+    {"instr_state": []}, {"instr_state": True},
+    {"instr_reason": "unknown_key"},
+    {"instr_state": "key_rejected", "instr_reason": "future-reason"},
+    {"instr_state": "key_rejected", "instr_reason": []},
+])
+def test_task14_instruction_attestation_bad_state_reason_omits_only_that_unit(candidate):
+    sanitize = instructions.sanitize_instruction_attestation
+    candidate = dict(candidate, instr_serial=8, verify_level="none")
+    assert sanitize(candidate) == {"instr_serial": 8, "verify_level": "none"}
+
+
+@pytest.mark.parametrize("field", _TASK14_APPLIED)
+def test_task14_instruction_attestation_applied_is_seven_closed_bounded_integers(field):
+    sanitize = instructions.sanitize_instruction_attestation
+    complete = {name: 0 for name in _TASK14_APPLIED}
+    for valid in (0, _TASK14_MAX):
+        candidate = dict(complete, **{field: valid})
+        assert sanitize({"applied": candidate}) == {"applied": candidate}
+    for invalid in (-1, _TASK14_MAX + 1, True, 1.0, "1", None):
+        candidate = dict(complete, **{field: invalid})
+        assert sanitize({"applied": candidate, "instr_state": "lkg"}) == {
+            "instr_state": "lkg"}
+    partial = dict(complete)
+    del partial[field]
+    assert sanitize({"applied": partial}) == {}
+    assert sanitize({"applied": dict(complete, arbitrary_option=1)}) == {}
+
+
+def test_task14_instruction_attestation_serial_verify_and_blocklist_units():
+    sanitize = instructions.sanitize_instruction_attestation
+    for boundary in (0, _TASK14_MAX):
+        candidate = {"instr_serial": boundary, "blocklist_rules": boundary,
+                     "blocklist_revision": boundary}
+        assert sanitize(candidate) == candidate
+    for level in ("sig", "none"):
+        assert sanitize({"verify_level": level}) == {"verify_level": level}
+    for invalid in (-1, _TASK14_MAX + 1, True, 1.0, "1", None):
+        assert sanitize({"instr_serial": invalid}) == {}
+        for field in ("blocklist_rules", "blocklist_revision"):
+            pair = {"blocklist_rules": 1, "blocklist_revision": 2, field: invalid}
+            assert sanitize(dict(pair, instr_state="applied")) == {"instr_state": "applied"}
+    for partial in ({"blocklist_rules": 1}, {"blocklist_revision": 2}):
+        assert sanitize(partial) == {}
+    for invalid in ("SIG", "unverified", True, None, []):
+        assert sanitize({"verify_level": invalid}) == {}
+
+
+def test_task14_instruction_attestation_drift_preserves_47_rows_order_and_duplicates():
+    sanitize = instructions.sanitize_instruction_attestation
+    rows = [{"option": name, "expected": 0, "observed": _TASK14_MAX}
+            for name in _TASK14_APPLIED]
+    repeated = {"option": "bt_max_peers", "expected": 1, "observed": 2}
+    rows += [dict(repeated) for _ in range(40)]
+    fact = {"options": rows}
+    assert len(rows) == 47
+    assert sanitize({"qos_drift": fact}) == {"qos_drift": fact}
+    assert sanitize({"qos_drift": {"options": rows + [dict(repeated)]}}) == {}
+    for field in ("blocklist_rules", "blocklist_revision"):
+        blocklist_only = {"options": [], field: {"expected": 0, "observed": _TASK14_MAX}}
+        assert sanitize({"qos_drift": blocklist_only}) == {"qos_drift": blocklist_only}
+
+
+@pytest.mark.parametrize("damage", [
+    "missing-options", "empty", "options-not-list", "row-not-object",
+    "unknown-option", "gid", "scope", "ip", "index", "token", "row-extra",
+    "row-missing", "equal", "negative", "overflow", "boolean", "float", "text",
+    "fact-extra", "pair-extra", "pair-missing", "pair-equal", "pair-negative",
+    "pair-overflow", "pair-boolean", "pair-float", "pair-text",
+])
+def test_task14_instruction_attestation_invalid_drift_omits_whole_fact(damage):
+    sanitize = instructions.sanitize_instruction_attestation
+    fact = copy.deepcopy(_task14_attestation()["qos_drift"])
+    row = fact["options"][0]
+    pair = fact["blocklist_revision"]
+    invalid_numbers = {"negative": -1, "overflow": _TASK14_MAX + 1,
+                       "boolean": True, "float": 1.0, "text": "1"}
+    if damage == "missing-options":
+        del fact["options"]
+    elif damage == "empty":
+        fact = {"options": []}
+    elif damage == "options-not-list":
+        fact["options"] = {}
+    elif damage == "row-not-object":
+        fact["options"] = [1]
+    elif damage == "unknown-option":
+        row["option"] = "arbitrary-aria2-option"
+    elif damage in {"gid", "scope", "ip", "index", "token", "row-extra"}:
+        row[damage] = "untrusted"
+    elif damage == "row-missing":
+        del row["observed"]
+    elif damage == "equal":
+        row["observed"] = row["expected"]
+    elif damage in invalid_numbers:
+        row["observed"] = invalid_numbers[damage]
+    elif damage == "fact-extra":
+        fact["role"] = "untrusted"
+    elif damage == "pair-extra":
+        pair["gid"] = "untrusted"
+    elif damage == "pair-missing":
+        del pair["expected"]
+    elif damage == "pair-equal":
+        pair["observed"] = pair["expected"]
+    else:
+        pair["observed"] = invalid_numbers[damage.removeprefix("pair-")]
+    assert sanitize({"qos_drift": fact, "instr_serial": 7}) == {"instr_serial": 7}

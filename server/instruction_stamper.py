@@ -69,6 +69,13 @@ class StamperError(RuntimeError):
         super().__init__(self.code)
 
 
+class RoleArtifactMissing(StamperError):
+    """Active metadata names an immutable artifact that cannot be found."""
+
+    def __init__(self):
+        super().__init__("role_unavailable")
+
+
 @dataclass(frozen=True)
 class StamperPaths:
     state_dir: str
@@ -730,6 +737,47 @@ def _validate_artifact(data, generation, metadata=None):
             raise StamperError("role_unavailable")
     signature_certificate_blob(signature)
     return body_bytes, signature, body
+
+
+def read_role_artifact_snapshot(paths, stamp):
+    """Copy one complete validated role artifact without producer mutation.
+
+    The role lock covers metadata and artifact reads, including all identity
+    checks. It is released before catalog callers select a key under the
+    secrets lock. No reconciliation, signing or durability repair runs on GET.
+    """
+    try:
+        stamp = copy.deepcopy(stamp)
+        instructions.validate_stamp(stamp)
+        with role_lock(paths):
+            generation = stamp["role_gen"]
+            metadata = _read_role_state(paths)["generations"].get(generation)
+            if metadata is None or metadata["state"] != "active" \
+                    or any(metadata[name] != stamp[name] for name in (
+                        "role", "epoch", "issued_at", "expires_at")):
+                raise StamperError("role_unavailable")
+            try:
+                stream = open(_artifact_path(paths, stamp["role"], generation),
+                              "rb")
+            except FileNotFoundError as exc:
+                raise RoleArtifactMissing() from exc
+            with stream:
+                artifact = stream.read(instructions.INSTR_RESPONSE_MAX + 1)
+            body_bytes, signature, body = _validate_artifact(
+                artifact, generation, metadata)
+            if hashlib.sha256(body_bytes).hexdigest() != \
+                    stamp["role_body_sha256"]:
+                raise StamperError("role_unavailable")
+            return {
+                "body_bytes": bytes(body_bytes),
+                "signature_bytes": bytes(signature),
+                "role": copy.deepcopy(body),
+                "artifact_sha256": metadata["artifact_sha256"],
+            }
+    except StamperError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise StamperError("role_unavailable") from exc
 
 
 def _validated_active_artifact(paths, generation, metadata):

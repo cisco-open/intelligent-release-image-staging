@@ -6,6 +6,7 @@
 
 import json
 from pathlib import Path
+import re
 
 import api_problem
 import api_routes
@@ -14,6 +15,23 @@ import openapi_contract
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "zensical" / "openapi.yaml"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+INSTRUCTION_RESOURCES = (
+    "/v1/devices/{device_id}/instructions",
+    "/v1/devices/{device_id}/instruction-keylist",
+)
+
+
+def _media_examples(media):
+    if "example" in media:
+        return [media["example"]]
+    return [entry["value"] for entry in media["examples"].values()]
+
+
+def _assert_i63_schema(schema, minimum=0):
+    assert schema["type"] == "integer"
+    assert schema["minimum"] == minimum
+    assert schema["maximum"] == (1 << 63) - 1
 
 
 def _load():
@@ -41,6 +59,35 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     # This second equality catches semantic drift beyond the route triples:
     # auth, examples, status contracts and compatibility declarations.
     assert doc == openapi_contract.build_document()
+
+
+def test_instruction_resources_are_exact_registered_device_routes():
+    routes = [route for route in api_routes.ROUTES
+              if "instruction" in route.path]
+    assert {(route.service, route.method, route.path, route.security)
+            for route in routes} == {
+        ("catalog", "GET", path, "deviceBearer")
+        for path in INSTRUCTION_RESOURCES
+    }
+    assert all(api_routes.match("catalog", "GET", path.replace(
+        "{device_id}", "edge-01")) is not None
+        for path in INSTRUCTION_RESOURCES)
+    for alias in ("/v1/instructions", "/v1/instruction-keylist",
+                  "/v1/keylist", "/v1/krl", "/krl",
+                  "/v1/devices/edge-01/krl",
+                  "/v1/devices/edge-01/role",
+                  "/v1/devices/edge-01/instruction-keylist/extra"):
+        assert api_routes.match("catalog", "GET", alias) is None
+
+    document = _load()
+    documented = {path for path in document["paths"]
+                  if "instruction" in path}
+    assert documented == set(INSTRUCTION_RESOURCES)
+    for path in INSTRUCTION_RESOURCES:
+        operation = document["paths"][path]["get"]
+        assert operation["x-iris-service"] == "catalog"
+        assert operation["x-iris-security"] == "deviceBearer"
+        assert operation["security"] == [{"deviceBearer": []}]
 
 
 def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility():
@@ -126,6 +173,254 @@ def test_catalog_torrent_media_and_cache_vary_are_explicit():
         "private, no-store"
     assert response["headers"]["Vary"]["schema"]["const"] == \
         "Authorization, X-IRIS-Tracker-Auth"
+
+
+def test_instruction_binary_success_and_conditional_contracts_are_exact():
+    document = _load()
+    expected_headers = {
+        "Cache-Control", "Vary", "ETag", "Date",
+        "X-Content-Type-Options",
+    }
+    for path in INSTRUCTION_RESOURCES:
+        operation = document["paths"][path]["get"]
+        parameters = {(item["name"], item["in"]): item
+                      for item in operation["parameters"]}
+        conditional = parameters[("If-None-Match", "header")]
+        assert conditional["required"] is False
+        assert conditional["schema"]["type"] == "string"
+        description = conditional["description"].lower()
+        assert all(term in description for term in
+                   ("weak", "list", "wildcard"))
+
+        success = operation["responses"]["200"]
+        assert set(success["content"]) == {"application/octet-stream"}
+        media = success["content"]["application/octet-stream"]
+        assert all(key not in media["schema"]
+                   for key in ("type", "format", "contentEncoding"))
+        assert set(success["headers"]) == expected_headers
+        assert success["headers"]["Cache-Control"]["schema"]["const"] == \
+            "private, no-store"
+        assert success["headers"]["Vary"]["schema"]["const"] == \
+            "Authorization"
+        assert success["headers"]["X-Content-Type-Options"]["schema"][
+            "const"] == "nosniff"
+        etag = success["headers"]["ETag"]
+        assert re.fullmatch(r'"sha256-[0-9a-f]{64}"', etag["example"])
+        assert success["headers"]["Date"]["schema"]["type"] == "string"
+
+        unchanged = operation["responses"]["304"]
+        assert "content" not in unchanged
+        assert set(unchanged["headers"]) == expected_headers
+        assert all(name not in unchanged["headers"]
+                   for name in ("Content-Type", "Content-Length"))
+        assert unchanged["headers"]["Cache-Control"]["schema"]["const"] == \
+            "private, no-store"
+        assert unchanged["headers"]["Vary"]["schema"]["const"] == \
+            "Authorization"
+        assert unchanged["headers"]["X-Content-Type-Options"]["schema"][
+            "const"] == "nosniff"
+
+
+def test_instruction_problem_matrix_titles_and_headers_are_exact():
+    document = _load()
+    expected = {
+        INSTRUCTION_RESOURCES[0]: {
+            "401": [("catalog-authentication-required",
+                     "Catalog authentication required")],
+            "403": [("instruction-device-forbidden",
+                     "Instruction access forbidden")],
+            "404": [("instruction-stamp-missing",
+                     "Instruction stamp missing")],
+            "409": [("stale_pointer", "Stale instruction pointer")],
+            "429": [("instruction-rate-limit-exceeded",
+                     "Instruction request rate limit exceeded")],
+            "503": [("credential-store-unavailable",
+                     "Credential store unavailable"),
+                    ("instruction-state-unavailable",
+                     "Instruction state unavailable")],
+        },
+        INSTRUCTION_RESOURCES[1]: {
+            "401": [("catalog-authentication-required",
+                     "Catalog authentication required")],
+            "403": [("instruction-device-forbidden",
+                     "Instruction access forbidden")],
+            "404": [("instruction-keylist-missing",
+                     "Instruction keylist missing")],
+            "429": [("instruction-rate-limit-exceeded",
+                     "Instruction request rate limit exceeded")],
+            "503": [("credential-store-unavailable",
+                     "Credential store unavailable"),
+                    ("instruction-keylist-unavailable",
+                     "Instruction keylist unavailable")],
+        },
+    }
+    common_headers = {
+        "Cache-Control", "Vary", "Date", "X-Content-Type-Options"}
+    observed = set()
+    for path, statuses in expected.items():
+        responses = document["paths"][path]["get"]["responses"]
+        assert set(responses) == {"200", "304", *statuses}
+        for status, variants in statuses.items():
+            response = responses[status]
+            assert len(response["x-iris-problem-codes"]) == len(variants)
+            assert set(response["x-iris-problem-codes"]) == {
+                code for code, _title in variants}
+            media = response["content"]["application/problem+json"]
+            examples = _media_examples(media)
+            assert len(examples) == len(variants)
+            assert {(item["code"], item["title"])
+                    for item in examples} == set(variants)
+            for item in examples:
+                assert set(item) == {"type", "title", "status", "code"}
+                assert item["status"] == int(status)
+                assert item["type"] == api_problem.TYPE_BASE + item["code"]
+                observed.add((int(status), item["code"], item["title"]))
+
+            header_names = set(response["headers"])
+            expected_names = set(common_headers)
+            if status == "401":
+                expected_names.add("WWW-Authenticate")
+            if status in ("409", "429", "503"):
+                expected_names.add("Retry-After")
+            assert header_names == expected_names
+            assert response["headers"]["Cache-Control"]["schema"][
+                "const"] == "no-store"
+            assert response["headers"]["Vary"]["schema"]["const"] == \
+                "Authorization"
+            assert response["headers"]["X-Content-Type-Options"]["schema"][
+                "const"] == "nosniff"
+            if status == "401":
+                assert response["headers"]["WWW-Authenticate"][
+                    "example"] == "Bearer"
+            if status in ("409", "503"):
+                assert response["headers"]["Retry-After"]["example"] == 10
+            elif status == "429":
+                assert response["headers"]["Retry-After"]["schema"][
+                    "minimum"] == 1
+
+    assert observed == {
+        (503, "credential-store-unavailable", "Credential store unavailable"),
+        (401, "catalog-authentication-required",
+         "Catalog authentication required"),
+        (403, "instruction-device-forbidden", "Instruction access forbidden"),
+        (404, "instruction-stamp-missing", "Instruction stamp missing"),
+        (404, "instruction-keylist-missing", "Instruction keylist missing"),
+        (409, "stale_pointer", "Stale instruction pointer"),
+        (429, "instruction-rate-limit-exceeded",
+         "Instruction request rate limit exceeded"),
+        (503, "instruction-state-unavailable",
+         "Instruction state unavailable"),
+        (503, "instruction-keylist-unavailable",
+         "Instruction keylist unavailable"),
+    }
+
+
+def test_instruction_policy_and_heartbeat_response_contracts_are_bounded():
+    document = _load()
+    paths = (
+        "/v1/devices/{device_id}/policy",
+        "/v1/devices/{device_id}/heartbeat",
+    )
+    for path in paths:
+        method = "get" if path.endswith("/policy") else "post"
+        media = document["paths"][path][method]["responses"]["200"][
+            "content"]["application/json"]
+        properties = media["schema"]["properties"]
+        pointer = properties["instr_rev"]
+        assert len(pointer["required"]) == 2
+        assert set(pointer["required"]) == {"epoch", "instr_serial"}
+        assert pointer["additionalProperties"] is False
+        for name in pointer["required"]:
+            _assert_i63_schema(pointer["properties"][name])
+        _assert_i63_schema(properties["keylist_seq"], minimum=1)
+        examples = _media_examples(media)
+        assert any(set(example.get("instr_rev", {})) == {
+            "epoch", "instr_serial"} and "keylist_seq" in example
+            for example in examples)
+
+    heartbeat = document["paths"][paths[1]]["post"]["responses"]["200"][
+        "content"]["application/json"]
+    cadence = heartbeat["schema"]["properties"]
+    assert cadence["stream_every"]["type"] == "integer"
+    assert cadence["stream_every"]["minimum"] == 1
+    assert cadence["stream_every"]["maximum"] == 60
+    assert cadence["stream_pause"]["type"] == "boolean"
+    assert any("instr_rev" not in example and
+               {"stream_every", "stream_pause"} <= set(example)
+               for example in _media_examples(heartbeat))
+
+
+def test_instruction_heartbeat_attestation_schema_and_examples_are_complete():
+    document = _load()
+    media = document["paths"]["/v1/devices/{device_id}/heartbeat"]["post"][
+        "requestBody"]["content"]["application/json"]
+    schema = media["schema"]
+    properties = schema["properties"]
+    applied_names = [
+        "bt_max_peers", "max_upload_limit", "max_download_limit",
+        "overall_up", "overall_down", "request_peer_speed_limit",
+        "max_concurrent",
+    ]
+    applied = properties["applied"]
+    assert len(applied["required"]) == len(applied_names)
+    assert set(applied["required"]) == set(applied_names)
+    assert applied["additionalProperties"] is False
+    for name in applied_names:
+        _assert_i63_schema(applied["properties"][name])
+
+    expected_states = {
+        "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+        "rollback_rejected", "floor_reset", "audience_mismatch",
+        "key_rejected", "tamper_rejected", "verifier_missing",
+        "lkg_rejected", "lkg_unreadable", "oversize", "reasserted",
+        "instr_unavailable", "instr_pending", "instr_forbidden",
+        "tracker-only",
+    }
+    assert len(properties["instr_state"]["enum"]) == len(expected_states)
+    assert set(properties["instr_state"]["enum"]) == expected_states
+    assert len(properties["instr_reason"]["enum"]) == 2
+    assert set(properties["instr_reason"]["enum"]) == {
+        "unknown_key", "bad_mac"}
+    _assert_i63_schema(properties["instr_serial"])
+    assert len(properties["verify_level"]["enum"]) == 2
+    assert set(properties["verify_level"]["enum"]) == {"sig", "none"}
+    for name in ("blocklist_rules", "blocklist_revision"):
+        _assert_i63_schema(properties[name])
+
+    drift = properties["qos_drift"]
+    assert len(drift["required"]) == 1
+    assert set(drift["required"]) == {"options"}
+    assert drift["additionalProperties"] is False
+    options = drift["properties"]["options"]
+    assert options["maxItems"] == 47
+    assert len(options["items"]["required"]) == 3
+    assert set(options["items"]["required"]) == {
+        "option", "expected", "observed"}
+    assert options["items"]["additionalProperties"] is False
+    option_names = options["items"]["properties"]["option"]["enum"]
+    assert len(option_names) == len(applied_names)
+    assert set(option_names) == set(applied_names)
+    _assert_i63_schema(options["items"]["properties"]["expected"])
+    _assert_i63_schema(options["items"]["properties"]["observed"])
+    for name in ("blocklist_rules", "blocklist_revision"):
+        pair = drift["properties"][name]
+        assert len(pair["required"]) == 2
+        assert set(pair["required"]) == {"expected", "observed"}
+        assert pair["additionalProperties"] is False
+        _assert_i63_schema(pair["properties"]["expected"])
+        _assert_i63_schema(pair["properties"]["observed"])
+
+    examples = _media_examples(media)
+    assert any("applied" in example for example in examples)
+    assert any(example.get("instr_state") == "key_rejected" and
+               example.get("instr_reason") in ("unknown_key", "bad_mac")
+               for example in examples)
+    instruction_fields = {
+        "applied", "instr_state", "instr_reason", "instr_serial",
+        "verify_level", "blocklist_rules", "blocklist_revision", "qos_drift",
+    }
+    assert any(not instruction_fields.intersection(example)
+               for example in examples)
 
 
 def test_problem_types_use_stable_anchors_on_the_documented_page():
@@ -403,7 +698,9 @@ def test_collection_and_catalog_success_examples_match_live_wire_shapes():
 
     policy = doc["paths"]["/v1/devices/{device_id}/policy"]["get"][
         "responses"]["200"]["content"]["application/json"]
-    assert set(policy["example"]) == {
+    legacy_policy = next(example for example in _media_examples(policy)
+                         if not {"instr_rev", "keylist_seq"}.intersection(example))
+    assert set(legacy_policy) == {
         "approved_image_id", "approved_image_ids", "plans"}
     refresh = doc["paths"]["/v1/devices/{device_id}/token-refresh"]["post"][
         "responses"]["200"]["content"]["application/json"]

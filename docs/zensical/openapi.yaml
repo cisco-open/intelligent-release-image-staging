@@ -54604,6 +54604,33 @@
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "instr_rev": {
+                      "type": "object",
+                      "required": [
+                        "epoch",
+                        "instr_serial"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "instr_serial": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        }
+                      },
+                      "description": "Pointer from the complete stored stamp only; absent before stamping. Role/cadence failure does not remove a valid pointer."
+                    },
+                    "keylist_seq": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9223372036854775807,
+                      "description": "Monotonic sequence parsed from the installed signed artifact; omitted when uninitialized or unavailable without failing policy/heartbeat."
                     }
                   },
                   "required": [
@@ -54613,15 +54640,38 @@
                   ],
                   "additionalProperties": true
                 },
-                "example": {
-                  "approved_image_id": null,
-                  "approved_image_ids": [
-                    "image-01"
-                  ],
-                  "plans": {
-                    "image-01": {
-                      "plan_id": "0123456789abcdef0123456789abcdef",
-                      "transfer_id": "fedcba9876543210fedcba9876543210"
+                "examples": {
+                  "instructionsAvailable": {
+                    "value": {
+                      "approved_image_id": null,
+                      "approved_image_ids": [
+                        "image-01"
+                      ],
+                      "plans": {
+                        "image-01": {
+                          "plan_id": "0123456789abcdef0123456789abcdef",
+                          "transfer_id": "fedcba9876543210fedcba9876543210"
+                        }
+                      },
+                      "instr_rev": {
+                        "epoch": 1788782400,
+                        "instr_serial": 7
+                      },
+                      "keylist_seq": 8
+                    }
+                  },
+                  "legacyOrUnavailable": {
+                    "value": {
+                      "approved_image_id": null,
+                      "approved_image_ids": [
+                        "image-01"
+                      ],
+                      "plans": {
+                        "image-01": {
+                          "plan_id": "0123456789abcdef0123456789abcdef",
+                          "transfer_id": "fedcba9876543210fedcba9876543210"
+                        }
+                      }
                     }
                   }
                 }
@@ -54744,6 +54794,1142 @@
         }
       }
     },
+    "/v1/devices/{device_id}/instructions": {
+      "get": {
+        "operationId": "catalog_get_v1_devices_device_id_instructions",
+        "summary": "Read sealed device instructions",
+        "description": "Read sealed device instructions. Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence. Both instruction routes share one process-local per-device token bucket: burst 2, refill one token per 10 seconds, 20,000 device bound, and 20-second idle pruning. Body, 304 and later resource-error requests all consume a token; authentication/authorization failures do not. Retry-After on 429 is max(1, ceil((1 - tokens) * 10)). Restart resets the limiter; multiple processes or replicas multiply the allowance. The supported deployment uses one catalog process/replica. No instruction-key material, role artifacts, signatures or trust roots have separate delivery aliases. IRIS stages images only. Reconstructs at most 256 KiB from one stored stamp and its validated immutable role artifact. The exact stamped non-revoked current key remains eligible regardless of rotation-trigger expiry; a non-revoked previous key is eligible only before its overlap deadline. Every response, including cache hits and 304, rechecks complete state and key eligibility. Missing stamp/named file returns counted 404; an unavailable stamped key returns stale_pointer 409. server_time equals stored issued_at; current HTTP Date does not change envelope bytes. The process-memory ciphertext cache is bounded at 256 entries and 16 MiB; per-device ciphertext is never persisted.",
+        "tags": [
+          "catalog"
+        ],
+        "x-iris-service": "catalog",
+        "x-iris-security": "deviceBearer",
+        "servers": [
+          {
+            "url": "https://iris.example:8443",
+            "description": "Device catalog"
+          }
+        ],
+        "security": [
+          {
+            "deviceBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 9110 weak comparison for GET: accepts a weak or strong tag, a comma-separated list, or wildcard *. Multiple field lines form one list. Invalid syntax and nonmatches return the ordinary response. Authentication, limiter admission and current state/key validation precede matching.",
+            "example": "W/\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact IRIS-INSTR/1 framed bytes",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"sha256-[0-9a-f]{64}\"$"
+                },
+                "description": "Strong SHA-256 digest of the exact selected response bytes",
+                "example": "\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {},
+                "example": "<IRIS-INSTR/1 bytes>"
+              }
+            }
+          },
+          "304": {
+            "description": "Selected representation matches If-None-Match after current authorization, limiter and state checks; no body, Content-Type or Content-Length",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"sha256-[0-9a-f]{64}\"$"
+                },
+                "description": "Strong SHA-256 digest of the exact selected response bytes",
+                "example": "\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+              }
+            }
+          },
+          "401": {
+            "description": "Catalog authentication required",
+            "x-iris-problem-codes": [
+              "catalog-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required"
+                    },
+                    "title": {
+                      "const": "Catalog authentication required"
+                    },
+                    "status": {
+                      "const": 401
+                    },
+                    "code": {
+                      "const": "catalog-authentication-required"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required",
+                  "title": "Catalog authentication required",
+                  "status": 401,
+                  "code": "catalog-authentication-required"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string",
+                  "const": "Bearer"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "Instruction access forbidden",
+            "x-iris-problem-codes": [
+              "instruction-device-forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-device-forbidden"
+                    },
+                    "title": {
+                      "const": "Instruction access forbidden"
+                    },
+                    "status": {
+                      "const": 403
+                    },
+                    "code": {
+                      "const": "instruction-device-forbidden"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-device-forbidden",
+                  "title": "Instruction access forbidden",
+                  "status": 403,
+                  "code": "instruction-device-forbidden"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Instruction stamp missing",
+            "x-iris-problem-codes": [
+              "instruction-stamp-missing"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-stamp-missing"
+                    },
+                    "title": {
+                      "const": "Instruction stamp missing"
+                    },
+                    "status": {
+                      "const": 404
+                    },
+                    "code": {
+                      "const": "instruction-stamp-missing"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-stamp-missing",
+                  "title": "Instruction stamp missing",
+                  "status": 404,
+                  "code": "instruction-stamp-missing"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale instruction pointer",
+            "x-iris-problem-codes": [
+              "stale_pointer"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#stale_pointer"
+                    },
+                    "title": {
+                      "const": "Stale instruction pointer"
+                    },
+                    "status": {
+                      "const": 409
+                    },
+                    "code": {
+                      "const": "stale_pointer"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#stale_pointer",
+                  "title": "Stale instruction pointer",
+                  "status": 409,
+                  "code": "stale_pointer"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "const": 10
+                },
+                "example": 10,
+                "description": "Retry after ten seconds"
+              }
+            }
+          },
+          "429": {
+            "description": "Instruction request rate limit exceeded",
+            "x-iris-problem-codes": [
+              "instruction-rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-rate-limit-exceeded"
+                    },
+                    "title": {
+                      "const": "Instruction request rate limit exceeded"
+                    },
+                    "status": {
+                      "const": 429
+                    },
+                    "code": {
+                      "const": "instruction-rate-limit-exceeded"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-rate-limit-exceeded",
+                  "title": "Instruction request rate limit exceeded",
+                  "status": 429,
+                  "code": "instruction-rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "example": 1,
+                "description": "Computed seconds until one limiter token is available"
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable or Instruction state unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable",
+              "instruction-state-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable"
+                        },
+                        "title": {
+                          "const": "Credential store unavailable"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "credential-store-unavailable"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-state-unavailable"
+                        },
+                        "title": {
+                          "const": "Instruction state unavailable"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "instruction-state-unavailable"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "examples": {
+                  "credential-store-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                      "title": "Credential store unavailable",
+                      "status": 503,
+                      "code": "credential-store-unavailable"
+                    }
+                  },
+                  "instruction-state-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-state-unavailable",
+                      "title": "Instruction state unavailable",
+                      "status": 503,
+                      "code": "instruction-state-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "const": 10
+                },
+                "example": 10,
+                "description": "Retry after ten seconds"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/devices/{device_id}/instruction-keylist": {
+      "get": {
+        "operationId": "catalog_get_v1_devices_device_id_instruction_keylist",
+        "summary": "Read installed instruction keylist",
+        "description": "Read installed instruction keylist. Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence. Both instruction routes share one process-local per-device token bucket: burst 2, refill one token per 10 seconds, 20,000 device bound, and 20-second idle pruning. Body, 304 and later resource-error requests all consume a token; authentication/authorization failures do not. Retry-After on 429 is max(1, ceil((1 - tokens) * 10)). Restart resets the limiter; multiple processes or replicas multiply the allowance. The supported deployment uses one catalog process/replica. No instruction-key material, role artifacts, signatures or trust roots have separate delivery aliases. IRIS stages images only. Serves at most 128 KiB of the exact installed root-signed keylist, including a KRL of at most 80 KiB. Both artifact and metadata absent means uninitialized 404; established artifact loss or contradictory/corrupt state means 503. An artifact ahead of its metadata remains authoritative and serveable. No signature verification, root discovery or repair occurs on GET.",
+        "tags": [
+          "catalog"
+        ],
+        "x-iris-service": "catalog",
+        "x-iris-security": "deviceBearer",
+        "servers": [
+          {
+            "url": "https://iris.example:8443",
+            "description": "Device catalog"
+          }
+        ],
+        "security": [
+          {
+            "deviceBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "example": "edge-01"
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "RFC 9110 weak comparison for GET: accepts a weak or strong tag, a comma-separated list, or wildcard *. Multiple field lines form one list. Invalid syntax and nonmatches return the ordinary response. Authentication, limiter admission and current state/key validation precede matching.",
+            "example": "W/\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact IRIS-KEYLIST/1 framed bytes",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"sha256-[0-9a-f]{64}\"$"
+                },
+                "description": "Strong SHA-256 digest of the exact selected response bytes",
+                "example": "\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {},
+                "example": "<IRIS-KEYLIST/1 bytes>"
+              }
+            }
+          },
+          "304": {
+            "description": "Selected representation matches If-None-Match after current authorization, limiter and state checks; no body, Content-Type or Content-Length",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "private, no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"sha256-[0-9a-f]{64}\"$"
+                },
+                "description": "Strong SHA-256 digest of the exact selected response bytes",
+                "example": "\"sha256-0000000000000000000000000000000000000000000000000000000000000000\""
+              }
+            }
+          },
+          "401": {
+            "description": "Catalog authentication required",
+            "x-iris-problem-codes": [
+              "catalog-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required"
+                    },
+                    "title": {
+                      "const": "Catalog authentication required"
+                    },
+                    "status": {
+                      "const": 401
+                    },
+                    "code": {
+                      "const": "catalog-authentication-required"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#catalog-authentication-required",
+                  "title": "Catalog authentication required",
+                  "status": 401,
+                  "code": "catalog-authentication-required"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string",
+                  "const": "Bearer"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "Instruction access forbidden",
+            "x-iris-problem-codes": [
+              "instruction-device-forbidden"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-device-forbidden"
+                    },
+                    "title": {
+                      "const": "Instruction access forbidden"
+                    },
+                    "status": {
+                      "const": 403
+                    },
+                    "code": {
+                      "const": "instruction-device-forbidden"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-device-forbidden",
+                  "title": "Instruction access forbidden",
+                  "status": 403,
+                  "code": "instruction-device-forbidden"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Instruction keylist missing",
+            "x-iris-problem-codes": [
+              "instruction-keylist-missing"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-keylist-missing"
+                    },
+                    "title": {
+                      "const": "Instruction keylist missing"
+                    },
+                    "status": {
+                      "const": 404
+                    },
+                    "code": {
+                      "const": "instruction-keylist-missing"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-keylist-missing",
+                  "title": "Instruction keylist missing",
+                  "status": 404,
+                  "code": "instruction-keylist-missing"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Instruction request rate limit exceeded",
+            "x-iris-problem-codes": [
+              "instruction-rate-limit-exceeded"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-rate-limit-exceeded"
+                    },
+                    "title": {
+                      "const": "Instruction request rate limit exceeded"
+                    },
+                    "status": {
+                      "const": 429
+                    },
+                    "code": {
+                      "const": "instruction-rate-limit-exceeded"
+                    }
+                  }
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-rate-limit-exceeded",
+                  "title": "Instruction request rate limit exceeded",
+                  "status": 429,
+                  "code": "instruction-rate-limit-exceeded"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "example": 1,
+                "description": "Computed seconds until one limiter token is available"
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable or Instruction keylist unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable",
+              "instruction-keylist-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable"
+                        },
+                        "title": {
+                          "const": "Credential store unavailable"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "credential-store-unavailable"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-keylist-unavailable"
+                        },
+                        "title": {
+                          "const": "Instruction keylist unavailable"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "instruction-keylist-unavailable"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "examples": {
+                  "credential-store-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                      "title": "Credential store unavailable",
+                      "status": 503,
+                      "code": "credential-store-unavailable"
+                    }
+                  },
+                  "instruction-keylist-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#instruction-keylist-unavailable",
+                      "title": "Instruction keylist unavailable",
+                      "status": 503,
+                      "code": "instruction-keylist-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Vary": {
+                "schema": {
+                  "type": "string",
+                  "const": "Authorization"
+                }
+              },
+              "Date": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Current RFC 9110 HTTP-date; independent of immutable envelope server_time and ETag",
+                "example": "Mon, 07 Sep 2026 12:00:00 GMT"
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "const": "nosniff"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "const": 10
+                },
+                "example": 10,
+                "description": "Retry after ten seconds"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/devices/{device_id}/heartbeat": {
       "post": {
         "operationId": "catalog_post_v1_devices_device_id_heartbeat",
@@ -54791,10 +55977,40 @@
                       "type": "boolean"
                     },
                     "stream_every": {
-                      "type": "integer"
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 60,
+                      "description": "The one server-resolved telemetry cadence reused for observation validation, retention and response; global settings supply the fallback."
                     },
                     "stream_pause": {
                       "type": "boolean"
+                    },
+                    "instr_rev": {
+                      "type": "object",
+                      "required": [
+                        "epoch",
+                        "instr_serial"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "epoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "instr_serial": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        }
+                      },
+                      "description": "Pointer from the complete stored stamp only; absent before stamping. Role/cadence failure does not remove a valid pointer."
+                    },
+                    "keylist_seq": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9223372036854775807,
+                      "description": "Monotonic sequence parsed from the installed signed artifact; omitted when uninitialized or unavailable without failing policy/heartbeat."
                     }
                   },
                   "required": [
@@ -54804,10 +56020,33 @@
                   ],
                   "additionalProperties": true
                 },
-                "example": {
-                  "ok": true,
-                  "stream_every": 4,
-                  "stream_pause": false
+                "examples": {
+                  "instructionsAvailable": {
+                    "value": {
+                      "ok": true,
+                      "stream_every": 4,
+                      "stream_pause": false,
+                      "instr_rev": {
+                        "epoch": 1788782400,
+                        "instr_serial": 7
+                      },
+                      "keylist_seq": 8
+                    }
+                  },
+                  "legacyOrUnavailable": {
+                    "value": {
+                      "ok": true,
+                      "stream_every": 4,
+                      "stream_pause": false
+                    }
+                  },
+                  "fallbackCadence": {
+                    "value": {
+                      "ok": true,
+                      "stream_every": 4,
+                      "stream_pause": false
+                    }
+                  }
                 }
               }
             }
@@ -55002,15 +56241,306 @@
                   },
                   "telemetry_stream_enabled": {
                     "type": "boolean"
+                  },
+                  "applied": {
+                    "type": "object",
+                    "required": [
+                      "bt_max_peers",
+                      "max_upload_limit",
+                      "max_download_limit",
+                      "overall_up",
+                      "overall_down",
+                      "request_peer_speed_limit",
+                      "max_concurrent"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "bt_max_peers": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "max_upload_limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "max_download_limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "overall_up": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "overall_down": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "request_peer_speed_limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      },
+                      "max_concurrent": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807
+                      }
+                    },
+                    "description": "Seven complete global/default aria2 observations, not per-GID claims. Omitted until successful assertion; retained for known LKG/fallback settings. Invalid objects are omitted as a whole."
+                  },
+                  "instr_state": {
+                    "type": "string",
+                    "enum": [
+                      "allowlist_expired",
+                      "applied",
+                      "audience_mismatch",
+                      "floor_reset",
+                      "instr_forbidden",
+                      "instr_pending",
+                      "instr_unavailable",
+                      "key_rejected",
+                      "lkg",
+                      "lkg_rejected",
+                      "lkg_unreadable",
+                      "none",
+                      "oversize",
+                      "reasserted",
+                      "rollback_rejected",
+                      "stale_expired",
+                      "tamper_rejected",
+                      "tracker-only",
+                      "verifier_missing"
+                    ]
+                  },
+                  "instr_reason": {
+                    "type": "string",
+                    "enum": [
+                      "bad_mac",
+                      "unknown_key"
+                    ]
+                  },
+                  "instr_serial": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "verify_level": {
+                    "type": "string",
+                    "enum": [
+                      "sig",
+                      "none"
+                    ]
+                  },
+                  "blocklist_rules": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "blocklist_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "qos_drift": {
+                    "type": "object",
+                    "required": [
+                      "options"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "options": {
+                        "type": "array",
+                        "maxItems": 47,
+                        "items": {
+                          "type": "object",
+                          "required": [
+                            "option",
+                            "expected",
+                            "observed"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "expected": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "observed": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "option": {
+                              "type": "string",
+                              "enum": [
+                                "bt_max_peers",
+                                "max_upload_limit",
+                                "max_download_limit",
+                                "overall_up",
+                                "overall_down",
+                                "request_peer_speed_limit",
+                                "max_concurrent"
+                              ]
+                            }
+                          },
+                          "description": "Non-Boolean integers; expected and observed must differ. Equality is rejected by the runtime sanitizer."
+                        }
+                      },
+                      "blocklist_revision": {
+                        "type": "object",
+                        "required": [
+                          "expected",
+                          "observed"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "expected": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "observed": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          }
+                        },
+                        "description": "Non-Boolean integers; expected and observed must differ. Equality is rejected by the runtime sanitizer."
+                      },
+                      "blocklist_rules": {
+                        "type": "object",
+                        "required": [
+                          "expected",
+                          "observed"
+                        ],
+                        "additionalProperties": false,
+                        "properties": {
+                          "expected": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "observed": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          }
+                        },
+                        "description": "Non-Boolean integers; expected and observed must differ. Equality is rejected by the runtime sanitizer."
+                      }
+                    },
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "options": {
+                            "minItems": 1
+                          }
+                        }
+                      },
+                      {
+                        "required": [
+                          "blocklist_revision"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "blocklist_rules"
+                        ]
+                      }
+                    ],
+                    "description": "One bounded fact; preserves option order and duplicate observations. At most seven global/default plus four options for each of ten active GIDs. GIDs, scopes, indexes, addresses and arbitrary option names are never transmitted. Active GIDs contribute only bt_max_peers, max_upload_limit, max_download_limit or request_peer_speed_limit. Any invalid row or pair omits the whole fact."
                   }
                 },
                 "required": [],
-                "additionalProperties": true
+                "additionalProperties": true,
+                "dependentRequired": {
+                  "blocklist_rules": [
+                    "blocklist_revision"
+                  ],
+                  "blocklist_revision": [
+                    "blocklist_rules"
+                  ]
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "required": [
+                        "instr_state"
+                      ],
+                      "properties": {
+                        "instr_state": {
+                          "const": "key_rejected"
+                        }
+                      }
+                    },
+                    "then": {
+                      "required": [
+                        "instr_reason"
+                      ]
+                    },
+                    "else": {
+                      "not": {
+                        "required": [
+                          "instr_reason"
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "description": "Instruction fields are optional device assertions, not verified compliance. The server omits invalid state/reason and blocklist pairs as units; legacy agents omit all instruction fields. Integers exclude Boolean values and fractional or floating-point input. Device role/platform, keys, signatures, peer lists and opaque aria2 option dictionaries are never accepted as attestation."
               },
-              "example": {
-                "agent_version": "2026.09.04",
-                "telemetry_enabled": true,
-                "telemetry_stream_enabled": true
+              "examples": {
+                "applied": {
+                  "value": {
+                    "agent_version": "2026.09.04",
+                    "telemetry_enabled": true,
+                    "telemetry_stream_enabled": true,
+                    "instr_state": "applied",
+                    "instr_serial": 7,
+                    "verify_level": "sig",
+                    "applied": {
+                      "bt_max_peers": 0,
+                      "max_upload_limit": 1,
+                      "max_download_limit": 2,
+                      "overall_up": 3,
+                      "overall_down": 4,
+                      "request_peer_speed_limit": 5,
+                      "max_concurrent": 6
+                    },
+                    "blocklist_rules": 12,
+                    "blocklist_revision": 3,
+                    "qos_drift": {
+                      "options": [
+                        {
+                          "option": "max_upload_limit",
+                          "expected": 8192,
+                          "observed": 16384
+                        }
+                      ]
+                    }
+                  }
+                },
+                "keyRejected": {
+                  "value": {
+                    "agent_version": "2026.09.04",
+                    "telemetry_enabled": true,
+                    "telemetry_stream_enabled": true,
+                    "instr_state": "key_rejected",
+                    "instr_reason": "unknown_key"
+                  }
+                },
+                "legacy": {
+                  "value": {
+                    "agent_version": "2026.09.04",
+                    "telemetry_enabled": true,
+                    "telemetry_stream_enabled": true
+                  }
+                }
               }
             }
           }
