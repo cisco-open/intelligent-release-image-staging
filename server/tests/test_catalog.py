@@ -3820,3 +3820,126 @@ def test_main_refuses_plaintext_without_opt_in_then_serves_with_it(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_task13_behavioral_red_set_policy_preserves_instruction_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    stamp = {
+        "epoch": 100,
+        "instr_serial": 7,
+        "policy_revision": 3,
+        "platform": "guestshell",
+        "role": "default",
+        "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64,
+        "key_id": "c" * 64,
+        "verify_level": "sig",
+        "issued_at": 101,
+        "expires_at": 101 + 604800,
+        "degraded": False,
+        "part": {
+            "peers": {
+                "mode": "tracker-only",
+                "include_origin": False,
+                "allowed_expires_at": 101 + 604800,
+            },
+            "qos_override": {},
+            "control_override": {},
+            "server_time": 101,
+        },
+    }
+    store._policies.put("d1", {
+        "approved_image_id": None,
+        "approved_image_ids": [],
+        "plans": {},
+        "instr": stamp,
+    })
+
+    store.set_policy("d1", approved_image_ids=[])
+
+    assert store._policies.get("d1")["instr"] == stamp
+
+
+def test_task13_malformed_established_stamp_refuses_policy_rewrite(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    bucket = keyed_state.bucket_of("d1")
+    directory = keyed_state.shard_dir(store.policy_path)
+    os.makedirs(directory, exist_ok=True)
+    shard = os.path.join(directory, "%02x.json" % bucket)
+    malformed = {"d1": {"approved_image_id": None,
+                        "approved_image_ids": [], "plans": {},
+                        "instr": {"instr_serial": 7}}}
+    with open(shard, "w") as stream:
+        json.dump(malformed, stream)
+    before = open(shard, "rb").read()
+    with pytest.raises(catalog.StateFileError,
+                       match="keyed state row is corrupt"):
+        store.set_policy("d1", approved_image_ids=[])
+    assert open(shard, "rb").read() == before
+
+
+def test_task13_unassign_and_concurrent_apply_merge_preserve_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    stamp = {
+        "epoch": 100, "instr_serial": 7, "policy_revision": 3,
+        "platform": "guestshell", "role": "default", "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64, "key_id": "c" * 64,
+        "verify_level": "sig", "issued_at": 101, "expires_at": 604901,
+        "degraded": False,
+        "part": {"peers": {"mode": "tracker-only", "include_origin": False,
+                            "allowed_expires_at": 604901},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": 101}}
+    store._policies.update("d1", lambda row: dict(row, instr=stamp))
+    barrier = threading.Barrier(2)
+
+    def apply():
+        barrier.wait()
+        store.set_policy("d1", approved_image_ids=[])
+
+    def stamp_merge():
+        barrier.wait()
+        store._policies.update("d1", lambda row: dict(row, instr=stamp))
+
+    threads = [threading.Thread(target=apply), threading.Thread(target=stamp_merge)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    row = store._policies.get("d1")
+    assert row["approved_image_ids"] == []
+    assert row["instr"] == stamp
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    assert store._policies.get("d1")["instr"] == stamp
+
+
+def test_task13_quarantine_auto_unassign_carries_instruction_stamp(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    store.save_image({
+        "id": "img-a", "filename": "img-a.bin", "size": 5,
+        "sha256": "ab" * 32, "sha512": "aa" * 64,
+        "cisco_signature_verified": False,
+        "info_hash_hex": "cc" * 20, "published_at": 111,
+    })
+    store.set_policy("d1", approved_image_ids=["img-a"])
+    stamp = {
+        "epoch": 100, "instr_serial": 7, "policy_revision": 3,
+        "platform": "guestshell", "role": "default", "role_gen": "a" * 64,
+        "role_body_sha256": "b" * 64, "key_id": "c" * 64,
+        "verify_level": "sig", "issued_at": 101, "expires_at": 604901,
+        "degraded": False,
+        "part": {"peers": {"mode": "tracker-only", "include_origin": False,
+                            "allowed_expires_at": 604901},
+                 "qos_override": {}, "control_override": {},
+                 "server_time": 101}}
+    store._policies.update("d1", lambda row: dict(row, instr=stamp))
+    store.apply_hash_verification({
+        "img-a": {"state": "mismatch", "feed_sha512": "bb" * 64,
+                  "publish_date": "2026-09-07", "deferral": False}},
+        source="scheduled", now=1000)
+    row = store._policies.get("d1")
+    assert row["approved_image_ids"] == []
+    assert row["plans"] == {}
+    assert row["instr"] == stamp

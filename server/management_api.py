@@ -43,6 +43,7 @@ import gui_fleet
 import gui_onboard
 import gui_tls
 import instruction_keys
+import instruction_stamper
 import live_samples
 import origin_qos
 import otlp
@@ -5146,6 +5147,14 @@ def main():
     threading.Thread(
         target=instruction_keys.status_loop,
         args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
+        daemon=True).start()
+    # Instruction production shares the management process's trusted fleet
+    # and catalog stores; importing this module never starts background work.
+    instruction_stop = threading.Event()
+    threading.Thread(
+        target=instruction_stamper.status_loop,
+        args=(instruction_stop, instruction_stamper.InstructionStamper(
+            fleet=fleet, catalog_store=catalog)),
         daemon=True).start()
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.

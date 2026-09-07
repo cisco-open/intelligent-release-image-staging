@@ -65,6 +65,7 @@ the file the error points at is enough to find them. See
 the full procedure.
 """
 import contextlib
+import errno
 import fcntl
 import json
 import os
@@ -77,12 +78,39 @@ import zlib
 SHARD_COUNT = 256
 
 
+def _fsync_directory(path):
+    fd = os.open(path or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        unsupported = {errno.EINVAL}
+        if hasattr(errno, "ENOTSUP"):
+            unsupported.add(errno.ENOTSUP)
+        if exc.errno not in unsupported:
+            raise
+    finally:
+        os.close(fd)
+
+
 class KeyedStateError(RuntimeError):
     """Existing keyed state is unreadable and must not be overwritten."""
 
 
 #: Sentinel an ``update``/``sweep`` callback returns to delete the row.
 DELETE = object()
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value):
+    raise ValueError("non-finite JSON number")
 
 
 def shard_dir(path):
@@ -132,7 +160,8 @@ class KeyedState:
     """
 
     def __init__(self, path, error=KeyedStateError, validate=None,
-                 legacy_extract=None, shards=SHARD_COUNT, indent=2):
+                 legacy_extract=None, shards=SHARD_COUNT, indent=2,
+                 durable=False):
         self.legacy_path = path
         self.dir = shard_dir(path)
         self.error = error
@@ -140,6 +169,7 @@ class KeyedState:
         self.indent = indent
         self._validate = validate
         self._legacy_extract = legacy_extract
+        self.durable = bool(durable)
         self._migrated = False
 
     # -- shard I/O ---------------------------------------------------------
@@ -150,7 +180,9 @@ class KeyedState:
     def _read_json(self, path):
         try:
             with open(path) as f:
-                data = json.load(f)
+                data = json.load(
+                    f, object_pairs_hook=_unique_object,
+                    parse_constant=_reject_constant)
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
@@ -178,10 +210,14 @@ class KeyedState:
         if not rows:
             # An empty shard is removed so a whole-fleet scan stays
             # proportional to the rows that actually exist.
+            removed = False
             try:
                 os.remove(path)
+                removed = True
             except FileNotFoundError:
                 pass
+            if removed and self.durable:
+                _fsync_directory(self.dir)
             return
         os.makedirs(self.dir, exist_ok=True)
         mode = None
@@ -198,9 +234,14 @@ class KeyedState:
                 # accepts, poisoning every reader of the shard.
                 json.dump(rows, f, indent=self.indent, sort_keys=True,
                           allow_nan=False)
+                if self.durable:
+                    f.flush()
+                    os.fsync(f.fileno())
             if mode is not None:
                 os.chmod(tmp, mode)
             os.replace(tmp, path)
+            if self.durable:
+                _fsync_directory(self.dir)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)

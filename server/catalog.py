@@ -33,6 +33,7 @@ import auth
 import bounded_pool
 import bulkhash
 import credential_cache
+import instructions
 import keyed_state
 import live_samples
 import secretfs
@@ -55,6 +56,16 @@ MAX_ASSIGNED_IMAGES = 10
 # is refused rather than silently accepted, so a typo in a caller can never
 # masquerade as a real provenance in the audit trail.
 HASH_VERIFICATION_SOURCES = ("scheduled", "manual", "offline")
+
+
+def _validate_policy_state_row(_device_id, row):
+    if not isinstance(row, dict):
+        raise ValueError("policy row is not an object")
+    if "instr" in row:
+        try:
+            instructions.validate_stamp(row["instr"])
+        except instructions.InstructionError as exc:
+            raise ValueError("invalid instruction stamp") from exc
 
 
 def _audit_id(value):
@@ -855,17 +866,19 @@ class CatalogStore:
         # but unreadable shard raises StateFileError rather than reading as
         # empty or being overwritten by the next writer.
         self._devices = self._keyed(self.devices_path)
-        self._policies = self._keyed(self.policy_path)
+        self._policies = self._keyed(
+            self.policy_path, validate=_validate_policy_state_row,
+            durable=True)
         self._pulls = self._keyed(self.pull_path)
         self._reports = self._keyed(self.telemetry_path)
         self._report_ids = self._keyed(self.report_ledger_path)
         self._attestations = self._keyed(self.attestations_path)
 
     @staticmethod
-    def _keyed(path):
+    def _keyed(path, **kwargs):
         """A keyed store for the per-device state at *path*, carrying this
         class's own fail-closed error type."""
-        return keyed_state.KeyedState(path, error=StateFileError)
+        return keyed_state.KeyedState(path, error=StateFileError, **kwargs)
 
     def _read(self, path):
         """One state file as a dict. A MISSING file is the empty store (first
@@ -1111,9 +1124,17 @@ class CatalogStore:
                 # aggregation both read list_policies() directly, not through
                 # get_policy()'s normalisation) must keep seeing an assignment
                 # without themselves knowing about the plural key.
-                return {"approved_image_id": ids[0] if ids else None,
-                        "approved_image_ids": ids,
-                        "plans": plans}
+                result = {"approved_image_id": ids[0] if ids else None,
+                          "approved_image_ids": ids,
+                          "plans": plans}
+                if "instr" in prev_row:
+                    # _policies validates this established authority before
+                    # the callback. Carry it in the same atomic row merge as
+                    # plans so Apply and quarantine rewrites cannot reset the
+                    # instruction serial lineage.
+                    instructions.validate_stamp(prev_row["instr"])
+                    result["instr"] = prev_row["instr"]
+                return result
 
             self._policies.update(device_id, write_row)
 

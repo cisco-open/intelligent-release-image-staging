@@ -376,6 +376,11 @@ def test_rotation_cli_preflights_missing_stamper_without_mutation(
     before = path.read_bytes()
     monkeypatch.setenv("IRIS_SECRETS", str(path))
     monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    # Task 13 now exists. Preserve the sentinel's missing dependency fixture
+    # through explicit import failure, so it still proves zero mutation.
+    monkeypatch.setattr(
+        module.importlib, "import_module",
+        lambda _name: (_ for _ in ()).throw(ImportError("injected")))
 
     assert module.main(["rotate", "dev-1"]) == 1
     assert path.read_bytes() == before
@@ -566,3 +571,156 @@ def test_cli_mode_dockerfile_and_device_transport_scope():
         source = path.read_text(encoding="utf-8")
         assert "IRIS_INSTR_KEY" not in source
         assert "instr_key" not in source
+
+
+def test_task13_behavioral_red_default_callback_and_resume_are_real(
+        tmp_path, monkeypatch, capsys):
+    module = _load_cli()
+    path = tmp_path / "secrets.json"
+    store = _store_with_device()
+    store["devices"]["dev-1"]["instr_key"] = _record()
+    secrets_store.save(store, str(path))
+    monkeypatch.setenv("IRIS_SECRETS", str(path))
+    calls = []
+
+    def callback(device_id, key_id):
+        calls.append((device_id, key_id))
+        return "unchanged"
+
+    fake_stamper = types.SimpleNamespace(restamp_instruction_key=callback)
+    monkeypatch.setattr(
+        module.importlib, "import_module",
+        lambda name: fake_stamper if name == "instruction_stamper" else None)
+    assert module.resolve_default_restamp() is callback
+
+    assert module.main(["restamp", "dev-1"], restamp=callback) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"device_id": "dev-1", "state": "unchanged"}
+    assert calls == [("dev-1", _record()["key_id"])]
+
+
+def test_task13_default_callback_resolves_the_real_stamper():
+    module = _load_cli()
+    callback = module.resolve_default_restamp()
+    assert callback.__module__ == "instruction_stamper"
+    assert callable(getattr(callback, "_iris_rotation_context"))
+
+
+def test_task13_restamp_snapshots_key_under_lock_then_calls_after_release(
+        tmp_path, monkeypatch):
+    module = _load_cli()
+    path = tmp_path / "secrets.json"
+    store = _store_with_device()
+    store["devices"]["dev-1"]["instr_key"] = _record()
+    secrets_store.save(store, str(path))
+    before = path.read_bytes()
+    monkeypatch.setenv("IRIS_SECRETS", str(path))
+    calls = []
+
+    def callback(device_id, key_id):
+        fd = os.open(str(path) + ".lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            calls.append((device_id, key_id))
+        finally:
+            os.close(fd)
+        return "updated"
+
+    assert module.restamp_device("dev-1", restamp=callback) == "updated"
+    assert calls == [("dev-1", _record()["key_id"])]
+    assert path.read_bytes() == before
+
+
+def test_task13_initialize_and_recover_commands_use_exact_parser(capsys):
+    module = _load_cli()
+    calls = []
+
+    def producer(mode, now=None):
+        calls.append((mode, now))
+        return {"epoch": 123}
+
+    assert module.main(["initialize"], producer=producer, now=lambda: 9) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "epoch": 123, "state": "initialize"}
+    assert module.main(["recover"], producer=producer, now=lambda: 10) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "epoch": 123, "state": "recover"}
+    assert [item[0] for item in calls] == ["initialize", "recover"]
+    assert module.main(["rec"]) == 2
+    capsys.readouterr()
+
+    assert module.main(
+        ["recover"], producer=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private-path-canary"))) == 1
+    assert capsys.readouterr().err == \
+        "iris-instr-key: instruction operation failed\n"
+
+
+def test_task13_default_rotation_context_spans_persist_and_handoff(
+        tmp_path, monkeypatch):
+    module = _load_cli()
+    path = tmp_path / "secrets.json"
+    store = _store_with_device()
+    store["devices"]["dev-1"]["instr_key"] = _record()
+    secrets_store.save(store, str(path))
+    monkeypatch.setenv("IRIS_SECRETS", str(path))
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    trace = []
+
+    @contextlib.contextmanager
+    def producer_context(device_id):
+        trace.append(("enter", device_id))
+        yield
+        trace.append(("exit", device_id))
+
+    def callback(device_id, key_id):
+        trace.append(("callback", device_id, key_id))
+        return "updated"
+
+    callback._iris_rotation_context = producer_context
+    monkeypatch.setattr(module, "resolve_default_restamp", lambda: callback)
+    monkeypatch.setattr(
+        module.secrets_store.secrets, "token_hex", lambda count: "0f" * count)
+
+    def persist(candidate, plain_path, **_kwargs):
+        trace.append(("persist", candidate["devices"]["dev-1"][
+            "instr_key"]["key_id"]))
+        secrets_store.save(candidate, plain_path)
+
+    monkeypatch.setattr(module.secretfs, "persist_store", persist)
+    key_id = module.rotate_device("dev-1", now=lambda: 500)
+    assert trace == [
+        ("enter", "dev-1"), ("persist", key_id),
+        ("callback", "dev-1", key_id), ("exit", "dev-1")]
+
+
+def test_task13_failed_no_overlap_handoff_resumes_without_another_key(
+        tmp_path, monkeypatch):
+    module = _load_cli()
+    path = tmp_path / "secrets.json"
+    store = _store_with_device()
+    store["devices"]["dev-1"]["instr_key"] = _record()
+    store["devices"]["dev-1"]["instr_key_prev"] = _record(
+        "02" * 32, created_at=10, expires_at=1000)
+    secrets_store.save(store, str(path))
+    monkeypatch.setenv("IRIS_SECRETS", str(path))
+    monkeypatch.setenv("IRIS_AGE_RECIPIENTS", "")
+    monkeypatch.setattr(
+        module.secrets_store.secrets, "token_hex", lambda count: "03" * count)
+    monkeypatch.setattr(
+        module.secretfs, "persist_store",
+        lambda candidate, plain_path, **_kwargs:
+        secrets_store.save(candidate, plain_path))
+    with pytest.raises(module.RestampIncomplete):
+        module.rotate_device(
+            "dev-1", no_overlap=True,
+            restamp=lambda *_args: (_ for _ in ()).throw(OSError("offline")),
+            now=lambda: 500)
+    committed = path.read_bytes()
+    current = secrets_store.load(str(path))["devices"]["dev-1"]["instr_key"]
+    seen = []
+    assert module.restamp_device(
+        "dev-1", restamp=lambda device_id, key_id:
+        seen.append((device_id, key_id)) or "unchanged") == "unchanged"
+    assert seen == [("dev-1", current["key_id"])]
+    assert path.read_bytes() == committed

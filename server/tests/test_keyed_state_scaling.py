@@ -585,3 +585,81 @@ def test_update_many_a_corrupt_shard_aborts_without_rewriting_it(tmp_path):
         state.update_many([good_key, "bad"], lambda k, row: {"n": row["n"] + 1})
     assert open(shard).read() == "{ corrupt"   # untouched
     assert state.get(good_key)["n"] == 2       # already-committed write survives
+
+
+def test_task13_behavioral_red_durable_write_fsyncs_file_then_directory(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "durable.json")
+    events = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def fsync(fd):
+        mode = os.fstat(fd).st_mode
+        events.append("directory" if os.path.isdir("/proc/self/fd/%d" % fd)
+                      else "file")
+        return real_fsync(fd)
+
+    def replace(source, target):
+        events.append("replace")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(keyed_state.os, "fsync", fsync)
+    monkeypatch.setattr(keyed_state.os, "replace", replace)
+    state = keyed_state.KeyedState(path, durable=True)
+    state.put("device-1", {"serial": 1})
+
+    assert events[-3:] == ["file", "replace", "directory"]
+
+
+def test_task13_default_keyed_state_remains_backwards_compatible_without_fsync(
+        tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(keyed_state.os, "fsync", lambda _fd: calls.append(1))
+    state = keyed_state.KeyedState(str(tmp_path / "ordinary.json"))
+    state.put("a", {"n": 1})
+    assert calls == []
+
+
+def test_task13_durable_empty_shard_removal_fsyncs_directory(
+        tmp_path, monkeypatch):
+    state = keyed_state.KeyedState(
+        str(tmp_path / "durable.json"), durable=True)
+    state.put("a", {"n": 1})
+    calls = []
+    real = keyed_state._fsync_directory
+
+    def record(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(keyed_state, "_fsync_directory", record)
+    assert state.delete("a")
+    assert calls == [state.dir]
+
+
+@pytest.mark.parametrize("failure_point", ["file", "directory"])
+def test_task13_durable_fsync_failures_propagate_with_honest_visibility(
+        tmp_path, monkeypatch, failure_point):
+    state = keyed_state.KeyedState(
+        str(tmp_path / "durable.json"), durable=True)
+    real_fsync = os.fsync
+    calls = []
+
+    def fail(fd):
+        kind = ("directory" if os.path.isdir("/proc/self/fd/%d" % fd)
+                else "file")
+        calls.append(kind)
+        if kind == failure_point:
+            raise OSError("injected %s fsync" % kind)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(keyed_state.os, "fsync", fail)
+    with pytest.raises(OSError, match="injected"):
+        state.put("a", {"n": 1})
+    restarted = keyed_state.KeyedState(
+        str(tmp_path / "durable.json"), durable=True)
+    if failure_point == "file":
+        assert restarted.get("a") is None
+    else:
+        assert restarted.get("a") == {"n": 1}

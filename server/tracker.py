@@ -28,6 +28,7 @@ import blocklist_reconciler as _reconciler
 import bounded_pool
 import credential_cache
 import peer_endpoints as _peer_endpoints
+import peer_handouts as _peer_handouts
 import peer_enforcement as _peer_enforcement
 import peer_policy as _peer_policy
 import origin_qos as _origin_qos
@@ -389,7 +390,8 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 policy_paths=None, endpoints_path=None, pending_queue=None,
                 record_endpoint=None, on_endpoint_failure=None,
                 on_endpoint_change=None, on_announce_refused=None,
-                scrape_authorizer=None, certfile=None):
+                scrape_authorizer=None, certfile=None, handout_path=None,
+                record_handout=None, on_handout_failure=None):
     """Build the tracker server (TLS when *certfile* is supplied).
 
     Typed identity/policy integration (spec §6/§7):
@@ -430,6 +432,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
     _credentials = credential_cache.CredentialResolver(secrets_path)
     _grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
     _record_endpoint = record_endpoint or _peer_endpoints.record_endpoint
+    _record_handout = record_handout or _peer_handouts.record_handout
     _policy_snapshot = (PolicySnapshot(*policy_paths)
                         if policy_paths is not None else None)
 
@@ -618,6 +621,8 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 peers = self._select(
                     a, principal, peer_ip, policy, get_attributions,
                     effective_numwant)
+                peers = self._record_selected(
+                    principal, peers, a["info_hash"], now)
                 self._send(200, build_announce_response(
                     peers, compact=a["compact"], interval=issued_interval,
                     min_interval=issued_interval))
@@ -639,9 +644,36 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             peers = self._select(
                 a, principal, peer_ip, policy, get_attributions,
                 effective_numwant)
+            peers = self._record_selected(
+                principal, peers, a["info_hash"], now)
             self._send(200, build_announce_response(
                 peers, compact=a["compact"], interval=issued_interval,
                 min_interval=issued_interval))
+
+        @staticmethod
+        def _record_selected(principal, peers, info_hash, now):
+            """Persist device disclosure evidence before response encoding.
+
+            Service and compatibility principals are outside this ledger.
+            With no ledger path the constructor retains its legacy/test
+            behavior; production always supplies one.
+            """
+            if principal.type != "device" or not peers or handout_path is None:
+                return peers
+            try:
+                covered = _record_handout(
+                    handout_path, principal, peers, info_hash, now)
+                if covered is False:
+                    raise _peer_handouts.HandoutStoreError(
+                        "handout persistence refused")
+            except Exception:
+                if on_handout_failure is not None:
+                    try:
+                        on_handout_failure()
+                    except Exception:
+                        pass
+                return []
+            return peers
 
         def _persist_endpoint(self, principal, peer_ip, peer_port, now):
             if endpoints_path is None:
@@ -1756,6 +1788,7 @@ def main():
     policy_paths = (os.path.join(state_dir, "peer-policy.json"),
                     os.path.join(state_dir, "peer-policy.lkg.json"))
     endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
+    handout_path = os.path.join(state_dir, "peer-handouts.json")
 
     try:
         srv = make_server(
@@ -1767,6 +1800,7 @@ def main():
             on_endpoint_change=reconciler.wake,
             on_announce_refused=hub.note_announce_refused,
             scrape_authorizer=_catalog_scrape_authorizer(state_dir),
+            handout_path=handout_path,
             certfile=certfile)
     except (OSError, ssl.SSLError, ValueError):
         print("iris-tracker: TLS certificate unusable; refusing plaintext "
