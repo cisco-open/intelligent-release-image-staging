@@ -269,6 +269,58 @@ requires the device to report staging complete. Rates and verification results
 identify the image they describe. Measurements that cannot be tied to a
 participant are unavailable.
 
+### Roles and peer-policy status
+
+The Devices table's **Role** column shows the declared fleet role, or a dash
+when none is declared. **Filters → Role** offers *Role: any*, *— no role —*,
+and the complete policy role list, including roles absent from the current
+page. The filter is applied by the server before paging.
+
+For a selection, open **More actions → Set role…**. Leaving the disabled initial
+placeholder untouched is a no-op; choosing the explicit *— no role —* option
+clears membership. **Preview change** sends one aggregate dry run for every
+selected device and shows the four access/membership impact counts, whether QoS
+changes, per-device failures, and the confirmation threshold. **Set role** uses
+the original pre-preview ETag and that preview's confirmation token in one
+aggregate commit. Cancel never commits. A concurrent change or confirmation
+refusal discards the preview and requires a refresh and new preview; the Console
+never silently retries policy intent, and an all-failed preview cannot commit.
+If the commit connection or response is
+unreadable, **changes may have been saved**: refresh policy and Fleet state,
+review drift, and preview again rather than repeating the request.
+
+The collapsed **Peer policy** disclosure above Devices summarizes role and
+restricted-role counts, drift, and outbox occupancy (`N/256`). Expanding it
+shows per-role member counts, the last origin-QoS state and download counts,
+the mutual-origin **preflight count only**, and the explicit-ACL shadowing rule.
+It never displays peer addresses or raw deny lists. Degraded, fail-closed, and
+unavailable states remain distinct. A capability banner blocks role changes
+unless the server explicitly returns `roles_supported: true`; a fully old
+Console/server pair cannot show this warning, which is why downgrade uses the
+quarantine-first procedure in [Role-policy operations and
+rollback](operations.md#role-policy-operations-and-rollback).
+
+The Set role action and its apply controls remain disabled while capability or
+policy health is uncertain. The UI's degraded state can cover LKG fallback or
+lost role state; the state-owning management process startup log provides the
+specific lost-state signal.
+
+The existing quarantine filter and per-row/bulk quarantine actions remain in
+place. Quarantine intent uses its existing badge and stays distinct from the
+tracker's last enforcement state.
+
+The Console intentionally has no role-policy JSON editor and no QoS editor.
+Use `iris-role` for definitions, definition-scoped QoS, membership, ACL
+migration, and one device's declared/compiled role and drift. Global QoS and
+pair explanations are available only through the documented API.
+
+Phase 0 changes future tracker introductions only; it
+does not sever existing connections or remove retained peers. For immediate
+containment, unassign every image from the affected device and let its current
+agent remove those torrents on the next tick. Device-side rate intent is
+cooperative, and a privileged device administrator can alter the device
+environment.
+
 An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
 agent without using the deployment record as authority. It is kept as the account of what
@@ -339,6 +391,7 @@ rows in view.
 | Adopt selected | Creates the ownership deployment record for each device. | Yes — a dialog listing the selected devices |
 | Delete selected | Removes the inventory rows only. | Yes — a dialog listing the devices and warning that deletion is not an undeploy |
 | *Set credential…* + **Apply** | Assigns one credential profile to every checked device. The picker opens on a disabled placeholder, so Apply with nothing chosen does nothing; choosing *no credential (clear the assignment)* clears it instead. The modal does not open while the profile list has failed to load. | Only when clearing — a dialog naming the device count |
+| More actions → Set role… | Previews and applies one role (or an explicit clear) to the whole cross-page selection in a single CAS-protected operation. | Always when effective membership/access or QoS changes; uses the reviewed preview token |
 | Assign images to selected | Opens the shared image picker for the whole checked selection — the bulk form of each row's own control in the **Assigned images** column, and the reason the filter bar exists: filter to a platform or model, select all, assign. | Only when it would unassign every image |
 
 A device can have up to ten images assigned at once, staged and transferred in

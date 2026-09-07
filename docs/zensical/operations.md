@@ -97,19 +97,95 @@ device session each. State-polling loops make a fresh observation on every
 iteration. Guest Shell readiness waits 2, 4, 6, and then up to 15 seconds
 between observations.
 
+## Role-policy operations and rollback
+
+Treat a role change like a network-policy change. Read the current policy and
+ETag, call the same mutation with `dry_run=1`, review
+`member_delta`, `origin_access_lost`, `empty_permitted_sets`,
+`role_pairs_stopped`, and `qos_changed`, then apply the unchanged request with
+its `confirm_token` and the same strong `If-Match`. The zero blast-radius
+threshold means every effective access, membership, or QoS change requires
+confirmation. A concurrent commit invalidates both the ETag and token; read and
+preview again rather than replaying either.
+
+Create definitions before assigning members. Clear or move every member and
+remove every referring peer-role before deleting a definition. A direct role
+assignment is refused when a non-quarantine explicit ACL already shadows that
+device. For a deliberate conversion, use `iris-role migrate ACL ROLE --dry-run`
+to preview without persisting anything. A confirmed `--apply` migration first
+records the role membership while the old ACL still shadows it, then a second
+policy commit removes the matching ACL assignments.
+If the second commit fails, the shadow remains and enforcement stays on the old
+ACL; inspect `role_drift`, correct the failure, and rerun the preview.
+
+Fleet declaration and compiled policy membership are separate durable stores.
+IRIS serializes their writers and chooses an order that leaves a more permissive
+residue on failure: a restriction writes the fleet declaration before policy;
+a relaxation writes policy before the declaration. Bulk results report exact
+`applied` and `failed` rows plus a bounded drift summary. Do not interpret a
+partial response as rollback. Repair the failed store and repeat the same
+idempotent membership intent.
+
+Neither order is a distributed rollback. A policy restore changes policy
+content only and does not roll back a completed Fleet write. Before repairing
+or restoring policy, preserve `peer-policy.json`, Fleet state,
+`peer-enforcement.json`, `origin-qos.json`, the LKG/ring, and the roles-ever
+watermark. Then compare declared and compiled membership and repair the reported
+drift.
+
+For an intentional policy rollback, the internal restore primitive copies
+reviewed historical content into a monotonic new revision, preserves the live
+outbox, appends a restore event, and rotates its acknowledgement epoch. There is
+no public restore route or CLI. Do not overwrite a healthy authoritative file
+with a ring snapshot; arrange a reviewed maintenance procedure around the
+primitive. Copying verified LKG bytes is reserved for repair of an already
+corrupt authoritative store.
+
+Phase 0 changes tracker discovery on the next announce and does not sever a
+live connection or erase aria2's retained peer list. If isolation cannot wait
+for connections to age naturally, unassign every image from the affected
+device; its current agent removes the torrents on the next tick. This remains a
+staging operation and never installs, activates, reloads, or changes boot state.
+
+Before rolling the server back to a binary that predates roles, always
+quarantine restricted devices before downgrading. Verify that the current
+tracker has exported those quarantine operations, then perform the server rollback. Older
+code ignores `roles_present` and cannot enforce or warn about role definitions.
+After restoring a role-capable version, repair any `role_drift`, verify the
+policy and origin-QoS status, and deliberately release each quarantine. Do not
+delete `peer-policy.json` or its LKG to silence a warning: doing so loses role,
+ACL, and quarantine intent.
+
 ## Peer-policy operations and their backlog
 
-Every policy mutation — a quarantine assignment from the console, or its removal
-— is committed under a single lock and appends a stable entry to an **outbox**
-that the tracker drains. The tracker reports how far it has consumed through
-`last_operation_exported_revision` in the enforcement status file, and entries at
-or below that watermark are pruned on the next commit.
+Every policy mutation — role definitions, memberships, QoS, migration,
+quarantine, and release — is committed under a single policy lock and appends a
+stable entry to an **outbox** that the tracker drains. One bulk membership
+change creates one revision and one outbox entry. Each commit also creates a new
+acknowledgement epoch. The tracker may advance
+`last_operation_exported_revision` only when the status epoch matches the
+current policy history and after it appends the local audit record and accepts
+the event into its queue. Each outbox row has a stable event ID, so a failed
+export or history mismatch replays the same event at least once. Only entries at
+or below a valid revision-and-epoch watermark are pruned on the next commit.
+The tracker persists both the accepted revision and its epoch in enforcement
+status.
 
-The outbox is capped at **256** unacknowledged entries, and the cap is checked
-*before any write*. A mutation that would exceed it is refused with
-`503 operation_backlog_full`, so a stalled consumer blocks new operations instead
-of silently discarding them. A 503 here means the tracker is not draining — check
-that it is running and reconciling before retrying the mutation.
+The outbox is capped at **256** unacknowledged entries. A mutation that observes
+a full backlog in preflight is refused before its normal Fleet/policy write with
+`operation_backlog_full`, so a stalled consumer blocks new operations instead
+of silently discarding them. New role/QoS routes use 409; the legacy quarantine
+route retains its 503 compatibility response. Either means the tracker is not
+draining — check that it is running and reconciling before retrying. A direct
+writer racing after a Fleet-first preflight can still fail partially; inspect
+`partial`, `applied`, `failed`, revision, and `role_drift` on every error before
+retrying.
+
+Do not manually advance or clear the acknowledgement fields to suppress a
+backlog. A number from another acknowledgement epoch is treated as zero and all
+stable event IDs replay; changing it by hand can only obscure the state that
+the tracker still needs to export. Reads, refusals, and dry runs commit no new
+revision or acknowledgement epoch.
 
 The same route separates its other refusals, and they mean different things:
 
@@ -119,6 +195,44 @@ The same route separates its other refusals, and they mean different things:
 | `422 policy_error` | Policy is degraded — running on the last-known-good copy. Repair the authoritative file. |
 | `503 policy_fail_closed` | Policy is fail-closed; mutations are refused entirely. |
 | `503 operation_backlog_full` | 256 operations are unacknowledged. The tracker is not draining. |
+
+New role and QoS routes instead use exact strong ETags (`428
+precondition_required`, `412 precondition_failed`) and return `409
+operation_backlog_full`. See [Peer policy](reference.md#peer-policy).
+
+### Tracker cadence, selection, and origin QoS
+
+Issue #158 is active in Phase 0. On every authenticated announce, the tracker
+loads the current compiled policy, chooses the device/global
+`announce_min_interval_s`, applies bounded ±10% jitter within 10–300 seconds,
+and returns that issued value as both `interval` and `min interval`. The peer
+row expires after twice its own issued interval. Candidate return is capped by
+the smaller of the request and effective `numwant`; `numwant=0` returns no
+peers. Selection starts at a randomized registry position and inspects at most
+the smaller of four times that ceiling or the whole swarm, so policy denials
+can make a response shorter than its ceiling. Restricted-role selection uses
+role indexes but still evaluates mutual policy for every candidate. A shared
+legacy/NAT address receives the slowest cadence and smallest peer ceiling of
+its possible owners. A role edit therefore affects the next requester announce
+without waiting for every candidate to reannounce.
+
+The same serialized reconciler applies origin QoS. It forces a complete apply
+on first run, aria2 session change, desired-option or active-GID-set change, and
+recovery after a failed pass. A global-option failure stops that pass. A
+per-download failure does not skip later downloads, but the entire pass remains
+degraded and is retried. `origin-qos.json` and the management view expose only
+state, option/download counts, timestamp, and a closed error code. They contain
+no GIDs, addresses, option values, or hashes.
+
+The mutual-origin result beside that status is still #153 preflight evidence.
+It does not change the applied blocklist. A `shared_permit_deny` NAT conflict is
+counted and the shared address stays unblocked, because a global IP block would
+also cut off the permitted principal.
+
+Keep #153 open until one full release of preflight observation has completed.
+Only a later reviewed activation may union the current self-evaluation set with
+mutual-origin evaluation for every ACL, including hand-written ACLs. This Phase
+0 runbook neither starts that release window nor activates the union.
 
 ## Endpoint writes that fail
 
@@ -603,6 +717,16 @@ selects another output path. These commands pack existing binaries; they do
 not rebuild aria2c or contact a device. Refresh the ARM bundle before any
 wrapper build that uses it as an input, or pass the verified binary directly
 with `ARIA2C_BIN_ARM64`.
+
+The pinned amd64 and arm64 aria2 binaries are now built from the documented
+source pin plus all six patches in `tools/aria2c-patches/`. Patches 0005 and
+0006 make the configured peer admission cap cover stalled/pending connections
+and preserve protocol messages coalesced with the BitTorrent handshake. These
+binaries are the source inputs for the **next** signed IOx wrappers and XR RPM,
+and for refreshed Guest Shell bundles. Their presence in the source tree does
+not mean a release was cut, a package was signed, or any deployed device was
+updated. Build, sign where your platform process requires it, verify the
+adjacent provenance, and redeploy as separate operator actions.
 
 Then redeploy affected devices so they actually run the new agent bytes. A
 green package row verifies the served wrapper against its manifest; it does

@@ -195,6 +195,77 @@ Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
 record's token with a constant-time comparison. Each request checks that
 record's current expiry and revocation state without scanning other devices.
 
+### Roles, virtual ACLs, and the Phase 0 boundary
+
+A device may declare one role. Role names match
+`^[a-z0-9][a-z0-9._-]{0,31}$`; `default`, `quarantine`, `origin`, `seeder`, and
+`legacy` are reserved. A restricted role becomes one **virtual role ACL** in
+memory: it permits its own role, the explicitly permitted peer roles, and
+`service:seeder` when `origin` is true, then denies everything else. Restricted
+roles that communicate must name one another symmetrically. An unrestricted
+role keeps implicit open discovery.
+
+Exactly one ACL governs a principal. Fail-closed and revoked state come first,
+then an explicit stored-ACL assignment, then a restricted role's virtual ACL,
+then implicit permit. An explicit assignment therefore **shadows the role**;
+it is not conjoined with the role ACL. Quarantine remains the reserved explicit
+deny-all assignment and takes precedence. Use the explain route before changing
+or migrating a device that already has an explicit assignment.
+
+Phase 0 enforces new introductions at the tracker. It **does not sever existing connections**
+or purge peers that aria2 already knows, and aria2 may reconnect
+to a retained peer without asking the tracker again. The immediate containment
+lever is to unassign every image from the restricted device; the existing agent
+then removes those torrents on its next tick. No role operation installs,
+activates, reloads, changes boot variables, or otherwise changes running device
+software.
+
+Issue #153 is **preflight only** in this phase. The reconciler computes how many
+devices a future mutual origin ACL would newly deny, but it continues applying
+the prior self-evaluation blocklist. `origin: false` controls whether the
+tracker introduces the origin; it does not yet add that device's address to the
+origin's aria2 blocklist. The management surface exposes the preflight count,
+not the device IDs or addresses.
+
+Issue #153 remains open through one full release of preflight observation. A
+later, separately reviewed activation would apply the
+union of current self-evaluation and mutual-origin evaluation to **all** ACLs,
+including hand-written ACLs. Phase 0 has neither completed that observation
+window nor activated the union.
+
+When permitted and denied principals share one translated IPv4 address, a
+global origin block would affect both. IRIS records a `shared_permit_deny`
+conflict and leaves that address unblocked. This availability rule means NAT can
+weaken address-level origin isolation; use distinct addresses when that
+isolation is required.
+
+The **agent-distribution exemption** is an invariant: role ACLs, QoS values,
+announce cadence, candidate ceilings, and future instruction vocabulary cannot
+gate bootstrap artifacts, enrollment, token refresh, or agent packages. A
+restricted or quarantined device must retain the recovery path used to receive
+and refresh the agent. Phase 0 adds no device instruction route and does not
+alter any deployed package.
+
+The exemption covers installers, Guest Shell bundles, IOx and IOS-XR packages,
+artifact recovery, enrollment, and token refresh. These recovery artifacts are
+separate from OS-image torrent staging. The current Phase 0 structural guards
+cover import reachability, the scoped refresh handler, packaging/install shell
+controls (including `server/pack-agent-bundle.sh` and
+`server/provision-served.sh`; `tools/make-agent-bundle.sh` is the operator
+wrapper), artifact-route metadata, the closed QoS grammar, and refresh ordering.
+Device instruction parsing, device cadence gates, and handout-budget accounting
+do not exist in Phase 0, so no later parser/cadence/budget guard is claimed here.
+
+### Device administrator trust boundary
+
+IRIS cannot keep a policy confidential from, or make it tamper-proof against,
+an administrator with IOS privilege 15 or IOS-XR root-lr access. That
+administrator controls the supported device environment. Device-side rates and
+caps are therefore cooperative and tamper-evident, never tamper-proof, even if
+a future phase delivers instructions. Phase 0 does not deliver those
+instructions at all. Any future `violation = 0` status would show only that IRIS
+observed no violation; it would not prove device compliance.
+
 ### Tracker transport security
 
 The tracker on TCP 6969 is **HTTPS-only** and presents the same server
@@ -223,30 +294,49 @@ the torrent.
 ### Peer policy failure posture
 
 Peer ACLs and per-device assignments live in `peer-policy.json` under
-`IRIS_STATE`, with a last-known-good copy at `peer-policy.lkg.json`. Every commit
-writes the current authoritative document to the LKG before atomically replacing
-the authoritative file, so the last-known-good copy is the revision before the
-current one and never a half-written candidate. On a fresh start, when neither
-file exists, both are written with the same base revision.
+`IRIS_STATE`, with a last-known-good copy at `peer-policy.lkg.json` and the five
+most recent prior committed documents in `peer-policy.lkg.d/`. Every commit
+writes the current authoritative document to the LKG and ring before atomically
+replacing the authoritative file, so recovery copies are never half-written
+candidates. The durable `peer-policy.roles-ever` watermark is created before
+the first role-bearing commit and supports startup downgrade/state-loss
+warnings. On a fresh start, when neither policy file exists, both are written
+with the same base revision.
 
 Read precedence decides the posture:
 
 | State on disk | Result |
 | --- | --- |
-| Neither file present | Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed. |
-| Valid authoritative | Used as-is. |
+| Neither file present, no roles-ever watermark | Open discovery. The validated base document is materialized to both paths; not degraded, not fail-closed. |
+| Neither file present, roles-ever watermark retained | The base document is materialized and discovery is open, but the result is `degraded` because prior role state was lost. Subsequent reads remain degraded. |
+| Valid authoritative | Used as-is, except that an authoritative document with no `roles` is `degraded` when `roles_present` or the roles-ever watermark proves role state previously existed. |
 | Corrupt authoritative, valid LKG | The LKG is used and the policy reports `degraded`. |
 | At least one file present, neither valid | `fail_closed`: no announce is offered any candidate peer, and the seeder blocklist switches to the emergency deny list below. |
 
 The first and last rows are easy to confuse and lead to opposite repairs. Both
 files *missing* is the open case, not the deny-everything case.
 
-Recovery is to put a valid document back at `peer-policy.json`. Copying
-`peer-policy.lkg.json` over it restores service, but that copy is one revision
-behind: the most recent policy change is lost and has to be reapplied from the
-console. Removing both files re-materializes the base policy, which drops every
-device's ACL assignment — including every quarantine assignment — and every
-operator-defined ACL; only the reserved `quarantine` ACL is re-created.
+Before recovery, preserve the authoritative policy, Fleet state, tracker and
+origin status, LKG and ring, and the roles-ever watermark. When the
+authoritative file is corrupt and the service is already using the valid LKG,
+a controlled repair may replace `peer-policy.json` with the verified LKG bytes;
+that repairs the store at the LKG revision and loses the newest policy change.
+It is a corrupt-store repair, not the normal rollback mechanism.
+
+An intentional rollback uses the policy restore primitive to copy reviewed
+historical content into a **monotonic new revision**. It preserves the live
+outbox, appends a `restore` event, and rotates the acknowledgement epoch. There
+is no public restore route or CLI, so do not simulate this by copying a ring
+file over a usable authoritative policy. The primitive itself requires usable
+authoritative state. Follow a reviewed maintenance procedure that invokes the
+restore primitive and then reconcile Fleet drift.
+
+Removing both files re-materializes the base policy, which drops
+every device's ACL assignment — including every quarantine assignment — every
+role and member, every QoS override, and every operator-defined ACL; only the
+reserved `quarantine` ACL is re-created. The roles-ever watermark remains, so a
+role-capable server reports the loss rather than treating it as a pristine
+install.
 
 A **valid but empty** policy is not the same as a broken one. The tracker applies
 an empty blocklist — a full replace, so anything previously blocked is released —

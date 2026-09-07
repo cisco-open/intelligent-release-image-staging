@@ -26,7 +26,7 @@ VPG subnet behind NAT), or `xr-host` (an IOS-XR appmgr container sharing the
 router's own network stack):
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
 ```
 
 - **routed** — fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -88,10 +88,51 @@ Keep operator passwords out of `fleet/devices.csv` even as a convenience — the
 credential profile lives in the server's secret store, and the CSV is a
 reviewable, Git-friendly file.
 
+### Role definitions and membership
+
+The optional `role` inventory column declares one lowercase role per device.
+Copying or re-importing an older pre-role CSV does not clear membership, and a
+blank `role` cell preserves the stored value. Clear it explicitly through the
+role API, the Console's **Set role** action, or:
+
+```bash
+iris-role set DEVICE_ID - --dry-run
+iris-role set DEVICE_ID - --confirm '<preview token>'
+```
+
+Role definitions have their own round-trippable file. Lists in `peers` and
+`nets` are semicolon-separated; rates are integer bytes per second and `*_s`
+values are integer seconds.
+
+`fleet/roles.csv.example` is the tracked template. The real
+`fleet/roles.csv` is operator-owned and ignored by Git; keep its review and
+backup controls with the rest of your site inventory.
+
+```bash
+cp fleet/roles.csv.example fleet/roles.csv
+iris-role import fleet/roles.csv --dry-run
+iris-role import fleet/roles.csv --confirm '<preview token>'
+iris-role export > fleet/roles.exported.csv
+```
+
+Import validates the whole role graph before writing, including references,
+symmetric restricted-role links, duplicate/canonical-equivalent networks, QoS
+ranges, and reserved names. One bulk membership or CSV action creates one
+policy revision and one tracker-outbox event. A partial two-store write reports
+the exact failed rows and `role_drift`; correct the storage problem and reapply
+the same intent. Roles change server-side swarm policy only. They add no device
+VLAN, ACL, environment variable, or package setting in any management type.
+
+The change stops new tracker introductions but does not sever connections or
+remove peer addresses already retained by aria2. When containment cannot wait,
+unassign every image from the device so its current agent removes the torrents
+on its next tick. Any future device rate/cap remains cooperative in the presence
+of a privileged device administrator; Phase 0 delivers no device rate setting.
+
 ### Batch operations in the Console
 
 The Devices toolbar finishes a CSV import in bulk: onboard, undeploy, adopt,
-delete, credential assignment, and image assignment all act on the checked
+delete, credential assignment, role membership, and image assignment all act on the checked
 rows and report per-device refusals instead of failing the whole batch. Image
 assignment applies a *set* — up to ten images — to the whole selection in one
 pick, not one image per device: the toolbar opens the same checkbox picker as

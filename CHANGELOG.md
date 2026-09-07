@@ -47,6 +47,33 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Use configured server paths when onboarding devices, and keep server log
   settings out of device installer options.
 
+### Added
+- Add Phase 0 server-side peer roles with one declared role per device,
+  in-memory virtual ACLs, explicit-ACL shadowing, lifecycle/migration tooling,
+  fleet/CSV membership, strong-CAS API mutations, dry-run impact counts,
+  candidate-bound confirmation, pair explanations, and effective-QoS
+  provenance. The Console adds a declared-role column/filter, aggregate
+  selection action, and a count-only policy disclosure.
+- Apply role-aware tracker discovery, bounded candidate selection, per-record
+  expiry, and configurable 10–300 second announce cadence plus `numwant`
+  ceilings. Policy changes stop new peer introductions; they do not sever
+  existing aria2 connections or erase retained peer addresses.
+- Apply origin-wide and per-torrent upload limits plus an origin peer cap, with
+  count-only reconciliation status. Per-role origin shaping and device-side
+  QoS are not present in Phase 0; effective device QoS is reported as
+  `pre-instructions`. Device-side limits remain cooperative in the presence of
+  a privileged device administrator.
+- Measure issue #153's prospective mutual-origin deny as a preflight count while
+  retaining the existing applied origin blocklist. Shared NAT permit/deny
+  conflicts stay unblocked and are reported by reason/count. The issue remains
+  open through one full release of preflight observation; any later activation
+  must separately review the union for all ACLs, including hand-written ACLs.
+- Keep agent artifacts, enrollment, and token refresh structurally exempt from
+  roles, QoS, cadence, and peer-selection budgets. The six-patch amd64/arm64
+  aria2 binaries are now the pinned source inputs for future refreshed Guest
+  Shell bundles and signed device packages; this does not cut a release, sign a
+  package, or update a deployed device.
+
 ## [2026.09.05]
 
 ### Documentation

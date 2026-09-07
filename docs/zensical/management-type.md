@@ -128,6 +128,14 @@ with telemetry when observability is enabled.
   record notes whether `ip nat outside` already existed; a pre-existing marking is
   preserved and undeploy removes that marking only when IRIS created it.
 
+  Several `router-nat` participants can share one translated outside address.
+  If origin policy would permit one of those principals and deny another, IRIS
+  reports a `shared_permit_deny` conflict and leaves the shared address
+  unblocked rather than cutting off the permitted principal. The additional
+  mutual-origin deny proposed by issue #153 remains a count-only preflight in
+  Phase 0; use distinct outside addresses when address-level isolation is
+  required.
+
 `device/router-install.sh` destroys any pre-existing Guest Shell before
 applying config, then enables it with the selected VPG networking. Agent
 state persists on `bootflash:guest-share` across the Guest Shell rebuild.
@@ -198,7 +206,7 @@ Inventory is a management-type-aware, named-header CSV. The header is required a
 validated; extra, missing, or misplaced columns are rejected.
 
 ```text
-device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,platform
+device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,app_gateway,inband_vlan,ios_ssh_host,model,vpg_number,nat_interface,svi_igp,role,platform
 ```
 
 - **routed** rows fill `iris_vlan`, `svi_ip`, `svi_mask`, `app_ip`, `app_mask`,
@@ -218,6 +226,11 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
   IOx app SSHes to for the placement copy. It defaults to the device's management IP
   (`device_ip`), which is on the same existing management VLAN. Only set it for an
   asymmetric topology; Guest Shell never uses it.
+- `role` is optional server-side peer-policy membership. It uses the same
+  meaning for routed, inband, router-routed, router-nat, and xr-host devices and
+  never renders an IOS/IOS-XR ACL or changes the device network configuration.
+  A blank import preserves existing membership; clear it through the explicit
+  role action.
 
 The same server-side validator is applied to the Console, the API, and CSV
 import: strict IDs, IPv4 addresses and contiguous masks, VLAN range 1–4094, and

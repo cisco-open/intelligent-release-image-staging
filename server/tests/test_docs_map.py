@@ -224,6 +224,128 @@ def test_docs_state_policy_outbox_backlog():
     _require("operations.md", ["operation_backlog_full", "256"])
 
 
+def test_docs_state_phase_zero_role_and_qos_contract():
+    """Phase 0 documentation must distinguish server enforcement from future
+    device instructions and preserve the preflight-only origin boundary."""
+    _require("security.md", [
+        "virtual role ACL",
+        "shadows the role",
+        "does not sever existing connections",
+        "preflight only",
+        "shared_permit_deny",
+        "agent-distribution exemption",
+    ])
+    _require("reference.md", [
+        "`^[a-z0-9][a-z0-9._-]{0,31}$`",
+        "at most 256 roles",
+        "`peers` | the role itself; at most 64",
+        "`0` means unlimited",
+        "`per_peer_bps`",
+        "modelling input",
+        "| `announce_min_interval_s` | 30 s | 10–300 s |",
+        "| `origin_max_peers` | 55 | 1–1,000 |",
+        "`delivery_state: pre-instructions`",
+        "`PUT /api/v1/peer-policy/roles/<name>`",
+        "`GET /api/v1/peer-policy/explain?a=&b=`",
+    ])
+    _require("operations.md", [
+        "`dry_run=1`",
+        "`confirm_token`",
+        "quarantine restricted devices before downgrading",
+        "unassign every image",
+    ])
+    _require("architecture.md", [
+        "server-side cadence",
+        "server-side peer selection",
+        "Per-role origin shaping is not expressible",
+    ])
+    _require("observability.md", [
+        "count-only",
+        "`enforcement.mutual_origin.mode = preflight`",
+        "`delivery_state = pre-instructions`",
+    ])
+    _require("network-ports.md", [
+        "No new port or network flow",
+    ])
+    _require("problems.md", [
+        "## asymmetric_peers",
+        "## role_isolated",
+        "## role_in_use",
+        "## role_reserved_name",
+        "## operation_backlog_full",
+    ])
+
+
+def test_docs_state_phase_zero_recovery_and_interface_boundaries():
+    """The Phase 0 operator contract must keep recovery monotonic, describe
+    partial writes honestly, and use the exact public Problem fragments."""
+    _require("security.md", [
+        "cooperative and tamper-evident, never tamper-proof",
+        "one full release of preflight observation",
+        "union of current self-evaluation and mutual-origin evaluation",
+        "current Phase 0 structural guards",
+        "`degraded` because prior role state was lost",
+        "`server/pack-agent-bundle.sh`",
+    ])
+    _require("operations.md", [
+        "monotonic new revision",
+        "no public restore route or CLI",
+        "acknowledgement epoch",
+        "stable event ID",
+        "does not roll back a completed Fleet write",
+        "`partial`",
+        "persists both the accepted revision and its epoch",
+    ])
+    _require("reference.md", [
+        "preview returns 200 JSON",
+        "committed DELETE returns 204",
+        "`console-session-required`",
+        "`management-authentication-required`",
+        "effective `endpoint_ttl()/3`",
+        "Numeric QoS values reject booleans",
+        "no per-role member cap",
+        "`peers` must be a non-null array",
+        "does not promise duplicate-net rejection",
+        "`defs.<role>.qos.on_stale`",
+        "never upload",
+        "`origin_unreachable`",
+    ])
+    _require("console.md", [
+        "— no role —",
+        "changes may have been saved",
+        "does not sever existing connections",
+        "pair explanations are available only",
+        "all-failed preview cannot commit",
+    ])
+    _require("observability.md", [
+        "compiled policy membership",
+        "`fleet_rollup.issued_revision: null`",
+        "`fleet_rollup.applied: {}`",
+        "Authorization data",
+    ])
+    _require("architecture.md", [
+        "Fleet declaration",
+        "compiled membership",
+    ])
+    _require("fleet-workflows.md", [
+        "`fleet/roles.csv` is operator-owned and ignored",
+    ])
+    _require("problems.md", [
+        "## bad_role",
+        "## device_not_found",
+        "## fleet_write_failed",
+        "## incomparable_role_change",
+        "## invalid_policy",
+        "## invalid_policy_request",
+        "## mixed_role_direction",
+        "## policy_unavailable",
+        "## precondition_failed",
+        "## principal_unresolvable",
+        "## revision_conflict",
+        "## role_not_found",
+    ])
+
+
 def test_docs_state_pending_endpoint_retry():
     """An endpoint write that fails is queued and retried; the device
     participates meanwhile but the reported status degrades."""

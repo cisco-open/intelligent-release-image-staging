@@ -91,6 +91,53 @@ The server and Console divide the work as follows:
 | Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
+## Phase 0 roles and traffic controls
+
+Phase 0 adds policy at the two server-owned BitTorrent control points. The
+tracker applies virtual role ACLs, server-side cadence, and server-side peer selection
+on every announce. It returns only mutually permitted candidates,
+caps the request by the role's effective `numwant`, and tells the client when
+to announce again. DHT, peer exchange, and local peer discovery remain disabled,
+so the tracker is the only source of new peer introductions.
+
+The origin reconciler separately applies the global origin upload limit, the
+per-torrent origin upload limit, and the origin's per-torrent peer cap to
+`aria2c`. These controls are global or per image. Per-role origin shaping is not expressible
+in one shared torrent: aria2 exposes no origin-side rate limit
+for a particular remote role. A metered device downlink is protected only
+cooperatively. Device administrators remain able to alter their environment;
+any later device policy would be tamper-evident rather than tamper-proof.
+Phase 0 neither changes a device's live aria2 options nor installs a device-side
+traffic policy.
+
+```mermaid
+flowchart LR
+    Fleet["Fleet declaration<br/>one role per device"] --> Compile["Compiled membership<br/>drift can differ"]
+    Policy["Revisioned peer policy<br/>roles + QoS intent"] --> Compile
+    Compile --> Tracker["Tracker<br/>ACL, cadence, candidate ceiling"]
+    Policy --> Origin["Origin reconciler<br/>global + per-torrent shaping"]
+    Tracker --> Device["Existing device aria2c"]
+    Origin --> Device
+    Recovery["Agent distribution<br/>enrollment + token refresh"] --> Device
+```
+
+Role ACLs are compiled in memory from the revisioned policy document; they do
+not consume the 64 stored-ACL slots and are never serialized as ordinary ACLs.
+The Fleet declaration and compiled membership are coordinated but separate
+durable values, which is why partial writes can produce visible `role_drift`.
+The separate agent-distribution path in the diagram is exempt from role and
+QoS policy so a restricted device retains its recovery channel.
+The same behavior applies in the one-host Compose stack, separate Docker hosts,
+and Kubernetes. All state and enforcement stay on the server tier. There is no
+new service, listener, environment variable, Secret, Service, NetworkPolicy
+rule, or device flow for Phase 0.
+
+The boundary matters during an incident: a policy change stops **new** tracker
+pairings, but it does not close an existing BitTorrent connection or erase a
+peer address already retained by aria2. See [Role-policy operations and
+rollback](operations.md#role-policy-operations-and-rollback) for the immediate
+containment procedure.
+
 IOx and IOS-XR appmgr use the same multi-architecture device image and the
 same entrypoint. `IRIS_DEVICE_PLATFORM=iox` or `xr-appmgr` selects the storage
 and device-integration profile; a missing or unknown value fails before any

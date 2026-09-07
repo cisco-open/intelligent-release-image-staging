@@ -65,6 +65,13 @@ See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
 
+**No new port or network flow** is introduced by Phase 0 role and QoS policy.
+Role evaluation, announce cadence, and candidate selection use the existing
+tracker HTTPS flow on 6969. Origin QoS uses the server's existing loopback-only
+aria2 JSON-RPC connection. Role lifecycle, previews, explanations, and status
+use the existing Console-to-management flow on 9443. There is no device
+instruction endpoint in Phase 0; catalog traffic on 8443 is unchanged.
+
 The server management API reads its local telemetry state, so 9101 needs
 **external** reachability only for authenticated Prometheus scraping or
 operator tools.

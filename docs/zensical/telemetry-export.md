@@ -97,6 +97,17 @@ because one is a level and the other is a flag.
 These eight are the `otel.log.name` values IRIS emits. Filter and group
 records by these names to select the measurement you need.
 
+Role enrichment does not add a ninth record family. When a peer is an
+authenticated device, existing tracker, rate, and byte records may carry
+`iris.device.role`, sourced from the loaded compiled policy membership.
+`iris.peer.role` keeps its older BitTorrent meaning (`seeder` or `leecher`), so
+do not group those two attributes as if they shared a vocabulary. The
+`iris.peer.policy` operation record remains count-only: it carries the policy
+revision/action and aggregate enforcement state/applied revision/desired IP
+count, never role membership lists, raw rules, addresses, or origin-QoS option
+values. The management policy view is the source for current preflight and
+`pre-instructions` status.
+
 !!! danger "Never sum the two peer record names together"
     `iris.swarm.peer_bytes` and `iris.device.peer_transfer_record` describe the *same
     bytes* from opposite ends of the wire — one badly, one exactly. They carry

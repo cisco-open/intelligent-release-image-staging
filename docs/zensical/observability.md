@@ -54,6 +54,48 @@ reads the IRIS target as down. Enable `IRIS_OBSERVABILITY=1` and restart the
 server to serve those metrics, or remove the scrape job. The Console's Swarm
 tab remains available for network state.
 
+## Role-policy status and privacy
+
+`GET /api/v1/peer-policy` is the operator status boundary. It is deliberately
+**count-only** for network enforcement: role definition/restriction/member
+counts, outbox occupancy, applied revision, desired denied-address count,
+conflict count/types, aggregate disconnect/removal effects, and origin-QoS
+target/applied counts. It never returns the raw blocklist, peer addresses,
+aria2 option dictionaries, session IDs, desired-state hashes, or the device IDs
+behind the mutual-origin preflight. Role drift is the narrow exception for
+repair: at most ten inventory device IDs are returned with `truncated`.
+
+Logging and export code must not serialize an aria2 option dictionary: tracker
+Authorization data can be present among those options. Closed state/error codes
+and aggregate counts are the supported observability vocabulary.
+
+Read these fields literally:
+
+| Field | Meaning |
+| --- | --- |
+| `roles_supported` / `roles_present` | This management binary understands roles / role state has existed in this policy. Presence is not an enforcement-success claim. |
+| `enforcement.state`, `applied_revision`, `stale` | Tracker blocklist reconciliation result and freshness. An old `enforced` value becomes stale after five minutes. |
+| `enforcement.mutual_origin.mode = preflight` | Issue #153 is observation only. `newly_denied_device_count` predicts a future mutual-origin block; those devices are not added to the applied origin blocklist by this phase. |
+| `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the global/per-torrent origin options reached every active origin GID. These are counts, not per-role throughput. |
+| `fleet_rollup.issued_revision: null`, `fleet_rollup.applied: {}` | Deliberate Phase 0 values: no device instruction revision has been issued and no device apply attestation exists. |
+| `fleet_rollup.states.pre-instructions` | Devices have configured role/QoS intent, but Phase 0 issued no device instructions. |
+| `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | The returned values and sources explain compilation, not device application. |
+
+Swarm participant `peer_policy` facts retain the raw explicit `assignment` and
+separately expose the compiled `effective_acl`, `acl_source`, compiled policy membership
+as `role`, `role_unknown`, and `role_shadowed_by`. That role can differ from the
+Fleet-declared role shown in Devices while `role_drift` exists. A typed device
+may also carry the boolean `mutual_origin_preflight`; this is joined by
+authenticated device ID,
+never inferred from an address. Shared NAT conflicts report the reason and
+`global_block_applied: false` without turning an aggregate count into a claim
+that a particular device was blocked.
+
+The preflight fact does not prove activation or compliance. Issue #153 remains
+open through one full release of preflight observation; only a later reviewed
+change may apply the union across current self-evaluation and mutual-origin
+evaluation for every ACL.
+
 ## Device reports
 
 Device reports are useful for both current status and post-incident review. Typical data includes:

@@ -437,6 +437,7 @@ Device list filters can be combined:
 | `cred` | Credential profile id; `__none` selects devices with no profile. |
 | `telemetry` | `on`, `off`, or `unknown` when the device has not reported its posture. |
 | `peer` | `quarantined` or `not-quarantined`. |
+| `role` | Exact declared role name; `__none` selects a row with no declared role. |
 | `status` | `onboarding`, `undeploying`, `waiting-heartbeat`, `waiting-staging`, `onboard-failed`, `undeploy-failed`, `deployed`, `placement-failed`, `image-failed`, `copying`, `staging`, `unassigned`, `enrolled`, `not-enrolled`, `offline`, or `__attention`. |
 
 `offline` selects heartbeats at least 600 seconds old; `__attention` selects
@@ -451,28 +452,201 @@ first shows `waiting-heartbeat`, then follows the agent's reported status.
 
 ### Peer policy
 
-The read side of the swarm's isolation posture, and the one compare-and-set
-write in the whole API.
+Role and QoS writes share the peer-policy revision. Read the current ETag first,
+send that exact strong value in `If-Match`, preview with `dry_run=1`, and send
+the preview's `confirm_token` with the identical candidate. The confirmation
+threshold is zero: any membership/access count or QoS change needs a token.
+A token is bound to the prior revision and candidate content; another policy
+commit makes it stale.
 
 | Route | Body / result |
 | --- | --- |
-| `GET /api/v1/peer-policy` | The count-only policy view: `schema`, `revision`, `degraded`, `fail_closed`, `quarantine` (the reserved-ACL descriptor), `quarantine_assignments` (the sorted device ids currently quarantined), and `enforcement` — the tracker's reconciler status as `state`, `desired_ip_count`, `applied_revision`, `last_reconciled_at`, `conflict_count`, `conflict_types`, `last_effect` (aggregate `disconnected_peers` / `removed_peers` counts only), `last_error`, and `last_operation_exported_revision`. Deliberately count-only: no peer address ever crosses this boundary. |
+| `GET /api/v1/peer-policy` | Count-only policy view and ETag. It includes role definition/restriction/member counts, at most ten drift IDs with a truncation flag, outbox occupancy, tracker enforcement, future mutual-origin preflight count, origin-QoS apply counts, and a fleet rollup whose current state is `pre-instructions`. No peer address or raw deny list crosses this boundary. `roles_supported` is the binary capability; `roles_present` records that role state has existed. |
+| `GET /api/v1/peer-policy/roles` | Full sorted role definitions and the current revision/ETag. Definitions contain policy values, never membership IDs. |
+| `PUT /api/v1/peer-policy/roles/<name>` | Create or replace a definition. Body fields are `restricted`, `peers`, `origin`, `nets`, `on_stale`, `qos`, plus `confirm_token` on apply. Preview with `?dry_run=1`. |
+| `DELETE /api/v1/peer-policy/roles/<name>` | Delete an unused role after preview/confirmation. The preview returns 200 JSON with candidate revision/ETag; the committed DELETE returns 204 with an empty body and the committed ETag. A role with members or another role referring to it returns `role_in_use` with counts/names. |
+| `PUT /api/v1/peer-policy/qos` | Replace global QoS keys with `{"qos": {...}}`, or one role's QoS with `{"role": "<name>", "qos": {...}}`. An empty QoS object clears that layer. Preview and confirmation rules apply. |
+| `POST /api/v1/devices/<id>/role` | `{"role": "<name>"}` sets membership; `{"role": null}` clears it. The fleet declaration and compiled membership are coordinated and the response reports partial failure/drift. |
+| `POST /api/v1/devices/bulk-role` | `{"device_ids": [...], "role": "<name-or-null>"}` applies one membership change as one policy revision and one outbox entry, with `applied`, `failed`, `partial`, and drift detail. The request cap is the supported fleet size and the split Console accepts the 2 MiB bulk body. |
+| `GET /api/v1/devices/<id>/effective-qos` | Each key as `{value, source}` from builtin → global → role → device precedence, plus pinned-client constraints. `delivery_state: pre-instructions` means this is configured intent/provenance; Phase 0 has not delivered it to the device. |
+| `GET /api/v1/peer-policy/explain?a=&b=` | Resolve each argument as a device id, `device:<id>`, or `service:seeder`; require one fresh, unambiguous attributed address per side; then return both directional decisions, matched sequences, effective ACL/source, role/shadow facts, `mutual`, revision, and ETag. Returns 422 rather than guessing when identity or address attribution is ambiguous. |
 | `PUT /api/v1/peer-policy/quarantine/<device_id>` | Quarantines or releases one device. The body must be **exactly** `{"quarantined": <bool>, "if_revision": <int ≥ 1>}` — no other keys, no other types. `if_revision` is the revision you read from `GET /api/v1/peer-policy`, and the write commits only if the policy is still at that revision. 200 `{ok: true, revision, quarantined}` on success. |
 
-Refusals on the write, all of them fail-closed:
+The public routes above map one-for-one to `/internal/v1/...` on the private
+management listener. That listener additionally requires its scoped tier
+credential; browser sessions and CSRF still protect mutations at either
+topology boundary.
 
-| Status | Body | Meaning |
+Every role-policy read returns 200 JSON plus the current ETag, but the JSON
+wrappers differ: the policy view is a sanitized count/status object, the role
+list wraps definitions under `roles`, effective QoS wraps per-key provenance
+under `qos`, and pair explain wraps directional `a`/`b` results. Every mutation
+preview returns 200 JSON with the candidate revision and candidate ETag. That
+preview ETag does **not** replace the prior strong ETag: apply the unchanged
+candidate with the original pre-preview `If-Match` and its `confirm_token`.
+Committed PUT/POST operations return 200 JSON plus the committed ETag; committed
+role DELETE alone returns 204 empty plus its ETag.
+
+On `/api/v1`, a missing or expired browser session, including expiry between
+preview and apply, returns 401 `console-session-required`; the operator must log
+in, reread, and preview again. On `/internal/v1`, a missing/invalid scoped tier
+credential returns 401 `management-authentication-required`. A browser mutation
+also requires its current CSRF value. Neither interface silently retries a
+policy mutation.
+
+Role names use `^[a-z0-9][a-z0-9._-]{0,31}$`, at most 256 roles may exist, and
+`default`, `quarantine`, `origin`, `seeder`, and `legacy` are reserved. A role
+definition has these fields:
+
+| Field | Default / bound | Meaning |
 | --- | --- | --- |
-| 400 | `{"error": "bad peer-policy request"}` | The body is not exactly the two required keys with the required types. |
-| 409 | `{"error": "revision_conflict", "revision": <current>}` | Someone else committed since you read; re-read and retry against the revision returned. |
-| 422 | `{"error": "unknown device"}` | No such device in inventory (an encoded `/` in the id is rejected here too). |
-| 422 | `{"error": "policy_error"}` | The policy document is degraded, or the mutation was refused. |
-| 503 | `{"error": "policy_fail_closed"}` | The policy could not be loaded; nothing is mutated. |
-| 503 | `{"error": "operation_backlog_full"}` | Too many committed operations still un-exported to the tracker. |
-| 413 | `{"error": "payload too large"}` | Body over the 64 KiB cap. |
+| `restricted` | `false` | When true, compile a virtual ACL; false retains implicit permit. |
+| `peers` | the role itself; at most 64 | Permitted role names. The list must contain itself. Links between two restricted roles must be symmetric; lifecycle writes normalize reciprocal links. |
+| `origin` | `true` | Whether the tracker may introduce `service:seeder` to this restricted role. Issue #153 origin-side mutual blocking remains preflight-only. |
+| `nets` | empty IPv4 list | Optional, validated subnet hints for role management. They do not classify tracker announces or install a network ACL. |
+| `on_stale` | `keep` for restricted roles, `defaults` otherwise | Future device-instruction stale behavior. It has no device-side effect in Phase 0. |
+| `qos` | empty | Overrides the global layer for keys allowed at role scope. |
+
+The `roles` member is optional in a legacy schema-1 policy document. When it is
+present, the roles container, every definition, and every QoS layer are closed,
+typed objects; unknown keys are refused. `peers` must be a non-null array of
+unique role names, must contain the role itself, and cannot contain more than
+64 entries. The role schema sets no per-role member cap; operational membership
+still cannot exceed the devices in the supported Fleet. An
+unrestricted role permits by default only on its own side of evaluation; the
+other principal's restricted ACL still governs the pair. A restricted
+`origin:false` role is valid. `origin_unreachable` is an advisory when neither
+that role nor a permitted role provides a path to the origin.
+
+Role networks accept bare IPv4 addresses and IPv4 prefixes with host bits.
+Prefix syntax may use a decimal length, a contiguous dotted netmask, or a
+contiguous dotted hostmask. Address octets with leading zeroes and IPv6 are
+refused; a decimal prefix spelling is bounded to 32 digits. Valid supplied text
+is preserved rather than canonicalized in raw policy. `iris-role` CSV/import is
+the owning interface for canonical-equivalent duplicate detection: it compares
+canonical networks while preserving the first valid spelling. The raw policy
+validator does not promise duplicate-net rejection.
+
+Stored ACLs still allow 64 names and 256 rules each. Virtual role ACLs consume
+none of those slots. One explicit stored-ACL assignment **shadows** role policy;
+it does not combine with it. `iris-role migrate ACL ROLE --dry-run` only
+previews the two-step migration and persists nothing. A confirmed `--apply`
+first stages membership behind the existing shadow, then removes matching
+explicit assignments in a second policy commit. Quarantine cannot be migrated.
+
+#### QoS keys
+
+Values are integers. Rates are bytes per second; `0` means unlimited, while a
+nonzero rate must be at least 8,192 B/s. Precedence is builtin → global → role
+→ device for keys that permit all three scopes. Phase 0 exposes the device
+layer for compilation/explanation but has no public device-QoS mutation and no
+device delivery. Only tracker cadence/selection and the three origin controls
+in this table are actively applied in Phase 0.
+
+| Key | Default | Range | Allowed scope | Phase 0 behavior |
+| --- | ---: | ---: | --- | --- |
+| `max_peers` | 10 | 1–1,000 | global, role, device | `pre-instructions`; the device launcher's existing value remains authoritative. |
+| `per_peer_bps` | 12,500,000 | 0–10,000,000,000 | global, role, device | A modelling input only. The builtin does not create a cap; when explicitly set it derives absent per-torrent rates as `per_peer_bps × fanout`. |
+| `fanout` | 1 | 1–1,000 and no greater than `max_peers` | global, role, device | Modelling input for the derived per-torrent rates; `pre-instructions`. |
+| `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
+| `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
+| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
+| `max_concurrent` | 100 | 1–1,000 | global, role, device | `pre-instructions`. |
+| `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | `pre-instructions`. |
+| `announce_min_interval_s` | 30 s | 10–300 s | global, role | Tracker returns this value with bounded ±10% jitter as both `interval` and `min interval`; a peerless leecher in the pinned client still has a 120 s floor. |
+| `numwant` | 50 | 4–200 | global, role | Tracker ceiling before selection. The pinned client requests at most 50; an explicit client `numwant=0` receives no peers. |
+| `handout_budget` | 0 (off) | 0–1,000 | global, role | Accepted policy input for a later phase; no handout-budget accounting is active in Phase 0. |
+| `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | `pre-instructions`; the existing launcher cadence remains unchanged. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
+| `telemetry_every_ticks` | 1 | 1–60 | global, role, device | `pre-instructions`. |
+| `telemetry_pause` | `false` | boolean | global, role, device | `pre-instructions`. |
+| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Future instruction fallback only. |
+| `origin_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active origin-wide upload limit; unlimited by default. |
+| `origin_per_torrent_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active per-image origin upload limit; unlimited by default. |
+| `origin_max_peers` | 55 | 1–1,000 | global only | Active origin per-torrent peer cap. |
+
+Numeric QoS values reject booleans even though Python treats booleans as an
+integer subtype; `telemetry_pause` alone is boolean. Connection limits are
+connections per torrent, `max_concurrent` is torrents, `fanout` is a multiplier,
+`numwant` is peers per announce, `handout_budget` is handouts per window,
+telemetry cadence is ticks, and interval fields are seconds. To convert a
+decimal display rate once, use `Mbit/s × 1,000,000 ÷ 8`; API and CSV `*_bps`
+values are already bytes per second.
+
+An explicitly supplied per-torrent rate wins over a rate derived from
+`per_peer_bps × fanout` at the same or a more-specific layer. A derived value
+above the 10,000,000,000 B/s bound is refused. A QoS PUT replaces the selected
+global or role QoS object. A subset is the complete replacement; `{}` clears
+that layer. Role membership accepts only an explicit role string or `null` to
+clear. The top-level global QoS object may carry `on_stale`; a role uses the
+separate definition field. `defs.<role>.qos.on_stale` and device placement are
+forbidden. Cadence values apply in seeder and leecher states with no independent
+per-state cadence setting. Heartbeats remain outside any future catalog or
+telemetry pause gate.
+
+Zero is unlimited, so no rate key expresses **never upload**. Use assignment
+and peer-access policy to avoid creating an upload path, while accounting for
+connections aria2 already retained. Phase 0 does not enforce a device upload
+rate.
+
+Per-role origin shaping is not expressible with aria2's global/per-download
+controls. The origin can shape all traffic or one image and the tracker can
+withhold the origin from a restricted role, but the origin cannot rate-limit
+one role within a shared swarm. Device downlink limits in Phase 0 are
+cooperative/modelled only.
+
+Refusals on role/QoS writes use Problem Details. Important codes are:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 428 | `precondition_required` | New role/QoS write omitted `If-Match`. |
+| 412 | `precondition_failed` | The header-time check found an ETag that is stale, weak, duplicated, wildcard, or otherwise not the exact current strong value. Re-read before previewing again. |
+| 428 | `confirmation_required` | The candidate changes access/membership/QoS and lacks its exact preview token. |
+| 409 | `revision_conflict` | The ETag passed the first check, but another writer committed before the under-lock revision check. Refresh and preview the candidate again. |
+| 409 | `role_in_use`, `role_isolated`, `role_reserved_name`, `role_shadowed_by_assignment` | Lifecycle/shadow guard refused the change. Only the migration coordinator may deliberately work beneath an explicit assignment. |
+| 409 | `operation_backlog_full` | 256 mutations remain unacknowledged. A backlog seen during preflight refuses before durable mutation; a direct writer racing after Fleet-first preflight can still return a partial outcome. |
+| 404 | `device_not_found`, `role_not_found` | The named device or role does not exist on the route that owns it. |
+| 422 | `bad_role`, `incomparable_role_change`, `mixed_role_direction`, `invalid_policy`, `invalid_policy_request` | Membership, graph/QoS content, or request fields violate the route's closed grammar or cannot be safely ordered as one bulk change. |
+| 503 | `fleet_write_failed` | Policy-first relaxation committed policy but a later Fleet write failed, or a Fleet write itself was partial. Inspect outcome detail. |
+| 503 | `policy_unavailable` | Policy was degraded/fail-closed before mutation, a required store failed, or a Fleet-first change wrote Fleet and the later policy write failed. The last case preserves `partial`, `applied`, `failed`, revision, and drift detail. |
+
+Precondition and degraded-state refusals happen before mutation; a backlog
+observed during normal preflight does too. Actual store failures are different:
+one coordinated store may already have committed. On any error response, inspect
+`partial`, `applied`, `failed`, revision, and `role_drift` when present, then
+refresh both policy and Fleet state and review before retrying. Never infer
+"nothing written" from HTTP 503 alone.
+
+`asymmetric_peers` belongs to raw policy/CSV graph validation. The public role
+PUT normalizes reciprocal edges atomically, so a valid one-sided edit through
+that lifecycle route updates the other definition in the same candidate.
+
+Legacy quarantine retains its body-carried `if_revision` compatibility shape
+and its older refusal bodies. New clients should also send the strong ETag.
 
 The backlog bound and what to do about each refusal are in
 [Peer-policy operations and their backlog](operations.md#peer-policy-operations-and-their-backlog).
+
+An abbreviated preview/apply sequence (cookie and CSRF setup omitted) is:
+
+```bash
+curl -sS -D headers -b session.cookie \
+  https://console.example/api/v1/peer-policy -o policy.json
+ETAG=$(awk 'tolower($1)=="etag:" {print $2}' headers | tr -d '\r')
+
+curl -sS -b session.cookie -H "X-CSRF-Token: $CSRF" \
+  -H "If-Match: $ETAG" -H 'Content-Type: application/json' \
+  -X PUT 'https://console.example/api/v1/peer-policy/roles/wan?dry_run=1' \
+  --data '{"restricted":true,"peers":["wan"],"origin":true,
+           "qos":{"announce_min_interval_s":60,"numwant":20}}'
+
+# Copy confirm_token from that preview without changing the body or ETag.
+curl -sS -b session.cookie -H "X-CSRF-Token: $CSRF" \
+  -H "If-Match: $ETAG" -H 'Content-Type: application/json' \
+  -X PUT https://console.example/api/v1/peer-policy/roles/wan \
+  --data '{"restricted":true,"peers":["wan"],"origin":true,
+           "qos":{"announce_min_interval_s":60,"numwant":20},
+           "confirm_token":"<preview token>"}'
+```
 
 ### Onboarding jobs
 

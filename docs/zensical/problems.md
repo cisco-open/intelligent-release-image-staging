@@ -16,6 +16,19 @@ The BitTorrent tracker is the one protocol-format exception: its errors remain
 BEP-compatible bencoded failure dictionaries. Anonymous `/healthz` and
 `/readyz` probes disclose only an `ok` boolean.
 
+## asymmetric_peers
+
+Raw policy or `iris-role import` input contains an asymmetric relationship
+between two restricted roles. Correct the whole graph and validate/import
+again. The public role PUT owns lifecycle normalization and updates reciprocal
+edges atomically, so this code is not part of that route's live refusal set.
+
+## bad_role
+
+A device role mutation did not supply a valid role string or explicit `null`
+clear. Use a known non-reserved role name, or `null` to clear membership, and
+preview again.
+
 ## authentication-required
 
 The operation requires a credential that was absent or invalid.
@@ -52,6 +65,12 @@ No usable browser-facing Console certificate is available.
 
 The browser operation requires a valid Console session cookie.
 
+## confirmation_required
+
+The role or QoS candidate changes at least one blast-radius count or QoS value.
+Preview that exact candidate with `dry_run=1`, then send its `confirm_token`
+with the same current ETag.
+
 ## content-length-required
 
 The request must provide a valid `Content-Length` and cannot use chunked
@@ -65,14 +84,30 @@ The credential store could not be read or validated, so access failed closed.
 
 The state-changing browser request lacks the session's valid CSRF value.
 
+## device_not_found
+
+The device-role or effective-QoS route names no current Fleet device. Refresh
+the inventory and use its exact device ID.
+
 ## forbidden
 
 The authenticated principal is not allowed to perform the operation.
+
+## fleet_write_failed
+
+A coordinated membership change could not finish its Fleet write. Policy may
+already have committed on a relaxation. Inspect `partial`, `applied`, `failed`,
+revision, and `role_drift`; refresh both stores before reviewing a retry.
 
 ## internal-error
 
 The server encountered an internal failure. Details never expose exception or
 filesystem text.
+
+## incomparable_role_change
+
+The server cannot classify the requested membership move safely as one
+tightening or relaxation. Split the change into separately previewed steps.
 
 ## invalid-authorization-request
 
@@ -81,6 +116,17 @@ The Console tier's header-only authorization preflight was malformed.
 ## invalid-content-length
 
 The supplied `Content-Length` is not a valid non-negative integer.
+
+## invalid_policy
+
+A role definition, role graph, network, or QoS value violates the closed policy
+schema. Correct the named field and validate the complete candidate again.
+
+## invalid_policy_request
+
+A role/QoS route received an unknown query key, unknown body field, malformed
+JSON shape, or a value of the wrong request type. Send only the documented
+route fields.
 
 ## invalid-request
 
@@ -110,19 +156,55 @@ bearer credential.
 The resource exists but does not support the requested HTTP method. Consult
 the response's `Allow` header.
 
+## mixed_role_direction
+
+One bulk role request combines devices whose changes tighten policy with
+devices whose changes relax it. Split them into directionally consistent bulk
+requests so the two-store write order remains safe.
+
 ## observability-authentication-required
 
 The observability operation requires its independently scoped bearer
 credential.
+
+## operation_backlog_full
+
+The tracker has not acknowledged 256 peer-policy operations. A backlog observed
+during normal preflight refuses before durable mutation; a Fleet-first writer
+racing after that check can still report a partial outcome. Inspect partial and
+drift fields, then repair tracker reconciliation before retrying.
 
 ## payload-too-large
 
 The declared or received request body exceeds that operation's documented
 limit.
 
+## policy_unavailable
+
+The role/QoS interface cannot use authoritative policy or a required policy
+store. This can be a pre-write degraded/fail-closed refusal, or it can wrap a
+Fleet-first `policy_write_failed` after Fleet changed. Inspect partial outcome,
+revision, and drift fields, then refresh both stores before retrying.
+
 ## precondition-failed
 
 An HTTP precondition such as `If-Match` did not match current state.
+
+## precondition_failed
+
+The role/QoS route's header-time CAS check did not receive exactly the current
+strong peer-policy ETag. Weak, wildcard, duplicate, missing-current, and stale
+values fail. Reread and preview again.
+
+## precondition_required
+
+The role or QoS mutation omitted the current strong peer-policy `If-Match`.
+
+## principal_unresolvable
+
+Pair explanation could not resolve one requested typed principal to exactly one
+fresh, unambiguous endpoint address. Wait for a fresh announce or repair shared
+attribution; the route never guesses from the inventory address.
 
 ## range-not-satisfiable
 
@@ -149,6 +231,40 @@ for a different operation.
 ## resource-not-found
 
 The authenticated resource does not exist.
+
+## revision_conflict
+
+Another policy writer committed after the request passed its initial ETag check
+but before the under-lock revision check. Use the returned revision/ETag to
+reread and preview; do not replay the old candidate token.
+
+## role_in_use
+
+The requested role still has members or is referenced by another role. The
+response gives the member count and referring role names; remove those uses
+before deleting it.
+
+## role_isolated
+
+A role's peer list omitted the role itself. Every role must permit its own
+members, even when it permits no other role.
+
+## role_not_found
+
+The requested definition, QoS target, or membership role does not exist.
+Refresh the role list, create the definition first if intended, and preview
+again.
+
+## role_reserved_name
+
+The requested role name is reserved by the policy model: `default`,
+`quarantine`, `origin`, `seeder`, or `legacy`.
+
+## role_shadowed_by_assignment
+
+The device has an explicit stored-ACL assignment that would shadow its role.
+Use the audited ACL-to-role migration workflow instead of creating inert
+membership accidentally.
 
 ## route-not-found
 
