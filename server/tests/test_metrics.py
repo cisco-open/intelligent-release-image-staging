@@ -246,6 +246,45 @@ class TestPerSignalExportHealthMetrics:
         assert "iris_peer_enforcement_health 1" in text
 
 
+class TestInstructionCustodyMetrics:
+    def test_count_state_and_age_families_have_no_key_labels(self):
+        text = metrics.render(
+            [], {}, {}, instruction_status={
+                "certificate_days_to_expiry": 12,
+                "keylist_age_days": 100,
+                "root_ceremony_overdue": "warn",
+                "roots_attested_180d": 1,
+                "root_quorum_degraded": True,
+            })
+        expected = {
+            "iris_instruction_certificate_days_to_expiry": 12,
+            "iris_instruction_keylist_age_days": 100,
+            "iris_instruction_root_ceremony_overdue": 1,
+            "iris_instruction_roots_attested_180d": 1,
+            "iris_instruction_root_quorum_degraded": 1,
+        }
+        for name, value in expected.items():
+            assert "# TYPE %s gauge" % name in text
+            assert "%s %d" % (name, value) in text
+        for forbidden in ("key=", "root_id=", "signature=", "ssh-ed25519"):
+            assert forbidden not in text
+
+    def test_critical_overdue_is_two_and_unknown_values_are_omitted(self):
+        text = metrics.render(
+            [], {}, {}, instruction_status={
+                "certificate_days_to_expiry": None,
+                "keylist_age_days": None,
+                "root_ceremony_overdue": "critical",
+                "roots_attested_180d": True,
+                "root_quorum_degraded": "yes",
+            })
+        assert "iris_instruction_root_ceremony_overdue 2" in text
+        assert "iris_instruction_certificate_days_to_expiry" not in text
+        assert "iris_instruction_keylist_age_days" not in text
+        assert "iris_instruction_roots_attested_180d" not in text
+        assert "iris_instruction_root_quorum_degraded" not in text
+
+
 class TestSwarmByteAttribution:
     # Peer-ledger byte attribution. AGGREGATE ONLY: the per-peer edges behind
     # these numbers are keyed by IP and live in the OTLP logs pipeline. The

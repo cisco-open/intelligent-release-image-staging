@@ -114,7 +114,7 @@ _LIFECYCLE_FAMILIES = (
 def render(swarm, seeder, counters, reports_stored=0, transfers=None,
            extras=None, otlp_health=None, peer_status=None,
            seeder_torrents=None, swarm_bytes=None, image_sizes=None,
-           lifecycle=None):
+           lifecycle=None, instruction_status=None):
     out = []
 
     def family(name, mtype, help_text):
@@ -370,6 +370,34 @@ def render(swarm, seeder, counters, reports_stored=0, transfers=None,
                 continue
             family(name, "gauge", help_text)
             out.append("%s %d" % (name, _int(val)))
+    if isinstance(instruction_status, dict):
+        for name, key, help_text in (
+            ("iris_instruction_certificate_days_to_expiry",
+             "certificate_days_to_expiry",
+             "Days until the online instruction-signing certificate expires"),
+            ("iris_instruction_keylist_age_days", "keylist_age_days",
+             "Age in days of the installed root-signed instruction KRL"),
+            ("iris_instruction_roots_attested_180d",
+             "roots_attested_180d",
+             "Configured offline roots independently attested in 180 days"),
+        ):
+            val = instruction_status.get(key)
+            if not isinstance(val, int) or isinstance(val, bool):
+                continue
+            family(name, "gauge", help_text)
+            out.append("%s %d" % (name, val))
+        overdue = {"ok": 0, "warn": 1, "critical": 2}.get(
+            instruction_status.get("root_ceremony_overdue"))
+        if overdue is not None:
+            family("iris_instruction_root_ceremony_overdue", "gauge",
+                   "Root ceremony state: 0=ok 1=warn 2=critical")
+            out.append("iris_instruction_root_ceremony_overdue %d" % overdue)
+        degraded = instruction_status.get("root_quorum_degraded")
+        if isinstance(degraded, bool):
+            family("iris_instruction_root_quorum_degraded", "gauge",
+                   "1 when fewer than two roots attested in 180 days")
+            out.append("iris_instruction_root_quorum_degraded %d"
+                       % (1 if degraded else 0))
     if otlp_health is not None:
         # Per-signal export failures / drops (design §10.9/§10.10): the
         # `signal` label separates logs from metrics; counters are monotonic

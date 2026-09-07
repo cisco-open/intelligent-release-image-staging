@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import threading
+import time
 
 import pytest
 
@@ -1440,6 +1441,71 @@ def test_metrics_text_reports_stored_gauge():
 def test_metrics_text_reports_stored_zero_when_unwired():
     hub = telemetry.Telemetry(PeerRegistry())
     assert "iris_device_reports_stored 0" in hub.metrics_text()
+
+
+def test_metrics_text_reads_durable_instruction_status_provider():
+    calls = []
+
+    def status():
+        calls.append(True)
+        return {
+            "certificate_days_to_expiry": 6,
+            "keylist_age_days": 135,
+            "root_ceremony_overdue": "critical",
+            "roots_attested_180d": 1,
+            "root_quorum_degraded": True,
+        }
+
+    hub = telemetry.Telemetry(
+        PeerRegistry(), instruction_status_info=status)
+    text = hub.metrics_text()
+    assert calls == [True]
+    assert "iris_instruction_certificate_days_to_expiry 6" in text
+    assert "iris_instruction_keylist_age_days 135" in text
+    assert "iris_instruction_root_ceremony_overdue 2" in text
+    assert "iris_instruction_root_quorum_degraded 1" in text
+
+
+def test_instruction_status_provider_failure_omits_families():
+    def failed():
+        raise OSError("unreadable")
+
+    hub = telemetry.Telemetry(
+        PeerRegistry(), instruction_status_info=failed)
+    text = hub.metrics_text()
+    assert "iris_instruction_certificate_days_to_expiry" not in text
+    assert "iris_instruction_root_quorum_degraded" not in text
+
+
+def test_from_env_wires_instruction_status_from_state_file(tmp_path):
+    import instruction_keys
+
+    status = {
+        "schema": instruction_keys.STATUS_SCHEMA,
+        "enabled": True,
+        "state": "renewal_due",
+        "certificate_days_to_expiry": 14,
+        "certificate_renewal_due": True,
+        "signing_refused": False,
+        "keylist_seq": 2,
+        "keylist_age_days": 101,
+        "keylist_resign_due": True,
+        "roots_configured": 2,
+        "roots_attested_180d": 1,
+        "root_ceremony_overdue": "warn",
+        "root_quorum_degraded": True,
+        "updated_at": int(time.time()),
+    }
+    (tmp_path / "instruction-key-status.json").write_text(
+        json.dumps(status) + "\n", encoding="utf-8")
+    hub = telemetry.from_env({
+        "IRIS_STATE": str(tmp_path),
+        "IRIS_RPC_SECRET": "test",
+        "IRIS_OTLP_ENDPOINT": "",
+        "IRIS_OBSERVABILITY": "0",
+    })
+    assert hub._instruction_status_snapshot() == status
+    assert "iris_instruction_keylist_age_days 101" in hub.metrics_text()
 
 
 # ---- live transfer streaming: aggregation + /swarm enrichment (spec 7.2/7.4)

@@ -77,6 +77,48 @@ PY
   }
 done
 
+# The online instruction signer is optional during Phase 0 and deliberately
+# separate from the three required bootstrap secrets above. If ciphertext is
+# present, however, corruption or a wrong identity is fatal: silently starting
+# without a configured signer would make the server claim a weaker custody
+# state than the operator provisioned. Sweep any stale runtime copy first.
+instruction_key_enc="$IRIS_CONFIG/instr/signing-key.age"
+instruction_key_out="$IRIS_RUN/instr/signing-key"
+instruction_cert="$IRIS_CONFIG/instr/signing-key-cert.pub"
+instruction_runtime_cert="$IRIS_RUN/instr/signing-key-cert.pub"
+if [ ! -e "$instruction_key_enc" ] && [ ! -L "$instruction_key_enc" ]; then
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+elif [ -L "$instruction_key_enc" ] || [ ! -f "$instruction_key_enc" ]; then
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+  echo "FATAL: instruction signing key ciphertext must be a regular non-symlink file (fail closed)" >&2
+  exit 1
+else
+  mkdir -p "$IRIS_RUN/instr"
+  rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+    "$instruction_runtime_cert"
+  IRIS_AGE_BIN="$IRIS_AGE_BIN" PYTHONPATH="$script_dir" python3 - \
+      "$instruction_key_enc" "$instruction_key_out" \
+      "$IRIS_AGE_KEY_FILE" <<'PY' || {
+import os, sys
+import secretfs
+secretfs.decrypt_to(sys.argv[1], sys.argv[2], sys.argv[3],
+                    age_bin=os.environ["IRIS_AGE_BIN"])
+PY
+    rm -f "$instruction_key_out" "$instruction_key_out.pub" \
+      "$instruction_runtime_cert"
+    echo "FATAL: could not decrypt instruction signing key (fail closed)" >&2
+    exit 1
+  }
+  chmod 600 "$instruction_key_out"
+  if [ -s "$instruction_cert" ]; then
+    cp "$instruction_cert" "$instruction_runtime_cert.tmp"
+    chmod 644 "$instruction_runtime_cert.tmp"
+    mv -f "$instruction_runtime_cert.tmp" "$instruction_runtime_cert"
+  fi
+fi
+
 # Build the plaintext combined cert (cert+key) in tmpfs for ssl.load_cert_chain.
 cat "$IRIS_CONFIG/tls/crt.pem" "$IRIS_RUN/tls/key.pem" > "$IRIS_RUN/tls/cert.pem"
 chmod 600 "$IRIS_RUN/tls/cert.pem"

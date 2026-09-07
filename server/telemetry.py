@@ -31,6 +31,7 @@ import api_routes
 import tier_auth
 import keyed_state
 import live_samples
+import instruction_keys
 import metrics
 import otlp
 import peer_enforcement as _peer_enforcement
@@ -641,7 +642,7 @@ class Telemetry:
                  env_endpoint="", env_enabled=False, headers=None,
                  policy_info=None, enforcement_info=None, peer_ledger=None,
                  assignments_info=None, transfer_lifecycle=None,
-                 attestations_info=None):
+                 attestations_info=None, instruction_status_info=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
         # event.id -> (plan_id, event, transfer_id) for every lifecycle record
@@ -736,6 +737,10 @@ class Telemetry:
         #   enforcement_info() -> peer-enforcement.json dict (or None)
         self._policy_info = policy_info
         self._enforcement_info = enforcement_info
+        # The management process writes only count/state/age custody facts to
+        # this durable provider. /metrics belongs to this tracker process, so
+        # it must never depend on management-process memory.
+        self._instruction_status_info = instruction_status_info
         # Optional callable -> the catalog's policy.json ({device_id: {…,
         # "plans": {image_id: {plan_id, transfer_id, planned_at,
         # info_hash}}}}), and the tracker's own TransferLifecycle
@@ -913,7 +918,9 @@ class Telemetry:
                                lifecycle=self._transfer_lifecycle_numbers(),
                                image_sizes=self._image_size_metrics(),
                                seeder_torrents=self._seeder_torrent_metrics(
-                                   time.time()))
+                                   time.time()),
+                               instruction_status=(
+                                   self._instruction_status_snapshot()))
 
     def _seeder_torrent_metrics(self, now):
         """Current control-state gauges, inner-joined to the image catalog.
@@ -1754,6 +1761,15 @@ class Telemetry:
         except Exception:
             return None
 
+    def _instruction_status_snapshot(self):
+        if self._instruction_status_info is None:
+            return None
+        try:
+            data = self._instruction_status_info()
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
     # Numeric enforcement health mapping (design §10.9): a single gauge, not a
     # one-hot label set. `fail_closed` is a degraded-security posture and maps
     # to -1 (degraded) so no false "enforced" is ever reported.
@@ -1911,6 +1927,8 @@ def from_env(env=None):
     enforcement_path = os.path.join(state_dir, "peer-enforcement.json")
     policy_info = lambda: _read_policy(policy_paths)
     enforcement_info = lambda: _peer_enforcement.read_status(enforcement_path)
+    instruction_status_info = lambda: instruction_keys.read_status_file(
+        os.path.join(state_dir, "instruction-key-status.json"))
     dest = telemetry_destination.DestinationSettings(
         telemetry_destination.settings_path(state_dir))
     # Durable origin->peer attribution. An unwritable state dir is not fatal:
@@ -1941,7 +1959,8 @@ def from_env(env=None):
                     peer_ledger=ledger,
                     assignments_info=assignments_info,
                     transfer_lifecycle=lifecycle,
-                    attestations_info=attestations_info)
+                    attestations_info=attestations_info,
+                    instruction_status_info=instruction_status_info)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.

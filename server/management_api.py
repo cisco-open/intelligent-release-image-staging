@@ -42,6 +42,7 @@ import gui_auth
 import gui_fleet
 import gui_onboard
 import gui_tls
+import instruction_keys
 import live_samples
 import origin_qos
 import otlp
@@ -177,6 +178,12 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
+
+
+def instruction_custody_view(state_dir):
+    """Return the durable count/state/age custody status, if available."""
+    return instruction_keys.read_status_file(os.path.join(
+        state_dir, "instruction-key-status.json"))
 # Public, non-configurable default first-run credential, retained for
 # compatibility. A fresh Console must stay on a trusted network until claimed.
 # The pair is accepted only while no administrator exists and mints a
@@ -1125,7 +1132,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     "states": {"pre-instructions": sum(
                         isinstance(row, dict) and bool(row.get("device_id"))
                         for row in rows)}},
-                "enforcement": enforcement, "origin_qos": origin_view}
+                "enforcement": enforcement, "origin_qos": origin_view,
+                "instruction_keys": instruction_custody_view(
+                    policy_state_dir())}
 
     def quarantine_assignment_ids():
         """The bare set of device ids under quarantine intent -- what the
@@ -5131,6 +5140,13 @@ def main():
     except ConsoleTLSError as exc:
         print("iris-management: %s" % exc, file=sys.stderr, flush=True)
         sys.exit(2)
+    # Hourly instruction-key custody refresh. This is an in-process daemon
+    # thread like the maintenance loops below, never another entrypoint process.
+    custody_stop = threading.Event()  # never set; loop dies with this process
+    threading.Thread(
+        target=instruction_keys.status_loop,
+        args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
+        daemon=True).start()
     # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
     # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
     ca_stop = threading.Event()     # never set in production; loop dies with us

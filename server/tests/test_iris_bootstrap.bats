@@ -249,6 +249,14 @@ decrypted_devices() {
   # A console-written GUI key must ride along too.
   printf 'GUI-KEY\n' > "$TMP/gui-key.pem"
   "$TMP/fake-age" -r "$PRIMARY_PUB" -o "$IRIS_CONFIG/tls/gui-key.pem.age" "$TMP/gui-key.pem"
+  # The online instruction key is optional and separately owned, but --rekey
+  # promises to rewrap every existing ciphertext. Its plaintext may traverse
+  # only a verified memory-backed scratch directory.
+  mkdir -p "$IRIS_CONFIG/instr"
+  printf 'fixture-signing-content\n' > "$TMP/instruction-key"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" \
+    -o "$IRIS_CONFIG/instr/signing-key.age" "$TMP/instruction-key"
+  chmod 640 "$IRIS_CONFIG/instr/signing-key.age"
 
   run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
       IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/fake-age" \
@@ -258,7 +266,8 @@ decrypted_devices() {
   [[ "$output" != *"minting"* ]]
 
   # Every file now names both recipients and still holds the SAME plaintext.
-  for f in secrets.json.age rpc-secret.age tls/key.pem.age tls/gui-key.pem.age; do
+  for f in secrets.json.age rpc-secret.age tls/key.pem.age tls/gui-key.pem.age \
+      instr/signing-key.age; do
     hdr="$(head -n1 "$IRIS_CONFIG/$f")"
     [[ "$hdr" == *"$BREAKGLASS_PUB"* ]] || { echo "$f not re-encrypted to break-glass: $hdr"; return 1; }
     [[ "$hdr" == *"$PRIMARY_PUB"* ]]    || { echo "$f lost the primary recipient: $hdr"; return 1; }
@@ -269,6 +278,85 @@ decrypted_devices() {
   [ "$(tail -n +2 "$IRIS_CONFIG/tls/key.pem.age")" = "$key_before" ]
   [ "$(sha256sum < "$IRIS_CONFIG/tls/crt.pem")"    = "$crt_before" ]
   [ "$(tail -n +2 "$IRIS_CONFIG/tls/gui-key.pem.age")" = "GUI-KEY" ]
+  [ "$(tail -n +2 "$IRIS_CONFIG/instr/signing-key.age")" = \
+    "fixture-signing-content" ]
+  [ "$(stat -c '%a' "$IRIS_CONFIG/instr/signing-key.age")" = "640" ]
+}
+
+@test "--rekey keeps the valid instruction original when its rewrap fails" {
+  seed_store_with_device
+  scratch_before="$(find /dev/shm -maxdepth 1 -name 'iris-bootstrap-*' -print 2>/dev/null | sort)"
+  mkdir -p "$IRIS_CONFIG/instr"
+  printf 'fixture-signing-content\n' > "$TMP/instruction-key"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" \
+    -o "$IRIS_CONFIG/instr/signing-key.age" "$TMP/instruction-key"
+  cat > "$TMP/failing-age" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *signing-key.age.rekey.tmp*)
+      printf 'injected instruction rewrap failure\n' >&2
+      exit 1
+      ;;
+  esac
+done
+exec "$IRIS_TEST_FAKE_AGE" "$@"
+EOF
+  chmod +x "$TMP/failing-age"
+  signing_before="$(sha256sum < "$IRIS_CONFIG/instr/signing-key.age")"
+
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_HOST_IP="127.0.0.1" \
+      IRIS_AGE_KEY_FILE="$TMP/iris_age_key" IRIS_AGE_BIN="$TMP/failing-age" \
+      IRIS_TEST_FAKE_AGE="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$PRIMARY_PUB,$BREAKGLASS_PUB" \
+      bash "$BOOTSTRAP" --rekey
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"re-key complete"* ]]
+  [ "$(sha256sum < "$IRIS_CONFIG/instr/signing-key.age")" = \
+    "$signing_before" ]
+  "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/check-signing" \
+    "$IRIS_CONFIG/instr/signing-key.age"
+  [ "$(cat "$TMP/check-signing")" = "fixture-signing-content" ]
+  [ -z "$(find "$IRIS_CONFIG" -name '*.rekey.tmp' -print)" ]
+  scratch_after="$(find /dev/shm -maxdepth 1 -name 'iris-bootstrap-*' -print 2>/dev/null | sort)"
+  [ "$scratch_before" = "$scratch_after" ]
+  # Earlier files may already be independently rewrapped. Every one remains
+  # decryptable by the current identity under the established per-file contract.
+  for f in secrets.json.age rpc-secret.age tls/key.pem.age; do
+    "$TMP/fake-age" -d -i "$TMP/iris_age_key" -o "$TMP/check" \
+      "$IRIS_CONFIG/$f"
+    [ -s "$TMP/check" ]
+  done
+}
+
+@test "--rekey refuses before decrypt when no memory-backed scratch is verified" {
+  seed_store_with_device
+  mkdir -p "$IRIS_CONFIG/instr"
+  printf 'fixture-signing-content\n' > "$TMP/instruction-key"
+  "$TMP/fake-age" -r "$PRIMARY_PUB" \
+    -o "$IRIS_CONFIG/instr/signing-key.age" "$TMP/instruction-key"
+  before="$(find "$IRIS_CONFIG" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  cat > "$TMP/stat" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-f" ]; then
+  printf 'ext2/ext3\n'
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+EOF
+  chmod +x "$TMP/stat"
+
+  run env IRIS_CONFIG="$IRIS_CONFIG" IRIS_RUN="$TMP/disk-run" \
+      IRIS_HOST_IP="127.0.0.1" IRIS_AGE_KEY_FILE="$TMP/iris_age_key" \
+      IRIS_AGE_BIN="$TMP/fake-age" \
+      IRIS_AGE_RECIPIENTS="$PRIMARY_PUB,$BREAKGLASS_PUB" \
+      PATH="$TMP:$PATH" bash "$BOOTSTRAP" --rekey
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"memory-backed scratch"* ]]
+  [[ "$output" != *"re-encrypting existing state"* ]]
+  after="$(find "$IRIS_CONFIG" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  [ "$before" = "$after" ]
+  [ -z "$(find "$IRIS_CONFIG" -name '*.rekey.tmp' -print)" ]
 }
 
 @test "--add-recipient is an alias for --rekey" {
