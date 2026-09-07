@@ -272,18 +272,31 @@ teardown() { rm -rf "$TMP"; }
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   mkdir -p "$STAGE/agent"
-  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
+  printf 'import sys\nopen(r"%s/events.log", "a").write("agent:" + " ".join(sys.argv[1:]) + "\\n")\n' "$TMP" \
     > "$STAGE/agent/iris_agent.py"
-  # record the jitter sleep's argument instead of actually waiting
-  printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleep.log"\n' "$TMP" > "$BIN/sleep"
-  chmod +x "$BIN/sleep"
-  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
+  # Record the jitter sleep's argument instead of actually waiting. Pin the
+  # random result to the upper in-range value: zero is also valid and
+  # intentionally skips sleep, so leaving this to entropy makes the assertion
+  # below fail one run in eight.
+  printf '#!/usr/bin/env bash\necho "sleep:$1" >> "%s/events.log"\n' "$TMP" > "$BIN/sleep"
+  real_python="$(command -v python3)"
+  cat > "$BIN/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "$1" = "-c" ] && [[ "$2" == *random.randrange* ]]; then
+  printf '%s\n' "$3" > "$IRIS_RNG_ARG_LOG"
+  printf '%s\n' "$IRIS_TEST_JITTER"
+  exit 0
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$BIN/sleep" "$BIN/python3"
+  run env PATH="$BIN:$PATH" REAL_PYTHON="$real_python" IRIS_TEST_JITTER=7 \
+      IRIS_RNG_ARG_LOG="$TMP/rng-arg.log" \
+      SRC="$SRC" STAGE="$STAGE" IRIS_TICK_JITTER_MAX=8 \
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
-  [ -f "$TMP/agent-invoked" ]
-  [ -f "$TMP/sleep.log" ]
-  jitter="$(cat "$TMP/sleep.log")"
-  [ "$jitter" -ge 0 ] && [ "$jitter" -lt 8 ]
+  [ "$(cat "$TMP/rng-arg.log")" -eq 8 ]
+  [ "$(cat "$TMP/events.log")" = $'sleep:7\nagent:--once' ]
 }
 
 @test "IRIS_TICK_JITTER_MAX=0 skips the jitter sleep entirely" {
