@@ -582,3 +582,212 @@ def test_devices_csv_example_header_matches_the_console_template():
     served = gui_fleet.FleetStore.example_csv().splitlines()
     served_header = next(l for l in served if l.startswith("device_id,"))
     assert header == served_header
+
+
+def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
+    """Acceptance 26 keeps the persisted tracker contract executable in prose."""
+    with open(os.path.join(DOCS, "reference.md")) as fh:
+        reference = fh.read()
+    with open(os.path.join(DOCS, "operations.md")) as fh:
+        operations = fh.read()
+
+    def ordered(text, terms):
+        cursor = -1
+        for term in terms:
+            cursor = text.lower().find(term.lower(), cursor + 1)
+            assert cursor >= 0, (term, terms)
+
+    for term in ("10–300", "4–200", "announce_min_interval_s", "numwant",
+                 "qos_state: {}"):
+        assert term in reference, term
+    reference_lower = reference.lower()
+    assert re.search(r"omit(?:ted|ting)?.{0,60}qos_state.{0,120}preserv",
+                     reference_lower, re.DOTALL)
+    explicit_clear = re.search(
+        r"qos_state\s*:\s*\{\}.{0,140}(?:remove|clear)"
+        r".{0,100}(?:only|selected).{0,100}state.{0,180}",
+        reference_lower, re.DOTALL)
+    assert explicit_clear
+    assert re.search(r"(?:preserv|retain|unchang).{0,80}"
+                     r"(?:scalar qos|scalar layer)|"
+                     r"(?:scalar qos|scalar layer).{0,80}"
+                     r"(?:preserv|retain|unchang)",
+                     explicit_clear.group(0), re.DOTALL)
+    assert re.search(r"(?:full|complete) role[- ]definition replacement"
+                     r".{0,180}(?:include|supply|send).{0,80}qos_state"
+                     r".{0,120}retain", reference_lower, re.DOTALL)
+    ordered(reference, ("builtin", "roles.qos_default",
+                        "roles.qos_state_default", "roles.defs.<role>.qos",
+                        "roles.defs.<role>.qos_state"))
+    cadence = (reference + "\n" + operations).lower()
+    assert re.search(r"(?:resolve|select|choose).{0,180}state.{0,120}"
+                     r"(?:before|precede|then).{0,80}jitter", cadence,
+                     re.DOTALL)
+    assert re.search(r"(?:one|single|exactly one).{0,40}jitter|"
+                     r"jitter.{0,40}(?:once|one)", cadence)
+    assert re.search(r"issued.{0,100}(?:both|same|identical).{0,100}"
+                     r"interval.{0,100}min(?:imum)? interval", cadence)
+    assert re.search(r"twice.{0,100}issued.{0,80}interval", cadence)
+    assert ("left == 0" in reference or "left == 0" in operations)
+
+    assert re.search(r"service.{0,160}(?:outside|no).{0,80}"
+                     r"(?:handout )?ledger", operations, re.IGNORECASE | re.DOTALL)
+    assert re.search(r"service.{0,180}(?:origin|seeder).{0,180}"
+                     r"(?:parsed|selected).{0,160}state", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"(?:global scalar|scalar global).{0,120}"
+                     r"(?:global state|state).{0,120}cadence", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"unattributed.{0,80}legacy.{0,180}"
+                     r"global-state", operations, re.IGNORECASE | re.DOTALL)
+    assert re.search(r"\battributed\b.{0,100}legacy.{0,220}"
+                     r"(?:selected|resolved).{0,140}state.{0,160}"
+                     r"every possible owner", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"unattributed.{0,80}legacy", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"\battributed\b.{0,100}legacy", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"unreadable.{0,180}global cadence.{0,180}"
+                     r"(?:fail[- ]closed).{0,180}"
+                     r"(?:no candidates|no peers|withhold(?:s|ing)? candidates|"
+                     r"empty candidate)",
+                     operations, re.IGNORECASE | re.DOTALL)
+    assert re.search(r"unreadable.{0,140}fallback", operations,
+                     re.IGNORECASE | re.DOTALL)
+    assert re.search(r"(?:shared|legacy).{0,80}NAT.{0,240}"
+                     r"(?:max|maximum|slowest).{0,120}"
+                     r"(?:interval|cadence).{0,120}"
+                     r"(?:min|minimum|smallest).{0,120}(?:numwant|peer)",
+                     operations, re.IGNORECASE | re.DOTALL)
+    assert re.search(r"possible owners.{0,180}(?:state|owner).{0,180}"
+                     r"(?:max|maximum|slowest).{0,160}"
+                     r"(?:min|minimum|smallest)", operations,
+                     re.IGNORECASE | re.DOTALL)
+
+    downgrade = operations.lower()
+    assert re.search(r"remove.{0,100}every.{0,100}(?:global|role).{0,100}state",
+                     downgrade, re.DOTALL)
+    assert re.search(r"(?:one|an) additional.{0,100}scalar-only.{0,100}"
+                     r"commit", downgrade, re.DOTALL)
+    for filename in ("peer-policy.json", "peer-policy.lkg.json"):
+        assert filename in downgrade
+    assert re.search(r"state-free.{0,80}schema[- ]1|schema[- ]1.{0,80}state-free",
+                     downgrade, re.DOTALL)
+    assert re.search(r"(?:do not|never).{0,80}retained.{0,80}"
+                     r"state-bearing.{0,80}ring snapshot", downgrade,
+                     re.DOTALL)
+    assert "restricted-role" in downgrade and "quarantine" in downgrade
+    assert "quarantine restricted devices before downgrading" in downgrade
+
+
+def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
+    """Acceptance 27/28 preserves scalar intent and the API-only boundary."""
+    with open(os.path.join(DOCS, "observability.md")) as fh:
+        observability = fh.read()
+    with open(os.path.join(DOCS, "console.md")) as fh:
+        console = fh.read()
+    with open(os.path.join(REPO, "fleet", "README.md")) as fh:
+        fleet = fh.read()
+    with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
+        changelog = fh.read()
+
+    obs = observability.lower()
+    assert re.search(r"(?:scalar|legacy).{0,160}qos.{0,160}"
+                     r"(?:instruction intent|pre-instructions)", obs,
+                     re.DOTALL)
+    assert re.search(r"tracker_qos.{0,160}(?:tracker|state).{0,160}"
+                     r"(?:explain|source|provenance)", obs, re.DOTALL)
+    for term in ("instruction", "control", "telemetry", "semantic",
+                 "role artifact", "stamp", "serial", "envelope",
+                 "heartbeat", "device configuration"):
+        assert term in obs, term
+    assert re.search(r"state.{0,160}tracker-only|tracker-only.{0,160}state",
+                     obs, re.DOTALL)
+    assert re.search(r"instruction.{0,80}(?:qos|control)|"
+                     r"(?:qos|control).{0,80}instruction", obs, re.DOTALL)
+    exclusion_verbs = ("never enters", "does not enter", "is excluded from",
+                       "remains outside")
+    exclusion_terms = ("instruction", "control", "telemetry", "semantic hashes",
+                       "role artifact", "stamp", "serial", "envelope",
+                       "heartbeat", "device configuration")
+    exclusion_sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", obs)
+                           if "tracker-only" in sentence and
+                           any(verb in sentence for verb in exclusion_verbs)]
+    assert any(all(term in sentence for term in exclusion_terms)
+               for sentence in exclusion_sentences)
+
+    console_lower = console.lower()
+    assert "qos_state" in console_lower
+    assert re.search(r"qos_state.{0,160}(?:api-only|management api|documented api)",
+                     console_lower, re.DOTALL)
+    assert "no role-policy json editor" in console_lower
+
+    fleet_lower = fleet.lower()
+    for term in ("iris-role", "roles.csv", "scalar-only", "qos_state",
+                 "qos_changed", "candidate-bound"):
+        assert term in fleet_lower, term
+    assert re.search(r"iris-role\s+export.{0,160}omit.{0,60}qos_state",
+                     fleet_lower, re.DOTALL)
+    assert re.search(r"iris-role\s+define.{0,160}(?:remove|clear).{0,80}state",
+                     fleet_lower, re.DOTALL)
+    assert re.search(r"iris-role\s+import.{0,160}(?:remove|clear).{0,80}state",
+                     fleet_lower, re.DOTALL)
+    assert re.search(r"(?:configure|preserve|remove).{0,100}state.{0,100}"
+                     r"management api", fleet_lower, re.DOTALL)
+    for verb in ("configure", "preserve", "remove"):
+        assert re.search(r"%s.{0,120}state.{0,120}management api" % verb,
+                         fleet_lower, re.DOTALL)
+    assert re.search(r"replace.{0,160}(?:role|definition).{0,180}"
+                     r"qos_state.{0,120}retain", fleet_lower, re.DOTALL)
+    assert re.search(r"preview.{0,180}qos_changed", fleet_lower, re.DOTALL)
+    assert re.search(r"candidate[- ]bound.{0,100}confirmation", fleet_lower,
+                     re.DOTALL)
+    assert "qos_state" in changelog and "tracker" in changelog.lower()
+
+
+def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_claim():
+    """Acceptance 27/28 adds no topology and leaves no stale cadence claim."""
+    with open(os.path.join(DOCS, "architecture.md")) as fh:
+        architecture = fh.read()
+    with open(os.path.join(DOCS, "network-ports.md")) as fh:
+        network = fh.read()
+    allowed = ("reference.md", "operations.md", "observability.md",
+               "architecture.md", "network-ports.md", "console.md")
+    combined = ""
+    for name in allowed:
+        with open(os.path.join(DOCS, name)) as fh:
+            combined += "\n" + fh.read()
+    for path in (os.path.join(REPO, "fleet", "README.md"),
+                 os.path.join(REPO, "CHANGELOG.md")):
+        with open(path) as fh:
+            combined += "\n" + fh.read()
+    normalized = re.sub(r"\s+", " ", combined).lower()
+    assert not re.search(r"no\s+independent\s+per[- ]state\s+"
+                         r"cadence\s+setting", normalized)
+
+    architecture_lower = architecture.lower()
+    for component, responsibility in (
+            ("catalog", "image metadata"),
+            ("tracker", "announce"),
+            ("management api", "server state"),
+            ("telemetry service", "tracker")):
+        assert re.search(r"\|\s*%s\s*\|[^|\n]*%s" %
+                         (re.escape(component), responsibility),
+                         architecture_lower)
+    assert "all state and enforcement stay on the server tier" in architecture_lower
+    assert "no new service" in architecture_lower
+    assert "no new listener" in architecture_lower
+    for line in architecture_lower.splitlines():
+        assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
+                             r"(?:new|additional)\s+(?:process|listener|service|flow|port)", line)
+
+    network_lower = network.lower()
+    for port in ("6969", "8443", "9443"):
+        assert re.search(r"\|\s*%s\s*\|" % port, network_lower)
+    assert "no new port or network flow" in network_lower
+    assert "tracker https flow on 6969" in network_lower
+    assert "console-to-management flow on 9443" in network_lower
+    for line in network_lower.splitlines():
+        assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
+                             r"(?:new|additional)\s+(?:process|listener|service|flow|port)", line)

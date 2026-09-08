@@ -870,3 +870,68 @@ def test_policy_contract_exact_business_unions_compose_tier_failures():
             assert "management-api-unavailable" in codes("/peer-policy/qos", "put", 503)
         schema = spec["paths"][prefix + "/peer-policy"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
         assert schema["properties"]["roles_supported"] == {"type": "boolean", "const": True}
+
+
+def test_tracker_state_openapi_contract_is_closed_reusable_and_exactly_generated():
+    document = _load()
+    generated = openapi_contract.build_document()
+    assert document["openapi"] == "3.2.0"
+    assert SPEC.read_bytes() == (json.dumps(generated, indent=2,
+                                           sort_keys=False) + "\n").encode("utf-8")
+    assert _specified_keys(document) == api_routes.keys()
+
+    def resolve(schema):
+        while "$ref" in schema:
+            reference = schema["$ref"]
+            assert reference.startswith("#/components/schemas/")
+            schema = document["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+        return schema
+
+    def state_map(schema):
+        map_ref = schema.get("$ref")
+        assert map_ref, "one reusable tracker-state map"
+        schema = resolve(schema)
+        assert schema["type"] == "object" and schema["additionalProperties"] is False
+        assert set(schema["properties"]) == {"seeder", "leecher"}
+        assert not schema.get("required")
+        refs = [schema["properties"][state].get("$ref") for state in ("seeder", "leecher")]
+        assert refs[0] and refs[0] == refs[1], "one reusable tracker-state object"
+        row = resolve(schema["properties"]["seeder"])
+        assert row["type"] == "object" and row["additionalProperties"] is False
+        assert set(row["properties"]) == {"announce_min_interval_s", "numwant"}
+        assert not row.get("required")
+        for key, lower, upper in (("announce_min_interval_s", 10, 300), ("numwant", 4, 200)):
+            value = resolve(row["properties"][key])
+            assert (value["type"], value["minimum"], value["maximum"]) == ("integer", lower, upper)
+        return map_ref, refs[0]
+
+    state_refs = []
+    for prefix in ("/api/v1", "/internal/v1"):
+        put = document["paths"][prefix + "/peer-policy/qos"]["put"]
+        body = resolve(put["requestBody"]["content"]["application/json"]["schema"])
+        assert body["additionalProperties"] is False
+        assert set(body["properties"]) == {"qos", "qos_state", "role", "confirm_token"}
+        state_refs.append(state_map(body["properties"]["qos_state"]))
+        assert set(put["responses"]["422"]["x-iris-problem-codes"]) == {
+            "invalid_policy", "invalid_policy_request"}
+        definition = resolve(document["paths"][prefix + "/peer-policy/roles/{name}"]["put"][
+            "requestBody"]["content"]["application/json"]["schema"])
+        state_refs.append(state_map(definition["properties"]["qos_state"]))
+        roles = resolve(document["paths"][prefix + "/peer-policy/roles"]["get"][
+            "responses"]["200"]["content"]["application/json"]["schema"])
+        assert "qos_state_default" not in roles["required"]
+        state_refs.append(state_map(roles["properties"]["qos_state_default"]))
+        stored_role = resolve(roles["properties"]["roles"]["additionalProperties"])
+        state_refs.append(state_map(stored_role["properties"]["qos_state"]))
+        effective = document["paths"][prefix + "/devices/{device_id}/effective-qos"]["get"]
+        query = [parameter for parameter in effective["parameters"] if parameter["in"] == "query"]
+        assert len(query) == 1 and query[0]["name"] == "tracker_state"
+        assert query[0].get("required", False) is False
+        assert resolve(query[0]["schema"])["type"] == "string"
+        assert set(resolve(query[0]["schema"])["enum"]) == {"seeder", "leecher"}
+        assert set(effective["responses"]["422"]["x-iris-problem-codes"]) == {"invalid_policy_request"}
+        assert set(effective["responses"]["404"]["x-iris-problem-codes"]) == {
+            "route-not-found", "device_not_found"}
+        response = resolve(effective["responses"]["200"]["content"]["application/json"]["schema"])
+        assert {"tracker_state", "tracker_qos"} <= set(response["properties"])
+    assert len(set(state_refs)) == 1

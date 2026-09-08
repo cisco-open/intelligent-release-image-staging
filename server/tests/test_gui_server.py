@@ -11776,3 +11776,51 @@ def test_policy_contract_actual_reads_confirmed_qos_and_role_definition(role_api
     assert preview["requires_confirmation"]
     check("PUT", "/peer-policy/qos", "/peer-policy/qos",
           {"qos": {"max_peers": 4}, "confirm_token": preview["confirm_token"]})
+
+
+def test_tracker_state_write_retains_success_failure_audit_and_read_only_preview(tmp_path):
+    host, port, (_, fleet, _, cat), audit_path, stop = _serve_full_audit(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "192.0.2.1"})
+        _define_device_role(cat)
+        cookie, csrf = _auth(host, port)
+
+        def request(path, body):
+            headers = {"Cookie": cookie, "X-CSRF-Token": csrf, "If-Match":
+                       gui_server._revision_etag("peer-policy",
+                           _loaded_peer_policy(cat).document["revision"])}
+            status, response_headers, raw = _req(
+                host, port, "PUT", path, body, headers=headers)
+            return status, response_headers, json.loads(raw)
+
+        def events():
+            with open(audit_path) as stream:
+                return [json.loads(line) for line in stream if line.strip()]
+
+        before = events()
+        prior = _loaded_peer_policy(cat).document
+        body = {"qos_state": {"seeder": {"numwant": 4}}}
+        status, _, preview = request("/api/peer-policy/qos?dry_run=1", body)
+        assert status == 200 and preview["qos_changed"] is True
+        assert events() == before
+        assert _loaded_peer_policy(cat).document == prior
+        status, _, committed = request("/api/peer-policy/qos",
+            dict(body, confirm_token=preview["confirm_token"]))
+        assert status == 200 and committed["revision"] == prior["revision"] + 1
+        after = events()
+        assert len(after) == len(before) + 1
+        assert after[-1]["event"] == "peer_policy_change"
+        assert after[-1]["action"] == "put" and after[-1]["target"] == "qos"
+        assert after[-1]["result"] == "ok"
+        before_policy = _loaded_peer_policy(cat).document
+        status, _, problem = request("/api/peer-policy/qos", {
+            "qos_state": {"seeder": {"numwant": 3}}})
+        assert status == 422 and problem["code"] == "invalid_policy"
+        failed = events()
+        assert len(failed) == len(after) + 1
+        assert failed[-1]["event"] == "peer_policy_change"
+        assert failed[-1]["target"] == "qos" and failed[-1]["result"] == "fail"
+        assert "invalid_policy" in failed[-1]["detail"]
+        assert _loaded_peer_policy(cat).document == before_policy
+    finally:
+        stop()

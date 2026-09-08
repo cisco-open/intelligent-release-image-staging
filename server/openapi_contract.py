@@ -167,7 +167,8 @@ def _policy_business_errors(route):
         ("GET", "/peer-policy/explain"): {
             422: ("principal_unresolvable",), 503: ("policy_unavailable",)},
         ("GET", "/devices/{device_id}/effective-qos"): {
-            404: ("device_not_found",), 503: ("policy_unavailable",)},
+            404: ("device_not_found",), 422: ("invalid_policy_request",),
+            503: ("policy_unavailable",)},
         ("PUT", "/peer-policy/roles/{name}"): {
             409: ("role_reserved_name", "role_isolated"),
             413: ("payload-too-large",),
@@ -251,6 +252,24 @@ def _qos_schema(scope):
             "description": "Replace this layer with any supported subset; an empty object clears it. Cross-field and restricted-role semantics are validated by the policy transaction."}
 
 
+def _tracker_qos_state_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "announce_min_interval_s": {
+                    "type": "integer", "minimum": 10, "maximum": 300},
+                "numwant": {
+                    "type": "integer", "minimum": 4, "maximum": 200}}}
+
+
+def _tracker_qos_state_map_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                state: _ref("TrackerQosState")
+                for state in ("seeder", "leecher")},
+            "description": (
+                "Closed seeder and leecher tracker-cadence overrides.")}
+
+
 def _role_name_schema():
     return {"type": "string", "pattern": peer_policy._ROLE_NAME_RE.pattern,
             "not": {"enum": sorted(peer_policy.RESERVED_ROLE_NAMES)}}
@@ -267,7 +286,8 @@ def _role_definition_schema():
             "pattern": peer_policy.ROLE_NET_PATTERN,
             "description": "IPv4 address, CIDR or dotted netmask/hostmask. A decimal prefix allows at most %d digits, including leading zeroes; valid spelling is preserved." % peer_policy.ROLE_NET_MAX_PREFIX_DIGITS}},
         "on_stale": {"type": "string", "enum": ["keep", "defaults"]},
-        "qos": _qos_schema("role")}}
+        "qos": _qos_schema("role"),
+        "qos_state": _ref("TrackerQosStateMap")}}
 
 
 def _swarm_peer_schema():
@@ -331,6 +351,80 @@ def _qos_example():
                                          constraint_source="pinned-aria2-client")
     qos["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
     return qos
+
+
+def _tracker_qos_source_schema():
+    return {"type": "string", "pattern": (
+        r"^(?:builtin|global|global-state:(?:seeder|leecher)|"
+        r"role:[a-z0-9][a-z0-9._-]{0,31}|"
+        r"role-state:[a-z0-9][a-z0-9._-]{0,31}:"
+        r"(?:seeder|leecher))$")}
+
+
+def _tracker_interval_explanation_schema(leecher):
+    properties = {
+        "value": {"type": "integer", "minimum": 10, "maximum": 300},
+        "source": _tracker_qos_source_schema(),
+    }
+    required = ["value", "source"]
+    if leecher:
+        properties.update({
+            "peerless_leecher_floor_s": {
+                "type": "integer", "const": 120},
+            "constraint_source": {
+                "type": "string", "const": "pinned-aria2-client"},
+        })
+        required.extend(["peerless_leecher_floor_s", "constraint_source"])
+    return {"type": "object", "additionalProperties": False,
+            "properties": properties, "required": required}
+
+
+def _tracker_numwant_explanation_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "value": {"type": "integer", "minimum": 4,
+                          "maximum": 200},
+                "source": _tracker_qos_source_schema(),
+                "effective_ceiling": {"type": "integer", "minimum": 4,
+                                      "maximum": 50},
+                "runtime_request_zero": {
+                    "type": "string", "const": "disabled"},
+                "constraint_source": {
+                    "type": "string", "const": "pinned-aria2-client"},
+            },
+            "required": ["value", "source", "effective_ceiling",
+                         "runtime_request_zero", "constraint_source"]}
+
+
+def _tracker_qos_explanation_schema(leecher=None):
+    interval = (
+        {"oneOf": [_tracker_interval_explanation_schema(False),
+                   _tracker_interval_explanation_schema(True)]}
+        if leecher is None else
+        _tracker_interval_explanation_schema(leecher))
+    return {"type": "object", "additionalProperties": False,
+            "properties": {
+                "announce_min_interval_s": interval,
+                "numwant": _tracker_numwant_explanation_schema(),
+            },
+            "required": ["announce_min_interval_s", "numwant"]}
+
+
+def _tracker_qos_example(state):
+    interval = {
+        "value": 120, "source": "role-state:boat:" + state}
+    if state == "leecher":
+        interval.update(peerless_leecher_floor_s=120,
+                        constraint_source="pinned-aria2-client")
+    return {
+        "announce_min_interval_s": interval,
+        "numwant": {
+            "value": 4, "source": "global-state:" + state,
+            "effective_ceiling": 4,
+            "runtime_request_zero": "disabled",
+            "constraint_source": "pinned-aria2-client",
+        },
+    }
 
 
 def _explain_side(device_id):
@@ -614,6 +708,14 @@ def _query_parameters(route):
             "description": "Bare device ID, device:<id>, or service:seeder. Requires one fresh, unambiguous durable IPv4 attribution; no inventory-IP fallback.",
             "schema": {"type": "string"}, "example": value}
             for key, value in (("a", "edge-01"), ("b", "service:seeder")))
+    if suffix == "/devices/{device_id}/effective-qos":
+        params.append({
+            "name": "tracker_state", "in": "query", "required": False,
+            "description": (
+                "Selects the seeder or leecher tracker cadence explanation. "
+                "Omission preserves the v1 scalar-only response bytes."),
+            "schema": {"type": "string", "enum": ["seeder", "leecher"]},
+            "example": "seeder"})
 
     if route.service in ("console", "management") and suffix == "/devices":
         params.extend([
@@ -834,8 +936,10 @@ _JSON_REQUESTS = {
     "/peer-policy/roles/{name}": ({"restricted": True, "peers": ["boat"],
         "origin": True, "nets": [], "on_stale": "keep", "qos": {},
         "confirm_token": "candidate-bound-sha256"}, (), True),
-    "/peer-policy/qos": ({"qos": {"numwant": 25}, "role": "boat",
-        "confirm_token": "candidate-bound-sha256"}, ("qos",), True),
+    "/peer-policy/qos": ({"qos": {"numwant": 25},
+        "qos_state": {"seeder": {"announce_min_interval_s": 120,
+                                    "numwant": 4}},
+        "role": "boat", "confirm_token": "candidate-bound-sha256"}, (), True),
     "/devices/{device_id}/role": ({"role": "boat",
         "confirm_token": "candidate-bound-sha256"}, ("role",), True),
     "/devices/bulk-role": ({"device_ids": ["edge-01", "edge-02"], "role": "boat",
@@ -987,6 +1091,14 @@ def _request_body(route):
             schema["properties"].update(_role_definition_schema()["properties"])
         if suffix == "/peer-policy/qos":
             schema["properties"]["qos"] = _qos_schema("global")
+            schema["properties"]["qos_state"] = _ref("TrackerQosStateMap")
+            schema["anyOf"] = [
+                {"required": ["qos"]}, {"required": ["qos_state"]}]
+            schema["description"] = (
+                "Global qos_state is stored at roles.qos_state_default. "
+                "Role qos_state is stored at roles.defs.<role>.qos_state. "
+                "Omission preserves either stored layer; an explicit empty "
+                "object clears the supplied layer.")
             schema["allOf"] = [{"if": {"required": ["role"], "properties": {
                 "role": {"type": "string"}}}, "then": {"properties": {"qos": _qos_schema("role")}}}]
         if "role" in schema["properties"]:
@@ -1695,6 +1807,8 @@ def _success(route):
     if suffix == "/peer-policy/roles":
         schema["properties"]["roles"] = {"type": "object",
             "propertyNames": _role_name_schema(), "additionalProperties": _role_definition_schema()}
+        schema["properties"]["qos_state_default"] = \
+            _ref("TrackerQosStateMap")
     if suffix == "/peer-policy":
         schema["properties"]["roles_supported"]["const"] = True
         schema["properties"]["roles"]["properties"]["members"] = {
@@ -1703,6 +1817,29 @@ def _success(route):
     if suffix == "/devices/{device_id}/effective-qos":
         for row in schema["properties"]["qos"]["properties"].values():
             row["required"] = [key for key in row["required"] if key != "derived_from"]
+        schema["properties"].update({
+            "tracker_state": {
+                "type": "string", "enum": ["seeder", "leecher"]},
+            "tracker_qos": _tracker_qos_explanation_schema(),
+        })
+        schema["dependentRequired"] = {
+            "tracker_state": ["tracker_qos"],
+            "tracker_qos": ["tracker_state"],
+        }
+        schema.setdefault("allOf", []).extend([
+            {
+                "if": {"required": ["tracker_state"], "properties": {
+                    "tracker_state": {"const": "seeder"}}},
+                "then": {"properties": {
+                    "tracker_qos": _tracker_qos_explanation_schema(False)}},
+            },
+            {
+                "if": {"required": ["tracker_state"], "properties": {
+                    "tracker_state": {"const": "leecher"}}},
+                "then": {"properties": {
+                    "tracker_qos": _tracker_qos_explanation_schema(True)}},
+            },
+        ])
     if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
         optional = {"candidate_revision", *_blast_example()}
         schema["required"] = [key for key in schema["required"] if key not in optional]
@@ -1717,6 +1854,11 @@ def _success(route):
     response = {"description": route.summary + " response",
                 "content": {"application/json": _media(
                     schema, example)}}
+    if suffix == "/devices/{device_id}/effective-qos":
+        state_example = dict(
+            example, tracker_state="seeder",
+            tracker_qos=_tracker_qos_example("seeder"))
+        response["content"]["application/json"]["example"] = state_example
     if _policy_mutation(route):
         no_confirmation = dict(example, confirm_token=None, requires_confirmation=False,
             member_delta=0, origin_access_lost=0, empty_permitted_sets=0,
@@ -2201,6 +2343,8 @@ def build_document():
                                "ok": {"type": "boolean"},
                            },
                            "additionalProperties": False},
+                "TrackerQosState": _tracker_qos_state_schema(),
+                "TrackerQosStateMap": _tracker_qos_state_map_schema(),
             },
         },
     }

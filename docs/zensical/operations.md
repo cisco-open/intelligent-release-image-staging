@@ -147,14 +147,19 @@ for connections to age naturally, unassign every image from the affected
 device; its current agent removes the torrents on the next tick. This remains a
 staging operation and never installs, activates, reloads, or changes boot state.
 
-Before rolling the server back to a binary that predates roles, always
-quarantine restricted devices before downgrading. Verify that the current
-tracker has exported those quarantine operations, then perform the server rollback. Older
-code ignores `roles_present` and cannot enforce or warn about role definitions.
-After restoring a role-capable version, repair any `role_drift`, verify the
-policy and origin-QoS status, and deliberately release each quarantine. Do not
-delete `peer-policy.json` or its LKG to silence a warning: doing so loses role,
-ACL, and quarantine intent.
+Before rolling the server back to a binary that predates roles or state-aware
+QoS, quarantine restricted devices before downgrading. Verify that the current
+tracker has exported those quarantine operations. Use the newer binary to remove
+every global and role state container, then make one additional scalar-only
+policy commit. Verify that both `peer-policy.json` and `peer-policy.lkg.json`
+contain state-free schema-1 documents before starting the older binary; do not
+supply it a retained state-bearing ring snapshot. This restricted-role
+quarantine containment procedure keeps older code from seeing state it cannot
+validate. Code predating roles ignores `roles_present` and cannot enforce or
+warn about role definitions. After restoring a role-capable version, repair any
+`role_drift`, verify the policy and origin-QoS status, and deliberately release
+each quarantine. Do not delete `peer-policy.json` or its LKG to silence a
+warning: doing so loses role, ACL, and quarantine intent.
 
 ## Peer-policy operations and their backlog
 
@@ -203,17 +208,27 @@ operation_backlog_full`. See [Peer policy](reference.md#peer-policy).
 ### Tracker cadence, selection, and origin QoS
 
 Issue #158 is active in Phase 0. On every authenticated announce, the tracker
-loads the current compiled policy, chooses the device/global
-`announce_min_interval_s`, applies bounded ±10% jitter within 10–300 seconds,
-and returns that issued value as both `interval` and `min interval`. The peer
-row expires after twice its own issued interval. Candidate return is capped by
-the smaller of the request and effective `numwant`; `numwant=0` returns no
-peers. Selection starts at a randomized registry position and inspects at most
-the smaller of four times that ceiling or the whole swarm, so policy denials
-can make a response shorter than its ceiling. Restricted-role selection uses
-role indexes but still evaluates mutual policy for every candidate. A shared
-legacy/NAT address receives the slowest cadence and smallest peer ceiling of
-its possible owners. A role edit therefore affects the next requester announce
+loads the current compiled policy and resolves the parsed state before applying
+exactly one bounded ±10% jitter within 10–300 seconds. Exact `left == 0`
+selects seeder; positive, omitted, malformed, and negative values select
+leecher. The service origin seeder selects its parsed state with
+global scalar and global state cadence and remains outside the handout ledger. An unattributed
+legacy principal uses the selected `global-state:<state>` cadence. An
+attributed legacy principal resolves the selected state separately for
+every possible owner before aggregation. A shared legacy/NAT address therefore
+considers all possible owners; each owner's selected state is aggregated with
+the maximum interval and minimum `numwant`. If
+attribution is unreadable, the global cadence fallback applies; the tracker
+remains fail-closed and withholds candidates. The issued value is returned as both
+`interval` and `min interval`; the peer row expires after twice its own issued
+interval. Candidate return is capped by the smaller of the request and the
+effective selected-state `numwant`; `numwant=0` returns no peers. A valid
+port-bearing announce registers its issued interval; an invalid port receives
+cadence without registration. Selection starts at a randomized registry
+position and inspects at most the smaller of four times that ceiling or the
+whole swarm, so policy denials can make a response shorter than its ceiling.
+Restricted-role selection uses role indexes but still evaluates mutual policy
+for every candidate. A role edit therefore affects the next requester announce
 without waiting for every candidate to reannounce.
 
 The same serialized reconciler applies origin QoS. It forces a complete apply

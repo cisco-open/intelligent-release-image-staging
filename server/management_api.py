@@ -3056,12 +3056,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                       if key != "confirm_token"}
                         committed = coordinator.define_role(name, definition, actor, **options)
                 elif path == "/api/peer-policy/qos":
-                    if set(body) - {"qos", "role", "confirm_token"} or "qos" not in body:
+                    if set(body) - {"qos", "qos_state", "role", "confirm_token"} or \
+                            not ({"qos", "qos_state"} & set(body)):
                         raise ValueError("bad qos fields")
                     role = body.get("role")
                     if role is not None:
                         peer_policy.validate_role_name(role)
-                    committed = coordinator.set_qos(body["qos"], actor, role=role, **options)
+                    qos = body.get("qos")
+                    if "qos" in body and not isinstance(qos, dict):
+                        raise peer_policy.PolicyError("bad qos")
+                    qos_options = dict(options, role=role)
+                    if "qos_state" in body:
+                        if not isinstance(body["qos_state"], dict):
+                            raise peer_policy.PolicyError("bad qos state")
+                        qos_options["qos_state"] = body["qos_state"]
+                    committed = coordinator.set_qos(qos, actor, **qos_options)
                 else:
                     bulk = path == "/api/devices/bulk-role"
                     if set(body) - ({"device_ids", "role", "confirm_token"} if bulk
@@ -3128,12 +3137,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                       "fail_closed": policy.fail_closed}
             try:
                 if path == "/api/peer-policy/roles":
-                    definitions = doc.get("roles", {}).get("defs", {})
+                    roles = doc.get("roles", {})
+                    definitions = roles.get("defs", {})
+                    if "qos_state_default" in roles:
+                        result["qos_state_default"] = roles["qos_state_default"]
                     result["roles"] = {name: definitions[name] for name in sorted(definitions)}
                 elif path.endswith("/effective-qos"):
                     did = unquote(path[len("/api/devices/"):-len("/effective-qos")])
                     if fleet is None or fleet.get_device(did) is None:
                         self._policy_problem(404, "device_not_found", revision)
+                        return
+                    query = parse_qs(urlsplit(self.path).query,
+                                     keep_blank_values=True)
+                    if query and (set(query) != {"tracker_state"} or
+                                  query["tracker_state"] not in
+                                  (["seeder"], ["leecher"])):
+                        self._policy_problem(
+                            422, "invalid_policy_request", revision)
                         return
                     qos = peer_policy.explain_qos(doc, did)
                     # These are pinned aria2 client constraints, not tracker caps:
@@ -3146,6 +3166,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
                                                 heartbeat_always=True)
                     result.update(device_id=did, qos=qos, delivery_state="pre-instructions")
+                    if query:
+                        tracker_state = query["tracker_state"][0]
+                        tracker_qos = peer_policy.explain_tracker_qos(
+                            doc, did, tracker_state)
+                        tracker_qos["numwant"].update(
+                            effective_ceiling=min(
+                                tracker_qos["numwant"]["value"], 50),
+                            runtime_request_zero="disabled",
+                            constraint_source="pinned-aria2-client")
+                        if tracker_state == "leecher":
+                            tracker_qos["announce_min_interval_s"].update(
+                                peerless_leecher_floor_s=120,
+                                constraint_source="pinned-aria2-client")
+                        result.update(tracker_state=tracker_state,
+                                      tracker_qos=tracker_qos)
                 else:
                     qs = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
                     if set(qs) != {"a", "b"} or any(len(qs[k]) != 1 for k in qs):

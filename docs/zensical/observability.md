@@ -81,6 +81,12 @@ Read these fields literally:
 | `fleet_rollup.states.pre-instructions` | Devices have configured role/QoS intent, but Phase 0 issued no device instructions. |
 | `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | The returned values and sources explain compilation, not device application. |
 
+Legacy scalar `qos` remains instruction intent and is reported as
+`delivery_state: pre-instructions`; an explicit `tracker_qos` explains the
+selected tracker state and its sources. `tracker_qos` is tracker-only: tracker
+state never enters instruction QoS/control, telemetry, semantic hashes, role artifacts,
+stamps, serials, envelopes, heartbeat, or device configuration.
+
 Swarm participant `peer_policy` facts retain the raw explicit `assignment` and
 separately expose the compiled `effective_acl`, `acl_source`, compiled policy membership
 as `role`, `role_unknown`, and `role_shadowed_by`. That role can differ from the

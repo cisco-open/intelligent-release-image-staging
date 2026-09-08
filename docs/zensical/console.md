@@ -310,9 +310,10 @@ place. Quarantine intent uses its existing badge and stays distinct from the
 tracker's last enforcement state.
 
 The Console intentionally has no role-policy JSON editor and no QoS editor.
-Use `iris-role` for definitions, definition-scoped QoS, membership, ACL
-migration, and one device's declared/compiled role and drift. Global QoS and
-pair explanations are available only through the documented API.
+Tracker `qos_state` is API-only: configure, preserve, or remove it through the
+documented management API. Use `iris-role` and scalar-only CSV definitions for
+role membership and scalar QoS; the Console exposes tracker-state effective-QoS
+explanations through the API but does not edit the nested state map.
 
 Phase 0 changes future tracker introductions only; it
 does not sever existing connections or remove retained peers. For immediate

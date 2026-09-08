@@ -128,9 +128,9 @@ durable values, which is why partial writes can produce visible `role_drift`.
 The separate agent-distribution path in the diagram is exempt from role and
 QoS policy so a restricted device retains its recovery channel.
 The same behavior applies in the one-host Compose stack, separate Docker hosts,
-and Kubernetes. All state and enforcement stay on the server tier. There is no
-new service, listener, environment variable, Secret, Service, NetworkPolicy
-rule, or device flow for Phase 0.
+and Kubernetes. All state and enforcement stay on the server tier.
+There is no new service and no new listener, environment variable, Secret, Service,
+NetworkPolicy rule, or device flow for Phase 0.
 
 The boundary matters during an incident: a policy change stops **new** tracker
 pairings, but it does not close an existing BitTorrent connection or erase a

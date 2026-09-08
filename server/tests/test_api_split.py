@@ -861,18 +861,20 @@ def policy_tiers(tmp_path, monkeypatch):
     _thread(console)
     headers = {}
     def request(tier, method, suffix, body=None, duplicates=False,
-                authorized=True, declared_length=None, match=True):
+                authorized=True, declared_length=None, match=True,
+                raw_response=False):
         conn = (http.client.HTTPSConnection("127.0.0.1", management.server_address[1],
                     context=ssl._create_unverified_context(), timeout=3)
                 if tier == "management" else http.client.HTTPConnection(
                     "127.0.0.1", console.server_address[1], timeout=3))
-        raw = json.dumps(body).encode() if body is not None else b""
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else b""
         outgoing = dict(headers) if authorized else {}
         if tier == "management":
             outgoing["Authorization"] = "Bearer " + "t" * 64
         if match:
-            outgoing["If-Match"] = management_api._revision_etag("peer-policy",
+            outgoing["If-Match"] = (management_api._revision_etag("peer-policy",
                 peer_policy.load_policy(auth_path, lkg_path).document["revision"])
+                if match is True else match)
         conn.putrequest(method, ("/internal/v1" if tier == "management" else "/api/v1") + suffix)
         for key, value in outgoing.items():
             conn.putheader(key, value)
@@ -883,7 +885,8 @@ def policy_tiers(tmp_path, monkeypatch):
         conn.endheaders(raw if declared_length is None else None)
         response = conn.getresponse()
         data = response.read()
-        result = response.status, dict(response.getheaders()), json.loads(data) if data else None
+        result = (response.status, dict(response.getheaders()),
+                  data if raw_response else json.loads(data) if data else None)
         conn.close()
         return result
     status, response_headers, login = request("console", "POST", "/login",
@@ -1055,3 +1058,289 @@ def test_policy_contract_browser_transport_and_tier_auth_codes(policy_tiers, mon
         status, _, problem = request("console", "PUT", "/peer-policy/qos", {"qos": {}})
         assert status == 401 and problem["code"] == "management-authentication-required"
         assert problem["code"] in operation["responses"]["401"]["x-iris-problem-codes"]
+
+
+def _state_qos_paths(store):
+    return (os.path.join(store.state_dir, "peer-policy.json"),
+            os.path.join(store.state_dir, "peer-policy.lkg.json"))
+
+
+def _state_qos_document(store):
+    import peer_policy
+    return peer_policy.load_policy(*_state_qos_paths(store)).document
+
+
+def _state_qos_durable_bytes(store):
+    return {str(path.relative_to(store.state_dir)): path.read_bytes()
+            for path in Path(store.state_dir).rglob("*")
+            if path.is_file() and not path.name.endswith(".lock")}
+
+
+def _state_qos_policy_bytes(store):
+    # Failed writes may append audit rows. Policy, LKG/ring, roles watermark,
+    # embedded outbox, and enforcement acknowledgement bytes must stay fixed.
+    return {name: value for name, value in _state_qos_durable_bytes(store).items()
+            if name.startswith("peer-policy") or name == "peer-enforcement.json"}
+
+
+def _state_qos_problem(status, headers, payload, expected, code, revision):
+    assert status == expected, payload
+    assert payload["code"] == payload["error"] == code
+    assert payload["status"] == expected
+    assert payload["type"] == api_problem.TYPE_BASE + code
+    assert headers["Content-Type"].startswith("application/problem+json")
+    assert headers["ETag"] == '"iris-peer-policy-%d"' % revision
+
+
+@pytest.mark.parametrize("tier", ["management", "console"])
+def test_tracker_state_mutations_preserve_clear_confirm_and_expose_both_scopes(
+        policy_tiers, tier):
+    import copy
+    request, _, store = policy_tiers
+    assert request(tier, "GET", "/peer-policy")[0] == 200
+
+    def view():
+        status, _, payload = request(tier, "GET", "/peer-policy/roles")
+        assert status == 200
+        return payload
+
+    assert "qos_state_default" not in view()
+    assert "qos_state" not in view()["roles"]["boat"]
+
+    def apply(body, path="/peer-policy/qos", check_guards=False):
+        prior = _state_qos_document(store)
+        before = _state_qos_policy_bytes(store)
+        if check_guards:
+            for options, status, code in (
+                    ({"match": False}, 428, "precondition_required"),
+                    ({"match": '"iris-peer-policy-0"'}, 412,
+                     "precondition_failed"),
+                    ({"duplicates": True}, 412, "precondition_failed")):
+                result = request(tier, "PUT", path, body, **options)
+                _state_qos_problem(*result, status, code, prior["revision"])
+                assert _state_qos_policy_bytes(store) == before
+        before_preview = _state_qos_durable_bytes(store)
+        status, headers, preview = request(tier, "PUT", path + "?dry_run=1", body)
+        assert status == 200, preview
+        assert preview["dry_run"] is True and preview["qos_changed"] is True
+        assert preview["requires_confirmation"] is True
+        assert preview["revision"] == preview["candidate_revision"] == prior["revision"] + 1
+        assert headers["ETag"] == '"iris-peer-policy-%d"' % preview["revision"]
+        assert all(preview[key] == 0 for key in (
+            "member_delta", "origin_access_lost", "empty_permitted_sets",
+            "role_pairs_stopped"))
+        assert _state_qos_durable_bytes(store) == before_preview
+        if check_guards:
+            result = request(tier, "PUT", path, body)
+            _state_qos_problem(*result, 428, "confirmation_required", prior["revision"])
+            altered = copy.deepcopy(body)
+            altered["qos_state"]["seeder"]["numwant"] = 9
+            altered["confirm_token"] = preview["confirm_token"]
+            result = request(tier, "PUT", path, altered)
+            _state_qos_problem(*result, 428, "confirmation_required", prior["revision"])
+            assert _state_qos_policy_bytes(store) == before
+        submitted = dict(body, confirm_token=preview["confirm_token"])
+        status, headers, committed = request(tier, "PUT", path, submitted)
+        assert status == 200, committed
+        assert committed["dry_run"] is False and committed["ok"] is True
+        after = _state_qos_document(store)
+        assert committed["revision"] == after["revision"] == prior["revision"] + 1
+        assert headers["ETag"] == '"iris-peer-policy-%d"' % after["revision"]
+        assert after["operation_outbox"][:-1] == prior["operation_outbox"]
+        assert after["operation_outbox"][-1]["revision"] == after["revision"]
+        assert after["operation_outbox"][-1]["action"] == (
+            "set_qos" if path == "/peer-policy/qos" else "define_role")
+        return after
+
+    for role in (None, "boat"):
+        scope = {} if role is None else {"role": role}
+        state = {"seeder": {"announce_min_interval_s": 80, "numwant": 8},
+                 "leecher": {"announce_min_interval_s": 140}}
+
+        def layer(document):
+            return (document["roles"] if role is None else
+                    document["roles"]["defs"][role])
+
+        scalar_key = "qos_default" if role is None else "qos"
+        state_key = "qos_state_default" if role is None else "qos_state"
+        after = apply(dict(scope, qos={"numwant": 25}, qos_state=state),
+                      check_guards=True)
+        assert layer(after)[scalar_key] == {"numwant": 25}
+        assert layer(after)[state_key] == state
+        exposed = view()
+        assert (exposed[state_key] if role is None else
+                exposed["roles"][role][state_key]) == state
+
+        replacement = {"seeder": {"numwant": 4}}
+        # An explicit null role is the same global scope as an omitted role.
+        state_scope = {"role": role}
+        after = apply(dict(state_scope, qos_state=replacement))
+        assert layer(after)[scalar_key] == {"numwant": 25}
+        assert layer(after)[state_key] == replacement
+        after = apply(dict(scope, qos={"announce_min_interval_s": 90}))
+        assert layer(after)[scalar_key] == {"announce_min_interval_s": 90}
+        assert layer(after)[state_key] == replacement
+        after = apply(dict(scope, qos_state={}))
+        assert state_key not in layer(after)
+        assert layer(after)[scalar_key] == {"announce_min_interval_s": 90}
+        exposed = view()
+        assert state_key not in (exposed if role is None else exposed["roles"][role])
+        after = apply(dict(scope, qos_state={"seeder": {}}))
+        assert layer(after)[state_key] == {"seeder": {}}
+        after = apply(dict(scope, qos={}))
+        assert layer(after)[scalar_key] == {}
+        assert layer(after)[state_key] == {"seeder": {}}
+
+    definition = copy.deepcopy(_state_qos_document(store)["roles"]["defs"]["boat"])
+    definition["qos_state"] = {"leecher": {"numwant": 7}}
+    after = apply(definition, "/peer-policy/roles/boat")
+    assert after["roles"]["defs"]["boat"]["qos_state"] == {"leecher": {"numwant": 7}}
+    assert view()["roles"]["boat"]["qos_state"] == {"leecher": {"numwant": 7}}
+    definition.pop("qos_state")
+    after = apply(definition, "/peer-policy/roles/boat")
+    assert "qos_state" not in after["roles"]["defs"]["boat"]
+    assert view()["qos_state_default"] == {"seeder": {}}
+
+
+@pytest.mark.parametrize("tier", ["management", "console"])
+def test_tracker_state_put_errors_are_closed_typed_and_atomic(policy_tiers, tier):
+    request, _, store = policy_tiers
+    assert request(tier, "GET", "/peer-policy")[0] == 200
+    revision = _state_qos_document(store)["revision"]
+    before = _state_qos_policy_bytes(store)
+    # Representative HTTP error mapping; Commit 1 and the schema tests own
+    # the exhaustive state/key/type/range matrix.
+    invalid = [
+        ({"qos_state": None}, "invalid_policy"),
+        ({"qos": {"numwant": 25}, "qos_state": None}, "invalid_policy"),
+        ({"role": "boat", "qos_state": None}, "invalid_policy"),
+        ({"qos_state": []}, "invalid_policy"),
+        ({"qos": {"numwant": 25}, "qos_state": {"seeder": {"numwant": 3}}}, "invalid_policy"),
+        ({"role": "boat", "qos": {}, "qos_state": {"seed": {}}}, "invalid_policy"),
+        ({"qos": None, "qos_state": {}}, "invalid_policy"),
+        ({"role": "boat", "qos": {"numwant": 4.0}, "qos_state": {}}, "invalid_policy"),
+        ({}, "invalid_policy_request"),
+        ({"qos_state": {}, "device_id": "d1"}, "invalid_policy_request"),
+        ({"qos_state": {}, "confirm_token": []}, "invalid_policy_request"),
+    ]
+    for body, code in invalid:
+        result = request(tier, "PUT", "/peer-policy/qos", body)
+        _state_qos_problem(*result, 422, code, revision)
+        assert _state_qos_policy_bytes(store) == before
+    before_preview = _state_qos_durable_bytes(store)
+    result = request(tier, "PUT", "/peer-policy/qos?dry_run=1", {"qos_state": None})
+    _state_qos_problem(*result, 422, "invalid_policy", revision)
+    assert _state_qos_durable_bytes(store) == before_preview
+    for body in ([], "not-an-object", b"{", b"null"):
+        result = request(tier, "PUT", "/peer-policy/qos", body)
+        _state_qos_problem(*result, 422, "invalid_policy_request", revision)
+    result = request(tier, "PUT", "/peer-policy/qos", {
+        "role": "missing", "qos_state": {"seeder": {"numwant": 4}}})
+    _state_qos_problem(*result, 404, "role_not_found", revision)
+    assert _state_qos_policy_bytes(store) == before
+
+
+def _state_qos_legacy_rows():
+    # Literal accepted scalar wire values, independent of policy compilers.
+    values = (
+        ("max_peers", 10), ("per_peer_bps", 12500000), ("fanout", 1),
+        ("seed_up_bps", 0), ("seed_down_bps", 0), ("leech_up_bps", 0),
+        ("leech_down_bps", 0), ("overall_up_bps", 0), ("overall_down_bps", 0),
+        ("max_concurrent", 100), ("request_peer_speed_limit_bps", 51200),
+        ("announce_min_interval_s", 30), ("numwant", 50), ("handout_budget", 0),
+        ("catalog_tick_s", 60), ("telemetry_every_ticks", 1),
+        ("telemetry_pause", False), ("on_stale", "defaults"),
+        ("origin_up_bps", 0), ("origin_per_torrent_up_bps", 0),
+        ("origin_max_peers", 55),
+    )
+    result = {key: {"value": value, "source": "builtin"} for key, value in values}
+    result["numwant"].update(effective_ceiling=50, runtime_request_zero="disabled",
+                             constraint_source="pinned-aria2-client")
+    result["announce_min_interval_s"].update(
+        peerless_leecher_floor_s=120, constraint_source="pinned-aria2-client")
+    result["catalog_tick_s"].update(offline_horizon_s=600, heartbeat_always=True)
+    return result
+
+
+@pytest.mark.parametrize("tier", ["management", "console"])
+def test_tracker_state_effective_qos_preserves_legacy_bytes_and_closes_query(
+        policy_tiers, tier):
+    import copy
+    import peer_policy
+    request, fleet, store = policy_tiers
+    paths = _state_qos_paths(store)
+
+    def legacy(device_id, expected_qos):
+        revision = _state_qos_document(store)["revision"]
+        expected = {"revision": revision, "degraded": False, "fail_closed": False,
+                    "device_id": device_id, "qos": expected_qos,
+                    "delivery_state": "pre-instructions"}
+        status, headers, raw = request(tier, "GET", "/devices/%s/effective-qos" % device_id,
+                                       raw_response=True)
+        assert status == 200
+        assert raw == json.dumps(expected).encode("utf-8")
+        assert headers["ETag"] == '"iris-peer-policy-%d"' % revision
+        return expected
+
+    def queried(device_id, scalar, state, interval, interval_source, numwant, source):
+        expected = copy.deepcopy(scalar)
+        interval_row = {"value": interval, "source": interval_source}
+        if state == "leecher":
+            interval_row.update(peerless_leecher_floor_s=120,
+                                constraint_source="pinned-aria2-client")
+        expected.update(tracker_state=state, tracker_qos={
+            "announce_min_interval_s": interval_row,
+            "numwant": {"value": numwant, "source": source,
+                        "effective_ceiling": min(numwant, 50),
+                        "runtime_request_zero": "disabled",
+                        "constraint_source": "pinned-aria2-client"}})
+        status, headers, payload = request(tier, "GET",
+            "/devices/%s/effective-qos?tracker_state=%s" % (device_id, state))
+        assert status == 200, payload
+        assert payload == expected
+        assert headers["ETag"] == '"iris-peer-policy-%d"' % expected["revision"]
+        assert payload["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
+
+    builtin = legacy("d1", _state_qos_legacy_rows())
+    for state in ("seeder", "leecher"):
+        queried("d1", builtin, state, 30, "builtin", 50, "builtin")
+    fleet.upsert({"device_id": "d2", "device_ip": "192.0.2.2"})
+    peer_policy.set_qos(*paths, {"announce_min_interval_s": 60, "numwant": 60},
+                        actor="fixture", now=2)
+    peer_policy.set_qos(*paths, {"announce_min_interval_s": 100, "numwant": 80},
+                        actor="fixture", now=3, role="boat")
+    peer_policy.set_role(*paths, "d1", "boat", actor="fixture", now=4)
+    scalar_role = _state_qos_legacy_rows()
+    scalar_role["announce_min_interval_s"].update(value=100, source="role:boat")
+    scalar_role["numwant"].update(value=80, source="role:boat")
+    scalar_role["on_stale"].update(value="keep", source="role:boat")
+    scalar_global = _state_qos_legacy_rows()
+    scalar_global["announce_min_interval_s"].update(value=60, source="global")
+    scalar_global["numwant"].update(value=60, source="global")
+    legacy("d1", scalar_role)
+    legacy("d2", scalar_global)
+    peer_policy.set_qos(*paths, None, actor="fixture", now=5, qos_state={
+        "seeder": {"announce_min_interval_s": 80, "numwant": 4},
+        "leecher": {"announce_min_interval_s": 180, "numwant": 150}})
+    peer_policy.set_qos(*paths, None, actor="fixture", now=6, role="boat", qos_state={
+        "seeder": {"announce_min_interval_s": 120}, "leecher": {"numwant": 6}})
+    role_view = legacy("d1", scalar_role)
+    global_view = legacy("d2", scalar_global)
+    queried("d1", role_view, "seeder", 120, "role-state:boat:seeder", 80, "role:boat")
+    queried("d1", role_view, "leecher", 100, "role:boat", 6, "role-state:boat:leecher")
+    queried("d2", global_view, "seeder", 80, "global-state:seeder", 4, "global-state:seeder")
+    queried("d2", global_view, "leecher", 180, "global-state:leecher", 150, "global-state:leecher")
+    revision = _state_qos_document(store)["revision"]
+    before = _state_qos_durable_bytes(store)
+    invalid = ("?tracker_state", "?tracker_state=", "?tracker_state=Seeder",
+               "?tracker_state=unknown", "?tracker_state=0",
+               "?tracker_state=%20leecher%20", "?other=seeder",
+               "?tracker_state=seeder&other=", "?tracker_state=seeder&tracker_state=seeder",
+               "?tracker_state=seeder&tracker_state=leecher",
+               "?tracker_state=leecher&tracker_state=")
+    for query in invalid:
+        result = request(tier, "GET", "/devices/d1/effective-qos" + query)
+        _state_qos_problem(*result, 422, "invalid_policy_request", revision)
+        result = request(tier, "GET", "/devices/missing/effective-qos" + query)
+        _state_qos_problem(*result, 404, "device_not_found", revision)
+    assert _state_qos_durable_bytes(store) == before

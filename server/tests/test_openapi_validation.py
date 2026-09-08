@@ -356,3 +356,142 @@ def test_policy_contract_qos_subsets_ranges_and_complete_role_definition():
     for bad in ({"bogus": True}, dict(definition, on_stale="whatever"),
                 dict(definition, restricted="true"), dict(definition, qos={"origin_up_bps": 8192})):
         assert list(OAS32Validator(schema).iter_errors(dict(valid, roles={"boat": bad})))
+
+
+def test_tracker_state_schemas_validate_mutations_presence_pairs_and_published_examples():
+    import re
+    document = _load()
+    state_examples = []
+    source_pattern = re.compile(
+        r"^(?:builtin|global|global-state:(?:seeder|leecher)|"
+        r"role:[a-z0-9][a-z0-9._-]{0,31}|"
+        r"role-state:[a-z0-9][a-z0-9._-]{0,31}:(?:seeder|leecher))$")
+    for prefix in ("/api/v1", "/internal/v1"):
+        paths = document["paths"]
+        put_media = paths[prefix + "/peer-policy/qos"]["put"]["requestBody"]["content"]["application/json"]
+        role_media = paths[prefix + "/peer-policy/roles/{name}"]["put"]["requestBody"]["content"]["application/json"]
+        roles_media = paths[prefix + "/peer-policy/roles"]["get"]["responses"]["200"]["content"]["application/json"]
+        effective_media = paths[prefix + "/devices/{device_id}/effective-qos"]["get"]["responses"]["200"]["content"]["application/json"]
+        put = OAS32Validator(_local_schema(put_media["schema"], document))
+        role = OAS32Validator(_local_schema(role_media["schema"], document))
+        roles = OAS32Validator(_local_schema(roles_media["schema"], document))
+        effective = OAS32Validator(_local_schema(effective_media["schema"], document))
+
+        def stored(state):
+            return {"revision": 4, "degraded": False, "fail_closed": False,
+                    "qos_state_default": state,
+                    "roles": {"boat": {"restricted": False, "qos_state": state}}}
+
+        valid_maps = ({}, {"seeder": {}}, {"leecher": {}}, {
+            "seeder": {"announce_min_interval_s": 10, "numwant": 4},
+            "leecher": {"announce_min_interval_s": 300, "numwant": 200}}, {
+            "seeder": {"announce_min_interval_s": 300, "numwant": 200},
+            "leecher": {"announce_min_interval_s": 10, "numwant": 4}})
+        for state in valid_maps:
+            for scope in ({}, {"role": None}, {"role": "boat"}):
+                put.validate(dict(scope, qos_state=state))
+                put.validate(dict(scope, qos={}, qos_state=state))
+            role.validate({"restricted": False, "qos_state": state})
+            roles.validate(stored(state))
+        put.validate({"qos": {}})
+        for body in ({}, {"role": "boat"}, {"confirm_token": "token"},
+                     {"qos": None}, {"qos": None, "qos_state": {}},
+                     {"qos": {}, "qos_state": None}, {"qos_state": {}, "device_id": "d1"}):
+            assert list(put.iter_errors(body)), body
+        invalid_maps = [None, [], False, "seeder", 4, {"unknown": {}}]
+        for state in ("seeder", "leecher"):
+            invalid_maps.extend([{state: value} for value in (None, [], False, "bad", 4)])
+            invalid_maps.append({state: {"max_peers": 10}})
+            for key, low, high in (("announce_min_interval_s", 10, 300), ("numwant", 4, 200)):
+                for value in (low - 1, high + 1, True, low + 0.5, str(low), None):
+                    invalid_maps.append({state: {key: value}})
+        for state in invalid_maps:
+            assert list(put.iter_errors({"qos_state": state})), state
+            assert list(role.iter_errors({"restricted": False, "qos_state": state})), state
+            # Exercise each stored location independently; one invalid sibling
+            # must not conceal an accidentally permissive other container.
+            global_only = stored({})
+            global_only["qos_state_default"] = state
+            assert list(roles.iter_errors(global_only)), state
+            role_only = stored({})
+            role_only["roles"]["boat"]["qos_state"] = state
+            assert list(roles.iter_errors(role_only)), state
+
+        legacy = copy.deepcopy(_media_examples(effective_media)[0])
+        legacy.pop("tracker_state", None)
+        legacy.pop("tracker_qos", None)
+        effective.validate(legacy)
+        seeder = dict(legacy, tracker_state="seeder", tracker_qos={
+            "announce_min_interval_s": {"value": 120, "source": "role-state:boat:seeder"},
+            "numwant": {"value": 4, "source": "global-state:seeder",
+                        "effective_ceiling": 4, "runtime_request_zero": "disabled",
+                        "constraint_source": "pinned-aria2-client"}})
+        leecher = dict(legacy, tracker_state="leecher", tracker_qos={
+            "announce_min_interval_s": {"value": 45, "source": "role-state:boat:leecher",
+                                       "peerless_leecher_floor_s": 120,
+                                       "constraint_source": "pinned-aria2-client"},
+            "numwant": {"value": 150, "source": "global-state:leecher",
+                        "effective_ceiling": 50, "runtime_request_zero": "disabled",
+                        "constraint_source": "pinned-aria2-client"}})
+        effective.validate(seeder)
+        effective.validate(leecher)
+        for body in (dict(legacy, tracker_state="seeder"),
+                     dict(legacy, tracker_qos=seeder["tracker_qos"]),
+                     dict(seeder, tracker_state="unknown"),
+                     dict(seeder, tracker_qos={}),
+                     dict(seeder, tracker_qos=dict(seeder["tracker_qos"], unexpected={})),
+                     dict(seeder, tracker_qos={"numwant": seeder["tracker_qos"]["numwant"]})):
+            assert list(effective.iter_errors(body)), body
+
+        for media, validator in ((put_media, put), (role_media, role),
+                                 (roles_media, roles), (effective_media, effective)):
+            for example in _media_examples(media):
+                validator.validate(example)
+                if "tracker_state" in example:
+                    state_examples.append(example)
+        mutation_examples = _media_examples(put_media) + _media_examples(role_media)
+        assert any("qos_state" in example for example in mutation_examples)
+        operation = paths[prefix + "/peer-policy/qos"]["put"]
+
+        def schema_descriptions(schema):
+            descriptions = [schema.get("description", "")]
+            for part in schema.get("allOf", []):
+                descriptions.extend(schema_descriptions(part))
+            return descriptions
+
+        descriptions = [operation.get("description", ""),
+                        operation["requestBody"].get("description", "")]
+        descriptions += schema_descriptions(_local_schema(put_media["schema"], document))
+        text = " ".join(" ".join(descriptions).lower().replace("`", "").split())
+        assert "global qos_state is stored at roles.qos_state_default" in text
+        assert "role qos_state is stored at roles.defs.<role>.qos_state" in text
+        published = [example for example in _media_examples(effective_media)
+                     if "tracker_state" in example]
+        assert any(
+            example["tracker_qos"]["announce_min_interval_s"]["source"] ==
+            "role-state:boat:" + example["tracker_state"] and
+            example["tracker_qos"]["numwant"]["source"] ==
+            "global-state:" + example["tracker_state"]
+            for example in published), "publish the role-state/global-state explanation"
+    assert state_examples, "publish a queried effective-QoS example"
+    for example in state_examples:
+        state = example["tracker_state"]
+        assert state in ("seeder", "leecher")
+        rows = example["tracker_qos"]
+        for row in rows.values():
+            assert source_pattern.fullmatch(row["source"])
+            if "-state:" in row["source"]:
+                assert row["source"].endswith(":" + state)
+        interval, numwant = rows["announce_min_interval_s"], rows["numwant"]
+        assert numwant["effective_ceiling"] == min(numwant["value"], 50)
+        assert numwant["runtime_request_zero"] == "disabled"
+        assert numwant["constraint_source"] == "pinned-aria2-client"
+        assert set(numwant) == {"value", "source", "effective_ceiling",
+                                "runtime_request_zero", "constraint_source"}
+        if state == "leecher":
+            assert interval["peerless_leecher_floor_s"] == 120
+            assert interval["constraint_source"] == "pinned-aria2-client"
+            assert set(interval) == {"value", "source", "peerless_leecher_floor_s",
+                                     "constraint_source"}
+        else:
+            assert set(interval) == {"value", "source"}

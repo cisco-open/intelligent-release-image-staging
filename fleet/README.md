@@ -31,12 +31,17 @@ only for this field: a blank value preserves the stored role, including when an
 older pre-role CSV is re-imported. Clear membership explicitly with
 `iris-role set DEVICE_ID -` or the role API.
 
-`iris-role export` writes the same schema as `roles.csv.example`; restore it
-with `iris-role import FILE`. The CLI validates the whole file, duplicate rows,
-peer references, network prefixes, and QoS units before writing. Use `--dry-run`
-on define, delete, set, bulk, and import changes. Rates are bytes per second and
-intervals are seconds; role rows cannot carry the global-only `origin_*` QoS
-settings.
+`iris-role export` writes the same scalar-only schema as `roles.csv.example` and
+omits `qos_state`; restore it with `iris-role import FILE`. `iris-role define`
+removes state from the role it replaces, and `iris-role import FILE` removes
+state from every definition it replaces. The CLI validates the whole file,
+duplicate rows, peer references, network prefixes, and QoS units before
+writing. Use `--dry-run` on define, delete, set, bulk, and import changes.
+Rates are bytes per second and intervals are seconds; role rows cannot carry the
+global-only `origin_*` QoS settings. Configure, preserve, or remove state
+through the management API. Preview reports `qos_changed`, and apply requires
+the candidate-bound confirmation token. When you replace a full role
+definition, include `qos_state` to retain its state.
 
 ## Getting devices onboarded
 

@@ -463,12 +463,12 @@ commit makes it stale.
 | --- | --- |
 | `GET /api/v1/peer-policy` | Count-only policy view and ETag. It includes role definition/restriction/member counts, at most ten drift IDs with a truncation flag, outbox occupancy, tracker enforcement, future mutual-origin preflight count, origin-QoS apply counts, and a fleet rollup whose current state is `pre-instructions`. No peer address or raw deny list crosses this boundary. `roles_supported` is the binary capability; `roles_present` records that role state has existed. |
 | `GET /api/v1/peer-policy/roles` | Full sorted role definitions and the current revision/ETag. Definitions contain policy values, never membership IDs. |
-| `PUT /api/v1/peer-policy/roles/<name>` | Create or replace a definition. Body fields are `restricted`, `peers`, `origin`, `nets`, `on_stale`, `qos`, plus `confirm_token` on apply. Preview with `?dry_run=1`. |
+| `PUT /api/v1/peer-policy/roles/<name>` | Create or replace a definition. Body fields are `restricted`, `peers`, `origin`, `nets`, `on_stale`, `qos`, optional `qos_state`, plus `confirm_token` on apply. Preview with `?dry_run=1`. A full role-definition replacement must include `qos_state` to retain the stored state object. |
 | `DELETE /api/v1/peer-policy/roles/<name>` | Delete an unused role after preview/confirmation. The preview returns 200 JSON with candidate revision/ETag; the committed DELETE returns 204 with an empty body and the committed ETag. A role with members or another role referring to it returns `role_in_use` with counts/names. |
-| `PUT /api/v1/peer-policy/qos` | Replace global QoS keys with `{"qos": {...}}`, or one role's QoS with `{"role": "<name>", "qos": {...}}`. An empty QoS object clears that layer. Preview and confirmation rules apply. |
+| `PUT /api/v1/peer-policy/qos` | Replace global QoS keys with `{"qos": {...}}`, or one role's QoS with `{"role": "<name>", "qos": {...}}`; the optional `qos_state` object selects the seeder/leecher tracker layers at the same scope. Omitted `qos_state` preserves its stored object. Explicit `qos_state: {}` removes only the selected state layer and preserves scalar QoS. At least one of `qos` or `qos_state` is required; preview and confirmation rules apply. |
 | `POST /api/v1/devices/<id>/role` | `{"role": "<name>"}` sets membership; `{"role": null}` clears it. The fleet declaration and compiled membership are coordinated and the response reports partial failure/drift. |
 | `POST /api/v1/devices/bulk-role` | `{"device_ids": [...], "role": "<name-or-null>"}` applies one membership change as one policy revision and one outbox entry, with `applied`, `failed`, `partial`, and drift detail. The request cap is the supported fleet size and the split Console accepts the 2 MiB bulk body. |
-| `GET /api/v1/devices/<id>/effective-qos` | Each key as `{value, source}` from builtin → global → role → device precedence, plus pinned-client constraints. `delivery_state: pre-instructions` means this is configured intent/provenance; Phase 0 has not delivered it to the device. |
+| `GET /api/v1/devices/<id>/effective-qos` | Without a query, the legacy scalar `qos` object remains byte-compatible. With exactly one `tracker_state=seeder|leecher`, the response retains scalar `qos` and adds paired `tracker_state`/`tracker_qos` values and sources; invalid, blank, duplicate, or unknown query input returns `422 invalid_policy_request` after an unknown device returns 404. `delivery_state: pre-instructions` means configured intent/provenance; Phase 0 has not delivered it to the device. |
 | `GET /api/v1/peer-policy/explain?a=&b=` | Resolve each argument as a device id, `device:<id>`, or `service:seeder`; require one fresh, unambiguous attributed address per side; then return both directional decisions, matched sequences, effective ACL/source, role/shadow facts, `mutual`, revision, and ETag. Returns 422 rather than guessing when identity or address attribution is ambiguous. |
 | `PUT /api/v1/peer-policy/quarantine/<device_id>` | Quarantines or releases one device. The body must be **exactly** `{"quarantined": <bool>, "if_revision": <int ≥ 1>}` — no other keys, no other types. `if_revision` is the revision you read from `GET /api/v1/peer-policy`, and the write commits only if the policy is still at that revision. 200 `{ok: true, revision, quarantined}` on success. |
 
@@ -505,7 +505,8 @@ definition has these fields:
 | `origin` | `true` | Whether the tracker may introduce `service:seeder` to this restricted role. Issue #153 origin-side mutual blocking remains preflight-only. |
 | `nets` | empty IPv4 list | Optional, validated subnet hints for role management. They do not classify tracker announces or install a network ACL. |
 | `on_stale` | `keep` for restricted roles, `defaults` otherwise | Future device-instruction stale behavior. It has no device-side effect in Phase 0. |
-| `qos` | empty | Overrides the global layer for keys allowed at role scope. |
+| `qos` | empty | Overrides the global scalar layer for keys allowed at role scope. |
+| `qos_state` | omitted | Closed `seeder`/`leecher` tracker cadence and `numwant` overlays for this role; tracker-only and API-configured. |
 
 The `roles` member is optional in a legacy schema-1 policy document. When it is
 present, the roles container, every definition, and every QoS layer are closed,
@@ -537,11 +538,14 @@ explicit assignments in a second policy commit. Quarantine cannot be migrated.
 #### QoS keys
 
 Values are integers. Rates are bytes per second; `0` means unlimited, while a
-nonzero rate must be at least 8,192 B/s. Precedence is builtin → global → role
-→ device for keys that permit all three scopes. Phase 0 exposes the device
-layer for compilation/explanation but has no public device-QoS mutation and no
-device delivery. Only tracker cadence/selection and the three origin controls
-in this table are actively applied in Phase 0.
+nonzero rate must be at least 8,192 B/s. Scalar QoS retains its existing
+compilation precedence. The exact tracker-state precedence is builtin →
+`roles.qos_default` → `roles.qos_state_default.<state>` →
+`roles.defs.<role>.qos` → `roles.defs.<role>.qos_state.<state>`; a partial state
+map overrides only its supplied key. Phase 0 exposes the device layer for
+compilation/explanation but has no public device-QoS mutation and no device
+delivery. Only tracker cadence/selection and the three origin controls in this
+table are actively applied in Phase 0.
 
 | Key | Default | Range | Allowed scope | Phase 0 behavior |
 | --- | ---: | ---: | --- | --- |
@@ -553,8 +557,8 @@ in this table are actively applied in Phase 0.
 | `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
 | `max_concurrent` | 100 | 1–1,000 | global, role, device | `pre-instructions`. |
 | `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | `pre-instructions`. |
-| `announce_min_interval_s` | 30 s | 10–300 s | global, role | Tracker returns this value with bounded ±10% jitter as both `interval` and `min interval`; a peerless leecher in the pinned client still has a 120 s floor. |
-| `numwant` | 50 | 4–200 | global, role | Tracker ceiling before selection. The pinned client requests at most 50; an explicit client `numwant=0` receives no peers. |
+| `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | Tracker resolves state before applying exactly one bounded ±10% jitter and returns the issued value as both `interval` and `min interval`; a peerless leecher in the pinned client still has a 120 s floor. |
+| `numwant` | 50 | 4–200 | global, role, state overlay | Tracker ceiling after selected-state resolution and before selection. The pinned client requests at most 50; an explicit client `numwant=0` receives no peers. |
 | `handout_budget` | 0 (off) | 0–1,000 | global, role | Accepted policy input for a later phase; no handout-budget accounting is active in Phase 0. |
 | `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | `pre-instructions`; the existing launcher cadence remains unchanged. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
 | `telemetry_every_ticks` | 1 | 1–60 | global, role, device | `pre-instructions`. |
@@ -579,9 +583,13 @@ global or role QoS object. A subset is the complete replacement; `{}` clears
 that layer. Role membership accepts only an explicit role string or `null` to
 clear. The top-level global QoS object may carry `on_stale`; a role uses the
 separate definition field. `defs.<role>.qos.on_stale` and device placement are
-forbidden. Cadence values apply in seeder and leecher states with no independent
-per-state cadence setting. Heartbeats remain outside any future catalog or
-telemetry pause gate.
+forbidden. Omitted `qos_state` preserves the stored state object; explicit
+`qos_state: {}` removes only the selected state layer while preserving scalar
+QoS. A full role-definition replacement must include `qos_state` to retain it.
+Tracker state is selected before exactly one jitter operation; the same issued
+interval is returned in both response fields and each row expires after twice
+its issued interval. Tracker state is tracker-only, and heartbeats remain
+outside any catalog or telemetry pause gate.
 
 Zero is unlimited, so no rate key expresses **never upload**. Use assignment
 and peer-access policy to avoid creating an upload path, while accounting for
@@ -795,7 +803,7 @@ follow the `IRIS_SEEDER_PREV_TTL` overlap.
 
 | Route | Body / result |
 | --- | --- |
-| `GET /announce` | Query: `info_hash` (20 raw bytes, percent-encoded), `peer_id`, `port` (1-65535), `left`, `event`, `numwant` (default 50), `compact` (`1` for BEP23 compact peers), and an `ip` override honoured **only** for the service origin-seeder principal and only for a private/CGNAT IPv4 address. A malformed hash is a bencoded 400 after auth. Success is bencoded `{interval, min interval, peers}`; peer policy filters candidates before return. |
+| `GET /announce` | Query: `info_hash` (20 raw bytes, percent-encoded), `peer_id`, `port` (1-65535), `left`, `event`, `numwant` (default 50), `compact` (`1` for BEP23 compact peers), and an `ip` override honoured **only** for the service origin-seeder principal and only for a private/CGNAT IPv4 address. Exact `left == 0` selects seeder; positive, omitted, malformed, and negative values select leecher. State QoS is resolved before one jitter, with the issued value returned as both `interval` and `min interval`; a valid registration expires after twice that issued interval, while an invalid port receives cadence without registration. A malformed hash is a bencoded 400 after auth. Success is bencoded `{interval, min interval, peers}`; peer policy filters candidates before return. |
 | `GET /scrape` | Query: `info_hash`; the same bearer rules apply. A missing/malformed hash is a bencoded 400. Success is bencoded `{"files": {<raw info_hash bytes>: {complete, incomplete, downloaded}}}` (BEP48). |
 
 Every valid, port-bearing announce from a device or service principal durably

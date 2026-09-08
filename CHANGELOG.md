@@ -58,6 +58,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   expiry, and configurable 10–300 second announce cadence plus `numwant`
   ceilings. Policy changes stop new peer introductions; they do not sever
   existing aria2 connections or erase retained peer addresses.
+- Expose state-aware tracker QoS through the management API with scalar
+  compatibility, explicit seeder/leecher cadence layers, and API-only
+  `qos_state` configuration; tracker state remains outside device delivery.
 - Apply origin-wide and per-torrent upload limits plus an origin peer cap, with
   count-only reconciliation status. Per-role origin shaping and device-side
   QoS are not present in Phase 0; effective device QoS is reported as
