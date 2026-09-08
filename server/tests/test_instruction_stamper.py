@@ -646,6 +646,106 @@ def test_role_global_base_and_only_differing_device_overrides(tmp_path):
     assert part["control_override"] == {"telemetry_pause": True}
 
 
+def test_tracker_state_revision_does_not_change_instruction_artifacts_or_envelope(
+        tmp_path):
+    paths, _fleet, cat, producer, _marker, *_ = _setup(tmp_path)
+    document = peer_policy.base_document()
+    document["roles"] = {
+        "defs": {"edge": {
+            "restricted": False,
+            "qos": {"max_peers": 12},
+            "qos_state": {
+                "seeder": {"announce_min_interval_s": 80, "numwant": 8},
+                "leecher": {"announce_min_interval_s": 140, "numwant": 14},
+            },
+        }},
+        "role_of": {"device-1": "edge"},
+        "qos_default": {"telemetry_pause": False},
+        "qos_device": {},
+        "qos_state_default": {
+            "seeder": {"announce_min_interval_s": 60, "numwant": 6},
+            "leecher": {"announce_min_interval_s": 120, "numwant": 12},
+        },
+    }
+    _write_policy(paths, document)
+
+    def semantic_bytes(value):
+        compiled = peer_policy.compile_roles(value)
+        semantic = stamper.semantic_role(value, compiled, "device-1")[0]
+        return semantic, instructions.canonical_json(semantic)
+
+    def artifact_snapshot():
+        root = Path(paths.roles)
+        return {str(path.relative_to(root)): path.read_bytes()
+                for path in root.iterdir() if path.is_file()}
+
+    key = bytes.fromhex(_record()["value"])
+
+    def current_envelope(stamp):
+        artifact = Path(stamper._artifact_path(
+            paths, stamp["role"], stamp["role_gen"]))
+        role_body, signature = instructions.parse_role(artifact.read_bytes())
+        envelope = instructions.seal_parts(
+            instructions.stamp_header("device-1", stamp), stamp["part"],
+            role_body, signature, key)
+        return role_body, envelope
+
+    semantic_before, semantic_bytes_before = semantic_bytes(document)
+    assert producer.stamp_device("device-1") == "updated"
+    stamp_before = copy.deepcopy(_raw_stamp(cat))
+    stamp_bytes_before = instructions.canonical_json(stamp_before)
+    artifacts_before = artifact_snapshot()
+    role_body_before, envelope_before = current_envelope(stamp_before)
+
+    changed = copy.deepcopy(document)
+    changed["revision"] += 1
+    changed["roles"]["qos_state_default"] = {
+        "seeder": {"announce_min_interval_s": 70, "numwant": 7},
+        "leecher": {"announce_min_interval_s": 130, "numwant": 13},
+    }
+    changed["roles"]["defs"]["edge"]["qos_state"] = {
+        "seeder": {"announce_min_interval_s": 90, "numwant": 9},
+        "leecher": {"announce_min_interval_s": 150, "numwant": 15},
+    }
+    _write_policy(paths, changed)
+    semantic_after, semantic_bytes_after = semantic_bytes(changed)
+    assert semantic_after == semantic_before
+    assert semantic_bytes_after == semantic_bytes_before
+    assert hashlib.sha256(semantic_bytes_after).digest() == \
+        hashlib.sha256(semantic_bytes_before).digest()
+
+    assert producer.stamp_device("device-1") == "unchanged"
+    stamp_after = copy.deepcopy(_raw_stamp(cat))
+    stamp_bytes_after = instructions.canonical_json(stamp_after)
+    artifacts_after = artifact_snapshot()
+    role_body_after, envelope_after = current_envelope(stamp_after)
+    assert stamp_after["role_gen"] == stamp_before["role_gen"]
+    assert stamp_after["instr_serial"] == stamp_before["instr_serial"]
+    assert stamp_after == stamp_before
+    assert stamp_bytes_after == stamp_bytes_before
+    assert artifacts_after == artifacts_before
+    assert role_body_after == role_body_before
+    assert envelope_after == envelope_before
+    assert stamp_after["policy_revision"] == document["revision"]
+    assert changed["revision"] != stamp_after["policy_revision"]
+
+    forbidden = {
+        "qos_state", "qos_state_default", "announce_min_interval_s", "numwant"}
+
+    def assert_tracker_free(value):
+        if isinstance(value, dict):
+            assert forbidden.isdisjoint(value)
+            for child in value.values():
+                assert_tracker_free(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_tracker_free(child)
+
+    assert_tracker_free(semantic_after)
+    assert_tracker_free(instructions.parse_json(role_body_after))
+    assert_tracker_free(stamp_after)
+
+
 def test_platform_is_only_resolved_from_trusted_fleet(tmp_path):
     paths, fleet, cat, producer, _marker, *_ = _setup(tmp_path)
     fleet.rows["device-1"].pop("platform")

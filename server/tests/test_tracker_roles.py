@@ -28,6 +28,7 @@ import tracker
 INFO_HASH_BYTES = hashlib.sha1(b"iris-tracker-role-test").digest()
 INFO_HASH = quote_from_bytes(INFO_HASH_BYTES)
 INFO_HASH_HEX = INFO_HASH_BYTES.hex()
+_OMITTED = object()
 
 
 def _paths(tmp_path):
@@ -35,7 +36,8 @@ def _paths(tmp_path):
             str(tmp_path / "peer-policy.lkg.json"))
 
 
-def _document(defs=None, role_of=None, qos_default=None, assignments=None):
+def _document(defs=None, role_of=None, qos_default=None, assignments=None,
+              qos_state_default=None):
     doc = peer_policy.base_document()
     doc["roles"] = {
         "defs": defs or {},
@@ -43,6 +45,8 @@ def _document(defs=None, role_of=None, qos_default=None, assignments=None):
         "qos_default": qos_default or {},
         "qos_device": {},
     }
+    if qos_state_default is not None:
+        doc["roles"]["qos_state_default"] = qos_state_default
     doc["assignments"].update(assignments or {})
     peer_policy.validate_document(doc)
     return doc
@@ -72,21 +76,22 @@ def _legacy_token(path, now=None):
     return store["seeder"]["announce_token_previous"][0]["value"]
 
 
-def _serve(tmp_path, registry, paths=None, endpoints_path=None):
+def _serve(tmp_path, registry, paths=None, endpoints_path=None, **kwargs):
     secrets_path = str(tmp_path / "secrets.json")
     server = tracker.make_server(
         "127.0.0.1", 0, secrets_path, registry=registry,
         policy_paths=paths, endpoints_path=endpoints_path,
-        scrape_authorizer=lambda _device_id, _info_hash: True)
+        scrape_authorizer=lambda _device_id, _info_hash: True, **kwargs)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1], secrets_path
 
 
 def _announce(port, token, peer_id="requester", peer_port=6881, left=1,
               extra=""):
-    path = ("/announce?info_hash=%s&peer_id=%s&port=%s&left=%s"
+    left_query = "" if left is _OMITTED else "&left=%s" % left
+    path = ("/announce?info_hash=%s&peer_id=%s&port=%s%s"
             "&announce_token=%s%s" %
-            (INFO_HASH, peer_id, peer_port, left, token, extra))
+            (INFO_HASH, peer_id, peer_port, left_query, token, extra))
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     connection.request("GET", path)
     response = connection.getresponse()
@@ -312,6 +317,491 @@ def test_role_numwant_is_an_exact_client_ceiling_in_both_encodings(
             port, token, extra="&numwant=10&compact=1")
         assert status == 200
         assert len(compact[b"peers"]) == 4 * 6
+    finally:
+        server.shutdown()
+
+
+def test_tracker_state_uses_exact_zero_and_one_jitter_with_invalid_port_unregistered(
+        monkeypatch, tmp_path):
+    parsed = [
+        tracker.parse_announce(query)["left"]
+        for query in ("left=0", "left=00", "left=+0", "left=-0",
+                      "left=1", "", "left=malformed", "left=-1")
+    ]
+    assert parsed == [0, 0, 0, 0, 1, None, None, -1]
+
+    paths = _paths(tmp_path)
+    _write_document(paths, _document(
+        defs={"boat": {
+            "restricted": False,
+            "qos_state": {
+                "seeder": {"announce_min_interval_s": 100},
+                "leecher": {"announce_min_interval_s": 200},
+            },
+        }},
+        role_of={"d1": "boat"}))
+    registry = PeerRegistry()
+    endpoint_calls = []
+    jitter_inputs = []
+
+    def issue(value, factor=None):
+        assert factor is None
+        jitter_inputs.append(value)
+        return {100: 107, 200: 193}[value]
+
+    monkeypatch.setattr(tracker, "jittered_interval", issue)
+    server, port, secrets_path = _serve(
+        tmp_path, registry, paths,
+        endpoints_path=str(tmp_path / "peer-endpoints.json"),
+        record_endpoint=lambda *args: endpoint_calls.append(args))
+    token = _mint(secrets_path, "d1")
+    cases = (
+        (0, "zero", 107, 0, True),
+        ("00", "leading-zero", 107, 0, True),
+        ("+0", "plus-zero", 107, 0, True),
+        ("-0", "minus-zero", 107, 0, True),
+        (1, "positive", 193, 1, False),
+        (_OMITTED, "omitted", 193, None, False),
+        ("malformed", "malformed", 193, None, False),
+        (-1, "negative", 193, -1, False),
+    )
+    try:
+        for left, peer_id, expected, _stored_left, _is_seeder in cases:
+            status, body = _announce(
+                port, token, peer_id=peer_id, left=left)
+            assert status == 200
+            assert body[b"interval"] == body[b"min interval"] == expected
+
+        status, body = _announce(
+            port, token, peer_id="invalid-port", peer_port=70000, left=0)
+        assert status == 200
+        assert body[b"interval"] == body[b"min interval"] == 107
+
+        rows = registry.snapshot()[INFO_HASH_HEX]
+        assert {row["peer_id"]: row["interval"] for row in rows} == {
+            peer_id: expected
+            for _left, peer_id, expected, _stored_left, _is_seeder in cases}
+        assert {row["peer_id"]: (row["left"], row["is_seeder"])
+                for row in rows} == {
+            peer_id: (stored_left, is_seeder)
+            for _left, peer_id, _expected, stored_left, is_seeder in cases}
+        assert len(endpoint_calls) == len(cases)
+        assert all(call[3] == 6881 for call in endpoint_calls)
+        assert jitter_inputs == [100, 100, 100, 100, 200, 200, 200, 200, 100]
+    finally:
+        server.shutdown()
+
+
+def test_tracker_state_numwant_caps_compact_noncompact_and_nonpositive(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    members = {"requester": "boat"}
+    members.update({"candidate-%d" % index: "boat" for index in range(12)})
+    _write_document(paths, _document(
+        defs={"boat": {
+            "restricted": True, "peers": ["boat"], "origin": False,
+            "qos_state": {
+                "seeder": {"numwant": 4},
+                "leecher": {"numwant": 7},
+            },
+        }}, role_of=members))
+    registry = PeerRegistry(randbelow=lambda _size: 0)
+    now = time.time()
+    for index in range(12):
+        registry.announce(
+            INFO_HASH_HEX, "candidate-peer-%d" % index,
+            "10.0.0.%d" % (index + 1), 7000 + index,
+            principal=auth.Principal("device", "candidate-%d" % index),
+            now=now)
+    monkeypatch.setattr(
+        tracker, "jittered_interval", lambda value, factor=None: value)
+    server, port, secrets_path = _serve(tmp_path, registry, paths)
+    token = _mint(secrets_path, "requester")
+    try:
+        for left, state, ceiling in ((0, "seeder", 4), (1, "leecher", 7)):
+            for compact in (0, 1):
+                status, body = _announce(
+                    port, token, peer_id="%s-%d" % (state, compact),
+                    left=left, extra="&numwant=500&compact=%d" % compact)
+                assert status == 200
+                expected_size = ceiling * 6 if compact else ceiling
+                assert len(body[b"peers"]) == expected_size
+                requested = ceiling - 1
+                status, below = _announce(
+                    port, token,
+                    peer_id="%s-%d-below" % (state, compact), left=left,
+                    extra="&numwant=%d&compact=%d" % (requested, compact))
+                assert status == 200
+                expected_size = requested * 6 if compact else requested
+                assert len(below[b"peers"]) == expected_size
+                for requested in (-1, 0):
+                    status, empty = _announce(
+                        port, token,
+                        peer_id="%s-%d-%d" % (state, compact, requested),
+                        left=left,
+                        extra="&numwant=%d&compact=%d" % (requested, compact))
+                    assert status == 200
+                    assert empty[b"peers"] == (b"" if compact else [])
+    finally:
+        server.shutdown()
+
+
+def test_state_changing_reannounce_replaces_strict_expiry_interval(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    _write_document(paths, _document(
+        defs={"boat": {
+            "restricted": False,
+            "qos_state": {
+                "seeder": {"announce_min_interval_s": 120},
+                "leecher": {"announce_min_interval_s": 20},
+            },
+        }}, role_of={"d1": "boat"}))
+    registry = PeerRegistry(read_prune_interval=0)
+    server, port, secrets_path = _serve(tmp_path, registry, paths)
+    started = int(time.time())
+    token = _mint(secrets_path, "d1", now=started)
+    clock = {"now": started}
+    monkeypatch.setattr(tracker.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(
+        tracker, "jittered_interval", lambda value, factor=None: value)
+    try:
+        status, seeded = _announce(port, token, peer_id="cycle", left=0)
+        assert status == 200
+        first = registry.snapshot(now=started)[INFO_HASH_HEX][0]
+        assert seeded[b"interval"] == seeded[b"min interval"] == \
+            first["interval"] == 120
+
+        clock["now"] = started + 100
+        status, leeching = _announce(port, token, peer_id="cycle", left=1)
+        assert status == 200
+        replacement = registry.snapshot(now=clock["now"])[INFO_HASH_HEX][0]
+        assert leeching[b"interval"] == leeching[b"min interval"] == \
+            replacement["interval"] == 20
+        assert replacement["last_seen"] == started + 100
+        assert registry.snapshot(now=started + 140)[INFO_HASH_HEX][0][
+            "peer_id"] == "cycle"
+        assert registry.snapshot(now=started + 141) == {}
+
+        clock["now"] = started + 200
+        status, leeching = _announce(
+            port, token, peer_id="reverse-cycle", left=1)
+        assert status == 200
+        assert leeching[b"interval"] == leeching[b"min interval"] == 20
+        clock["now"] = started + 210
+        status, seeded = _announce(
+            port, token, peer_id="reverse-cycle", left=0)
+        assert status == 200
+        replacement = registry.snapshot(now=clock["now"])[INFO_HASH_HEX][0]
+        assert seeded[b"interval"] == seeded[b"min interval"] == \
+            replacement["interval"] == 120
+        assert replacement["last_seen"] == started + 210
+        assert registry.snapshot(now=started + 450)[INFO_HASH_HEX][0][
+            "peer_id"] == "reverse-cycle"
+        assert registry.snapshot(now=started + 451) == {}
+    finally:
+        server.shutdown()
+
+
+def test_service_and_unattributed_legacy_select_global_tracker_state(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    _write_document(paths, _document(qos_state_default={
+        "seeder": {"announce_min_interval_s": 80, "numwant": 4},
+        "leecher": {"announce_min_interval_s": 140, "numwant": 6},
+    }))
+    registry = PeerRegistry(randbelow=lambda _size: 0)
+    now = time.time()
+    for index in range(10):
+        registry.announce(
+            INFO_HASH_HEX, "global-candidate-%d" % index,
+            "10.5.0.%d" % (index + 1), 7600 + index,
+            principal=auth.Principal("device", "global-candidate-%d" % index),
+            now=now)
+    monkeypatch.setattr(
+        tracker, "jittered_interval", lambda value, factor=None: value)
+    server, port, secrets_path = _serve(tmp_path, registry, paths)
+    legacy_token = _legacy_token(secrets_path)
+    service_token = secrets_store.load(
+        secrets_path)["seeder"]["announce_token"]["value"]
+    try:
+        for principal, token in (("service", service_token),
+                                 ("legacy", legacy_token)):
+            for left, state, interval, ceiling in (
+                    (0, "seeder", 80, 4), (1, "leecher", 140, 6)):
+                status, body = _announce(
+                    port, token, peer_id="%s-%s" % (principal, state),
+                    left=left, extra="&numwant=100")
+                assert status == 200
+                assert body[b"interval"] == body[b"min interval"] == interval
+                assert len(body[b"peers"]) == ceiling
+    finally:
+        server.shutdown()
+
+    none_root = tmp_path / "without-policy"
+    none_root.mkdir()
+    none_registry = PeerRegistry(randbelow=lambda _size: 0)
+    now = time.time()
+    for index in range(210):
+        none_registry.announce(
+            INFO_HASH_HEX, "policy-none-%d" % index,
+            "10.4.0.%d" % (index + 1), 7400 + index,
+            principal=auth.Principal("device", "policy-none-%d" % index),
+            now=now)
+    none_server, none_port, none_secrets = _serve(
+        none_root, none_registry, paths=None)
+    none_token = _mint(none_secrets, "policy-none-requester")
+    try:
+        for left, compact in ((0, 0), (1, 1)):
+            status, body = _announce(
+                none_port, none_token,
+                peer_id="policy-none-requester-%d" % left, left=left,
+                extra="&numwant=500&compact=%d" % compact)
+            assert status == 200
+            assert body[b"interval"] == body[b"min interval"] == 30
+            assert len(body[b"peers"]) == (1200 if compact else 200)
+    finally:
+        none_server.shutdown()
+
+
+def test_attributed_legacy_tracker_state_uses_single_owner_and_shared_nat_max_min(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    state_by_role = {
+        "owner-a": {
+            "seeder": {"announce_min_interval_s": 40, "numwant": 8},
+            "leecher": {"announce_min_interval_s": 70, "numwant": 7},
+        },
+        "owner-b": {
+            "seeder": {"announce_min_interval_s": 60, "numwant": 5},
+            "leecher": {"announce_min_interval_s": 50, "numwant": 4},
+        },
+    }
+    members = {"owner-a-device": "owner-a", "owner-b-device": "owner-b"}
+    members.update({"candidate-%d" % index: "open" for index in range(12)})
+    _write_document(paths, _document(
+        defs={
+            "owner-a": {"restricted": False,
+                        "qos_state": state_by_role["owner-a"]},
+            "owner-b": {"restricted": False,
+                        "qos_state": state_by_role["owner-b"]},
+            "open": {"restricted": False},
+        }, role_of=members))
+    endpoints_path = str(tmp_path / "peer-endpoints.json")
+    observed = time.time()
+    peer_endpoints.record_endpoint(
+        endpoints_path, auth.Principal("device", "owner-a-device"),
+        "127.0.0.1", 6881, observed)
+    registry = PeerRegistry(randbelow=lambda _size: 0)
+    for index in range(12):
+        registry.announce(
+            INFO_HASH_HEX, "candidate-%d" % index,
+            "10.1.0.%d" % (index + 1), 7100 + index,
+            principal=auth.Principal("device", "candidate-%d" % index),
+            now=observed)
+    jitter_inputs = []
+    attribution_reads = []
+    real_attributions = tracker.legacy_attributions
+
+    def counted_attributions(*args, **kwargs):
+        attribution_reads.append((args, kwargs))
+        return real_attributions(*args, **kwargs)
+
+    def issue(value, factor=None):
+        assert factor is None
+        jitter_inputs.append(value)
+        return value
+
+    monkeypatch.setattr(tracker, "jittered_interval", issue)
+    monkeypatch.setattr(tracker, "legacy_attributions", counted_attributions)
+    server, port, secrets_path = _serve(
+        tmp_path, registry, paths, endpoints_path=endpoints_path)
+    token = _legacy_token(secrets_path)
+    try:
+        for left, state, interval, ceiling in (
+                (0, "seeder", 40, 8), (1, "leecher", 70, 7)):
+            status, body = _announce(
+                port, token, peer_id="single-%s" % state, left=left,
+                extra="&numwant=100")
+            assert status == 200
+            assert body[b"interval"] == body[b"min interval"] == interval
+            assert len(body[b"peers"]) == ceiling
+            assert len(attribution_reads) == (1 if state == "seeder" else 2)
+
+        peer_endpoints.record_endpoint(
+            endpoints_path, auth.Principal("device", "owner-b-device"),
+            "127.0.0.1", 6882, observed)
+        for left, state, interval, ceiling in (
+                (0, "seeder", 60, 5), (1, "leecher", 70, 4)):
+            status, body = _announce(
+                port, token, peer_id="shared-%s" % state, left=left,
+                extra="&numwant=100")
+            assert status == 200
+            assert body[b"interval"] == body[b"min interval"] == interval
+            assert len(body[b"peers"]) == ceiling
+            assert len(attribution_reads) == (3 if state == "seeder" else 4)
+        assert jitter_inputs == [40, 70, 60, 70]
+        assert len(attribution_reads) == 4
+    finally:
+        server.shutdown()
+
+
+def test_unreadable_legacy_attribution_uses_global_state_and_no_candidates(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    _write_document(paths, _document(qos_state_default={
+        "seeder": {"announce_min_interval_s": 90, "numwant": 4},
+        "leecher": {"announce_min_interval_s": 160, "numwant": 6},
+    }))
+    registry = PeerRegistry(randbelow=lambda _size: 0)
+    now = time.time()
+    for index in range(10):
+        registry.announce(
+            INFO_HASH_HEX, "candidate-%d" % index,
+            "10.2.0.%d" % (index + 1), 7200 + index,
+            principal=auth.Principal("device", "candidate-%d" % index),
+            now=now)
+    attribution_reads = []
+
+    def unreadable(*args, **kwargs):
+        attribution_reads.append((args, kwargs))
+        return tracker.LegacyAttributions({}, True, frozenset())
+
+    jitter_inputs = []
+    monkeypatch.setattr(tracker, "legacy_attributions", unreadable)
+    monkeypatch.setattr(
+        tracker, "jittered_interval",
+        lambda value, factor=None: jitter_inputs.append(value) or value)
+    server, port, secrets_path = _serve(
+        tmp_path, registry, paths,
+        endpoints_path=str(tmp_path / "peer-endpoints.json"))
+    selected_numwant = []
+    original_select = server.RequestHandlerClass._select
+
+    def select(handler, *args, **kwargs):
+        selected_numwant.append(args[-1])
+        return original_select(handler, *args, **kwargs)
+
+    monkeypatch.setattr(server.RequestHandlerClass, "_select", select)
+    token = _legacy_token(secrets_path)
+    try:
+        for left, state, interval in ((0, "seeder", 90),
+                                      (1, "leecher", 160)):
+            status, body = _announce(
+                port, token, peer_id="unreadable-%s" % state, left=left,
+                extra="&numwant=100")
+            assert status == 200
+            assert body[b"interval"] == body[b"min interval"] == interval
+            assert body[b"peers"] == []
+        rows = {row["peer_id"]: row
+                for row in registry.snapshot()[INFO_HASH_HEX]}
+        for state, interval in (("seeder", 90), ("leecher", 160)):
+            row = rows["unreadable-%s" % state]
+            assert row["interval"] == interval
+            assert row["legacy_restricted"] is True
+        assert jitter_inputs == [90, 160]
+        assert selected_numwant == [4, 6]
+        assert len(attribution_reads) == 2
+    finally:
+        server.shutdown()
+
+
+def test_state_numwant_bounds_device_handout_and_failure_service_legacy_excluded(
+        monkeypatch, tmp_path):
+    paths = _paths(tmp_path)
+    members = {"requester": "boat"}
+    members.update({"candidate-%d" % index: "boat" for index in range(10)})
+    _write_document(paths, _document(
+        defs={"boat": {
+            "restricted": False,
+            "qos_state": {
+                "seeder": {"numwant": 4},
+                "leecher": {"numwant": 6},
+            },
+        }}, role_of=members,
+        qos_state_default={"seeder": {"numwant": 8}}))
+    registry = PeerRegistry(randbelow=lambda _size: 0)
+    now = time.time()
+    for index in range(10):
+        registry.announce(
+            INFO_HASH_HEX, "candidate-%d" % index,
+            "10.3.0.%d" % (index + 1), 7300 + index,
+            principal=auth.Principal("device", "candidate-%d" % index),
+            now=now)
+    handout_calls = []
+    failures = []
+    outcomes = ("success", "success", "exception", "false")
+
+    def record_handout(path, principal, peers, info_hash, recorded_at):
+        handout_calls.append((path, principal, list(peers), info_hash,
+                              recorded_at))
+        outcome = outcomes[len(handout_calls) - 1]
+        if outcome == "exception":
+            raise OSError("injected handout failure")
+        return outcome != "false"
+
+    monkeypatch.setattr(
+        tracker, "jittered_interval", lambda value, factor=None: value)
+    handout_path = str(tmp_path / "peer-handouts.json")
+    server, port, secrets_path = _serve(
+        tmp_path, registry, paths, handout_path=handout_path,
+        record_handout=record_handout,
+        on_handout_failure=lambda: failures.append(True))
+    device_token = _mint(secrets_path, "requester")
+    legacy_token = _legacy_token(secrets_path)
+    service_token = secrets_store.load(
+        secrets_path)["seeder"]["announce_token"]["value"]
+    try:
+        status, body = _announce(
+            port, device_token, peer_id="device-seeder", left=0,
+            extra="&numwant=100")
+        assert status == 200
+        assert len(body[b"peers"]) == len(handout_calls[0][2]) == 4
+        assert handout_calls[0][0] == handout_path
+        assert handout_calls[0][1] == auth.Principal("device", "requester")
+
+        status, body = _announce(
+            port, device_token, peer_id="device-seeder-invalid", peer_port=70000,
+            left=0, extra="&numwant=100&compact=1")
+        assert status == 200
+        assert len(body[b"peers"]) == 4 * 6
+        assert len(handout_calls[1][2]) == 4
+
+        status, body = _announce(
+            port, device_token, peer_id="device-leecher", left=1,
+            extra="&numwant=100")
+        assert status == 200
+        assert len(handout_calls[2][2]) == 6
+        assert body[b"peers"] == []
+
+        status, body = _announce(
+            port, device_token, peer_id="device-leecher-invalid",
+            peer_port=70000, left=1,
+            extra="&numwant=100&compact=1")
+        assert status == 200
+        assert len(handout_calls[3][2]) == 6
+        assert body[b"peers"] == b""
+        assert failures == [True, True]
+        assert all(call[0] == handout_path for call in handout_calls)
+        assert all(call[1] == auth.Principal("device", "requester")
+                   for call in handout_calls)
+        assert all(call[3] == INFO_HASH_HEX for call in handout_calls)
+        rows = registry.snapshot()[INFO_HASH_HEX]
+        assert not {"device-seeder-invalid", "device-leecher-invalid"} & {
+            row["peer_id"] for row in rows}
+
+        before = len(handout_calls)
+        status, service_body = _announce(
+            port, service_token, peer_id="service", left=0,
+            extra="&numwant=1&compact=1")
+        assert status == 200
+        assert len(service_body[b"peers"]) == 6
+        status, legacy_body = _announce(
+            port, legacy_token, peer_id="legacy", left=0,
+            extra="&numwant=1&compact=0")
+        assert status == 200
+        assert len(legacy_body[b"peers"]) == 1
+        assert len(handout_calls) == before
     finally:
         server.shutdown()
 

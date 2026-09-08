@@ -568,6 +568,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
 
         def _handle_announce(self, query, store, index, now, ctx):
             a = parse_announce(query)
+            state = "seeder" if a["left"] == 0 else "leecher"
             socket_ip = self.client_address[0]
             # The legacy id is derived from the SOCKET endpoint: a legacy
             # credential never earns the ip= override (below), so this is
@@ -607,7 +608,7 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                 return attribution_cache[0]
 
             qos = self._announce_qos(
-                policy, principal, peer_ip, get_attributions)
+                policy, principal, peer_ip, get_attributions, state)
             issued_interval = jittered_interval(
                 qos.get("announce_min_interval_s", INTERVAL))
             effective_numwant = min(
@@ -710,12 +711,14 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             return attributions.by_ip.get(peer_ip, (principal,))
 
         @staticmethod
-        def _announce_qos(policy, principal, peer_ip, get_attributions):
+        def _announce_qos(policy, principal, peer_ip, get_attributions,
+                          state):
             if policy is None:
                 return {"announce_min_interval_s": INTERVAL,
                         "numwant": NUMWANT_CAP}
             if principal.type == "device":
-                return _peer_policy.compile_qos(policy.document, principal.id)
+                return _peer_policy.compile_tracker_qos(
+                    policy.document, principal.id, state)
             if principal.type == "legacy":
                 attributions = get_attributions()
             else:
@@ -723,8 +726,9 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             if attributions is not None and not attributions.unreadable:
                 attributed = attributions.by_ip.get(peer_ip, ())
                 if attributed:
-                    values = [_peer_policy.compile_qos(
-                        policy.document, item.id) for item in attributed]
+                    values = [_peer_policy.compile_tracker_qos(
+                        policy.document, item.id, state)
+                              for item in attributed]
                     # A shared NAT address receives the slowest cadence and
                     # smallest handout ceiling of every possible owner.
                     result = dict(values[0])
@@ -732,7 +736,8 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
                         item["announce_min_interval_s"] for item in values)
                     result["numwant"] = min(item["numwant"] for item in values)
                     return result
-            return _peer_policy.compile_qos(policy.document, None)
+            return _peer_policy.compile_tracker_qos(
+                policy.document, None, state)
 
         @staticmethod
         def _legacy_restricted(policy, principal, peer_ip, get_attributions):
