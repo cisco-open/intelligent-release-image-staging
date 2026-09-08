@@ -531,7 +531,7 @@ def request(value):
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
-    if scenario.startswith('malformed_response'):
+    if scenario.startswith(('malformed_response','malformed_success','malformed_install_')):
         control.shutdown(socket.SHUT_WR)
         return
     if finished:
