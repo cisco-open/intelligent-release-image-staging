@@ -3693,7 +3693,7 @@ class _CancellingIoxController(_FrozenIoxController):
 
 def _iox_controller_service(tmp_path, controller, raw_runs=None,
                             preflight_fn=None, mint_fn=None, fleet=None,
-                            probe_fn=None, artifact_names=None):
+                            probe_fn=None, artifact_names=None, creds=None):
     artifact_names = artifact_names or ("iris-arm64.tar",)
     for name in artifact_names:
         (tmp_path / name).write_bytes(b"frozen-wrapper")
@@ -3704,7 +3704,8 @@ def _iox_controller_service(tmp_path, controller, raw_runs=None,
         raise AssertionError("real IOx work escaped controller custody")
 
     return gui_onboard.OnboardService(
-        fleet or _iox_fleet(platform="iox", model="IE-3400"), _iox_creds(),
+        fleet or _iox_fleet(platform="iox", model="IE-3400"),
+        creds or _iox_creds(),
         host_ip="10.9.9.9",
         mint_fn=mint_fn or (lambda device_id: "TOK-" + device_id),
         run_fn=legacy_runner,
@@ -3860,6 +3861,40 @@ def test_real_iox_install_routes_only_through_the_controller(tmp_path):
     assert {key: target[key] for key in ("host", "port", "platform")} == {
         "host": "10.0.0.1", "port": 22, "platform": "iox"}
     assert "controller-owned IOx output" in job["lines"]
+
+
+def test_iox_runtime_credentials_are_resolved_only_inside_controller(tmp_path):
+    class ControllerOwnedCredentials:
+        def get_secrets(self, _profile_id):
+            raise AssertionError(
+                "OnboardService resolved an IOx runtime credential")
+
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(
+        tmp_path, controller, creds=ControllerOwnedCredentials())
+
+    job = _wait(service, service.start("d1"))
+
+    assert job["state"] == "done", job["lines"]
+    assert len(controller.requests) == 1
+    assert _request_value(controller.requests[0], "credential_ref") == "lab"
+
+
+def test_iox_request_target_preserves_device_feature_intent():
+    target = gui_onboard.OnboardService._iox_request_target(
+        {
+            "platform": "iox", "model": "IE-3400", "os_family": "xe",
+            "management_type": "routed", "device_ip": "10.0.0.1",
+        },
+        {
+            "DEVICE_IP": "10.0.0.1", "IRIS_TELEMETRY": "off",
+            "IRIS_TELEMETRY_STREAM": "on", "IRIS_LOG": "on",
+        },
+        None)
+
+    assert target["telemetry"] == "off"
+    assert target["telemetry_stream"] == "on"
+    assert target["log"] == "on"
 
 
 def test_iox_prepare_is_deferred_inside_controller(tmp_path):

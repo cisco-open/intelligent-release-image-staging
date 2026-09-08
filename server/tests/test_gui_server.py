@@ -3144,6 +3144,18 @@ def test_owned_resources_for_xr_host_matches_the_uninstall_recipe(tmp_path):
         srv.server_close()
 
 
+def test_owned_resources_for_iox_claim_only_the_iox_application(tmp_path):
+    secrets_path = str(tmp_path / "secrets.json")
+    app = gui_app.GuiApp(secrets_path)
+    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None)
+    try:
+        assert srv.RequestHandlerClass._owned_resources({
+            "platform": "iox", "management_type": "routed",
+        }) == [{"kind": "iox-app", "ownership": "iris-created"}]
+    finally:
+        srv.server_close()
+
+
 def test_owned_resources_raises_without_management_type(tmp_path):
     """Task 2 (spec decision 6): resolved["management_type"] is read as a
     direct subscript, never a defaulted .get() -- a resolved dict missing
@@ -7764,6 +7776,26 @@ class _RawProjectionRecordStore:
                 if self.selected["device_id"] == device_id else None)
 
 
+class _StrictProjectionRecordStore(_RawProjectionRecordStore):
+    def __init__(self, records, selected):
+        _RawProjectionRecordStore.__init__(self, records, selected)
+        self.strict_reads = []
+
+    def list(self, device_id, *args, **kwargs):
+        self.strict_reads.append(("list", kwargs.get("strict")))
+        if kwargs.get("strict") is not True:
+            raise AssertionError("deployment list was not a strict read")
+        return _RawProjectionRecordStore.list(
+            self, device_id, *args, **kwargs)
+
+    def recoverable_for_device(self, device_id, *args, **kwargs):
+        self.strict_reads.append(("recoverable", kwargs.get("strict")))
+        if kwargs.get("strict") is not True:
+            raise AssertionError("deployment selection was not a strict read")
+        return _RawProjectionRecordStore.recoverable_for_device(
+            self, device_id, *args, **kwargs)
+
+
 def _verification_observation(state="enabled", at=10, command_id=1):
     return {
         "state": state, "observed_at": at, "command_id": command_id,
@@ -7903,6 +7935,88 @@ def test_deployment_route_projects_only_safe_iox_authority_fields(tmp_path):
             assert private_value not in public_bytes
     finally:
         stop()
+
+
+def test_deployment_route_uses_strict_record_reads(tmp_path):
+    raw_record = {
+        "record_id": "record-1", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "h" * 64, "state": "active",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.1"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 1},
+    }
+    store = _StrictProjectionRecordStore([raw_record], raw_record)
+    host, port, _unused, stop = _serve_records(
+        tmp_path, record_store_override=store)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 200, body
+        assert store.strict_reads == [("list", True), ("recoverable", True)]
+    finally:
+        stop()
+
+
+def test_local_recovery_deduplicates_one_board_across_authority_sources():
+    class Fleet:
+        @staticmethod
+        def get_device(device_id):
+            return ({"device_id": "d1", "credential_profile_id": "lab"}
+                    if device_id == "d1" else None)
+
+    class Credentials:
+        @staticmethod
+        def list_profiles():
+            return [{"id": "lab"}]
+
+    class Controller:
+        @staticmethod
+        def summary_for_device(device_id):
+            assert device_id == "d1"
+            return {
+                "iox_verification_obligations": [{
+                    "board_identity": "FCW0000IOX",
+                    "record_id": "record-1",
+                }],
+                "iox_sessions": [{
+                    "board_identity": "FCW0000IOX",
+                    "record_id": None,
+                }],
+            }
+
+    class Onboard:
+        def __init__(self):
+            self.recoveries = []
+
+        def start_iox_recovery(self, device_id, credential_ref,
+                               board_identity, record_id=None):
+            self.recoveries.append((device_id, credential_ref,
+                                    board_identity, record_id))
+            return "0123456789abcdef"
+
+        @staticmethod
+        def get_job(job_id):
+            return {"id": job_id, "state": "queued", "record_id": None}
+
+    onboard = Onboard()
+    adapter = gui_server._OnboardSubmissionAdapter(
+        Fleet(), Credentials(), None, onboard, Controller(),
+        lambda *_args: None, lambda *_args: None, lambda *_args: None,
+        lambda *_args: None, None, lambda: 0)
+
+    result = adapter.dispatch({
+        "operation": "recover", "device_id": "d1", "wait": False,
+    })
+
+    assert result == {
+        "accepted": True, "job_id": "0123456789abcdef", "state": "queued",
+        "terminal": False, "record_id": None, "result_code": None,
+    }
+    assert onboard.recoveries == [
+        ("d1", "lab", "FCW0000IOX", "record-1")]
 
 
 def test_deployment_route_returns_503_when_iox_authority_is_unreadable(tmp_path):
