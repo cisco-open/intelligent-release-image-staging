@@ -5,12 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 setup() {
-  export DEVICE_IP=100.90.168.99 DEVICE_USER=u DEVICE_PASS=p VLAN=666
+  export DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666
   UNINSTALL="$BATS_TEST_DIRNAME/../uninstall.sh"
 }
-
-# One assertion per @test (only the LAST command in a bats body sets status).
-
 @test "dry-run exits 0" {
   run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ]
@@ -81,17 +78,6 @@ setup() {
   [[ "$output" == *"delete /force sdflash:iris-arm64.tar"* ]]
 }
 
-@test "real run refuses to start without DEVICE_PASS" {
-  unset DEVICE_PASS
-  run bash "$UNINSTALL"
-  [ "$status" -ne 0 ]
-}
-
-@test "real run refuses an empty VLAN instead of guessing 666" {
-  VLAN='' run bash "$UNINSTALL"
-  [ "$status" -ne 0 ] && [[ "$output" == *"VLAN not set"* ]]
-}
-
 @test "inband dry-run removes only the app footprint" {
   MANAGEMENT_TYPE=inband INBAND_VLAN=120 run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"no app-hosting appid iris"* ]] && \
@@ -126,13 +112,6 @@ setup() {
   [[ "$output" != *"iox_host_data_share"* ]]
 }
 
-# --- guest-share/iris cleanup (IE-3400 scp-push staging dir) ---------------
-# The agent SCP-pushes the image to <target_fs>guest-share/iris on IE-3400
-# (and on any C9300 that falls back from the share mount). Undeploy left that
-# directory behind: the app package and the SSD-share files were removed, this
-# one never was. Mirrors the Guest Shell uninstaller, which has always cleaned
-# its guest-share.
-
 @test "dry-run removes the scp-push staging dir under guest-share" {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"delete /force /recursive sdflash:guest-share/iris"* ]]
@@ -153,12 +132,6 @@ setup() {
   run bash "$UNINSTALL" --dry-run
   [[ "$output" == *"guest-share/iris"* ]]
 }
-
-# --- IRIS_FORCE_AGENT_ONLY: record-less force undeploy ----------------------
-# A device stranded WITHOUT a deployment record has no record to prove the
-# VLAN/SVI is IRIS-owned. gui_server.py sets IRIS_FORCE_AGENT_ONLY=1 for exactly
-# this case; force preserves that operator network while still removing every
-# artifact carrying IRIS's own name.
 
 @test "force dry-run keeps the operator VLAN but clears IRIS-named config" {
   # "Operator-owned" is the VLAN and its SVI -- network IRIS merely configured,
@@ -196,141 +169,504 @@ setup() {
   [[ "$output" == *"delete /force /recursive sdflash:guest-share/iris"* ]]
 }
 
-
-# --- record-less force rescue: the VLAN guard must not gate it --------------
-# Force mode never uses VLAN -- config_cleanup returns before any Vlan$VLAN
-# line and the verify filter drops every VLAN term -- yet its absence aborted
-# the rescue before the script reached the device.
-
-_iox_uninstall_stub_setup() {
-  STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
-  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
+# The controller peer is inline and uses a fresh private socketpair for each
+# invocation. Direct device tools are refusal sentinels, never success stubs.
+# The fixture validates every v1 key, binding, sequence and closed operation.
+# Live identity discovery belongs to the Python controller suite. The two
+# identity-refusal scenarios here prove that a recipe lacking a ready frame
+# cannot fall back to direct device commands or environment authority.
+_iox_fixture_setup() {
+  STUBDIR="$BATS_TEST_TMPDIR/private-controller"
+  mkdir -p "$STUBDIR/device/iox" "$STUBDIR/lab" "$STUBDIR/bin" \
+    "$STUBDIR/artifacts" "$STUBDIR/home" "$STUBDIR/authority"
+  chmod 700 "$STUBDIR" "$STUBDIR/home" "$STUBDIR/authority"
+  export IOX_DIRECT_LOG="$STUBDIR/direct-transport.log"
+  export IOX_REQUEST_LOG="$STUBDIR/requests.jsonl"
+  : > "$IOX_DIRECT_LOG"
+  : > "$IOX_REQUEST_LOG"
+  cat > "$STUBDIR/lab/device-run.sh" <<'GUARD'
 #!/usr/bin/env bash
-cat > /dev/null
-# No app-hosting entry, no matching config: the device reads as already clean,
-# so both poll loops exit on their first pass and nothing sleeps.
-echo "[OK]"
-STUB
-  chmod +x "$STUBDIR/lab/device-run.sh"
-  ln -sf "$UNINSTALL" "$STUBDIR/device/iox/uninstall.sh"
+printf '%s\n' 'forbidden direct device transport' >> "$IOX_DIRECT_LOG"
+exit 96
+GUARD
+  chmod 700 "$STUBDIR/lab/device-run.sh"
+  for binary in ssh scp sshpass; do
+    cp "$STUBDIR/lab/device-run.sh" "$STUBDIR/bin/$binary"
+  done
+  cat > "$STUBDIR/lab/iris-ssh-policy.sh" <<'GUARD'
+iris_ssh_policy() { printf '%s\n' 'forbidden recipe SSH policy' >> "$IOX_DIRECT_LOG"; return 96; }
+iris_ssh_cleanup() { :; }
+GUARD
+  ln -s "$BATS_TEST_DIRNAME/../install.sh" "$STUBDIR/device/iox/install.sh"
+  ln -s "$BATS_TEST_DIRNAME/../uninstall.sh" "$STUBDIR/device/iox/uninstall.sh"
+  ln -s "$BATS_TEST_DIRNAME/../../../server" "$STUBDIR/server"
+  python3 - "$STUBDIR/artifacts/iris-arm64.tar" <<'TAR'
+import io,sys,tarfile
+with tarfile.open(sys.argv[1], 'w', format=tarfile.USTAR_FORMAT) as archive:
+    member=tarfile.TarInfo('package.yaml')
+    data=b'descriptor-schema-version: "2.7"\n'
+    member.size=len(data)
+    archive.addfile(member,io.BytesIO(data))
+TAR
+  export IRIS_CRT_FILE="$STUBDIR/artifacts/iris-catalog.pem"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout "$STUBDIR/catalog.key" -out "$IRIS_CRT_FILE" \
+    -days 1 -subj '/CN=private-test-fixture' >/dev/null 2>&1
+  printf '%s\n' 'authority-owner-data' > "$STUBDIR/authority/owner"
+  export PATH="$STUBDIR/bin:$PATH" HOME="$STUBDIR/home" TMPDIR="$STUBDIR"
+  export IRIS_ARTIFACTS_DIR="$STUBDIR/artifacts" IRIS_STATE="$STUBDIR/authority"
+  export DEVICE_IP=192.0.2.10 DEVICE_USER=fixture-user DEVICE_PASS=fixture-login-secret
+  export DEVICE_ENABLE=fixture-enable-secret DEVICE_SSH_PASS=fixture-self-secret
+  export CATALOG_TOKEN=fixture-catalog-secret DEVICE_ID=fixture-device STAGE_HOST=192.0.2.2
+  export VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10
+  export MODEL=IE-3400-8T2S EXPECTED_DEVICE_IDENTITY=ENVIRONMENT-MUST-NOT-AUTHORIZE
+  export INSTALL_TIMEOUT=2 ACTIVATE_TIMEOUT=2 START_TIMEOUT=2 STATE_POLL=1
 }
 
-@test "forced teardown does not demand a VLAN it will never use" {
-  # A bare legacy_routed fleet row carries no vlan at all, so this closed the
-  # only exit a record-less device had: the force banner even says Vlan$VLAN
-  # is NOT touched.
-  _iox_uninstall_stub_setup
-  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
-    DEVICE_PASS=p IRIS_FORCE_AGENT_ONLY=1 \
-    bash "$STUBDIR/device/iox/uninstall.sh"
-  [[ "$output" != *"VLAN not set"* ]] || return 1
-  [[ "$output" == *"FORCE:"*"IRISQ"*"IRIS PKI"* ]] || return 1
-  [[ "$output" == *"preserve operator VLAN/SVI"* ]] || return 1
+_iox_controller_run() {
+  local action="$1" scenario="${2:-success}" mode="${3:-recorded}"
+  python3 - "$STUBDIR/device/iox/$action.sh" "$action" "$scenario" "$mode" <<'CONTROLLER'
+import base64,ctypes,fcntl,hashlib,json,os,selectors,signal,socket,struct,subprocess,sys,time
+script,action,scenario,mode=sys.argv[1:]
+mode='none' if action=='install' else mode
+attempt='a'*32
+board='CONTROLLER-LIVE-BOARD'
+record='controller-record' if mode!='force_agent_only' else None
+transaction='b'*32 if action=='install' else None
+revision=0 if action=='install' else None
+phase='observed' if action=='install' else None
+wrapper=hashlib.sha256(open(os.path.join(os.environ['IRIS_ARTIFACTS_DIR'],'iris-arm64.tar'),'rb').read()).hexdigest() if action=='install' else None
+trace=open(os.environ['IOX_REQUEST_LOG'],'a')
+control,recipe=socket.socketpair()
+control.setblocking(False)
+selector=selectors.DefaultSelector()
+selector.register(control,selectors.EVENT_READ,'control')
+env=dict(os.environ)
+env['IRIS_IOX_CONTROL_FD']=str(recipe.fileno())
+env['IRIS_IOX_RECORD_ID']='environment-forged-record'
+env['IRIS_IOX_TRANSACTION_ID']='e'*32
+env['IRIS_IOX_REVISION']='999'
+env['IRIS_IOX_BOARD_IDENTITY']='ENVIRONMENT-FORGED-BOARD'
+if mode=='force_agent_only':
+    env['IRIS_FORCE_AGENT_ONLY']='1'
+    env.pop('VLAN',None)
+    env.pop('INBAND_VLAN',None)
+if scenario=='missing_environment_identity':
+    env.pop('EXPECTED_DEVICE_IDENTITY',None)
+# The fixture itself is a subreaper, and never leaves shell/helper descendants.
+libc=ctypes.CDLL(None,use_errno=True)
+assert libc.prctl(36,1,0,0,0)==0
+child=subprocess.Popen(['/bin/bash',script],env=env,pass_fds=(recipe.fileno(),),
+    stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+recipe.close()
+fcntl.fcntl(child.stdout.fileno(),fcntl.F_SETFL,fcntl.fcntl(child.stdout.fileno(),fcntl.F_GETFL)|os.O_NONBLOCK)
+selector.register(child.stdout,selectors.EVENT_READ,'output')
+deadline=time.monotonic()+6
+wire=bytearray()
+output=bytearray()
+sequence=1
+finished=False
+expected_exit=None
+protocol_error=None
+uploaded=False
+admitted=False
+resolved=False
+certificate=False
+state='RUNNING' if scenario in ('routing_missing','preserve_existing') else ''
+counts={}
+last_ready=None
+
+
+def frame(value):
+    payload=json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode('utf-8')
+    assert 1<=len(payload)<=65536
+    return struct.pack('!I',len(payload))+payload
+
+
+def send(value):
+    data=frame(value)
+    control.setblocking(True)
+    control.settimeout(max(0.01,deadline-time.monotonic()))
+    control.sendall(data)
+    control.setblocking(False)
+
+
+def ready():
+    global last_ready
+    last_ready=dict(version=1,type='ready',next_sequence=sequence,attempt_id=attempt,
+        action=action,teardown_mode=mode,record_id=record,transaction_id=transaction,
+        expected_revision=revision,board_identity=board,wrapper_sha256=wrapper)
+    outgoing=dict(last_ready)
+    if scenario=='malformed_ready_key' and sequence==1:
+        outgoing['unexpected']='fixture-login-secret'
+    if scenario=='malformed_ready_tuple' and sequence==1:
+        outgoing['transaction_id']='e'*32 if action=='uninstall' else None
+    send(outgoing)
+
+
+def unique(pairs):
+    result={}
+    for key,value in pairs:
+        assert key not in result,'duplicate JSON key'
+        result[key]=value
+    return result
+
+
+def command_names():
+    return set('iox_status app_list routing_prereq storage_prereq clock prepare_iox_scp configure_network mkdir_share app_stop app_deactivate app_uninstall remove_app_config configure_app app_install app_activate copy_certificate app_start save remove_wrapper remove_certificate cleanup_config cleanup_files cleanup_config_probe cleanup_stage_probe'.split())
+
+
+def request(value):
+    global sequence,finished,expected_exit,uploaded,admitted,resolved,certificate,state,revision,phase
+    keys=set('version sequence attempt_id action teardown_mode record_id transaction_id expected_revision board_identity wrapper_sha256 operation arguments'.split())
+    assert set(value)==keys,'request is not the exact closed schema'
+    assert type(value['sequence']) is int and value['sequence']==sequence
+    assert type(value['version']) is int and value['version']==1
+    for key in keys-set(('sequence','operation','arguments')):
+        assert type(value[key]) is type(last_ready[key]) and value[key]==last_ready[key],'request replaced controller '+key
+    operation=value['operation']
+    arguments=value['arguments']
+    assert type(arguments) is dict
+    assert operation in ('command','upload_wrapper','upload_certificate','begin_install','deployed','cleanup','finish')
+    name=operation
+    if operation=='command':
+        assert set(arguments)=={'name'} and arguments['name'] in command_names()
+        name=arguments['name']
+    elif operation=='cleanup':
+        assert set(arguments)=={'reason','exit_intent'}
+        assert arguments['reason'] in ('success','error','term','int','hup','cancel')
+        assert arguments['exit_intent'] is None or type(arguments['exit_intent']) is int and 0<=arguments['exit_intent']<=255
+    elif operation=='finish':
+        assert set(arguments)=={'exit_intent'} and type(arguments['exit_intent']) is int and 0<=arguments['exit_intent']<=255
+    else:
+        assert arguments=={}
+    if action=='uninstall':
+        assert operation not in ('upload_wrapper','upload_certificate','begin_install','deployed')
+        assert name not in ('app_install','app_activate','configure_app','configure_network','copy_certificate','app_start')
+    trace.write(json.dumps(dict(event='request',request=value),sort_keys=True)+'\n')
+    trace.flush()
+    counts[name]=counts.get(name,0)+1
+    assert sum(counts.values())<=128,'unbounded recipe requests'
+    code=0
+    category=None
+    detail=''
+    stdout=''
+    stderr=''
+    returncode=0 if operation in ('command','upload_wrapper','upload_certificate') else None
+    framing=True
+    timed_out=False
+    if scenario=='certificate_invalid' and sum(counts.values())==1:
+        code,category,detail=2,None,'not a valid PEM certificate'
+        returncode=None
+    elif name=='routing_prereq':
+        if scenario=='device_down':
+            code,category,detail=4,'connection','PREREQ: could not verify ip routing'
+            returncode=255
+            framing=False
+        elif scenario in ('routing_missing','preserve_existing'):
+            stdout='show running-config | include no ip routing\nno ip routing\nDefault gateway is not set\n'
+        else:
+            stdout='show running-config | include no ip routing\nGateway of last resort is 192.0.2.1 to network 0.0.0.0\n'
+    elif name=='storage_prereq':
+        stdout='Filesystem: sdflash: (no IOx partition present)\n' if scenario=='no_partition' else 'IOx Partition Exists\n'
+    elif name=='clock':
+        stdout='% Clock is not set\n' if scenario=='unknown_clock' else '14:23:07.512 UTC Thu Aug 20 '+('2018' if scenario=='old_clock' else '2026')+'\n'
+    elif name=='iox_status':
+        stdout='IOx service (CAF) : Running\nDockerd : Running\n'
+        if scenario=='caf_missing': stdout='Dockerd : Running\n'
+        if scenario=='dockerd_missing': stdout='IOx service (CAF) : Running\n'
+        if scenario in ('caf_missing','dockerd_missing') and counts[name]>=2:
+            code,category,detail=4,'timeout','waiting for IOx services exceeded the controller deadline'
+            timed_out=True
+            framing=False
+            returncode=None
+    elif name=='app_list':
+        stdout='App id State\n---------------------\n'+('iris '+state+'\n' if state else 'No App found\n')
+        if scenario=='activation_timeout' and counts.get('app_activate') and counts[name]>=4:
+            code,category,detail=4,'timeout','did not reach ACTIVATED within 2 seconds; Last observed state: DEPLOYED; Activation may still be running; retry onboarding'
+            stderr='% Error: activation is still loading the app image\n'
+            timed_out=True
+            framing=False
+            returncode=None
+        if scenario=='install_timeout' and counts.get('app_install') and counts[name]>=4:
+            code,category,detail=4,'timeout','did not reach DEPLOYED within 2 seconds'
+            timed_out=True
+            framing=False
+            returncode=None
+    elif name=='upload_wrapper': uploaded=True
+    elif name=='begin_install':
+        assert uploaded,'begin_install preceded bound upload'
+        admitted=True
+        revision+=1
+        phase='unchanged' if scenario=='marker_present' else 'disabled_confirmed'
+    elif name in ('app_stop','app_deactivate','app_uninstall','remove_app_config','configure_network','configure_app','app_install'):
+        assert action=='uninstall' or admitted,'application mutation preceded begin_install'
+        if name=='app_stop': state='STOPPED'
+        if name=='app_deactivate': state='DEPLOYED'
+        if name in ('app_uninstall','remove_app_config'): state=''
+        if name=='app_install':
+            state='INSTALLING' if scenario=='install_timeout' else 'DEPLOYED'
+            stdout="Installing package for 'iris'.\n%IOX: application installation accepted\n"
+    elif name=='deployed':
+        assert state=='DEPLOYED' and admitted
+        resolved=True
+        revision+=1
+        phase='restored' if phase!='unchanged' else phase
+    elif name=='app_activate':
+        assert admitted and resolved,'activation preceded restoration acknowledgement'
+        if scenario!='activation_timeout': state='ACTIVATED'
+        stdout='Application activation requested\n' if scenario=='activation_timeout' else 'Application activated\n'
+    elif name=='copy_certificate':
+        assert state=='ACTIVATED','certificate copied before activation'
+        if scenario in ('certificate_copy_failure','copy_failure_cleanup_failure'):
+            code,category,detail=4,'rejected','application data copy failed'
+            stdout='% Error: application data unavailable\n'
+        else:
+            certificate=True
+            stdout='Successfully copied file /flash/iris-catalog.pem to iris as iris-catalog.pem\n'
+    elif name=='app_start':
+        assert certificate and state=='ACTIVATED'
+        state='RUNNING'
+    elif name=='save': stdout='[OK]\n'
+    elif name=='cleanup':
+        if action=='install' and admitted and phase=='disabled_confirmed':
+            revision+=1
+            phase='restored'
+            resolved=True
+        if scenario=='copy_failure_cleanup_failure':
+            code,category,detail=5,'journal_durability','fixture cleanup durability failure'
+    elif name=='finish':
+        if action=='install' and admitted and phase=='disabled_confirmed':
+            revision+=1
+            phase='restored'
+            resolved=True
+        if scenario in ('finish_failure','copy_failure_cleanup_failure'):
+            code,category,detail=5,'journal_durability','fixture finish durability failure'
+        finished=True
+    for stream,data in (('stdout',stdout),('stderr',stderr)):
+        raw=data.encode('utf-8')
+        assert len(raw)<=32768
+        for index,start in enumerate(range(0,len(raw),4096)):
+            send(dict(version=1,type='output',sequence=sequence,stream=stream,index=index,
+                data_b64=base64.b64encode(raw[start:start+4096]).decode('ascii')))
+    result=dict(version=1,type='result',sequence=sequence,ok=code==0,operation_code=code,
+        revision=revision,phase=phase,returncode=returncode,timed_out=timed_out,
+        stdout_truncated=False,stderr_truncated=False,framing_complete=framing,
+        error_category=category,detail=detail,transcript_ref=None,
+        recipe_returncode=None,recovery_code=None)
+    if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
+    if scenario=='malformed_response_status': result['recipe_returncode']=0
+    send(result)
+    if scenario.startswith('malformed_response'):
+        control.shutdown(socket.SHUT_WR)
+        return
+    if finished:
+        expected_exit=arguments['exit_intent'] or code
+        trace.write(json.dumps(dict(event='finish',exit_intent=arguments['exit_intent'],
+            operation_code=code,expected_exit=arguments['exit_intent'] or code,state=state))+'\n')
+        trace.flush()
+    else:
+        sequence+=1
+        ready()
+
+try:
+    if scenario in ('identity_refused','identity_unknown'):
+        control.shutdown(socket.SHUT_WR)
+    else:
+        ready()
+    while time.monotonic()<deadline:
+        for key,unused in selector.select(min(0.1,max(0,deadline-time.monotonic()))):
+            if key.data=='output':
+                data=os.read(child.stdout.fileno(),4096)
+                if data:
+                    output.extend(data)
+                    assert len(output)<=65536,'unbounded recipe diagnostic output'
+                else: selector.unregister(child.stdout)
+            else:
+                data=control.recv(4096)
+                if not data:
+                    selector.unregister(control)
+                else:
+                    assert not finished,'request after acknowledged finish'
+                    wire.extend(data)
+                    while len(wire)>=4:
+                        length=struct.unpack('!I',wire[:4])[0]
+                        assert 1<=length<=65536,'invalid frame length'
+                        if len(wire)<4+length: break
+                        payload=bytes(wire[4:4+length])
+                        del wire[:4+length]
+                        value=json.loads(payload.decode('utf-8'),object_pairs_hook=unique,
+                            parse_constant=lambda value: (_ for _ in ()).throw(ValueError('non-finite JSON')))
+                        request(value)
+        if child.poll() is not None and not selector.get_map(): break
+    else:
+        raise AssertionError('bounded controller fixture deadline expired')
+    assert not wire,'partial final request frame'
+    if finished: assert child.returncode==expected_exit,'recipe exit differs from acknowledged finish'
+    assert finished or scenario in ('identity_refused','identity_unknown') or scenario.startswith('malformed_'),'recipe exited without acknowledged finish'
+except (AssertionError,ValueError,TypeError,OSError) as error:
+    protocol_error=str(error)
+finally:
+    try: os.killpg(child.pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    child.wait(timeout=1)
+    reap_deadline=time.monotonic()+0.5
+    while True:
+        try:
+            pid,unused=os.waitpid(-1,os.WNOHANG)
+            if not pid:
+                if time.monotonic()>=reap_deadline:
+                    protocol_error='fixture descendant could not be reaped'
+                    break
+                time.sleep(0.005)
+        except ChildProcessError: break
+    control.close()
+    selector.close()
+    trace.close()
+sys.stdout.write(output.decode('utf-8','replace'))
+if protocol_error:
+    sys.stdout.write('\ncontroller fixture: '+protocol_error+'\n')
+    sys.exit(97)
+sys.exit(child.returncode if child.returncode>=0 else 128-child.returncode)
+CONTROLLER
+}
+
+_iox_assert_trace() {
+  # A broken peer is a fixture failure, never the expected recipe refusal.
+  [ "$status" -ne 97 ] || return 1
+  [ "$status" -ne 124 ] || return 1
+  python3 - "$IOX_REQUEST_LOG" "$@" <<'ASSERTIONS' || return 1
+import json,sys
+records=[json.loads(line) for line in open(sys.argv[1])]
+requests=[row['request'] for row in records if row['event']=='request']
+names=[row['arguments']['name'] if row['operation']=='command' else row['operation'] for row in requests]
+check=sys.argv[2]
+if check=='none':
+    assert requests==[],names
+elif check=='absent':
+    assert not set(sys.argv[3:]).intersection(names),names
+else:
+    assert requests,'recipe did not use its controller channel'
+    assert all(row['board_identity']=='CONTROLLER-LIVE-BOARD' for row in requests)
+    assert [row['sequence'] for row in requests]==list(range(1,len(requests)+1))
+    if check=='ordered':
+        indices=[names.index(name) for name in sys.argv[3:]]
+        assert indices==sorted(indices),(names,indices)
+    elif check=='first_only':
+        assert len(requests)==1,names
+    elif check=='count':
+        assert names.count(sys.argv[3])==int(sys.argv[4]),names
+    elif check=='finish':
+        finishes=[row for row in records if row['event']=='finish']
+        assert len(finishes)==1 and names[-1]=='finish'
+        assert finishes[0]['state']==sys.argv[3],finishes
+    elif check=='mode':
+        mode=sys.argv[3]
+        assert all(row['teardown_mode']==mode for row in requests)
+        for row in requests:
+            assert row['transaction_id'] is None and row['wrapper_sha256'] is None and row['expected_revision'] is None
+            assert row['record_id']==(None if mode=='force_agent_only' else 'controller-record')
+    elif check=='preserve_primary':
+        finish=[row for row in records if row['event']=='finish'][0]
+        assert finish['exit_intent']!=0 and finish['expected_exit']==finish['exit_intent']
+ASSERTIONS
+  [ ! -s "$IOX_DIRECT_LOG" ]
+}
+
+@test "standalone dry-run needs no credentials controller authority or transport" {
+  _iox_fixture_setup
+  run env -u DEVICE_USER -u DEVICE_PASS -u DEVICE_SSH_PASS -u DEVICE_ENABLE \
+    -u CATALOG_TOKEN -u ENABLE_SECRET -u SSHPASS -u IRIS_IOX_CONTROL_FD \
+    -u EXPECTED_DEVICE_IDENTITY -u IRIS_FORCE_AGENT_ONLY \
+    IRIS_STATE="$STUBDIR/authority/owner" \
+    bash "$STUBDIR/device/iox/uninstall.sh" --dry-run
   [ "$status" -eq 0 ]
+  [ ! -s "$IOX_DIRECT_LOG" ]
+  [ ! -s "$IOX_REQUEST_LOG" ]
+  [ "$(cat "$STUBDIR/authority/owner")" = authority-owner-data ]
+  [ "$(find "$STUBDIR/authority" -mindepth 1 | wc -l)" -eq 1 ]
 }
 
-@test "non-forced teardown still refuses to guess a missing VLAN" {
-  # The guard is correct for a record-driven teardown -- it must keep firing there.
-  _iox_uninstall_stub_setup
-  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u \
-    DEVICE_PASS=p bash "$STUBDIR/device/iox/uninstall.sh"
-  [[ "$output" == *"VLAN not set"* ]] || return 1
+@test "environment authority cannot start the real uninstall recipe" {
+  _iox_fixture_setup
+  run env -u IRIS_IOX_CONTROL_FD IRIS_FORCE_AGENT_ONLY=1 \
+    IRIS_IOX_RECORD_ID=environment-record \
+    IRIS_IOX_TRANSACTION_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+    IRIS_IOX_REVISION=999 timeout 6 bash "$STUBDIR/device/iox/uninstall.sh"
+  [ "$status" -eq 2 ]
+  [ ! -s "$IOX_DIRECT_LOG" ]
+  [ ! -s "$IOX_REQUEST_LOG" ]
+  [[ "$output" != *'fixture-login-secret'* ]]
+}
+
+@test "controller recorded teardown uses its bound board and record through finish" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall success recorded
+  [ "$status" -eq 0 ]
+  _iox_assert_trace mode recorded
+  _iox_assert_trace ordered app_stop app_deactivate app_uninstall cleanup_config cleanup_files save finish
+  _iox_assert_trace finish ''
+}
+
+@test "controller forced teardown needs no VLAN and still has a live board binding" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall success force_agent_only
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'VLAN not set'* ]]
+  _iox_assert_trace mode force_agent_only
+  _iox_assert_trace ordered app_stop app_deactivate app_uninstall cleanup_config cleanup_files finish
+  _iox_assert_trace absent upload_wrapper upload_certificate begin_install deployed app_install app_activate
+}
+
+@test "controller recorded teardown remains board-bound without EXPECTED_DEVICE_IDENTITY" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall missing_environment_identity recorded
+  [ "$status" -eq 0 ]
+  _iox_assert_trace mode recorded
+  _iox_assert_trace ordered app_stop app_uninstall finish
+}
+
+@test "controller force authority ignores a forged environment identity and record" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall success force_agent_only
+  [ "$status" -eq 0 ]
+  _iox_assert_trace mode force_agent_only
+  _iox_assert_trace finish ''
+}
+
+@test "controller identity mismatch refusal supplies no handoff or teardown authority" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall identity_refused recorded
   [ "$status" -ne 0 ]
+  _iox_assert_trace none
 }
 
-
-# --- EXPECTED_DEVICE_IDENTITY: the record binds the teardown to one box ------
-# The console passes the deployment record's processor board ID. The first
-# device session is then a read-only `show version`, and no destructive
-# command is sent unless the live board ID matches -- mirrors the router
-# uninstaller and the IOx installer's own guard. Force mode (record-less
-# rescue) has nothing to compare against and skips it.
-
-_iox_identity_stub_setup() {
-  # $1 = the board ID the stub device reports ("" = a truncated session that
-  # never returns one). Every command the script sends is logged, so the
-  # tests can prove nothing destructive went out before the abort.
-  STUBDIR="$BATS_TEST_TMPDIR/stub"
-  mkdir -p "$STUBDIR/lab" "$STUBDIR/device/iox"
-  export IRIS_STUB_LOG="$BATS_TEST_TMPDIR/sent.log" IRIS_STUB_BOARD_ID="$1"
-  cat > "$STUBDIR/lab/device-run.sh" <<'STUB'
-#!/usr/bin/env bash
-cmds="$(cat)"
-printf '%s\n' "$cmds" >> "$IRIS_STUB_LOG"
-if printf '%s\n' "$cmds" | grep -q '^show version'; then
-  echo "Cisco IOS XE Software, Version 17.15.01"
-  echo "cisco IE-3400-8T2S (ARM) processor with 512K bytes of memory."
-  [ -n "$IRIS_STUB_BOARD_ID" ] && echo "Processor board ID $IRIS_STUB_BOARD_ID"
-  exit 0
-fi
-echo "[OK]"
-STUB
-  chmod +x "$STUBDIR/lab/device-run.sh"
-  ln -sf "$UNINSTALL" "$STUBDIR/device/iox/uninstall.sh"
+@test "controller unreadable live identity also refuses forced teardown handoff" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall identity_unknown force_agent_only
+  [ "$status" -ne 0 ]
+  _iox_assert_trace none
 }
 
-_sent_destructive() {
-  grep -E '^(app-hosting (stop|deactivate|uninstall)|no |configure terminal|delete |copy running-config)' \
-    "$IRIS_STUB_LOG" || true
+@test "controller finish failure cannot be reported as successful uninstall" {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall finish_failure recorded
+  [ "$status" -eq 5 ]
+  _iox_assert_trace finish ''
 }
 
-@test "identity mismatch aborts before any destructive command" {
-  _iox_identity_stub_setup FCW9999LIVE
-  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
-    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
-    bash "$STUBDIR/device/iox/uninstall.sh"
-  [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"device identity mismatch"* ]] || return 1
-  [[ "$output" == *"FCW1234RECORD"*"FCW9999LIVE"* ]] || return 1
-  [[ "$output" == *"use Force"* ]] || return 1
-  # the ONLY session was the read-only probe
-  grep -q '^show version' "$IRIS_STUB_LOG" || return 1
-  [ -z "$(_sent_destructive)" ]
-}
-
-@test "a session that returns no board ID aborts instead of proceeding" {
-  # a dropped or unauthenticated session must never read as "identity ok"
-  _iox_identity_stub_setup ""
-  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
-    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
-    bash "$STUBDIR/device/iox/uninstall.sh"
-  [ "$status" -ne 0 ] || return 1
-  [[ "$output" == *"could not read the processor board ID"* ]] || return 1
-  [ -z "$(_sent_destructive)" ]
-}
-
-@test "matching identity proceeds with the teardown" {
-  _iox_identity_stub_setup FCW1234RECORD
-  run env DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p VLAN=666 \
-    EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
-    bash "$STUBDIR/device/iox/uninstall.sh"
-  [ "$status" -eq 0 ] || return 1
-  [[ "$output" != *"identity mismatch"* ]] || return 1
-  # show version came FIRST, then the teardown
-  first="$(grep -nE '^(show version|app-hosting stop)' "$IRIS_STUB_LOG" | head -1)"
-  [[ "$first" == *"show version"* ]] || return 1
-  grep -q '^app-hosting stop appid iris' "$IRIS_STUB_LOG"
-}
-
-@test "without EXPECTED_DEVICE_IDENTITY the teardown runs as before (no probe)" {
-  _iox_identity_stub_setup FCW9999LIVE
-  run env -u EXPECTED_DEVICE_IDENTITY DEVICE_IP=192.0.2.10 DEVICE_USER=u \
-    DEVICE_PASS=p VLAN=666 bash "$STUBDIR/device/iox/uninstall.sh"
-  [ "$status" -eq 0 ] || return 1
-  ! grep -q '^show version' "$IRIS_STUB_LOG"
-}
-
-@test "force mode skips the identity check (record-less rescue)" {
-  _iox_identity_stub_setup FCW9999LIVE
-  run env -u VLAN -u INBAND_VLAN DEVICE_IP=192.0.2.10 DEVICE_USER=u DEVICE_PASS=p \
-    IRIS_FORCE_AGENT_ONLY=1 EXPECTED_DEVICE_IDENTITY=FCW1234RECORD \
-    bash "$STUBDIR/device/iox/uninstall.sh"
-  [ "$status" -eq 0 ] || return 1
-  [[ "$output" != *"identity mismatch"* ]]
-}
-
-@test "the header documents EXPECTED_DEVICE_IDENTITY" {
-  grep -q 'EXPECTED_DEVICE_IDENTITY' "$UNINSTALL"
-  head -50 "$UNINSTALL" | grep -q 'EXPECTED_DEVICE_IDENTITY'
+@test "malformed controller ready and response frames close the recipe before another operation" {
+  for scenario in malformed_ready_key malformed_ready_tuple malformed_response_key malformed_response_status; do
+    _iox_fixture_setup
+    run _iox_controller_run uninstall "$scenario"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 97 ]
+    [[ "$output" != *'fixture-login-secret'* ]]
+    if [[ "$scenario" == malformed_ready* ]]; then
+      _iox_assert_trace none
+    else
+      _iox_assert_trace first_only
+    fi
+    rm -rf "$STUBDIR"
+  done
 }

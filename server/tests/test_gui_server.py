@@ -3181,7 +3181,7 @@ def test_router_teardown_resolved_raises_without_management_type(tmp_path):
         srv.server_close()
 
 
-def _serve_inband(tmp_path, run_fn, device=None):
+def _serve_inband(tmp_path, run_fn, device=None, iox_controller=None):
     import deployment_records
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
@@ -3198,20 +3198,26 @@ def _serve_inband(tmp_path, run_fn, device=None):
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()   # IOx package-presence gate
+    onboard_kwargs = {}
+    if iox_controller is not None:
+        onboard_kwargs["iox_controller"] = iox_controller
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
                                          mint_fn=lambda d: "TOK", run_fn=run_fn,
                                          record_store=record_store, artifacts_dir=art,
-                                         # this device is platform=guestshell, so
-                                         # the job-start reachability gate (see
-                                         # gui_onboard.py) probes it before run_fn
+                                         # The default Guest Shell device uses
+                                         # the job-start reachability probe.
                                          probe_fn=lambda dev, env: "C9300",
                                          guestshell_preflight_fn=_CLEAN_GUESTSHELL_PREFLIGHT,
                                          iox_preflight_fn=lambda dev, env, resolved: {
                                              "status": "passed",
                                              "device_identity": "FCW0000TEST",
-                                             "detected_model": "IE-3400"})
+                                             "detected_model": "IE-3400"},
+                                         **onboard_kwargs)
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, record_store=record_store)
+                                 onboard, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, srv.shutdown
@@ -3220,14 +3226,17 @@ def _serve_inband(tmp_path, run_fn, device=None):
 def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
     """Inband IOx resolves the iox platform and, with no explicit ios_ssh_host,
     the app SSHes to the switch's management IP (device_ip)."""
-    ran = []
+    raw_runs = []
+    controller = _HttpIoxController()
     host, port, stop = _serve_inband(
-        tmp_path, lambda p, e, on: (ran.append(dict(e)), 0)[1],
+        tmp_path,
+        lambda *args, **kwargs: raw_runs.append((args, kwargs)) or 0,
         device={"device_id": "ie", "device_ip": "192.0.2.30",
                 "management_type": "inband", "inband_vlan": "120",
                 "app_ip": "192.0.2.31", "app_mask": "255.255.255.0",
                 "app_gateway": "192.0.2.1", "model": "IE-3400", "platform": "iox",
-                "credential_profile_id": "lab"})
+                "credential_profile_id": "lab"},
+        iox_controller=controller)
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
@@ -3239,14 +3248,31 @@ def test_inband_iox_onboard_defaults_ssh_host_to_mgmt_ip(tmp_path):
         assert resolved["ios_ssh_host"] == "192.0.2.30"    # defaults to device_ip
         st, _, b = _req(host, port, "POST", "/api/devices/ie/onboard", {}, headers=hh)
         assert st == 200
-        import time as _t
-        deadline = _t.time() + 3
-        while _t.time() < deadline:
-            if ran:
-                break
-            _t.sleep(0.02)
-        assert ran and ran[-1]["MANAGEMENT_TYPE"] == "inband"
-        assert ran[-1]["IOS_SSH_HOST"] == "192.0.2.30"
+        job_id = json.loads(b)["job_id"]
+        assert _wait_onboard_job(host, port, ck, job_id)["state"] == "done"
+        assert raw_runs == []
+        assert len(controller.requests) == 1
+        request = controller.requests[0]
+        assert _internal_request_value(request, "action") == "install"
+        assert _internal_request_value(request, "device_id") == "ie"
+        assert _internal_request_value(request, "job_id") == job_id
+        assert _internal_request_value(request, "credential_ref") == "lab"
+        assert _internal_request_value(request, "teardown_mode") == "none"
+        assert _internal_request_value(request, "record_id") is None
+        assert _internal_request_has(request, "wrapper_path")
+        assert _internal_request_value(
+            request, "wrapper_path").endswith("iris-arm64.tar")
+        target = _internal_request_value(request, "target")
+        assert {key: target[key] for key in ("host", "port", "platform")} == {
+            "host": "192.0.2.30", "port": 22, "platform": "iox"}
+        assert target["management_type"] == "inband"
+        assert target["ios_ssh_host"] == "192.0.2.30"
+        assert not _internal_request_has(request, "recipe_env")
+        for raw_key in ("credential", "credentials", "credential_profile_id",
+                        "username", "password", "device_user", "device_pass",
+                        "ios_ssh_user", "ios_ssh_pass"):
+            assert not _internal_request_has(request, raw_key)
+            assert raw_key not in target
     finally:
         stop()
 
@@ -3578,7 +3604,7 @@ def test_router_undeploy_uses_record_ip_after_inventory_edit(tmp_path):
         stop()
 
 
-def _serve_nonrouter(tmp_path, run_fn, device):
+def _serve_nonrouter(tmp_path, run_fn, device, iox_controller=None):
     """Record-backed server for a Guest Shell or IOx device, handing back the
     fleet and record store so a test can edit the inventory and read the
     record the way the router variant above does."""
@@ -3594,6 +3620,9 @@ def _serve_nonrouter(tmp_path, run_fn, device):
     art = str(tmp_path / "artifacts"); os.makedirs(art, exist_ok=True)
     for pkg in ("iris-arm64.tar", "iris-amd64.tar"):
         open(os.path.join(art, pkg), "w").close()
+    onboard_kwargs = {}
+    if iox_controller is not None:
+        onboard_kwargs["iox_controller"] = iox_controller
     onboard = gui_onboard.OnboardService(
         fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
         run_fn=run_fn, record_store=record_store, artifacts_dir=art,
@@ -3603,9 +3632,12 @@ def _serve_nonrouter(tmp_path, run_fn, device):
             "detected_model": "C9300-48P"},
         iox_preflight_fn=lambda dev, env, resolved: {
             "status": "passed", "device_identity": "FCW0000IOX",
-            "detected_model": "IE-3400"})
+            "detected_model": "IE-3400"}, **onboard_kwargs)
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
     srv = gui_server.make_server("127.0.0.1", 0, app, None, fleet, creds, None,
-                                 onboard, certfile=None, record_store=record_store)
+                                 onboard, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, fleet, record_store, srv.shutdown
@@ -3619,6 +3651,116 @@ _GS_ROW = {"device_id": "edge", "device_ip": "192.0.2.10",
 _IOX_ROW = dict(_GS_ROW, device_id="ie1", model="IE-3400", platform="iox")
 
 
+class _HttpIoxController:
+    def __init__(self):
+        self.requests = []
+
+    def _run(self, operation, request, prepare, preflight, on_output, cancel):
+        self.requests.append(request)
+        assert not (cancel() if callable(cancel) else cancel.is_set())
+        identity = {
+            "board_identity": "FCW0000IOX",
+            "model": "IE-3400", "os_family": "xe", "platform": "iox",
+        }
+        preflight(request, identity)
+        record_id = prepare(request, identity)
+        on_output("stdout", b"controller-authorized IOx work\n")
+        job_id = (request.get("job_id") if isinstance(request, dict)
+                  else getattr(request, "job_id"))
+        assert isinstance(job_id, str)
+        assert re.fullmatch(r"[0-9a-f]{16}", job_id)
+        device_id = (request.get("device_id") if isinstance(request, dict)
+                     else getattr(request, "device_id"))
+        teardown_mode = (
+            request.get("teardown_mode") if isinstance(request, dict)
+            else getattr(request, "teardown_mode"))
+        return {"result_code": 0, "returncode": 0,
+                "recovery_code": None, "record_id": record_id,
+                "iox_verification": None,
+                "iox_session": {
+                    "attempt_id": ("a" if operation == "install" else "b") * 32,
+                    "job_id": job_id,
+                    "device_id": device_id, "board_identity": "FCW0000IOX",
+                    "operation": operation,
+                    "teardown_mode": teardown_mode, "record_id": record_id,
+                    "state": "reaped", "mutation_blocked": False}}
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "install", request, prepare, preflight, on_output, cancel)
+
+    def run_uninstall(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "uninstall", request, prepare, preflight, on_output, cancel)
+
+    def summary_for_device(self, _device_id):
+        return {"iox_verification_obligations": [], "iox_sessions": []}
+
+
+def _internal_request_value(request, key):
+    if isinstance(request, dict):
+        return request.get(key)
+    return getattr(request, key)
+
+
+def _internal_request_has(request, key):
+    if isinstance(request, dict):
+        return key in request
+    return hasattr(request, key)
+
+
+def test_http_iox_force_passes_explicit_controller_mode_without_record_or_vlan(
+        tmp_path):
+    controller = _HttpIoxController()
+    raw_runs = []
+    device = {
+        "device_id": "ie-force", "device_ip": "192.0.2.10",
+        "management_type": "legacy_routed", "model": "IE-3400",
+        "platform": "iox", "credential_profile_id": "lab",
+    }
+    host, port, _fleet, record_store, stop = _serve_nonrouter(
+        tmp_path,
+        lambda *args, **kwargs: raw_runs.append((args, kwargs)) or 0,
+        device, iox_controller=controller)
+    try:
+        cookie, csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "POST", "/api/devices/ie-force/undeploy",
+            {"force": True},
+            headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert status == 200, body
+        job_id = json.loads(body)["job_id"]
+        job = _wait_onboard_job(host, port, cookie, job_id)
+        assert job["state"] == "done"
+        assert job["record_id"] is None
+        assert job["result_code"] == 0
+        assert job["returncode"] == 0
+        assert job["recovery_code"] is None
+        assert set(job["iox_session"]) == {
+            "attempt_id", "job_id", "device_id", "board_identity",
+            "operation", "teardown_mode", "record_id", "state",
+            "mutation_blocked"}
+        assert job["iox_session"]["job_id"] == job_id
+        assert raw_runs == []
+        assert record_store.list("ie-force") == []
+        assert len(controller.requests) == 1
+        request = controller.requests[0]
+        assert _internal_request_value(request, "action") == "uninstall"
+        assert _internal_request_value(
+            request, "teardown_mode") == "force_agent_only"
+        assert _internal_request_value(request, "record_id") is None
+        assert _internal_request_value(request, "device_id") == "ie-force"
+        assert _internal_request_value(request, "job_id") == job_id
+        assert _internal_request_value(request, "credential_ref") == "lab"
+        assert not _internal_request_has(request, "wrapper_path")
+        target = _internal_request_value(request, "target")
+        assert {key: target[key] for key in ("host", "port", "platform")} == {
+            "host": "192.0.2.10", "port": 22, "platform": "iox"}
+        assert not target.get("vlan")
+    finally:
+        stop()
+
+
 @pytest.mark.parametrize("device, identity", [(_GS_ROW, "FOC0000GS"),
                                               (_IOX_ROW, "FCW0000IOX")])
 def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
@@ -3630,34 +3772,85 @@ def test_nonrouter_undeploy_uses_record_ip_and_identity_after_inventory_edit(
     DEVICE_IP from the live fleet row. The recorded teardown could then
     remove an operator VLAN/SVI and IRIS-named config from whatever box
     answered at the edited address, with an empty EXPECTED_DEVICE_IDENTITY."""
-    ran = []
+    raw_runs = []
+    is_iox = device["platform"] == "iox"
+    controller = _HttpIoxController() if is_iox else None
     did = device["device_id"]
     host, port, fleet, record_store, stop = _serve_nonrouter(
-        tmp_path, lambda path, env, on: (ran.append(dict(env)), 0)[1], device)
+        tmp_path,
+        lambda path, env, on: (raw_runs.append(dict(env)), 0)[1],
+        device, iox_controller=controller)
     try:
         cookie, csrf = _auth(host, port)
         headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
         _, _, body = _req(host, port, "POST", "/api/devices/%s/onboard" % did,
                           {}, headers=headers)
+        install_job_id = json.loads(body)["job_id"]
         assert _wait_onboard_job(host, port, cookie,
-                                 json.loads(body)["job_id"])["state"] == "done"
-        assert ran[-1]["DEVICE_IP"] == "192.0.2.10"
-        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+                                 install_job_id)["state"] == "done"
+        if is_iox:
+            assert raw_runs == []
+            assert len(controller.requests) == 1
+            install_request = controller.requests[0]
+            assert _internal_request_value(install_request, "action") == "install"
+            assert _internal_request_value(install_request, "device_id") == did
+            assert _internal_request_value(
+                install_request, "job_id") == install_job_id
+            assert _internal_request_value(
+                install_request, "credential_ref") == "lab"
+            assert _internal_request_value(
+                install_request, "teardown_mode") == "none"
+            assert _internal_request_value(install_request, "record_id") is None
+            assert _internal_request_has(install_request, "wrapper_path")
+            install_target = _internal_request_value(install_request, "target")
+            assert {key: install_target[key]
+                    for key in ("host", "port", "platform")} == {
+                        "host": "192.0.2.10", "port": 22, "platform": "iox"}
+        else:
+            assert raw_runs[-1]["DEVICE_IP"] == "192.0.2.10"
+            assert raw_runs[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
         record = record_store.active_for_device(did)
         # the record now carries the evidence of the check that ran
         assert record["preflight"]["status"] == "passed"
         assert record["preflight"]["device_identity"] == identity
         assert record["resolved"]["device_identity"] == identity
         assert record["resolved"]["device_ip"] == "192.0.2.10"
+        assert record["resolved"]["management_type"] == "inband"
 
         fleet.upsert({"device_id": did, "device_ip": "203.0.113.99"})
         _, _, body = _req(host, port, "POST", "/api/devices/%s/undeploy" % did,
                           {}, headers=headers)
+        uninstall_job_id = json.loads(body)["job_id"]
         assert _wait_onboard_job(host, port, cookie,
-                                 json.loads(body)["job_id"])["state"] == "done"
-        assert ran[-1]["DEVICE_IP"] == "192.0.2.10", "teardown followed the edited row"
-        assert ran[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
-        assert ran[-1]["MANAGEMENT_TYPE"] == "inband"
+                                 uninstall_job_id)["state"] == "done"
+        if is_iox:
+            assert raw_runs == []
+            assert len(controller.requests) == 2
+            uninstall_request = controller.requests[1]
+            assert _internal_request_value(
+                uninstall_request, "action") == "uninstall"
+            assert _internal_request_value(uninstall_request, "device_id") == did
+            assert _internal_request_value(
+                uninstall_request, "job_id") == uninstall_job_id
+            assert _internal_request_value(
+                uninstall_request, "credential_ref") == "lab"
+            assert _internal_request_value(
+                uninstall_request, "teardown_mode") == "recorded"
+            assert _internal_request_value(
+                uninstall_request, "record_id") == record["record_id"]
+            assert not _internal_request_has(uninstall_request, "wrapper_path")
+            uninstall_target = _internal_request_value(
+                uninstall_request, "target")
+            assert uninstall_target["host"] == "192.0.2.10", (
+                "teardown followed the edited row")
+            assert uninstall_target["device_identity"] == identity
+            assert uninstall_target["management_type"] == "inband"
+            assert uninstall_target["resources"] == record["resources"]
+        else:
+            assert raw_runs[-1]["DEVICE_IP"] == "192.0.2.10", (
+                "teardown followed the edited row")
+            assert raw_runs[-1]["EXPECTED_DEVICE_IDENTITY"] == identity
+            assert raw_runs[-1]["MANAGEMENT_TYPE"] == "inband"
         assert record_store.get(record["record_id"])["state"] == "removed"
     finally:
         stop()
@@ -7421,17 +7614,42 @@ def test_settings_ca_trust_malformed_ipv6_rejected(tmp_path, monkeypatch):
 
 # ---- GET /api/devices/<id>/deployment (deployment config visibility) ------
 
-def _serve_records(tmp_path, now_fn=None):
-    """A server with ONLY a record store wired (the deployment route needs
-    nothing else). Returns the store so tests can seed records directly."""
+class _DeploymentProjectionController:
+    def __init__(self, result=None, error=None):
+        self.result = (result if result is not None else {
+            "iox_verification_obligations": [], "iox_sessions": []})
+        self.error = error
+        self.requested = []
+
+    def summary_for_device(self, device_id):
+        self.requested.append(device_id)
+        if self.error is not None:
+            raise self.error
+        # Return a detached value, as the real controller does across its
+        # read-only authority boundary.
+        return json.loads(json.dumps(self.result))
+
+
+_READABLE_IOX_AUTHORITY = object()
+
+
+def _serve_records(tmp_path, now_fn=None,
+                   iox_controller=_READABLE_IOX_AUTHORITY,
+                   record_store_override=None):
+    """Serve deployment records with explicit readable IOx authority."""
     import deployment_records
     app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
     app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
-    record_store = (deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
-                if now_fn else deployment_records.DeploymentRecordStore(state))
-    srv = gui_server.make_server("127.0.0.1", 0, app, certfile=None,
-                                 record_store=record_store)
+    record_store = record_store_override or (
+        deployment_records.DeploymentRecordStore(state, now_fn=now_fn)
+        if now_fn else deployment_records.DeploymentRecordStore(state))
+    if iox_controller is _READABLE_IOX_AUTHORITY:
+        iox_controller = _DeploymentProjectionController()
+    server_kwargs = {"certfile": None, "record_store": record_store}
+    if iox_controller is not None:
+        server_kwargs["iox_controller"] = iox_controller
+    srv = gui_server.make_server("127.0.0.1", 0, app, **server_kwargs)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, record_store, srv.shutdown
@@ -7468,7 +7686,9 @@ def test_deployment_route_null_then_newest_then_active(tmp_path):
         st, _, b = _req(host, port, "GET", "/api/devices/d1/deployment",
                         headers={"Cookie": ck})
         assert st == 200
-        assert json.loads(b) == {"record": None, "total": 0}
+        assert json.loads(b) == {
+            "record": None, "total": 0,
+            "iox_verification_obligations": [], "iox_sessions": []}
         # two non-active, non-recoverable records -> the newest by
         # timestamps.planned_at wins
         r1 = record_store.create(_record_stub("d1"))
@@ -7502,7 +7722,9 @@ def test_deployment_route_null_then_newest_then_active(tmp_path):
         # records are per-device: another device still sees null
         _, _, b = _req(host, port, "GET", "/api/devices/other/deployment",
                        headers={"Cookie": ck})
-        assert json.loads(b) == {"record": None, "total": 0}
+        assert json.loads(b) == {
+            "record": None, "total": 0,
+            "iox_verification_obligations": [], "iox_sessions": []}
     finally:
         stop()
 
@@ -7524,6 +7746,194 @@ def test_deployment_route_recoverable_beats_newer_planned(tmp_path):
         assert got["record"]["record_id"] == r1["record_id"]
         assert got["record"]["state"] == "needs-reconcile"
         assert got["total"] == 2
+    finally:
+        stop()
+
+
+class _RawProjectionRecordStore:
+    def __init__(self, records, selected):
+        self.records = list(records)
+        self.selected = selected
+
+    def list(self, device_id, *args, **kwargs):
+        return [record for record in self.records
+                if record["device_id"] == device_id]
+
+    def recoverable_for_device(self, device_id, *args, **kwargs):
+        return (self.selected
+                if self.selected["device_id"] == device_id else None)
+
+
+def _verification_observation(state="enabled", at=10, command_id=1):
+    return {
+        "state": state, "observed_at": at, "command_id": command_id,
+        "transcript_id": "d" * 32, "stdout_offset": 0,
+        "stdout_length": 7, "stderr_offset": 0, "stderr_length": 0,
+        "returncode": 0, "timed_out": False, "truncated": False,
+        "framing_complete": True,
+    }
+
+
+def _internal_terminal_verification():
+    return {
+        "schema_version": 1, "transaction_id": "a" * 32, "revision": 1,
+        "record_id": "record-1", "controller_id": "b" * 32,
+        "board_identity": "FDO2547X9AB", "wrapper_sha256": "c" * 64,
+        # An enabled initial observation may close directly as unchanged when
+        # either native marker is present.
+        "package_sign_present": True, "package_cert_present": False,
+        "prior_state": "enabled", "current_state": "enabled",
+        "phase": "unchanged", "unresolved": False, "created_at": 10,
+        "updated_at": 12, "observed_at": 10, "terminal_at": 12,
+        "initial_observation": _verification_observation(),
+        "pre_disable_observation": None, "disable_confirmation": None,
+        "restore_observation": None, "error": None,
+        "transcript_refs": [{
+            "id": "d" * 32, "attempt_id": "d" * 32,
+            "stored_bytes": 4096, "observed_bytes": 7,
+            "dropped_bytes": 0, "truncated": False,
+        }],
+    }
+
+
+def _internal_indeterminate_verification():
+    value = _internal_terminal_verification()
+    value.update({
+        "transaction_id": "e" * 32, "revision": 2,
+        "record_id": "record-2", "package_sign_present": False,
+        "current_state": "disabled", "phase": "indeterminate",
+        "unresolved": True, "updated_at": 13, "observed_at": 12,
+        "terminal_at": None,
+        "pre_disable_observation": _verification_observation(
+            state="enabled", at=11, command_id=2),
+        "restore_observation": _verification_observation(
+            state="disabled", at=12, command_id=3),
+        "error": {
+            "category": "reconciliation_required",
+            "detail": "disabled state requires operator reconciliation",
+            "at": 13, "transcript_id": "d" * 32,
+        },
+    })
+    value["transcript_refs"][0].update({"observed_bytes": 21})
+    return value
+
+
+def _public_verification(record_id="record-1", transaction_id=None,
+                         revision=1, current_state="enabled",
+                         phase="unchanged", unresolved=False,
+                         updated_at=12, observed_at=10,
+                         error_category=None):
+    return {
+        "schema_version": 1, "record_id": record_id,
+        "transaction_id": transaction_id or "a" * 32,
+        "revision": revision,
+        "board_identity": "FDO2547X9AB", "prior_state": "enabled",
+        "current_state": current_state, "phase": phase,
+        "unresolved": unresolved, "created_at": 10,
+        "updated_at": updated_at, "observed_at": observed_at,
+        "terminal_at": None if unresolved else updated_at,
+        "error_category": error_category,
+    }
+
+
+def test_deployment_route_projects_only_safe_iox_authority_fields(tmp_path):
+    internal_terminal = _internal_terminal_verification()
+    internal_terminal_before = json.loads(json.dumps(internal_terminal))
+    raw_record = {
+        "record_id": "record-1", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "h" * 64, "state": "active",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.1"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 1},
+        "iox_verification": internal_terminal,
+    }
+    obligation = _public_verification(
+        record_id="record-2", transaction_id="e" * 32,
+        revision=2, current_state="disabled", phase="indeterminate",
+        unresolved=True, updated_at=13, observed_at=12,
+        error_category="reconciliation_required")
+    unresolved_record = {
+        "record_id": "record-2", "controller_id": "iris",
+        "device_id": "d1", "inventory_revision": 1,
+        "plan_hash": "i" * 64, "state": "abandoned",
+        "resolved": {"platform": "iox", "device_ip": "10.0.0.2",
+                     "device_identity": "FDO2547X9AB"},
+        "preflight": {"status": "passed"}, "resources": [],
+        "timestamps": {"planned_at": 2},
+        "iox_verification": _internal_indeterminate_verification(),
+    }
+    session = {
+        "attempt_id": "f" * 32, "job_id": "fedcba9876543210",
+        "device_id": "d1",
+        "board_identity": "FDO2547X9AB", "operation": "install",
+        "teardown_mode": "none", "record_id": "record-2",
+        "state": "active", "mutation_blocked": True,
+    }
+    controller = _DeploymentProjectionController({
+        "iox_verification_obligations": [obligation],
+        "iox_sessions": [session],
+    })
+    host, port, _store, stop = _serve_records(
+        tmp_path, iox_controller=controller,
+        record_store_override=_RawProjectionRecordStore(
+            [raw_record, unresolved_record], raw_record))
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 200, body
+        result = json.loads(body)
+        assert controller.requested == ["d1"]
+        assert set(result) == {
+            "record", "total", "iox_verification_obligations", "iox_sessions"}
+        assert result["total"] == 2
+        assert result["iox_verification_obligations"] == [obligation]
+        assert result["iox_sessions"] == [session]
+        assert result["record"]["iox_verification"] == _public_verification()
+        # Projection is copy-only: serving it must not replace authority in
+        # the record-store object supplied to the controller.
+        assert raw_record["iox_verification"] == internal_terminal_before
+        assert raw_record["iox_verification"]["controller_id"] == "b" * 32
+        public_bytes = json.dumps(result, sort_keys=True)
+        for private_value in ("b" * 32, "c" * 64, "transcript_refs",
+                              "initial_observation", "command_id",
+                              "package_sign_present", "package_cert_present"):
+            assert private_value not in public_bytes
+    finally:
+        stop()
+
+
+def test_deployment_route_returns_503_when_iox_authority_is_unreadable(tmp_path):
+    controller = _DeploymentProjectionController(
+        error=OSError("/private/authority/token-super-secret"))
+    host, port, _record_store, stop = _serve_records(
+        tmp_path, iox_controller=controller)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 503
+        result = json.loads(body)
+        assert controller.requested == ["d1"]
+        assert isinstance(result.get("error"), str)
+        assert "token-super-secret" not in result["error"]
+    finally:
+        stop()
+
+
+def test_deployment_route_returns_503_without_an_authority_controller(tmp_path):
+    host, port, _record_store, stop = _serve_records(
+        tmp_path, iox_controller=None)
+    try:
+        cookie, _csrf = _auth(host, port)
+        status, _, body = _req(
+            host, port, "GET", "/api/devices/d1/deployment",
+            headers={"Cookie": cookie})
+        assert status == 503
+        assert isinstance(json.loads(body).get("error"), str)
     finally:
         stop()
 

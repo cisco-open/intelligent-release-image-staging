@@ -54,7 +54,7 @@ def _wait(svc, job_id, timeout=3.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
         j = svc.get_job(job_id)
-        if j and j["state"] in ("done", "error"):
+        if j and j["state"] in ("done", "error", "cancelled"):
             return j
         time.sleep(0.01)
     return svc.get_job(job_id)
@@ -1073,24 +1073,21 @@ def _iox_preflight_ok(identity="FDO2547X9AB", model=None):
 
 
 def test_probe_resolves_iox_and_caches_model(tmp_path):
-    art_dir = tmp_path
-    (art_dir / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet()  # no explicit platform/model -> falls to probe
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["install_path"] = install_path
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, probe_fn=lambda dev, env: "IE-3400",
-        iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(art_dir))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        probe_fn=lambda dev, env: "IE-3400")
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/install.sh")
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-arm64.tar")
+    target = _request_value(request, "target")
+    assert target["model"] == "IE-3400"
+    assert "board_identity" not in target
     assert {"device_id": "d1", "model": "IE-3400"} in fleet.upserts
     # the job line reports the model the probe just found, not a placeholder
     assert any("platform: iox (model IE-3400)" in l for l in job["lines"])
@@ -1261,24 +1258,18 @@ def test_default_probe_xe_device_records_xe(monkeypatch):
 
 
 def test_iox_env_has_ssh_creds(tmp_path):
-    art_dir = tmp_path
-    (art_dir / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["env"] = env
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(art_dir))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["env"]["DEVICE_SSH_PASS"] == "s3cret"
-    assert seen["env"]["DEVICE_SSH_USER"] == "admin"
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "credential_ref") == "lab"
+    target = _request_value(request, "target")
+    assert "DEVICE_SSH_PASS" not in target
+    assert "DEVICE_SSH_USER" not in target
+    assert "s3cret" not in repr(request)
 
 
 def test_guestshell_env_unchanged_no_ssh_keys(tmp_path):
@@ -1442,18 +1433,26 @@ def test_iox_onboard_persists_xr_family_on_refusal(tmp_path):
     # device through to the iox preflight itself -- an 8xxx-shaped model
     # would refuse earlier, inside _iox_arch_env, without ever reaching it.
     fleet = _iox_fleet(platform="iox", model="C9300")
-    creds = _iox_creds()
+    raw_runs = []
+    minted = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300",
+        "os_family": "xe", "platform": "iox",
+    })
 
     def iox_preflight(dev, env, resolved):
         dev["os_family"] = "xr"
         gui_onboard._refuse_xr(dev.get("device_id"))
 
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: 0, iox_preflight_fn=iox_preflight,
-        artifacts_dir=str(tmp_path))
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        preflight_fn=iox_preflight,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK",
+        artifact_names=("iris-amd64.tar",))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
+    assert raw_runs == [] and minted == []
+    assert [call[0] for call in controller.callback_calls] == ["preflight"]
     assert any("IOS-XR" in line for line in job["lines"]), job["lines"]
     assert {"device_id": "d1", "os_family": "xr"} in fleet.upserts
     assert fleet._d["d1"]["os_family"] == "xr"
@@ -1887,25 +1886,24 @@ def test_apply_iox_preflight_rejects_identity_drift_while_queued():
 
 def test_iox_onboard_runs_preflight_and_exports_identity_and_model(tmp_path):
     """Console onboard of an IOx-platform device runs the preflight and
-    threads a non-empty EXPECTED_DEVICE_IDENTITY (and MODEL) into the
-    installer env -- the CRITICAL defect fix."""
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    events, seen = [], {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
+    binds the discovered device identity and model inside controller custody."""
+    events, raw_runs = [], []
+    controller = _FrozenIoxController(events=events)
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
         mint_fn=lambda d: events.append("mint") or "TOK",
-        run_fn=lambda p, e, on: (events.append("run"), seen.update(e), 0)[2],
-        iox_preflight_fn=lambda dev, env, resolved: (
+        preflight_fn=lambda dev, env, resolved: (
             events.append("preflight") or {
                 "status": "passed", "device_identity": "FDO2547X9AB",
-                "detected_model": "IE-3400"}),
-        artifacts_dir=str(tmp_path))
+                "detected_model": "IE-3400"}))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert events == ["preflight", "mint", "run"]
-    assert seen["EXPECTED_DEVICE_IDENTITY"] == "FDO2547X9AB"
-    assert seen["MODEL"] == "IE-3400"
+    assert events == ["controller:install", "preflight", "mint"]
+    assert raw_runs == []
+    bound = controller.preflight_results[0]
+    assert _request_value(bound, "device_identity") == "FDO2547X9AB"
+    assert _request_value(bound, "model") == "IE-3400"
+    assert "board_identity" not in bound
 
 
 def test_iox_preflight_parse_failure_fails_job_before_installer_runs(tmp_path):
@@ -1913,19 +1911,17 @@ def test_iox_preflight_parse_failure_fails_job_before_installer_runs(tmp_path):
     job (fail-closed) before the installer ever runs or the token is
     minted -- an empty EXPECTED_DEVICE_IDENTITY would make install.sh's
     identity guard a no-op."""
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    minted, ran = [], []
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
+    minted, raw_runs = [], []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
         mint_fn=lambda d: minted.append(d) or "TOK",
-        run_fn=lambda p, e, on: ran.append(1) or 0,
-        iox_preflight_fn=lambda dev, env, resolved: (_ for _ in ()).throw(
-            ValueError("could not determine the device's processor board ID")),
-        artifacts_dir=str(tmp_path))
+        preflight_fn=lambda dev, env, resolved: (_ for _ in ()).throw(
+            ValueError("could not determine the device's processor board ID")))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "error"
-    assert minted == [] and ran == []
+    assert minted == [] and raw_runs == []
+    assert [call[0] for call in controller.callback_calls] == ["preflight"]
     assert any("preflight failed" in l for l in job["lines"])
 
 
@@ -1949,34 +1945,25 @@ def test_iox_missing_iris_tar_errors_before_run(tmp_path):
 
 
 def test_iox_present_iris_tar_proceeds(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    seen = {}
-
-    def fake_run(install_path, env, on_line):
-        seen["install_path"] = install_path
-        return 0
-
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=fake_run, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/install.sh")
+    assert raw_runs == []
+    assert _request_value(
+        controller.requests[0], "wrapper_path") == str(
+            tmp_path / "iris-arm64.tar")
 
 
 def test_job_lines_note_platform_and_recipe(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    creds = _iox_creds()
-    svc = gui_onboard.OnboardService(
-        fleet, creds, host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=lambda p, e, on: 0, iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(tmp_path, controller, raw_runs)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
+    assert raw_runs == []
+    assert _request_value(controller.requests[0], "action") == "install"
     assert any("platform: iox" in l and "device/iox/install.sh" in l
                for l in job["lines"])
 
@@ -2293,19 +2280,22 @@ def test_onboard_jobs_carry_action_and_default_onboard():
     assert j["action"] == "onboard"
 
 
-def test_undeploy_iox_runs_the_iox_uninstall_script():
-    """Fleet-wide undeploy: an IOx device runs device/iox/uninstall.sh (NOT the
-    Guest Shell teardown, and no longer refused). No token is minted."""
-    seen = {}
+def test_undeploy_iox_runs_the_iox_uninstall_script(tmp_path):
+    """IOx undeploy selects its recipe and enters controller custody."""
+    raw_runs = []
     minted = []
-    fleet = _iox_fleet(platform="iox", model="IE-3400")
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9",
-        mint_fn=lambda d: minted.append(d) or "TOK",
-        run_fn=lambda p, e, on: seen.update(install_path=p, env=e) or 0)
-    job = _wait(svc, svc.start("d1", action="undeploy"))
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs,
+        mint_fn=lambda d: minted.append(d) or "TOK")
+    job = _wait(svc, svc.start(
+        "d1", action="undeploy", teardown_mode="force_agent_only"))
     assert job["state"] == "done"
-    assert seen["install_path"].endswith("device/iox/uninstall.sh")
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "teardown_mode") == "force_agent_only"
+    assert not _request_has(request, "wrapper_path")
     assert minted == []                       # undeploy never mints
     assert any("device/iox/uninstall.sh" in l for l in job["lines"])
 
@@ -2489,44 +2479,53 @@ def _run_capture(seen):
 
 
 def test_c9k_iox_gets_amd64_env(tmp_path):
-    (tmp_path / "iris-amd64.tar").write_text("fake")
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    env = seen["env"]
-    assert env["PKG"] == "iris-amd64.tar"
-    assert env["APP_INTF"] == "AppGigabitEthernet1/0/1"
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-amd64.tar")
+    target = _request_value(request, "target")
+    assert target["pkg"] == "iris-amd64.tar"
+    assert target["app_intf"] == "AppGigabitEthernet1/0/1"
     # Route B: the C9k SSD share is bind-mounted into the app, the scratch
     # lands there at disk speed, and placement targets bootflash like the
     # Guest Shell path — no scp, no CoPP-limited punt traffic.
-    assert env["TARGET_FS"] == "flash:"
-    assert env["SHARE_HOST_PATH"] == "/vol/usb1/iox_host_data_share"
-    assert env["SHARE_IOS_PATH"] == "usbflash1:iox_host_data_share"
+    assert target["target_fs"] == "flash:"
+    assert target["share_host_path"] == "/vol/usb1/iox_host_data_share"
+    assert target["share_ios_path"] == "usbflash1:iox_host_data_share"
+    assert "board_identity" not in target
 
 
 def test_ie3k_iox_keeps_arm_defaults(tmp_path):
-    (tmp_path / "iris-arm64.tar").write_text("fake")
     fleet = _iox_fleet(model="IE-3400")   # model regex -> iox, arm
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController()
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet)
     job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
-    env = seen["env"]
+    assert raw_runs == []
+    request = controller.requests[0]
+    assert _request_value(request, "wrapper_path").endswith(
+        "iris-arm64.tar")
+    target = _request_value(request, "target")
     # arm case leaves these unset so install.sh's own defaults apply
-    assert "PKG" not in env
-    assert "APP_INTF" not in env
-    assert "TARGET_FS" not in env
+    assert "pkg" not in target
+    assert "app_intf" not in target
+    assert "target_fs" not in target
     # the SSD share mount is a C9k mechanism; IE-3x00 keeps the scp path
-    assert "SHARE_HOST_PATH" not in env
-    assert "SHARE_IOS_PATH" not in env
+    assert "share_host_path" not in target
+    assert "share_ios_path" not in target
 
 
 def test_c9k_guestshell_override_runs_guestshell(tmp_path):
@@ -2542,29 +2541,25 @@ def test_c9k_guestshell_override_runs_guestshell(tmp_path):
     assert "PKG" not in seen["env"] and "DEVICE_SSH_PASS" not in seen["env"]
 
 
-def test_c9k_stacked_member_app_intf_override_wins(tmp_path):
-    (tmp_path / "iris-amd64.tar").write_text("fake")
+def test_c9k_stacked_member_app_intf_override_wins(tmp_path, monkeypatch):
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), iox_preflight_fn=_iox_preflight_ok(),
-        artifacts_dir=str(tmp_path))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
     # simulate an operator/env override for a stacked member 2/0/1
-    import os as _os
-    old = _os.environ.get("APP_INTF")
-    _os.environ["APP_INTF"] = "AppGigabitEthernet2/0/1"
-    try:
-        job = _wait(svc, svc.start("d1"))
-    finally:
-        if old is None:
-            _os.environ.pop("APP_INTF", None)
-        else:
-            _os.environ["APP_INTF"] = old
+    monkeypatch.setenv("APP_INTF", "AppGigabitEthernet2/0/1")
+    job = _wait(svc, svc.start("d1"))
     assert job["state"] == "done"
+    assert raw_runs == []
+    target = _request_value(controller.requests[0], "target")
     # setdefault must not clobber the explicit override
-    assert seen["env"]["APP_INTF"] == "AppGigabitEthernet2/0/1"
-    assert seen["env"]["PKG"] == "iris-amd64.tar"
+    assert target["app_intf"] == "AppGigabitEthernet2/0/1"
+    assert target["pkg"] == "iris-amd64.tar"
 
 
 def test_iox_unclassifiable_model_raises_guard(tmp_path):
@@ -2587,15 +2582,23 @@ def test_iox_unclassifiable_model_raises_guard(tmp_path):
 
 def test_undeploy_c9k_uses_resolved_amd64_pkg(tmp_path):
     fleet = _iox_fleet(platform="iox", model="C9300-48UXM")
-    seen = {}
-    svc = gui_onboard.OnboardService(
-        fleet, _iox_creds(), host_ip="10.9.9.9", mint_fn=lambda d: "TOK",
-        run_fn=_run_capture(seen), artifacts_dir=str(tmp_path))
-    job = _wait(svc, svc.start("d1", action="undeploy"))
+    raw_runs = []
+    controller = _FrozenIoxController(identity={
+        "board_identity": "FDO2547X9AB", "model": "C9300-48UXM",
+        "os_family": "xe", "platform": "iox",
+    })
+    svc = _iox_controller_service(
+        tmp_path, controller, raw_runs, fleet=fleet,
+        artifact_names=("iris-amd64.tar",))
+    job = _wait(svc, svc.start(
+        "d1", action="undeploy", teardown_mode="force_agent_only"))
     assert job["state"] == "done"
+    assert raw_runs == []
     # undeploy never checks the artifacts guard, but _resolve populates PKG so
     # uninstall.sh deletes flash:iris-amd64.tar
-    assert seen["env"]["PKG"] == "iris-amd64.tar"
+    request = controller.requests[0]
+    assert not _request_has(request, "wrapper_path")
+    assert _request_value(request, "target")["pkg"] == "iris-amd64.tar"
 
 
 def test_c9k_iox_notfound_names_amd64_tar(tmp_path):
@@ -3581,3 +3584,518 @@ def test_build_env_record_svi_igp_overrides_the_inherited_env_default(monkeypatc
         "platform": "guestshell", "management_type": "routed",
         "device_ip": "10.0.0.1", "svi_igp": "none"})
     assert env["SVI_IGP"] == "none"
+
+
+# ---- IOx controller custody -------------------------------------------------
+
+def _request_value(request, key):
+    if isinstance(request, dict):
+        return request.get(key)
+    return getattr(request, key)
+
+
+def _request_has(request, key):
+    if isinstance(request, dict):
+        return key in request
+    return hasattr(request, key)
+
+
+def _cancel_value(cancel):
+    return cancel() if callable(cancel) else cancel.is_set()
+
+
+class _FrozenIoxController:
+    """Small behavioral fake for the frozen controller/service boundary."""
+
+    def __init__(self, events=None, result=None, entered=None, release=None,
+                 identity=None):
+        self.events = events if events is not None else []
+        self.result = result if result is not None else {}
+        self.requests = []
+        self.callback_calls = []
+        self.preflight_results = []
+        self.prepare_results = []
+        self.entered = entered
+        self.release = release
+        self.identity = identity or {
+            "board_identity": "FDO2547X9AB",
+            "model": "IE-3400", "os_family": "xe", "platform": "iox",
+        }
+
+    def _run(self, operation, request, prepare, preflight, on_output, cancel):
+        self.events.append("controller:" + operation)
+        self.requests.append(request)
+        job_id = _request_value(request, "job_id")
+        assert isinstance(job_id, str) and re.fullmatch(
+            r"[0-9a-f]{16}", job_id)
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            assert self.release.wait(5.0)
+        assert not _cancel_value(cancel)
+        identity = dict(self.identity)
+        self.callback_calls.append(("preflight", request, identity))
+        self.preflight_results.append(preflight(request, identity))
+        self.callback_calls.append(("prepare", request, identity))
+        record_id = prepare(request, identity)
+        self.prepare_results.append(record_id)
+        on_output("stdout", b"controller-owned IOx output\n")
+        result = {
+            "result_code": 0,
+            "returncode": 0,
+            "recovery_code": None,
+            "record_id": record_id,
+            "iox_verification": None,
+            "iox_session": None,
+        }
+        result.update(
+            self.result(request) if callable(self.result) else self.result)
+        return result
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "install", request, prepare, preflight, on_output, cancel)
+
+    def run_uninstall(self, request, prepare, preflight, on_output, cancel):
+        return self._run(
+            "uninstall", request, prepare, preflight, on_output, cancel)
+
+
+class _CancellingIoxController(_FrozenIoxController):
+    def __init__(self):
+        _FrozenIoxController.__init__(self)
+        self.entered = threading.Event()
+        self.stop = threading.Event()
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        self.requests.append(request)
+        self.entered.set()
+        deadline = time.time() + 5.0
+        while (not _cancel_value(cancel) and not self.stop.is_set()
+               and time.time() < deadline):
+            time.sleep(0.005)
+        assert _cancel_value(cancel), "abort did not reach controller"
+        job_id = _request_value(request, "job_id")
+        assert isinstance(job_id, str) and re.fullmatch(
+            r"[0-9a-f]{16}", job_id)
+        return {
+            "result_code": 130, "returncode": None, "recovery_code": 0,
+            "record_id": None, "iox_verification": None,
+            "iox_session": {
+                "attempt_id": "b" * 32, "job_id": job_id,
+                "device_id": "d1", "board_identity": "FDO2547X9AB",
+                "operation": "install", "teardown_mode": "none",
+                "record_id": None, "state": "reaped",
+                "mutation_blocked": False,
+            },
+        }
+
+
+def _iox_controller_service(tmp_path, controller, raw_runs=None,
+                            preflight_fn=None, mint_fn=None, fleet=None,
+                            probe_fn=None, artifact_names=None):
+    artifact_names = artifact_names or ("iris-arm64.tar",)
+    for name in artifact_names:
+        (tmp_path / name).write_bytes(b"frozen-wrapper")
+    raw_runs = raw_runs if raw_runs is not None else []
+
+    def legacy_runner(*args, **kwargs):
+        raw_runs.append((args, kwargs))
+        raise AssertionError("real IOx work escaped controller custody")
+
+    return gui_onboard.OnboardService(
+        fleet or _iox_fleet(platform="iox", model="IE-3400"), _iox_creds(),
+        host_ip="10.9.9.9",
+        mint_fn=mint_fn or (lambda device_id: "TOK-" + device_id),
+        run_fn=legacy_runner,
+        probe_fn=probe_fn,
+        iox_preflight_fn=preflight_fn or _iox_preflight_ok(),
+        artifacts_dir=str(tmp_path), iox_controller=controller)
+
+
+def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
+    """Freeze the whole Console -> controller -> private recipe handoff."""
+    import test_iox_verification as iox_spec
+
+    board_identity = iox_spec._BOARD
+    model = "IE-3400-8T2S"
+    wrapper_source = iox_spec._write_wrapper(
+        tmp_path, markers=("package.sign", "package.cert"))
+    wrapper_path = tmp_path / "iris-arm64.tar"
+    with open(wrapper_source, "rb") as source:
+        wrapper_path.write_bytes(source.read())
+
+    recipe_event = tmp_path / "recipe-events"
+    recipe = iox_spec._write_recipe_peer(
+        tmp_path, operations=iox_spec._install_operations(),
+        event_path=str(recipe_event))
+    state_dir = tmp_path / "state"
+    store = deployment_records.DeploymentRecordStore(str(state_dir))
+    transport = iox_spec._TransportFactory(board=board_identity)
+    credentials = {
+        "device_user": "admin",
+        "device_pass": "console-device-pass-SECRET",
+        "enable_secret": "console-enable-SECRET",
+    }
+    enrollment_token = "console-catalog-token-SECRET"
+    controller = iox_spec._controller(
+        tmp_path, store, transport,
+        credential_resolver=lambda reference: (
+            credentials if reference == "lab" else None),
+        enrollment_token_minter=lambda device_id: enrollment_token,
+        recipe_argv_by_action={"install": ["/bin/bash", recipe]})
+    assert isinstance(controller, iox_spec._module().IoxController)
+    legacy_calls = []
+
+    def legacy_runner(*args, **kwargs):
+        legacy_calls.append((args, kwargs))
+        raise AssertionError("IOx job bypassed controller custody")
+
+    service = gui_onboard.OnboardService(
+        _iox_fleet(platform="iox", model=model), _iox_creds(),
+        host_ip="10.9.9.9", mint_fn=lambda device_id: enrollment_token,
+        run_fn=legacy_runner,
+        iox_preflight_fn=_iox_preflight_ok(
+            identity=board_identity, model=model),
+        artifacts_dir=str(tmp_path), record_store=store,
+        iox_controller=controller)
+
+    def prepare_record():
+        record = store.create({
+            "record_id": "record-1", "controller_id": "controller-1",
+            "device_id": "d1", "inventory_revision": 1,
+            "plan_hash": "a" * 64,
+            "resolved": {
+                "platform": "iox", "model": model, "os_family": "xe",
+                "device_ip": "10.0.0.1", "management_type": "routed",
+                "device_identity": board_identity, "vlan": "666",
+                "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+                "guest_ip": "10.0.0.3",
+                "resources": [
+                    {"kind": "iox-app", "ownership": "iris-created"}],
+            },
+            "preflight": {
+                "status": "passed", "device_identity": board_identity,
+                "detected_model": model,
+            },
+            "resources": [
+                {"kind": "iox-app", "ownership": "iris-created"}],
+        })
+        return record["record_id"]
+
+    try:
+        job_id = service.start("d1", prepare=prepare_record)
+        job = _wait(service, job_id)
+    finally:
+        controller.close()
+
+    assert re.fullmatch(r"[0-9a-f]{16}", job_id)
+    assert legacy_calls == []
+    assert job["state"] == "done"
+    assert job["result_code"] == 0
+    assert job["returncode"] == 0
+    assert job["recovery_code"] is None
+    assert job["record_id"] == "record-1"
+    assert recipe_event.read_bytes() == b"finish_ack\n"
+
+    # Reload through a separate store instance: this must be the durable
+    # deployment record and terminal authority journal, not test-fake state.
+    persisted_store = deployment_records.DeploymentRecordStore(str(state_dir))
+    persisted_record = persisted_store.get("record-1", strict=True)
+    assert persisted_record["state"] == "active"
+    journal = persisted_record["iox_verification"]
+    assert journal["record_id"] == job["record_id"]
+    assert journal["controller_id"] == iox_spec._CONTROLLER_ID
+    assert journal["board_identity"] == board_identity
+    assert journal["phase"] == "unchanged"
+    assert journal["unresolved"] is False
+    assert set(job["iox_verification"]) == {
+        "schema_version", "record_id", "transaction_id", "revision",
+        "board_identity", "prior_state", "current_state", "phase",
+        "unresolved", "created_at", "updated_at", "observed_at",
+        "terminal_at", "error_category"}
+    assert job["iox_verification"]["record_id"] == journal["record_id"]
+    assert job["iox_verification"]["transaction_id"] == journal[
+        "transaction_id"]
+    assert job["iox_verification"]["phase"] == journal["phase"]
+    assert job["iox_session"]["job_id"] == job_id
+
+    persisted_files = []
+    for root, _directories, filenames in os.walk(str(tmp_path)):
+        for filename in filenames:
+            path = os.path.join(root, filename)
+            with open(path, "rb") as stream:
+                persisted_files.append(stream.read())
+    assert any(job_id.encode("ascii") in body for body in persisted_files), (
+        "controller custody never durably associated the Console job ID")
+    published = repr(job).encode("utf-8")
+    for secret in (credentials["device_pass"], credentials["enable_secret"],
+                   enrollment_token):
+        needle = secret.encode("utf-8")
+        assert needle not in published
+        assert all(needle not in body for body in persisted_files)
+
+
+def test_real_iox_install_routes_only_through_the_controller(tmp_path):
+    raw_runs = []
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(tmp_path, controller, raw_runs)
+
+    job_id = service.start("d1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    assert raw_runs == []
+    assert len(controller.requests) == 1
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "install"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "none"
+    assert _request_value(request, "record_id") is None
+    assert _request_has(request, "wrapper_path")
+    assert _request_value(request, "wrapper_path").endswith("iris-arm64.tar")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert "controller-owned IOx output" in job["lines"]
+
+
+def test_iox_prepare_is_deferred_inside_controller(tmp_path):
+    events = []
+    entered = threading.Event()
+    release = threading.Event()
+    controller = _FrozenIoxController(
+        events=events, entered=entered, release=release)
+
+    def preflight(*_args, **_kwargs):
+        events.append("preflight")
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
+    service = _iox_controller_service(
+        tmp_path, controller, preflight_fn=preflight,
+        mint_fn=lambda device_id: events.append("mint") or "TOK-" + device_id)
+
+    def prepare():
+        events.append("prepare")
+        return "record-after-recovery"
+
+    job_id = service.start("d1", prepare=prepare)
+    assert entered.wait(2.0)
+    try:
+        running = service.get_job(job_id)
+        assert running["state"] == "running"
+        assert running["result_code"] is None
+        assert running["returncode"] is None
+        assert running["recovery_code"] is None
+        assert running["iox_verification"] is None
+        assert running["iox_session"] is None
+        assert _request_value(controller.requests[0], "job_id") == job_id
+        # Queue admission must not create a record. The controller invokes
+        # preparation only after entering its board/recovery gate.
+        assert "prepare" not in events
+        assert "mint" not in events
+    finally:
+        release.set()
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    assert events == ["controller:install", "preflight", "prepare", "mint"]
+    assert job["record_id"] == "record-after-recovery"
+
+
+def test_same_action_iox_submission_deduplicates_while_controller_is_running(
+        tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    controller = _FrozenIoxController(entered=entered, release=release)
+    service = _iox_controller_service(tmp_path, controller)
+    prepares = []
+
+    def prepare():
+        prepares.append("record-1")
+        return "record-1"
+
+    first = service.start("d1", prepare=prepare)
+    assert entered.wait(2.0)
+    second_result = []
+    second_done = threading.Event()
+
+    def submit_again():
+        try:
+            second_result.append(("ok", service.start("d1", prepare=prepare)))
+        except Exception as exc:
+            second_result.append(("error", exc))
+        finally:
+            second_done.set()
+
+    submitter = threading.Thread(target=submit_again)
+    submitter.daemon = True
+    submitter.start()
+    try:
+        assert second_done.wait(1.0), (
+            "same-action dedupe blocked behind controller execution")
+        assert second_result == [("ok", first)]
+        assert len(controller.requests) == 1
+        assert _request_value(controller.requests[0], "job_id") == first
+        assert prepares == []
+    finally:
+        release.set()
+        submitter.join(2.0)
+    assert not submitter.is_alive()
+
+    job = _wait(service, first)
+    assert job["state"] == "done"
+    assert prepares == ["record-1"]
+
+
+def test_running_iox_abort_reaches_controller_and_preserves_normalized_result(
+        tmp_path):
+    controller = _CancellingIoxController()
+    raw_runs = []
+    service = _iox_controller_service(tmp_path, controller, raw_runs)
+
+    job_id = service.start("d1")
+    assert controller.entered.wait(2.0)
+    abort_result = []
+    abort_thread = threading.Thread(
+        target=lambda: abort_result.append(service.abort(job_id)))
+    abort_thread.daemon = True
+    abort_thread.start()
+    try:
+        abort_thread.join(2.0)
+        assert not abort_thread.is_alive(), (
+            "abort blocked behind controller work")
+        assert abort_result == [True]
+    finally:
+        controller.stop.set()
+        abort_thread.join(2.0)
+    job = _wait(service, job_id)
+
+    assert job["state"] == "cancelled"
+    assert job["result_code"] == 130
+    assert job["returncode"] is None
+    assert job["recovery_code"] == 0
+    assert set(job["iox_session"]) == {
+        "attempt_id", "job_id", "device_id", "board_identity", "operation",
+        "teardown_mode", "record_id", "state", "mutation_blocked"}
+    assert job["iox_session"]["state"] == "reaped"
+    assert job["iox_session"]["mutation_blocked"] is False
+    assert job["iox_session"]["job_id"] == job_id
+    assert raw_runs == []
+
+
+def test_iox_terminal_controller_evidence_is_published_without_inference(tmp_path):
+    verification = {
+        "schema_version": 1, "record_id": "record-1",
+        "transaction_id": "1" * 32, "revision": 7,
+        "board_identity": "FDO2547X9AB", "prior_state": "enabled",
+        "current_state": "disabled", "phase": "restore_intent",
+        "unresolved": True, "created_at": 10, "updated_at": 20,
+        "observed_at": 19, "terminal_at": None,
+        "error_category": "journal_durability",
+    }
+    evidence = {}
+
+    def controller_result(request):
+        session = {
+            "attempt_id": "a" * 32,
+            "job_id": _request_value(request, "job_id"),
+            "device_id": "d1", "board_identity": "FDO2547X9AB",
+            "operation": "install", "teardown_mode": "none",
+            "record_id": "record-1", "state": "reaped",
+            "mutation_blocked": False,
+        }
+        evidence["session"] = session
+        return {
+            "result_code": 4, "returncode": -15, "recovery_code": 5,
+            "record_id": "record-1", "iox_verification": verification,
+            "iox_session": session,
+        }
+
+    controller = _FrozenIoxController(result=controller_result)
+    service = _iox_controller_service(tmp_path, controller)
+
+    job_id = service.start("d1", prepare=lambda: "record-1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "error"
+    assert job["result_code"] == 4
+    assert job["returncode"] == -15
+    assert job["recovery_code"] == 5
+    assert job["record_id"] == "record-1"
+    assert job["iox_verification"] == verification
+    assert job["iox_session"] == evidence["session"]
+    assert job["iox_session"]["job_id"] == job_id
+
+
+def test_recorded_iox_uninstall_keeps_the_preselected_record_target(tmp_path):
+    controller = _FrozenIoxController()
+    minted = []
+    service = _iox_controller_service(
+        tmp_path, controller,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK")
+    service.fleet.upsert({"device_id": "d1", "device_ip": "203.0.113.99"})
+    recorded = {
+        "platform": "iox", "model": "IE-3400", "os_family": "xe",
+        "device_ip": "10.0.0.1", "management_type": "routed",
+        "device_identity": "FDO2547X9AB", "vlan": "666",
+        "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
+        "guest_ip": "10.0.0.3",
+        "resources": [{"kind": "iox-app", "ownership": "iris-created"}],
+    }
+
+    job_id = service.start(
+        "d1", action="undeploy", resolved=recorded,
+        record_id="record-1", teardown_mode="recorded",
+        prepare=lambda: "record-1")
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "recorded"
+    assert _request_value(request, "record_id") == "record-1"
+    assert not _request_has(request, "wrapper_path")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert target["device_identity"] == "FDO2547X9AB"
+    assert target["resources"] == recorded["resources"]
+    assert minted == []
+
+
+def test_forced_iox_uninstall_uses_explicit_controller_mode_without_a_record(
+        tmp_path):
+    controller = _FrozenIoxController()
+    minted = []
+    service = _iox_controller_service(
+        tmp_path, controller,
+        mint_fn=lambda device_id: minted.append(device_id) or "TOK")
+
+    job_id = service.start(
+        "d1", action="undeploy", resolved={
+            "platform": "iox", "model": "IE-3400", "os_family": "xe",
+            "device_ip": "10.0.0.1", "management_type": "routed",
+        }, record_id=None, teardown_mode="force_agent_only",
+        prepare=lambda: None)
+    job = _wait(service, job_id)
+
+    assert job["state"] == "done"
+    request = controller.requests[0]
+    assert _request_value(request, "action") == "uninstall"
+    assert _request_value(request, "device_id") == "d1"
+    assert _request_value(request, "job_id") == job_id
+    assert _request_value(request, "credential_ref") == "lab"
+    assert _request_value(request, "teardown_mode") == "force_agent_only"
+    assert _request_value(request, "record_id") is None
+    assert not _request_has(request, "wrapper_path")
+    target = _request_value(request, "target")
+    assert {key: target[key] for key in ("host", "port", "platform")} == {
+        "host": "10.0.0.1", "port": 22, "platform": "iox"}
+    assert minted == []
