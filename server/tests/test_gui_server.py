@@ -8,6 +8,54 @@ import management_api as gui_server
 import pytest
 
 
+def test_management_sigterm_runs_ordered_shutdown_cleanup(tmp_path):
+    """Container stop must enter the same cleanup path as normal return."""
+    import subprocess
+    import sys
+    import time
+
+    ready = tmp_path / "ready"
+    cleaned = tmp_path / "cleaned"
+    program = r'''
+import os
+import signal
+import sys
+import management_api
+
+ready, cleaned = sys.argv[1:]
+
+class Server:
+    def serve_forever(self):
+        with open(ready, "w"):
+            pass
+        while True:
+            signal.pause()
+
+def cleanup():
+    with open(cleaned, "w") as stream:
+        stream.write("drained")
+
+management_api._serve_with_shutdown(Server(), cleanup)
+'''
+    proc = subprocess.Popen(
+        [sys.executable, "-c", program, str(ready), str(cleaned)],
+        env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    try:
+        deadline = time.time() + 3.0
+        while not ready.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), proc.communicate(timeout=1)
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0, (stdout, stderr)
+        assert cleaned.read_text() == "drained"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
     assert '<th>Device</th><th>Role</th>' in html
