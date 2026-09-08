@@ -156,14 +156,42 @@ ROOT_COPY_NOT_ATTEMPTED = object()
 # `rename`, a directory-entry update that moves no data. The probe and its
 # surcharge were removed (scrubber #138); the gate charges exactly the bytes
 # the temp copy actually writes, same as before the crash-safety fix.
-Deps = collections.namedtuple(
+_BaseDeps = collections.namedtuple(
     "Deps", "catalog emit boot_image aria_add file_size verify free_bytes "
             "version copy_to_root purge_others reclaim root_present "
             "remove_stage aria_remove detect_mode target_fs running_image "
             "reclaimable reclaim_bundle model refresh aria_stats aria_peers "
             "io_transfer checkpoint aria_session copy_in_place "
             "root_file_size verify_root")
-Deps.__new__.__defaults__ = (None, None)
+_BaseDeps.__new__.__defaults__ = (None, None)
+
+
+class Deps(_BaseDeps):
+    """Established 29-field dependency tuple with an additive callback view.
+
+    Keep the callback as per-instance metadata so older code that checks the
+    tuple's exact shape remains valid, while new callers can construct and
+    replace ``instruction_step`` as if it were an optional dependency.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        instruction_step = kwargs.pop("instruction_step", None)
+        value = _BaseDeps.__new__(cls, *args, **kwargs)
+        value._instruction_step = instruction_step
+        return value
+
+    @property
+    def instruction_step(self):
+        return self._instruction_step
+
+    def _replace(self, **kwargs):
+        marker = object()
+        instruction_step = kwargs.pop("instruction_step", marker)
+        if instruction_step is marker:
+            instruction_step = self.instruction_step
+        value = _BaseDeps._replace(self, **kwargs)
+        value._instruction_step = instruction_step
+        return value
 
 
 def _atomic_write_state(state_path, state):
@@ -240,7 +268,44 @@ def _heartbeat(image, deps, stage_state="staging", target_fs=None,
     return hb
 
 
-def _send_heartbeat(deps, sid, payload):
+_INSTRUCTION_STATES = frozenset((
+    "none", "applied", "lkg", "stale_expired", "allowlist_expired",
+    "rollback_rejected", "floor_reset", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "verifier_missing", "lkg_rejected", "lkg_unreadable",
+    "oversize", "reasserted", "instr_unavailable", "instr_pending",
+    "instr_forbidden", "tracker-only",
+))
+_INSTRUCTION_REASONS = frozenset(("unknown_key", "bad_mac"))
+
+
+def _heartbeat_with_instruction(payload, attestation):
+    """Copy only the bounded public instruction facts into a heartbeat."""
+    if not isinstance(attestation, dict):
+        return payload
+    clean = {}
+    instr_state = attestation.get("instr_state")
+    if isinstance(instr_state, str) and instr_state in _INSTRUCTION_STATES:
+        clean["instr_state"] = instr_state
+    instr_reason = attestation.get("instr_reason")
+    if (instr_state == "key_rejected"
+            and isinstance(instr_reason, str)
+            and instr_reason in _INSTRUCTION_REASONS):
+        clean["instr_reason"] = instr_reason
+    instr_serial = attestation.get("instr_serial")
+    if (not isinstance(instr_serial, bool) and isinstance(instr_serial, int)
+            and 0 <= instr_serial <= (1 << 63) - 1):
+        clean["instr_serial"] = instr_serial
+    verify_level = attestation.get("verify_level")
+    if verify_level in ("sig", "none"):
+        clean["verify_level"] = verify_level
+    if not clean:
+        return payload
+    result = dict(payload)
+    result.update(clean)
+    return result
+
+
+def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
     """POST a heartbeat, BEST-EFFORT — must never raise out of run_once.
 
     The heartbeat is the LAST step on every path, AFTER the tick has already
@@ -259,7 +324,8 @@ def _send_heartbeat(deps, sid, payload):
     realistic on enterprise networks and would discard progress. Mirrors
     _emit_impl's unconditional best-effort try/except."""
     try:
-        return deps.catalog.heartbeat(sid, payload)
+        return deps.catalog.heartbeat(
+            sid, _heartbeat_with_instruction(payload, instruction_attestation))
     except Exception as e:
         deps.emit("HEARTBEAT-FAIL", "%s heartbeat failed (ignored): %s" % (sid, e))
         return None
@@ -1096,7 +1162,8 @@ class _ImageTick:
 # an image record (below) is keyed by image id.
 _RESERVED_STATE_KEYS = frozenset((
     "schema_version", "image_id", "root_file", "stage_fs",
-    "pending_root_deletes", "link", "frozen_pull", "stream_directives"))
+    "pending_root_deletes", "link", "frozen_pull", "stream_directives",
+    "instructions"))
 
 # Fields only a per-image record carries. Membership in the assigned set is
 # not enough to recognise one: the park pass has to find records for images
@@ -1416,7 +1483,8 @@ _SET_STAGE_STATES = ("flash_full_seeding_only", "flash_full", "error",
                      "copy_failed")
 
 
-def _send_set_heartbeat(deps, sid, state, ids, ticks):
+def _send_set_heartbeat(deps, sid, state, ids, ticks,
+                        instruction_attestation=None):
     """POST the tick's single heartbeat for the whole set; return the response.
 
     A one-image set POSTs its recorded payload verbatim — same keys, same
@@ -1428,7 +1496,8 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
         # Defensive: a future path may return without a heartbeat payload.
         return None
     if len(ids) == 1:
-        return _send_heartbeat(deps, sid, live[0].build())
+        return _send_heartbeat(deps, sid, live[0].build(),
+                               instruction_attestation)
     staged = _staged_image_ids(state, ids)
     # Which assigned images THIS TICK's own per-image status calls a
     # terminal failure -- the same _SET_STAGE_STATES vocabulary `failed`
@@ -1456,11 +1525,12 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks):
                                  "staging")
     hb["stage_error"] = next((t.stage_error for t in live if t.stage_error),
                              None)
-    return _send_heartbeat(deps, sid, hb)
+    return _send_heartbeat(deps, sid, hb, instruction_attestation)
 
 
 def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
-                 legacy_pointer=False, plan_row=None):
+                 legacy_pointer=False, plan_row=None,
+                 instruction_attestation=None):
     """Stage ONE image of the assigned set and return its status string.
 
     This is the whole of the pre-multi-image run_once() from the catalog
@@ -2121,7 +2191,8 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         deps, sid, _heartbeat(image, deps, "transferring_to_ios",
                                               target_fs=target_prefix,
                                               tele_on=tele_on,
-                                              stream_on=stream_on))
+                                              stream_on=stream_on),
+                        instruction_attestation)
                 if not st.get("copied") and not st.get("copy_terminal") \
                         and now >= st.get("copy_next_ts", 0):
                     result = deps.copy_to_root(image["filename"], target_prefix, size)
@@ -2526,14 +2597,37 @@ def run_once(cfg, deps, state):
     # so a few failed ticks never strand the device; the live client's bearer
     # is _refresh_impl's concern, see its docstring for the failure split).
     _container_platform = cfg.get("device_platform") in agent_config.DEVICE_PLATFORMS
-    if ((_container_platform and not cfg.get("announce_token"))
-            or needs_refresh(time.time(),
-                             int(float(cfg.get("token_expires_at", 0) or 0)),
-                             _TOKEN_TTL, _TOKEN_REFRESH_AT)):
+    expires_at = int(float(cfg.get("token_expires_at", 0) or 0))
+    catalog_now = None
+    instruction_runtime = None
+    monotonic_now = None
+    current_boot_id = None
+    # main() validates these fields before run_once. A few old unit fixtures
+    # deliberately call this function with only device_id/stage_dir; preserve
+    # that non-runtime seam without consulting the untrusted device wall clock.
+    # Every production config has catalog_url and therefore refreshes
+    # conservatively until an authenticated catalog Date anchors this boot.
+    if cfg.get("catalog_url") or isinstance(state.get("instructions"), dict):
+        import instr
+        instruction_runtime = instr
+        monotonic_now = time.monotonic()
+        current_boot_id = instr.boot_id()
+        catalog_now = instr.project_clock(
+            state, "catalog", monotonic_now, current_boot_id)
+    refresh_due = catalog_now is None
+    if catalog_now is not None:
+        refresh_due = needs_refresh(catalog_now, expires_at,
+                                    _TOKEN_TTL, _TOKEN_REFRESH_AT)
+    if ((_container_platform and not cfg.get("announce_token")) or refresh_due):
         new_cfg = deps.refresh()
         if new_cfg is None:
-            deps.emit("TOKEN-REFRESH-FAIL",
-                      "catalog token refresh failed; proceeding on current token")
+            # main() never reaches this point without catalog_url. Preserve
+            # the old direct-unit-call seam's quiet behavior while still
+            # exercising its conservative refresh callback.
+            if cfg.get("catalog_url") or expires_at == 0:
+                deps.emit(
+                    "TOKEN-REFRESH-FAIL",
+                    "catalog token refresh failed; proceeding on current token")
         else:
             cfg = new_cfg
     sid = cfg["device_id"]
@@ -2557,6 +2651,53 @@ def run_once(cfg, deps, state):
             deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
 
     policy = deps.catalog.get_policy(sid)
+    cumulative_catalog_date = getattr(
+        deps.catalog, "last_authenticated_date", None)
+    _missing_response_date = object()
+    authenticated_date = getattr(
+        deps.catalog, "response_authenticated_date", _missing_response_date)
+    if authenticated_date is _missing_response_date:
+        # Compatibility for established test doubles. The production
+        # CatalogClient exposes the per-response property and resets it before
+        # every request, so a missing/invalid Date on this policy response can
+        # never inherit an older value.
+        authenticated_date = cumulative_catalog_date
+    catalog_clock_date = (cumulative_catalog_date
+                          if cumulative_catalog_date is not None
+                          else authenticated_date)
+    if catalog_clock_date is not None:
+        # Anchor at response receipt, after any token refresh and policy I/O;
+        # the pre-request sample would under-project elapsed authenticated time.
+        monotonic_now = time.monotonic()
+        if instruction_runtime is None:
+            import instr
+            instruction_runtime = instr
+            current_boot_id = instr.boot_id()
+        try:
+            instruction_runtime.observe_clock(
+                state, "catalog", catalog_clock_date,
+                monotonic_now, current_boot_id)
+        except instruction_runtime.InstructionError:
+            # A rejected catalog-clock update cannot suppress staging. The
+            # existing trusted anchor, if any, remains the refresh authority.
+            pass
+
+    instruction_attestation = None
+    if callable(deps.instruction_step):
+        try:
+            instruction_result = deps.instruction_step(
+                cfg=cfg, state=state, hints=policy,
+                catalog_date=authenticated_date)
+            if isinstance(instruction_result, dict):
+                instruction_attestation = instruction_result.get("attestation")
+        except Exception as e:
+            # Do not format the exception: instruction artifacts and verifier
+            # failures can contain material that must never reach syslog or a
+            # heartbeat. Only the exception class is useful operationally.
+            deps.emit("INSTRUCTION-FAIL",
+                      "instruction step failed (ignored): %s"
+                      % type(e).__name__)
+            instruction_attestation = {"instr_state": "instr_unavailable"}
     # The server assigns an ORDERED SET of images (at most 10). Older servers,
     # and policy rows they wrote, carry only the singular approved_image_id —
     # fall back to it and stage a set of one, which is byte-for-byte the old
@@ -2599,7 +2740,8 @@ def run_once(cfg, deps, state):
                                    target_fs=cfg.get("target_fs"),
                                    tele_on=tele_on, stream_on=stream_on,
                                    observation=_not_active_observation(
-                                       tele_on, time.time())))
+                                       tele_on, time.time())),
+                        instruction_attestation)
         return "no-assignment"
 
     ticks = []
@@ -2613,11 +2755,14 @@ def run_once(cfg, deps, state):
         statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
                                      stream_on, tick,
                                      legacy_pointer=(idx == 0),
-                                     plan_row=plan_rows.get(img_id)))
+                                     plan_row=plan_rows.get(img_id),
+                                     instruction_attestation=
+                                     instruction_attestation))
 
     # ONE heartbeat for the whole set (the device is one row on the server),
     # then each image's telemetry replayed against the answer it carried.
-    hb_resp = _send_set_heartbeat(deps, sid, state, ids, ticks)
+    hb_resp = _send_set_heartbeat(
+        deps, sid, state, ids, ticks, instruction_attestation)
     for tick in ticks:
         tick.replay(hb_resp)
 
@@ -2799,6 +2944,10 @@ def _refresh_impl(cfg, conf_path, catalog, emit_fn):
     if bag.get("rpc_secret") is not None:
         new_cfg["rpc_secret"] = bag["rpc_secret"]
     try:
+        # Instruction-key validation is an independent subtransaction. The
+        # config helper returns a fresh mapping, retains the complete old pair
+        # on malformed input, and deliberately never consumes a server lkg_key.
+        new_cfg = agent_config.merge_instruction_key_refresh(new_cfg, bag)
         agent_config.write_conf(conf_path, new_cfg)
     except Exception as e:
         emit_fn("TOKEN-REFRESH-FAIL", "%s conf rewrite failed: %s" % (sid, e))
@@ -3881,6 +4030,48 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
 
 # ---- on-box wiring (not exercised by unit tests) ----
 
+def _instruction_platform(platform, cfg):
+    """Map the established launcher/storage profiles to the signed platform."""
+    if platform == "iox":
+        return "iox"
+    if platform == "xr-appmgr" \
+            or (not platform and (cfg.get("mode") or "").strip() == "xr"):
+        return "xr-appmgr"
+    if (not platform
+            and cfg.get("stage_dir") == "/bootflash/guest-share/iris"
+            and cfg.get("target_fs") == "bootflash:"):
+        return "router"
+    return "guestshell"
+
+
+def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
+    """Attach Task 15's contained instruction step to platform dependencies."""
+    # Preserve the established platform-dispatch seam: tests and downstream
+    # wrappers may return an opaque sentinel from a substituted builder.  Only
+    # the real dependency contract can safely receive runtime wiring.
+    if (getattr(deps, "_fields", None) != Deps._fields
+            or not callable(getattr(deps, "_replace", None))):
+        return deps
+    import instr
+
+    runtime_platform = _instruction_platform(platform, cfg)
+    paths = instr.paths_for(runtime_platform, cfg)
+    verifier = instr.SSHVerifier(
+        shutil.which("ssh-keygen") or "/usr/bin/ssh-keygen",
+        paths["signers"], paths["root_signers"], paths["work_dir"])
+    current_boot_id = instr.boot_id()
+
+    def instruction_step(cfg, state, hints, catalog_date):
+        return instr.run_instruction_step(
+            cfg, state, deps.catalog, hints, catalog_date,
+            runtime_platform, paths["work_dir"], current_boot_id,
+            time.monotonic(), verifier,
+            lambda updated: agent_config.write_conf(conf_path, updated),
+            deps.emit, checkpoint=deps.checkpoint)
+
+    return deps._replace(instruction_step=instruction_step)
+
+
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # One container selector owns both the backend and storage profile. An
     # absent selector is the established Guest Shell path; container
@@ -3891,7 +4082,9 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     legacy_xr = (not platform and (cfg.get("mode") or "").strip() == "xr")
     if platform == "xr-appmgr" or legacy_xr:
         import xr_deps
-        return xr_deps.build_deps(cfg, conf_path, state_path)
+        return _with_instruction_step(
+            xr_deps.build_deps(cfg, conf_path, state_path),
+            cfg, conf_path, platform)
     import base64
     import urllib.request
     import catalog_client
@@ -4299,25 +4492,27 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # after a checkpointed POST restarts with the frozen id/sequence.
         _atomic_write_state(state_path, state)
 
-    return Deps(catalog=catalog, emit=emit, boot_image=boot_image,
-                aria_add=aria_add,
-                file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
-                verify=lambda p, sha: verify_image.sha256_matches(p, sha),
-                free_bytes=free_bytes, version=version, copy_to_root=copy_to_root,
-                purge_others=purge_others, reclaim=reclaim,
-                root_present=root_present, remove_stage=remove_stage,
-                aria_remove=aria_remove,
-                detect_mode=detect_mode, target_fs=target_fs,
-                running_image=running_image, reclaimable=reclaimable,
-                reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
-                aria_stats=aria_stats, aria_peers=aria_peers,
-                io_transfer=_container_iox,
-                checkpoint=checkpoint, aria_session=aria_session,
-                copy_in_place=False,
-                root_file_size=lambda name, prefix: _ios_root_file_size(
-                    name, prefix, cli_execute),
-                verify_root=lambda name, prefix, digest: _verify_guestshell_root(
-                    name, prefix, digest, cfg["stage_dir"], cli_configure))
+    deps = Deps(
+        catalog=catalog, emit=emit, boot_image=boot_image,
+        aria_add=aria_add,
+        file_size=lambda p: os.path.getsize(p) if os.path.exists(p) else None,
+        verify=lambda p, sha: verify_image.sha256_matches(p, sha),
+        free_bytes=free_bytes, version=version, copy_to_root=copy_to_root,
+        purge_others=purge_others, reclaim=reclaim,
+        root_present=root_present, remove_stage=remove_stage,
+        aria_remove=aria_remove,
+        detect_mode=detect_mode, target_fs=target_fs,
+        running_image=running_image, reclaimable=reclaimable,
+        reclaim_bundle=reclaim_bundle, model=model, refresh=refresh,
+        aria_stats=aria_stats, aria_peers=aria_peers,
+        io_transfer=_container_iox,
+        checkpoint=checkpoint, aria_session=aria_session,
+        copy_in_place=False,
+        root_file_size=lambda name, prefix: _ios_root_file_size(
+            name, prefix, cli_execute),
+        verify_root=lambda name, prefix, digest: _verify_guestshell_root(
+            name, prefix, digest, cfg["stage_dir"], cli_configure))
+    return _with_instruction_step(deps, cfg, conf_path, platform)
 
 
 def main():  # pragma: no cover

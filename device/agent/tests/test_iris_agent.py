@@ -3162,12 +3162,17 @@ def test_run_once_skips_refresh_when_token_fresh():
     deps, _, _, _, _, _, _, _ = make_deps(cat, {"/stage/img1.bin": 5})
     refreshed = []
     deps = deps._replace(refresh=lambda: refreshed.append(True))
-    # token minted, far from half-life: now (via injected) << expires - window.
-    # run_once reads time.time(); use a far-future expiry so needs_refresh is False.
+    # A fresh token is judged against authenticated catalog time, never the
+    # device wall clock. Seed the same persisted clock used by a successful GET.
     import time
+    import instr
+    authenticated_now = 1788782400
+    state = {}
+    instr.observe_clock(state, "catalog", authenticated_now,
+                        time.monotonic(), instr.boot_id())
     cfg = {"device_id": "sw1", "stage_dir": "/stage",
-           "token_expires_at": str(int(time.time()) + 604_800)}
-    assert iris_agent.run_once(cfg, deps, {}) == "complete"
+           "token_expires_at": str(authenticated_now + 604800)}
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
     assert refreshed == []        # token still fresh -> no refresh
 
 

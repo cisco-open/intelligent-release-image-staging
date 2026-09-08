@@ -8,6 +8,8 @@ iris_agent.make_catalog_context from the pinned catalog_ca (chain + hostname
 / IP-SAN checks); that builder fails closed and never falls back to an
 unverified context. `context=None` exists for plain-http unit tests only.
 Stdlib only."""
+import calendar
+import email.utils
 import gzip
 import json
 import os
@@ -28,6 +30,8 @@ RTT_LOG_MAX = 16
 JSON_RESPONSE_MAX = 64 * 1024
 TORRENT_RESPONSE_MAX = 4 * 1024 * 1024
 ERROR_RESPONSE_MAX = 64 * 1024
+INSTRUCTION_RESPONSE_MAX = 256 * 1024
+INSTRUCTION_KEYLIST_RESPONSE_MAX = 128 * 1024
 TRACKER_BEARER_NEGOTIATION_HEADER = "X-IRIS-Tracker-Auth"
 
 
@@ -49,6 +53,14 @@ class CatalogClient:
         # SSH-to-self costs seconds), so timed HTTPS calls are the agent's
         # only link probe. Drained once per tick via drain_rtts().
         self.rtt_ms_log = []
+        # The most recent strict IMF-fixdate on a successful authenticated
+        # response.  Consumers apply their own persisted monotonic/regression
+        # rules; this value deliberately records the response Date as received.
+        self.last_authenticated_date = None
+        # Per-call signal used when a response's payload (such as a policy
+        # hint) must be authenticated by that same response Date.  Unlike the
+        # cumulative value above, this resets before every request.
+        self.response_authenticated_date = None
 
     @staticmethod
     def _read_limited(response, limit):
@@ -70,11 +82,53 @@ class CatalogClient:
             if total > limit:
                 raise CatalogError("catalog response exceeds %d bytes" % limit)
 
+    @staticmethod
+    def _authenticated_date(headers):
+        if headers is None:
+            return None
+        get_all = getattr(headers, "get_all", None)
+        if get_all is not None:
+            values = get_all("Date") or []
+        else:
+            value = headers.get("Date")
+            values = [] if value is None else [value]
+        if len(values) != 1 or not isinstance(values[0], str):
+            return None
+        value = values[0]
+        try:
+            parsed = email.utils.parsedate_to_datetime(value)
+            if parsed is None or parsed.utcoffset() is None:
+                return None
+            timestamp = calendar.timegm(parsed.utctimetuple())
+            if email.utils.formatdate(timestamp, usegmt=True) != value:
+                return None
+        except (OSError, TypeError, ValueError, OverflowError):
+            return None
+        return value, timestamp
+
+    @classmethod
+    def _headers_dict(cls, headers):
+        if headers is None:
+            return {}
+        result = {name: value for name, value in headers.items()
+                  if name.lower() != "date"}
+        observed = cls._authenticated_date(headers)
+        if observed is not None:
+            result["Date"] = observed[0]
+        return result
+
+    def _observe_authenticated_date(self, headers):
+        observed = self._authenticated_date(headers)
+        if observed is not None:
+            self.response_authenticated_date = observed[1]
+            self.last_authenticated_date = observed[1]
+
     def _req(self, method, path, body=None, data=None, extra_headers=None,
-             max_response_bytes=JSON_RESPONSE_MAX):
+             max_response_bytes=JSON_RESPONSE_MAX, return_headers=False):
         # body: dict to JSON-encode. data: pre-encoded bytes sent as-is
         # (e.g. a gzipped telemetry report) -- callers pass one or the
         # other, never both. extra_headers: merged over the defaults.
+        self.response_authenticated_date = None
         url = self.base + path
         if data is None:
             data = json.dumps(body).encode() if body is not None else None
@@ -89,14 +143,25 @@ class CatalogClient:
             with urllib.request.urlopen(req, timeout=15, context=self.context) as r:
                 status = r.status
                 payload = self._read_limited(r, max_response_bytes)
+                response_headers = self._headers_dict(r.headers)
+                if 200 <= status <= 299:
+                    self._observe_authenticated_date(r.headers)
             # Successful round trip: record the RTT for link classification.
             # HTTPError/URLError paths record nothing -- failures feed the
             # heartbeat fail_streak instead, never the RTT median.
             self.rtt_ms_log.append((time.monotonic() - started) * 1000.0)
             del self.rtt_ms_log[:-RTT_LOG_MAX]        # keep the newest 16
-            return status, payload
+            result = (status, payload, response_headers)
+            return result if return_headers else result[:2]
         except urllib.error.HTTPError as e:
-            return e.code, self._read_limited(e, ERROR_RESPONSE_MAX)
+            limit = max_response_bytes if e.code == 304 else ERROR_RESPONSE_MAX
+            payload = self._read_limited(e, limit)
+            if e.code == 304:
+                if payload:
+                    raise CatalogError("catalog HTTP 304 response has a body")
+                self._observe_authenticated_date(e.headers)
+            result = (e.code, payload, self._headers_dict(e.headers))
+            return result if return_headers else result[:2]
         except urllib.error.URLError as e:
             raise CatalogError("catalog unreachable: %s" % e)
 
@@ -121,6 +186,27 @@ class CatalogClient:
         if status == 200:
             return json.loads(body)
         raise CatalogError("image %s -> HTTP %d" % (image_id, status))
+
+    def _get_binary(self, path, etag, limit):
+        headers = None
+        if etag is not None:
+            if not isinstance(etag, str) or not etag or any(
+                    character in etag for character in ("\x00", "\r", "\n")):
+                raise CatalogError("invalid catalog ETag")
+            headers = {"If-None-Match": etag}
+        return self._req(
+            "GET", path, extra_headers=headers, max_response_bytes=limit,
+            return_headers=True)
+
+    def get_instructions(self, device_id, etag=None):
+        return self._get_binary(
+            "/v1/devices/%s/instructions" % device_id, etag,
+            INSTRUCTION_RESPONSE_MAX)
+
+    def get_instruction_keylist(self, device_id, etag=None):
+        return self._get_binary(
+            "/v1/devices/%s/instruction-keylist" % device_id, etag,
+            INSTRUCTION_KEYLIST_RESPONSE_MAX)
 
     def download_torrent(self, image_id, dest_path):
         extra_headers = None
