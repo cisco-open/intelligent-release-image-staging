@@ -243,6 +243,25 @@ def test_role_cadence_applies_to_both_states_and_invalid_port(monkeypatch,
         server.shutdown()
 
 
+def test_canonical_quarantine_disables_restricted_sparse_selection(tmp_path):
+    paths = _paths(tmp_path)
+    document = _document(
+        defs={"boat": {"restricted": True, "peers": ["boat"]}},
+        role_of={"requester": "boat"})
+    document["quarantined_devices"] = {"requester": True}
+    _write_document(paths, document)
+    registry = PeerRegistry()
+    server, _port, _secrets_path_value = _serve(tmp_path, registry, paths)
+    try:
+        policy = peer_policy.PolicyResult(
+            document, False, False, peer_policy.compile_roles(document))
+        requester = auth.Principal("device", "requester")
+        assert server.RequestHandlerClass._restricted_candidates(
+            policy, requester) is None
+    finally:
+        server.shutdown()
+
+
 def test_service_and_unmapped_legacy_use_global_cadence(monkeypatch,
                                                          tmp_path):
     paths = _paths(tmp_path)

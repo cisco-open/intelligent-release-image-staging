@@ -79,16 +79,15 @@ def drift_report(fleet, policy_result, limit=DRIFT_ID_LIMIT):
                   if isinstance(row, dict) and row.get("device_id")}
     compiled = _policy_roles(policy_result)
     role_of = compiled.role_of
-    assignments = policy_result.document.get("assignments", {})
     divergent = set()
     for device_id in set(fleet_rows) | set(role_of):
         declared = (fleet_rows.get(device_id) or {}).get("role") or None
         enforced = role_of.get(device_id) or None
         if declared != enforced:
             divergent.add(device_id)
-        assignment = assignments.get(device_id)
-        if declared and assignment is not None \
-                and assignment != peer_policy.RESERVED_QUARANTINE:
+        assignment = peer_policy.ordinary_assignment(
+            policy_result.document, device_id)
+        if declared and assignment is not None:
             divergent.add(device_id)
     ordered = sorted(divergent)
     return {"count": len(ordered), "device_ids": ordered[:limit],
@@ -227,7 +226,6 @@ class RoleCoordinator:
             raise RoleManagementError("role mapping must not be empty",
                                       code="bad_role_mapping", status=400)
         definitions = self._known_roles(result.document)
-        assignments = result.document.get("assignments", {})
         normalized = {}
         failed = {}
         for raw_device_id, raw_role in mapping.items():
@@ -243,9 +241,9 @@ class RoleCoordinator:
             if not allow_missing and self.fleet.get_device(device_id) is None:
                 failed[device_id] = "no such device"
                 continue
-            assignment = assignments.get(device_id)
-            if not allow_shadow and assignment is not None \
-                    and assignment != peer_policy.RESERVED_QUARANTINE:
+            assignment = peer_policy.ordinary_assignment(
+                result.document, device_id)
+            if not allow_shadow and assignment is not None:
                 raise RoleManagementError(
                     "role is shadowed by an explicit assignment",
                     code="role_shadowed_by_assignment", status=409,
@@ -255,7 +253,6 @@ class RoleCoordinator:
 
     def _direction(self, document, mapping):
         compiled = peer_policy.compile_roles(document)
-        assignments = document.get("assignments", {})
         _fleet_revision, fleet_rows = self.fleet.snapshot()
         device_ids = {row.get("device_id") for row in fleet_rows
                       if isinstance(row, dict) and row.get("device_id")}
@@ -279,7 +276,7 @@ class RoleCoordinator:
         for device_id, new_role in mapping.items():
             transition = (
                 compiled.role_of.get(device_id), new_role,
-                assignments.get(device_id) == peer_policy.RESERVED_QUARANTINE)
+                peer_policy.is_quarantined(document, device_id))
             if transition not in transitions:
                 old_role = transition[0]
                 if old_role not in old_signatures:
@@ -725,7 +722,7 @@ class RoleCoordinator:
 
     def set_quarantine(self, device_id, quarantined, actor,
                        expected_revision):
-        """Change a device quarantine assignment under the role outer lock."""
+        """Change device quarantine membership under the role outer lock."""
         if type(quarantined) is not bool:
             raise RoleManagementError("quarantined must be boolean",
                                       code="bad_quarantine", status=400)
@@ -747,11 +744,8 @@ class RoleCoordinator:
                     status=409, revision=revision)
 
             def mutate(candidate):
-                assignments = candidate.setdefault("assignments", {})
-                if quarantined:
-                    assignments[device_id] = peer_policy.RESERVED_QUARANTINE
-                else:
-                    assignments.pop(device_id, None)
+                peer_policy._set_quarantine_membership(
+                    candidate, device_id, quarantined)
 
             try:
                 return peer_policy.commit_mutation(
@@ -767,12 +761,14 @@ class RoleCoordinator:
         """Remove only an explicit ACL shadow after durable credential revoke.
 
         Pure revoke keeps the fleet declaration, compiled role membership and
-        per-device QoS so a later remint cannot silently return unrestricted.
-        Retirement uses :meth:`retire_device` for the wider three-slot cleanup.
+        per-device QoS and quarantine membership so a later remint cannot
+        silently shed policy intent. Retirement uses :meth:`retire_device` for
+        the wider four-slot cleanup.
         """
         with secrets_store.store_lock(self.lock_path):
             policy = self._load()
-            if device_id not in policy.document.get("assignments", {}):
+            if peer_policy.ordinary_assignment(
+                    policy.document, device_id) is None:
                 return policy.document
 
             def mutate(candidate):

@@ -141,25 +141,49 @@ with a ring snapshot; arrange a reviewed maintenance procedure around the
 primitive. Copying verified LKG bytes is reserved for repair of an already
 corrupt authoritative store.
 
+Peer quarantine is independent of a device's ordinary ACL assignment. Applying
+peer quarantine preserves the current ordinary ACL; an ACL changed while
+quarantine is active stays suppressed until release, when the then-current
+ordinary ACL, role, or established unassigned fallback becomes effective.
+Reads enforce both independent membership and legacy
+`assignments[device-id] == "quarantine"` rows. The next successful policy
+mutation migrates legacy rows to the independent container without adding a
+second revision or outbox event. A legacy quarantine row has no surviving
+ordinary ACL, so IRIS cannot recover the assignment that older behavior already
+overwrote. Repeating quarantine or release at the current revision still
+creates one revision and one outbox event. Pure credential revoke clears only
+the ordinary ACL assignment and retains peer quarantine, Fleet and policy role
+membership, and device QoS. Device retirement clears peer quarantine along with
+the ordinary ACL, role membership, and device QoS. Peer quarantine controls
+device peer discovery and is separate from catalog image quarantine.
+
 Phase 0 changes tracker discovery on the next announce and does not sever a
 live connection or erase aria2's retained peer list. If isolation cannot wait
 for connections to age naturally, unassign every image from the affected
 device; its current agent removes the torrents on the next tick. This remains a
 staging operation and never installs, activates, reloads, or changes boot state.
 
-Before rolling the server back to a binary that predates roles or state-aware
-QoS, quarantine restricted devices before downgrading. Verify that the current
-tracker has exported those quarantine operations. Use the newer binary to remove
-every global and role state container, then make one additional scalar-only
-policy commit. Verify that both `peer-policy.json` and `peer-policy.lkg.json`
-contain state-free schema-1 documents before starting the older binary; do not
-supply it a retained state-bearing ring snapshot. This restricted-role
-quarantine containment procedure keeps older code from seeing state it cannot
-validate. Code predating roles ignores `roles_present` and cannot enforce or
-warn about role definitions. After restoring a role-capable version, repair any
-`role_drift`, verify the policy and origin-QoS status, and deliberately release
-each quarantine. Do not delete `peer-policy.json` or its LKG to silence a
-warning: doing so loses role, ACL, and quarantine intent.
+Before rolling the server back to an older binary, treat peer-policy containment
+and compatibility as a separately reviewed change. Any restricted-role downgrade
+requires this separately reviewed containment and compatibility procedure. Older
+servers that predate independent quarantine ignore that membership, so
+independent quarantine is not sufficient containment for a downgrade even after
+the current tracker has
+exported the operation. Do not convert the membership for compatibility by
+overwriting the preserved ordinary ACL.
+
+For a binary that also predates roles or state-aware QoS, use the newer binary
+to remove every global and role state container, then make one additional
+scalar-only policy commit. Verify that both `peer-policy.json` and
+`peer-policy.lkg.json` contain state-free schema-1 documents before starting the
+older binary; do not supply it a retained state-bearing ring snapshot. These
+schema preparations do not make an older server enforce independent quarantine.
+Code predating roles ignores `roles_present` and cannot enforce or warn about
+role definitions. After restoring a role-capable, independent-quarantine-aware
+version, verify the retained quarantine intent, repair any `role_drift`, verify
+the policy and origin-QoS status, and deliberately release each quarantine. Do
+not delete `peer-policy.json` or its LKG to silence a warning: doing so loses
+role, ACL, and quarantine intent.
 
 ## Peer-policy operations and their backlog
 

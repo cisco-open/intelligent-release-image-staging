@@ -12,6 +12,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Keep each ordinary ACL assignment preserved through peer quarantine and
+  release. Legacy rows whose ACL was already overwritten have unrecoverable
+  assignment history, and older servers ignore independent quarantine during a
+  downgrade.
 - Verify the server’s Guest Shell aria2c checksum and architecture before
   publishing its bundle; failed provisioning remains visible in Device packages
   readiness even when an older bundle is retained (issue #178).

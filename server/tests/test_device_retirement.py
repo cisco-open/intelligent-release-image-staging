@@ -237,8 +237,8 @@ def test_iris_revoke_cleanup_failure_keeps_revoke_applied(tmp_path, monkeypatch)
 
 def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
     sp = _seed_secrets(tmp_path)
-    # Pre-assign the device to the reserved quarantine ACL while retaining a
-    # declared/enforced role and per-device QoS across pure credential revoke.
+    # Quarantine is orthogonal to the ordinary ACL and, like role/QoS intent,
+    # survives a pure credential revoke and a later credential remint.
     ap = str(tmp_path / "peer-policy.json")
     lk = str(tmp_path / "peer-policy.lkg.json")
     gui_fleet = __import__("gui_fleet")
@@ -247,6 +247,7 @@ def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
                   "role": "boat"})
 
     def seed(candidate):
+        candidate["acls"]["manual"] = {"rules": []}
         roles = candidate.setdefault("roles", {})
         roles.setdefault("defs", {})["boat"] = {
             "restricted": True, "peers": ["boat"]}
@@ -254,7 +255,8 @@ def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
         roles.setdefault("qos_default", {})
         roles.setdefault("qos_device", {})["dev-1"] = {"max_peers": 4}
         candidate["roles_present"] = True
-        candidate["assignments"]["dev-1"] = "quarantine"
+        candidate["assignments"]["dev-1"] = "manual"
+        candidate["quarantined_devices"] = {"dev-1": True}
     peer_policy.commit_mutation(
         ap, lk, "assign", "dev-1", "op", 1.0,
         seed)
@@ -265,8 +267,12 @@ def test_iris_revoke_success_unassigns_policy(tmp_path, monkeypatch):
     assert mod.main(["dev-1"]) == 0
     doc = peer_policy.load_policy(ap, lk).document
     assert "dev-1" not in doc["assignments"]
+    assert doc["quarantined_devices"] == {"dev-1": True}
     assert doc["roles"]["role_of"]["dev-1"] == "boat"
     assert doc["roles"]["qos_device"]["dev-1"] == {"max_peers": 4}
+    assert peer_policy.evaluate(
+        doc, auth.Principal("device", "dev-1"), "10.0.0.5") == \
+        ("deny", 10)
     # A later remint does not need to reconstruct the original role intent.
     store = secrets_store.load(sp)
     secrets_store.mint(store, "dev-1", "catalog_token", time.time() + 1)

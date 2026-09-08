@@ -48,6 +48,7 @@ MAX_RULES_PER_ACL = 256
 OUTBOX_CAP = 256
 MAX_ROLES = 256
 MAX_ROLE_PEERS = 64
+MAX_QUARANTINED_DEVICES = peer_endpoints.SUPPORTED_DEVICES
 LKG_RING_SIZE = 5
 BLAST_RADIUS_CONFIRM_THRESHOLD = 0
 RESERVED_QUARANTINE = "quarantine"
@@ -357,6 +358,97 @@ def _validate_qos_state(qos_state):
             if not minimum <= value <= maximum:
                 raise PolicyError(
                     "tracker state qos value out of range: %s" % key)
+
+
+def _validate_quarantined_devices(value, enforce_limit=True):
+    """Validate the optional independent quarantine membership map."""
+    if not isinstance(value, dict):
+        raise PolicyError("bad quarantined_devices")
+    for device_id, present in value.items():
+        if not isinstance(device_id, str):
+            raise PolicyError("bad quarantined device id")
+        if present is not True:
+            raise PolicyError("bad quarantined device membership")
+    if enforce_limit and len(value) > MAX_QUARANTINED_DEVICES:
+        raise PolicyError("too many quarantined devices")
+
+
+def is_quarantined(doc, device_id):
+    """Return whether a device has canonical or legacy quarantine intent."""
+    membership = doc.get("quarantined_devices", {})
+    canonical = isinstance(membership, dict) \
+        and membership.get(device_id) is True
+    assignments = doc.get("assignments", {})
+    legacy = isinstance(assignments, dict) \
+        and assignments.get(device_id) == RESERVED_QUARANTINE
+    return canonical or legacy
+
+
+def ordinary_assignment(doc, device_id):
+    """Return a device's ordinary assignment, excluding legacy quarantine."""
+    assignments = doc.get("assignments", {})
+    if not isinstance(assignments, dict):
+        return None
+    assigned = assignments.get(device_id)
+    return None if assigned == RESERVED_QUARANTINE else assigned
+
+
+def quarantine_device_ids(doc):
+    """Return a detached union of canonical and legacy quarantine IDs."""
+    membership = doc.get("quarantined_devices", {})
+    device_ids = {
+        device_id for device_id, present in membership.items()
+        if present is True} if isinstance(membership, dict) else set()
+    assignments = doc.get("assignments", {})
+    if isinstance(assignments, dict):
+        device_ids.update(
+            device_id for device_id, assigned in assignments.items()
+            if assigned == RESERVED_QUARANTINE)
+    return device_ids
+
+
+def _normalize_quarantine(candidate):
+    """Move legacy quarantine rows within one detached mutation candidate."""
+    assignments = candidate.get("assignments")
+    if not isinstance(assignments, dict):
+        raise PolicyError("bad assignments")
+    if "quarantined_devices" in candidate:
+        membership = candidate["quarantined_devices"]
+        # Validate malformed callback-owned state before a legacy row with the
+        # same ID could overwrite it. Final validation enforces cardinality.
+        _validate_quarantined_devices(membership, enforce_limit=False)
+    else:
+        membership = {}
+    legacy_ids = []
+    for device_id, assigned in assignments.items():
+        if assigned == RESERVED_QUARANTINE:
+            if not isinstance(device_id, str):
+                raise PolicyError("bad quarantined device id")
+            legacy_ids.append(device_id)
+    if not legacy_ids:
+        return candidate
+    normalized_assignments = dict(assignments)
+    normalized_membership = dict(membership)
+    for device_id in legacy_ids:
+        normalized_assignments.pop(device_id)
+        normalized_membership[device_id] = True
+    candidate["assignments"] = normalized_assignments
+    candidate["quarantined_devices"] = normalized_membership
+    return candidate
+
+
+def _set_quarantine_membership(candidate, device_id, quarantined):
+    """Update membership on an already-normalized detached candidate."""
+    membership = dict(candidate.get("quarantined_devices", {}))
+    if quarantined:
+        membership[device_id] = True
+        candidate["quarantined_devices"] = membership
+    else:
+        membership.pop(device_id, None)
+        if membership:
+            candidate["quarantined_devices"] = membership
+        else:
+            candidate.pop("quarantined_devices", None)
 
 
 def _qos_layers(doc, device_id):
@@ -692,6 +784,8 @@ def validate_document(doc, warning_sink=None):
     for dev, acl_name in assignments.items():
         if acl_name not in acls:
             raise PolicyError("assignment to unknown acl")
+    if "quarantined_devices" in doc:
+        _validate_quarantined_devices(doc["quarantined_devices"])
     seeder = doc.get("seeder_assignment")
     if seeder is not None and seeder not in acls:
         raise PolicyError("seeder assignment to unknown acl")
@@ -795,7 +889,9 @@ def _assigned_acl(doc, principal, compiled=None):
     service principals have an assignment slot; legacy has none (spec 0a)."""
     compiled = _compiled_roles(doc, compiled)
     if principal.type == "device":
-        name = doc.get("assignments", {}).get(principal.id)
+        if is_quarantined(doc, principal.id):
+            return doc.get("acls", {}).get(RESERVED_QUARANTINE)
+        name = ordinary_assignment(doc, principal.id)
         if name is not None:
             return doc.get("acls", {}).get(name)
         role = compiled.role_of.get(principal.id)
@@ -862,7 +958,9 @@ def effective_acl_name(doc, principal, compiled=None):
     """Name the single stored or virtual ACL effective for ``principal``."""
     compiled = _compiled_roles(doc, compiled)
     if principal.type == "device":
-        assigned = doc.get("assignments", {}).get(principal.id)
+        if is_quarantined(doc, principal.id):
+            return RESERVED_QUARANTINE
+        assigned = ordinary_assignment(doc, principal.id)
         if assigned is not None:
             return assigned if assigned in doc.get("acls", {}) else None
         role = compiled.role_of.get(principal.id)
@@ -1151,7 +1249,9 @@ def commit_mutation(auth_path, lkg_path, action, target, actor, now,
 
         candidate = json.loads(json.dumps(prior))  # deep copy
         candidate["operation_outbox"] = outbox
+        _normalize_quarantine(candidate)
         mutate(candidate)
+        _normalize_quarantine(candidate)
         if "roles" in candidate or prior.get("roles_present") is True:
             candidate["roles_present"] = True
         candidate["revision"] = prior["revision"] + 1
@@ -1678,7 +1778,9 @@ def blast_radius(prior, candidate, threshold):
         for device_id in role_devices)
 
     devices = (role_devices | set(prior.get("assignments", {})) |
-               set(candidate.get("assignments", {})))
+               set(candidate.get("assignments", {})) |
+               quarantine_device_ids(prior) |
+               quarantine_device_ids(candidate))
     prior_compiled = compile_roles(prior)
     candidate_compiled = compile_roles(candidate)
     prior_origin = {
@@ -1780,11 +1882,13 @@ def pending_exports(doc, exported_revision):
 
 def unassign_device(auth_path, lkg_path, device_id, actor, now,
                     acked_revision=0):
-    """Remove ``device_id``'s ACL assignment as a system cleanup action (spec §7
-    retirement). Safe/optimistic: a no-op mutation (device not assigned) still
-    commits a revision so the outbox records the cleanup; the reserved
-    quarantine ACL is never touched. Runs under the same umbrella lock and
-    preserves the operation outbox via :func:`commit_mutation`.
+    """Remove ``device_id``'s four policy slots as a system cleanup action.
+
+    Retirement clears its ordinary ACL, quarantine membership, role membership,
+    and device QoS. A no-op mutation still commits a revision so the outbox
+    records the cleanup; the reserved quarantine ACL is never touched. Runs
+    under the same umbrella lock and preserves the operation outbox via
+    :func:`commit_mutation`.
 
     This is the device-retirement counterpart to an operator assignment: after a
     device's secrets are durably revoked, its endpoint rows are retained and the
@@ -1794,6 +1898,7 @@ def unassign_device(auth_path, lkg_path, device_id, actor, now,
     """
     def _mutate(candidate):
         candidate.get("assignments", {}).pop(device_id, None)
+        _set_quarantine_membership(candidate, device_id, False)
         roles = candidate.get("roles")
         if isinstance(roles, dict):
             role_of = roles.get("role_of")

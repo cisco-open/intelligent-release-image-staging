@@ -322,7 +322,9 @@ class TestDeviceRetirementRoleCleanup:
     def test_unassign_pops_acl_role_and_device_qos_in_one_commit(self, paths):
         auth, lkg = paths
         doc = peer_policy.load_policy(auth, lkg).document
-        doc["assignments"]["device-1"] = "quarantine"
+        doc["acls"]["manual"] = {"rules": []}
+        doc["assignments"]["device-1"] = "manual"
+        doc["quarantined_devices"] = {"device-1": True}
         doc["roles"] = {
             "defs": {"boat": {"restricted": True}},
             "role_of": {"device-1": "boat"},
@@ -335,6 +337,7 @@ class TestDeviceRetirementRoleCleanup:
             auth, lkg, "device-1", actor="system", now=1.0)
         assert result["revision"] == before["revision"] + 1
         assert "device-1" not in result["assignments"]
+        assert "quarantined_devices" not in result
         assert "device-1" not in result["roles"]["role_of"]
         assert "device-1" not in result["roles"]["qos_device"]
         assert len(result["operation_outbox"]) == 1

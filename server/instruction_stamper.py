@@ -1165,7 +1165,8 @@ def compile_peers(paths, policy, device_id, role, restricted, definition,
     include_origin = peer_policy.role_origin_enabled(doc, role)
     explicit = device_id in doc.get("assignments", {})
     owner = auth.Principal("device", device_id)
-    if restricted and not explicit:
+    if restricted and not explicit and \
+            not peer_policy.is_quarantined(doc, device_id):
         if "nets" in definition:
             allowed = sorted({str(ipaddress.IPv4Network(value, strict=False))
                               for value in definition["nets"]})

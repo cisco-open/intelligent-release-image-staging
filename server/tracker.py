@@ -764,7 +764,8 @@ def make_server(host, port, secrets_path, registry=None, on_announce=None,
             """Return sparse registry indexes for a virtual-role requester."""
             if principal.type != "device":
                 return None
-            if principal.id in policy.document.get("assignments", {}):
+            if principal.id in policy.document.get("assignments", {}) or \
+                    _peer_policy.is_quarantined(policy.document, principal.id):
                 return None
             compiled = policy.roles
             role = compiled.role_of.get(principal.id)

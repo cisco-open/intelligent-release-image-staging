@@ -153,6 +153,32 @@ def test_quarantined_device_endpoint_is_blocked(tmp_path):
     assert peer_enforcement.read_status(p["enforcement"])["desired_ip_count"] == 1
 
 
+def test_canonical_and_legacy_quarantine_share_reconciler_enforcement(
+        tmp_path):
+    aria = FakeAria()
+    rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
+    document = peer_policy.base_document()
+    document["quarantined_devices"] = {
+        "canonical": True, "seeder": True}
+    document["assignments"]["legacy"] = peer_policy.RESERVED_QUARANTINE
+    peer_policy.validate_document(document)
+    peer_policy._atomic_write_json(p["policy"], document)
+    peer_policy._atomic_write_json(p["lkg"], document)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], _dev("canonical"), "10.0.0.7", 6881, 1000.0)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], _dev("legacy"), "10.0.0.8", 6881, 1000.0)
+    peer_endpoints.record_endpoint(
+        p["endpoints"], auth.Principal("service", "seeder"),
+        "10.0.0.9", 6881, 1000.0)
+
+    status = rec.run_once()
+
+    assert aria.calls[-1] == ["10.0.0.7", "10.0.0.8"]
+    assert status["state"] == "enforced"
+    assert status["desired_ip_count"] == 2
+
+
 def test_corrupt_endpoints_retain_blocklist_and_report_fail_closed(tmp_path):
     aria = FakeAria()
     rec, p, _ = _make_reconciler(tmp_path, aria, clock=Clock(1000.0))
@@ -1112,7 +1138,10 @@ def test_unquarantined_device_row_then_ages_out(tmp_path):
     assert rec.run_once()["desired_ip_count"] == 1
 
     def unassign(doc):
-        doc["assignments"].pop("bad", None)
+        membership = doc.get("quarantined_devices", {})
+        membership.pop("bad", None)
+        if not membership:
+            doc.pop("quarantined_devices", None)
     peer_policy.commit_mutation(p["policy"], p["lkg"], "unassign", "bad",
                                 "op", clock.t, unassign)
     status = rec.run_once()

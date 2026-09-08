@@ -7,6 +7,7 @@ These tests deliberately exercise the coordinator rather than duplicating its
 two-store sequence in an API or CLI fixture.  The role transaction lock must
 always be the outer lock: role-management -> fleet/keyed state or peer-policy.
 """
+import collections
 import importlib
 import json
 import os
@@ -18,6 +19,9 @@ import pytest
 import gui_fleet
 import keyed_state
 import peer_policy
+
+
+Principal = collections.namedtuple("Principal", ["type", "id"])
 
 
 def _module():
@@ -902,3 +906,286 @@ def test_role_confirmation_capture_runs_inside_policy_transaction(tmp_path, monk
     preview = coordinator.set_role("d1", "boat", "test", dry_run=True)
     assert preview["requires_confirmation"]
     assert not fleet.get_device("d1").get("role")
+
+
+# ---------------------------------------------------------------------------
+# Workstream D: quarantine is operation history over an independent set
+# ---------------------------------------------------------------------------
+
+def test_quarantine_repeats_preserve_changing_ordinary_acl_and_event_contract(
+        tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    fleet.bulk_upsert(["d00"], {"role": "boat"})
+
+    def seed(candidate):
+        candidate["acls"]["manual-a"] = {"rules": []}
+        candidate["acls"]["manual-b"] = {"rules": []}
+        candidate["assignments"]["d00"] = "manual-a"
+        candidate["roles"]["role_of"]["d00"] = "boat"
+
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d00", "test", 2.0, seed)
+    manager = _manager(tmp_path, fleet, now=10.0)
+    before = _policy(auth_path, lkg_path).document
+    first = manager.set_quarantine(
+        "d00", True, actor="console:test",
+        expected_revision=before["revision"])
+    assert first["revision"] == before["revision"] + 1
+    assert first["assignments"]["d00"] == "manual-a"
+    assert first["quarantined_devices"] == {"d00": True}
+    assert peer_policy.effective_acl_name(
+        first, Principal("device", "d00")) == "quarantine"
+    event = first["operation_outbox"][-1]
+    assert set(event) == {
+        "event_id", "revision", "action", "target", "actor", "created_at"}
+    assert (event["action"], event["target"], event["actor"]) == \
+        ("assign", "d00", "console:test")
+
+    repeated = manager.set_quarantine(
+        "d00", True, actor="console:test",
+        expected_revision=first["revision"])
+    assert repeated["revision"] == first["revision"] + 1
+    assert repeated["assignments"]["d00"] == "manual-a"
+    assert repeated["quarantined_devices"] == {"d00": True}
+    assert repeated["operation_outbox"][-1]["action"] == "assign"
+    assert repeated["operation_ack_epoch"] != first["operation_ack_epoch"]
+
+    changed = peer_policy.commit_mutation(
+        auth_path, lkg_path, "assign", "d00", "test", 11.0,
+        lambda candidate: candidate["assignments"].__setitem__(
+            "d00", "manual-b"))
+    assert changed["quarantined_devices"] == {"d00": True}
+    assert peer_policy.effective_acl_name(
+        changed, Principal("device", "d00")) == \
+        "quarantine"
+
+    released = manager.set_quarantine(
+        "d00", False, actor="console:test",
+        expected_revision=changed["revision"])
+    assert released["assignments"]["d00"] == "manual-b"
+    assert "quarantined_devices" not in released
+    assert peer_policy.effective_acl_name(
+        released, Principal("device", "d00")) == \
+        "manual-b"
+    assert released["operation_outbox"][-1]["action"] == "unassign"
+
+    repeated_release = manager.set_quarantine(
+        "d00", False, actor="console:test",
+        expected_revision=released["revision"])
+    assert repeated_release["revision"] == released["revision"] + 1
+    assert repeated_release["assignments"]["d00"] == "manual-b"
+    assert "quarantined_devices" not in repeated_release
+    assert repeated_release["operation_outbox"][-1]["action"] == "unassign"
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.set_quarantine(
+            "d00", True, actor="console:test",
+            expected_revision=released["revision"])
+    assert caught.value.code == "revision_conflict"
+    assert _policy(auth_path, lkg_path).document == repeated_release
+
+
+@pytest.mark.parametrize("order", ["assignment-first", "quarantine-first"])
+@pytest.mark.parametrize("quarantined", [True, False])
+def test_competing_assignment_and_quarantine_serialize_without_lost_update(
+        tmp_path, monkeypatch, order, quarantined):
+    fleet = _fleet(tmp_path)
+    fleet.bulk_upsert(["d00"], {"role": "boat"})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": False, "peers": ["fiber"]}),
+    ])
+
+    def seed(candidate):
+        candidate["acls"].update({
+            "manual-a": {"rules": []}, "manual-b": {"rules": []}})
+        candidate["assignments"]["d00"] = "manual-a"
+        candidate["roles"]["role_of"]["d00"] = "boat"
+        if not quarantined:
+            candidate["quarantined_devices"] = {"d00": True}
+
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d00", "test", 2.0, seed)
+    manager = _manager(tmp_path, fleet, now=10.0)
+    before = _policy(auth_path, lkg_path).document
+    entered_first = threading.Event()
+    competitor_started = threading.Event()
+    release_first = threading.Event()
+    real_commit = peer_policy.commit_mutation
+    results = {}
+    errors = []
+    conflicts = []
+    assignment_actor = "assignment-thread"
+    quarantine_actor = "quarantine-thread"
+
+    def assignment_mutation(candidate):
+        candidate["assignments"]["d00"] = "manual-b"
+        if order == "assignment-first":
+            entered_first.set()
+            assert release_first.wait(3)
+
+    def controlled_commit(*args, **kwargs):
+        actor = kwargs.get("actor")
+        if actor == (quarantine_actor if order == "assignment-first"
+                     else assignment_actor):
+            competitor_started.set()
+        if actor == quarantine_actor and order == "quarantine-first":
+            original_mutation = kwargs["mutate"]
+            def controlled_quarantine(candidate):
+                original_mutation(candidate)
+                entered_first.set()
+                assert release_first.wait(3)
+            kwargs["mutate"] = controlled_quarantine
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(peer_policy, "commit_mutation", controlled_commit)
+
+    def assign():
+        try:
+            results["assignment"] = peer_policy.commit_mutation(
+                auth_path, lkg_path, action="assign", target="d00",
+                actor=assignment_actor, now=11.0,
+                mutate=assignment_mutation)
+        except Exception as exc:
+            errors.append(exc)
+
+    def change_quarantine():
+        expected_revision = before["revision"]
+        for attempt in range(2):
+            try:
+                results["quarantine"] = manager.set_quarantine(
+                    "d00", quarantined, actor=quarantine_actor,
+                    expected_revision=expected_revision)
+                return
+            except _module().RoleManagementError as exc:
+                if attempt == 0 and exc.code == "revision_conflict":
+                    conflicts.append(exc.code)
+                    expected_revision = _policy(
+                        auth_path, lkg_path).document["revision"]
+                    continue
+                errors.append(exc)
+                return
+
+    assignment_thread = threading.Thread(target=assign)
+    quarantine_thread = threading.Thread(target=change_quarantine)
+    first = assignment_thread if order == "assignment-first" \
+        else quarantine_thread
+    second = quarantine_thread if order == "assignment-first" \
+        else assignment_thread
+    first.start()
+    assert entered_first.wait(3)
+    second.start()
+    assert competitor_started.wait(3)
+    assert second.is_alive()
+    release_first.set()
+    first.join(3)
+    second.join(3)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert set(results) == {"assignment", "quarantine"}
+    assert conflicts == (["revision_conflict"]
+                         if order == "assignment-first" else [])
+    live = _policy(auth_path, lkg_path).document
+    assert live["revision"] == before["revision"] + 2
+    assert live["assignments"] == {"d00": "manual-b"}
+    if quarantined:
+        assert live["quarantined_devices"] == {"d00": True}
+    else:
+        assert "quarantined_devices" not in live
+    expected_events = [
+        ("assign", "d00", assignment_actor),
+        ("assign" if quarantined else "unassign",
+         "d00", quarantine_actor),
+    ]
+    if order == "quarantine-first":
+        expected_events.reverse()
+    events = live["operation_outbox"][-2:]
+    assert [event["revision"] for event in events] == [
+        before["revision"] + 1, before["revision"] + 2]
+    assert [(event["action"], event["target"], event["actor"])
+            for event in events] == expected_events
+
+    if quarantined:
+        with pytest.raises(_module().RoleManagementError) as shadow:
+            manager.set_role("d00", "fiber", actor="test")
+        assert shadow.value.status == 409
+        assert shadow.value.code == "role_shadowed_by_assignment"
+        assert fleet.get_device("d00")["role"] == "boat"
+        assert _policy(auth_path, lkg_path).document == live
+
+
+def test_pure_revoke_clears_only_ordinary_assignment_and_retains_quarantine(
+        tmp_path):
+    fleet = _fleet(tmp_path)
+    fleet.bulk_upsert(["d00"], {"role": "boat"})
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("fiber", {"restricted": False, "peers": ["fiber"]}),
+    ])
+
+    def seed(candidate):
+        candidate["acls"]["manual"] = {"rules": []}
+        candidate["assignments"]["d00"] = "manual"
+        candidate["quarantined_devices"] = {"d00": True}
+        candidate["roles"]["role_of"]["d00"] = "boat"
+        candidate["roles"]["qos_device"]["d00"] = {"max_peers": 4}
+
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d00", "test", 2.0, seed)
+    manager = _manager(tmp_path, fleet)
+    before = _policy(auth_path, lkg_path).document
+    assert manager.role_drift() == {
+        "count": 1, "device_ids": ["d00"], "truncated": False}
+    revoked = manager.clear_assignment_for_revoke("d00", actor="iris-revoke")
+    assert revoked["revision"] == before["revision"] + 1
+    assert "d00" not in revoked["assignments"]
+    assert revoked["quarantined_devices"] == {"d00": True}
+    assert revoked["roles"]["role_of"]["d00"] == "boat"
+    assert revoked["roles"]["qos_device"]["d00"] == {"max_peers": 4}
+    assert revoked["operation_outbox"][-1]["action"] == "unassign"
+    assert peer_policy.evaluate(
+        revoked, Principal("device", "d00"),
+        "10.0.0.1") == ("deny", 10)
+    assert manager.role_drift() == {
+        "count": 0, "device_ids": [], "truncated": False}
+
+    unchanged = manager.clear_assignment_for_revoke(
+        "d00", actor="iris-revoke")
+    assert unchanged == revoked
+    assert _policy(auth_path, lkg_path).document == revoked
+
+    changed_role = manager.set_role("d00", "fiber", actor="test")
+    assert changed_role["ok"] is True
+    assert changed_role["direction"] == "neutral"
+    assert fleet.get_device("d00")["role"] == "fiber"
+    after_role = _policy(auth_path, lkg_path).document
+    assert after_role["roles"]["role_of"]["d00"] == "fiber"
+    assert after_role["quarantined_devices"] == {"d00": True}
+    assert peer_policy.evaluate(
+        after_role, Principal("device", "d00"),
+        "10.0.0.1") == ("deny", 10)
+
+    legacy = json.loads(json.dumps(after_role))
+    legacy["revision"] = after_role["revision"] + 10
+    legacy.pop("quarantined_devices")
+    legacy["assignments"]["d00"] = peer_policy.RESERVED_QUARANTINE
+    peer_policy.validate_document(legacy)
+    peer_policy._atomic_write_json(auth_path, legacy)
+    peer_policy._atomic_write_json(lkg_path, legacy)
+    raw_bytes = (open(auth_path, "rb").read(),
+                 open(lkg_path, "rb").read())
+
+    legacy_unchanged = manager.clear_assignment_for_revoke(
+        "d00", actor="iris-revoke")
+    assert legacy_unchanged == legacy
+    assert legacy_unchanged["revision"] == legacy["revision"]
+    assert legacy_unchanged["assignments"] == {
+        "d00": peer_policy.RESERVED_QUARANTINE}
+    assert "quarantined_devices" not in legacy_unchanged
+    assert (open(auth_path, "rb").read(),
+            open(lkg_path, "rb").read()) == raw_bytes
+    assert peer_policy.evaluate(
+        legacy_unchanged, Principal("device", "d00"),
+        "10.0.0.1") == ("deny", 10)

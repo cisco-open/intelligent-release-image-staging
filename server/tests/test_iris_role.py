@@ -262,6 +262,47 @@ def test_iris_role_migrate_defaults_to_dry_run_and_quarantine_is_never_selected(
     after = _policy(tmp_path).document
     assert after["revision"] == before["revision"] + 2
     assert after["roles"]["role_of"] == {"d1": "boat"}
-    assert after["assignments"] == {
-        "d2": peer_policy.RESERVED_QUARANTINE}
+    assert after["assignments"] == {}
+    assert after["quarantined_devices"] == {"d2": True}
     assert fleet.get_device("d1")["role"] == "boat"
+
+
+def test_iris_role_explain_keeps_role_only_shadow_contract_during_quarantine(
+        tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                  "role": "boat"})
+    auth_path = str(tmp_path / "peer-policy.json")
+    lkg_path = str(tmp_path / "peer-policy.lkg.json")
+    peer_policy.define_role(auth_path, lkg_path, "boat", {
+        "restricted": True, "peers": ["boat"]}, "test", 1)
+
+    def seed(candidate):
+        candidate["acls"]["manual"] = {"rules": []}
+        candidate["assignments"]["d1"] = "manual"
+        candidate["quarantined_devices"] = {"d1": True}
+        candidate["roles"]["role_of"]["d1"] = "boat"
+
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "seed", "d1", "test", 2, seed)
+    explained = _run(tmp_path, "explain", "d1")
+    assert explained.returncode == 1, explained.stderr
+    body = json.loads(explained.stdout)
+    assert body == {
+        "device_id": "d1", "declared_role": "boat",
+        "enforced_role": "boat", "role_drift": True,
+        "role_shadowed_by": "manual",
+        "revision": _policy(tmp_path).document["revision"]}
+    assert "quarantined" not in body
+
+    current = _policy(tmp_path).document
+    peer_policy.commit_mutation(
+        auth_path, lkg_path, "unassign", "d1", "test", 3,
+        lambda candidate: candidate["assignments"].pop("d1"),
+        expected_revision=current["revision"])
+    explained = _run(tmp_path, "explain", "d1")
+    assert explained.returncode == 0, explained.stderr
+    body = json.loads(explained.stdout)
+    assert body["role_drift"] is False
+    assert body["role_shadowed_by"] is None
+    assert "quarantined" not in body

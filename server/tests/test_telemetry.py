@@ -1707,7 +1707,7 @@ class TestPeerPolicyEnforcementFacts:
         row = self._row(self._hub(policy=policy))
         assert row["peer_policy"]["decision"] == "deny"
         assert row["peer_policy"]["matched_seq"] == 10
-        assert row["peer_policy"]["assignment"] == "quarantine"
+        assert row["peer_policy"]["assignment"] is None
         assert row["peer_policy"]["quarantined"] is True
 
     def test_fail_closed_is_explicit_deny(self):
@@ -4126,7 +4126,89 @@ def test_policy_contract_fail_closed_exception_preserves_assignment(monkeypatch,
     monkeypatch.setattr(peer_policy, "evaluate", broken)
     fact = telemetry._peer_policy_fact(policy, "device", "d1", "192.0.2.1")
     assert fact["decision"] == "deny" and fact["matched_seq"] is None
-    assert fact["assignment"] == assignment
+    assert fact["assignment"] == (None if assignment == "quarantine"
+                                   else assignment)
     assert fact["quarantined"] == (assignment == "quarantine")
     assert fact["role"] == "boat"
     assert fact["role_shadowed_by"] == (None if assignment == "quarantine" else "boat")
+
+
+def test_canonical_and_legacy_quarantine_have_identical_observable_facts():
+    import peer_policy
+
+    def fact(document):
+        policy = peer_policy.PolicyResult(
+            document, False, False, peer_policy.compile_roles(document))
+        return telemetry._peer_policy_fact(
+            policy, "device", "d1", "192.0.2.1")
+
+    legacy = peer_policy.base_document()
+    legacy["assignments"]["d1"] = peer_policy.RESERVED_QUARANTINE
+    canonical = peer_policy.base_document()
+    canonical["quarantined_devices"] = {"d1": True}
+    expected = {
+        "decision": "deny", "matched_seq": 10, "assignment": None,
+        "quarantined": True, "fail_closed": False,
+        "effective_acl": "quarantine", "acl_source": "assignment:quarantine",
+        "role": None, "role_unknown": False, "role_shadowed_by": None,
+    }
+    assert fact(legacy) == expected
+    assert fact(canonical) == expected
+
+
+def test_quarantine_preserves_ordinary_assignment_but_shadows_its_policy():
+    import peer_policy
+
+    document = peer_policy.base_document()
+    document["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    document["assignments"]["d1"] = "manual"
+    document["roles"] = {
+        "defs": {"boat": {"restricted": True}},
+        "role_of": {"d1": "boat"},
+        "qos_default": {}, "qos_device": {},
+    }
+    document["quarantined_devices"] = {"d1": True}
+    policy = peer_policy.PolicyResult(
+        document, False, False, peer_policy.compile_roles(document))
+    row = telemetry._peer_policy_fact(
+        policy, "device", "d1", "192.0.2.1")
+    assert row["assignment"] == "manual"
+    assert row["quarantined"] is True
+    assert row["decision"] == "deny"
+    assert row["effective_acl"] == "quarantine"
+    assert row["acl_source"] == "assignment:quarantine"
+    assert row["role"] == "boat"
+    assert row["role_shadowed_by"] == "boat"
+
+
+def test_fail_closed_canonical_quarantine_preserves_known_intent(monkeypatch):
+    import peer_policy
+
+    document = peer_policy.base_document()
+    document["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    document["assignments"]["d1"] = "manual"
+    document["roles"] = {
+        "defs": {"boat": {"restricted": True}},
+        "role_of": {"d1": "boat"},
+        "qos_default": {}, "qos_device": {},
+    }
+    document["quarantined_devices"] = {"d1": True}
+    policy = peer_policy.PolicyResult(
+        document, True, True, peer_policy.compile_roles(document))
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("evaluator unavailable")
+
+    monkeypatch.setattr(peer_policy, "evaluate", broken)
+    fact = telemetry._peer_policy_fact(
+        policy, "device", "d1", "192.0.2.1")
+    assert fact["assignment"] == "manual"
+    assert fact["quarantined"] is True
+    assert fact["decision"] == "deny"
+    assert fact["matched_seq"] is None
+    assert fact["role"] == "boat"
+    assert fact["role_shadowed_by"] == "boat"

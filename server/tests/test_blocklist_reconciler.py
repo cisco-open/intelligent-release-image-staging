@@ -39,6 +39,23 @@ def _quarantine_doc(*device_ids):
     return doc
 
 
+def test_canonical_quarantine_flows_through_shared_evaluator():
+    doc = peer_policy.base_document()
+    doc["quarantined_devices"] = {"bad": True}
+    policy = peer_policy.PolicyResult(
+        doc, False, False, peer_policy.compile_roles(doc))
+    durable = _endpoints(
+        ("device:bad", "device", "bad", "198.51.100.16"))
+    result = br.derive_denied_set(
+        policy, durable_endpoints=durable, pending_endpoints={},
+        active_participants=[], revoked_principals=set(),
+        protected_seeder_ip=SEEDER_IP)
+    assert result.denied_ips == ["198.51.100.16"]
+    assert result.conflicts == []
+    keep = br.denied_retention(policy, set())
+    assert keep("device", "bad", "198.51.100.16") is True
+
+
 SEEDER = Principal("service", "seeder")
 SEEDER_IP = "192.0.2.10"
 

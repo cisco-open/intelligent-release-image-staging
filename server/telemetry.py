@@ -2192,8 +2192,8 @@ def _device_observation(entry, now):
 def _peer_policy_fact(policy, principal_type, device_id, ipv4):
     """Per-participant ``peer_policy`` fact (operator intent) for a typed device
     principal, evaluated against the tracker's CURRENT PolicyStore (spec §7).
-    Exposes the decision, matched rule sequence, the assigned ACL name, and
-    whether the reserved quarantine ACL is assigned. ``fail_closed`` is explicit.
+    Exposes the decision, matched rule sequence, ordinary ACL assignment, and
+    independent device quarantine intent. ``fail_closed`` is explicit.
     None when no policy is wired."""
     if policy is None:
         return None
@@ -2203,7 +2203,10 @@ def _peer_policy_fact(policy, principal_type, device_id, ipv4):
     fail_closed = bool(getattr(policy, "fail_closed", False))
     principal = auth.Principal(principal_type, device_id)
     compiled = policy.roles
-    assignment = doc.get("assignments", {}).get(device_id)
+    assignment = _peer_policy.ordinary_assignment(doc, device_id) \
+        if principal_type == "device" else None
+    quarantined = principal_type == "device" and \
+        _peer_policy.is_quarantined(doc, device_id)
     role = compiled.role_of.get(device_id) if compiled is not None else None
     unknown = bool(compiled is not None and
                    compiled.acl_by_role.get(role, {}).get("role_unknown"))
@@ -2223,12 +2226,11 @@ def _peer_policy_fact(policy, principal_type, device_id, ipv4):
         "decision": "deny" if fail_closed else decision,
         "matched_seq": None if fail_closed else matched_seq,
         "assignment": assignment,
-        "quarantined": assignment == _peer_policy.RESERVED_QUARANTINE,
+        "quarantined": quarantined,
         "fail_closed": fail_closed,
         "effective_acl": name, "acl_source": source, "role": role,
         "role_unknown": unknown,
-        "role_shadowed_by": role if role and assignment is not None and
-            assignment != _peer_policy.RESERVED_QUARANTINE else None,
+        "role_shadowed_by": role if role and assignment is not None else None,
     }
 
 

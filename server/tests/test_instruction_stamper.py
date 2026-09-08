@@ -1294,6 +1294,85 @@ def test_peer_compiler_static_and_permit_all_do_not_read_dynamic_state(
         }
 
 
+def test_peer_compiler_canonical_quarantine_bypasses_static_role_nets(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_ENDPOINT_TTL", "300")
+    paths, _fleet, cat, producer, _marker, *_ = _setup(tmp_path)
+    document = peer_policy.base_document()
+    document["roles"] = {
+        "defs": {"edge": {"restricted": True,
+                           "nets": ["198.51.100.0/24"]}},
+        "role_of": {"device-1": "edge"},
+        "qos_default": {}, "qos_device": {},
+    }
+    document["quarantined_devices"] = {"device-1": True}
+    policy = _policy_result(document)
+    result = stamper.compile_peers(
+        paths, policy, "device-1", "edge", True,
+        document["roles"]["defs"]["edge"], NOW, NOW + 600)
+    assert result == {
+        "mode": "tracker-only", "include_origin": True,
+        "allowed_expires_at": NOW + 600,
+    }
+    legacy = copy.deepcopy(document)
+    legacy.pop("quarantined_devices")
+    legacy["assignments"]["device-1"] = peer_policy.RESERVED_QUARANTINE
+    legacy_result = stamper.compile_peers(
+        paths, _policy_result(legacy), "device-1", "edge", True,
+        legacy["roles"]["defs"]["edge"], NOW, NOW + 600)
+    assert legacy_result == result
+    assert "quarantined_devices" not in json.dumps(result)
+
+    peer_handouts.initialize(paths.handouts)
+    _write_live(paths, {"device-1": ["10.0.0.2"]})
+    # Fresh endpoints are bounded by live evidence; older endpoints expire first.
+    for endpoint_age, remaining in ((0, 120), (270, 30)):
+        peer_endpoints.record_endpoint(
+            paths.endpoints, auth.Principal("device", "peer-a"),
+            "10.0.0.2", 6881, NOW - endpoint_age)
+        expected = {
+            "mode": "deny", "rules": ["10.0.0.2"], "include_origin": True,
+            "allowed_expires_at": NOW + remaining,
+        }
+        canonical_result = stamper.compile_peers(
+            paths, policy, "device-1", "edge", True,
+            document["roles"]["defs"]["edge"], NOW, NOW + 600)
+        legacy_result = stamper.compile_peers(
+            paths, _policy_result(legacy), "device-1", "edge", True,
+            legacy["roles"]["defs"]["edge"], NOW, NOW + 600)
+        assert canonical_result == expected
+        assert legacy_result == expected
+
+    _write_policy(paths, document)
+    assert producer.stamp_device("device-1") == "updated"
+    stamp = _raw_stamp(cat)
+    instructions.validate_stamp(stamp)
+    artifact = Path(stamper._artifact_path(
+        paths, stamp["role"], stamp["role_gen"])).read_bytes()
+    role_body, signature = instructions.parse_role(artifact)
+    body = instructions.validate_role_body(instructions.parse_json(role_body))
+    part = stamp["part"]
+    instructions.validate_part(
+        part, issued_at=stamp["issued_at"], expires_at=stamp["expires_at"])
+    assert part["peers"] == {
+        "mode": "deny", "rules": ["10.0.0.2"], "include_origin": True,
+        "allowed_expires_at": NOW + 30,
+    }
+    header = instructions.stamp_header("device-1", stamp)
+    key = bytes.fromhex(_record()["value"])
+    envelope = instructions.seal_parts(header, part, role_body, signature, key)
+    opened_header, opened_role, opened_signature, opened_part = \
+        instructions.open_parts(envelope, key)
+    assert opened_header == header
+    assert (opened_role, opened_signature, opened_part) == (
+        role_body, signature, part)
+    for payload in (body, stamp, part, opened_header,
+                    instructions.parse_json(opened_role), opened_part):
+        assert "quarantined_devices" not in json.dumps(payload)
+    assert b"quarantined_devices" not in artifact
+    assert b"quarantined_devices" not in opened_signature
+
+
 def test_peer_compiler_mutual_roles_and_exact_allow_caps(tmp_path,
                                                           monkeypatch):
     paths, *_ = _setup(tmp_path)

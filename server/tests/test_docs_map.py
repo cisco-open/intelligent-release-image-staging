@@ -251,7 +251,8 @@ def test_docs_state_phase_zero_role_and_qos_contract():
     _require("operations.md", [
         "`dry_run=1`",
         "`confirm_token`",
-        "quarantine restricted devices before downgrading",
+        "independent quarantine",
+        "not sufficient",
         "unassign every image",
     ])
     _require("architecture.md", [
@@ -678,7 +679,10 @@ def test_workstream_a_docs_define_state_aware_tracker_cadence_and_downgrade():
                      r"state-bearing.{0,80}ring snapshot", downgrade,
                      re.DOTALL)
     assert "restricted-role" in downgrade and "quarantine" in downgrade
-    assert "quarantine restricted devices before downgrading" in downgrade
+    assert re.search(r"(?:older|predating).{0,160}independent quarantine",
+                     downgrade, re.DOTALL)
+    assert re.search(r"not.{0,80}sufficient.{0,120}(?:quarantine|downgrad)",
+                     downgrade, re.DOTALL)
 
 
 def test_workstream_a_docs_separate_tracker_observability_and_api_only_state():
@@ -791,3 +795,52 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
     for line in network_lower.splitlines():
         assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
                              r"(?:new|additional)\s+(?:process|listener|service|flow|port)", line)
+
+
+def test_workstream_d_docs_state_legacy_loss_and_downgrade_truth():
+    """The operator surfaces describe the independent quarantine limit."""
+    with open(os.path.join(DOCS, "operations.md")) as fh:
+        operations = fh.read().lower()
+    with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
+        changelog = fh.read().lower()
+
+    def sentences(text):
+        return re.split(r"(?<=[.!?])\s+", text)
+
+    op_paragraphs = re.split(r"\n\s*\n", operations)
+    op_sentences = sentences(operations)
+    assert any("ordinary" in line and "acl" in line and
+               re.search(r"preserv|retain", line)
+               for line in op_sentences)
+    assert any("legacy" in line and
+               re.search(r"no surviving|cannot recover|unrecoverable|lost",
+                         line) and "ordinary" in line
+               for line in op_sentences)
+    downgrade = next((paragraph for paragraph in op_paragraphs
+                      if re.search(r"older|predating", paragraph) and
+                      "independent quarantine" in paragraph), "")
+    assert downgrade
+    assert re.search(r"ignore|does not understand|incompatible", downgrade)
+    assert re.search(r"independent quarantine.{0,180}"
+                     r"(?:not sufficient|insufficient|cannot|ignore)",
+                     downgrade, re.DOTALL)
+    assert "quarantine restricted devices before downgrading" not in downgrade
+    assert "quarantine restricted devices before downgrading" not in operations
+    assert "pre-d" not in operations
+    assert any("revoke" in line and "quarantine" in line and
+               re.search(r"retain|preserv", line)
+               for line in op_sentences)
+    assert any(re.search(r"retir", line) and "quarantine" in line and
+               re.search(r"clear|remove", line)
+               for line in op_sentences)
+
+    unreleased = changelog.split("## [unreleased]", 1)[1]
+    unreleased = unreleased.split("\n## ", 1)[0]
+    assert "unreleased" in changelog
+    assert "pre-d" not in unreleased
+    assert re.search(r"ordinary.{0,100}(?:acl|assignment).{0,120}preserv",
+                     unreleased, re.DOTALL)
+    assert re.search(r"legacy.{0,180}(?:history|unrecover|limitation|lost)",
+                     unreleased, re.DOTALL)
+    assert re.search(r"(?:older|predating).{0,180}(?:incompatib|downgrad)",
+                     unreleased, re.DOTALL)

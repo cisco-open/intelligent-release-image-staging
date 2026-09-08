@@ -648,7 +648,8 @@ def test_swarm_contract_uses_real_source_grouped_snapshot_shapes():
     snapshot = telemetry.Telemetry(registry, policy_info=lambda: policy).swarm_snapshot()
     device = next(row for row in snapshot["images"][0]["peers"] if row["device_id"] == "d1")
     assert device["peer_policy"]["decision"] == "deny"
-    assert device["peer_policy"]["assignment"] == "quarantine"
+    assert device["peer_policy"]["assignment"] is None
+    assert device["peer_policy"]["quarantined"] is True
     service = next(row for row in registry.snapshot()["abc"] if row["principal_type"] == "service")
     service_row = telemetry._peer_row(service, None, {}, {}, {}, {}, None, None, set(), set(), 10)
     OAS32Validator(openapi_contract._swarm_peer_schema()).validate(service_row)

@@ -2766,7 +2766,9 @@
     if (peerPolicy.roles_supported !== true) {
       return 'This Console cannot confirm backend role support. ' +
         (peerPolicy.roles_present ? 'The backend declares role state. ' : '') +
-        'Role changes are disabled. Use a compatible server; quarantine restricted devices before a downgrade. ' +
+        'Role changes are disabled. Use a compatible server. Independent peer quarantine is not ' +
+        'enforced by older servers. ' +
+        'Use a reviewed containment and compatibility procedure before downgrading. ' +
         'A fully downgraded Console and server cannot show this warning.';
     }
     if (peerPolicy.fail_closed) return 'Peer policy is fail-closed. Peer discovery is denied and role changes are disabled. Restore a valid policy.';

@@ -241,7 +241,14 @@ assert.equal(el('apply-role-selected').disabled, true);
 delete peerPolicy.roles_supported; // genuinely older response, no capability flag
 delete peerPolicy.roles_present;
 renderPeerPolicyPanel();
-assert.match(el('role-capability-banner').textContent, /cannot confirm.*role support/i);
+let roleWarning = el('role-capability-banner').textContent.toLowerCase();
+assert.match(roleWarning, /cannot confirm.*role support/i);
+let normalizedRoleWarning = roleWarning.replace(/\s+/g, ' ');
+assert.match(normalizedRoleWarning,
+  /independent (?:peer )?quarantine.{0,100}(?:not enforced|ignored|not sufficient|insufficient).{0,100}(?:older|predating) servers?.{0,180}(?:containment|compatibility).{0,100}downgrad/);
+assert.doesNotMatch(roleWarning, /pre-d/);
+assert.doesNotMatch(roleWarning,
+  /quarantine restricted devices before (?:a|any)? ?downgrade/);
 peerPolicy.roles_supported = true;
 peerPolicy.degraded = true;
 renderPeerPolicyPanel();
@@ -268,6 +275,14 @@ def test_role_policy_startup_signal_identifies_lost_state_without_addresses(tmp_
     warning = capsys.readouterr().err
     assert 'role state lost' in warning
     assert 'quarantine' in warning and 'downgrade' in warning
+    warning_lower = warning.lower()
+    assert re.search(r"older|predating", warning_lower)
+    assert "independent quarantine" in warning_lower
+    assert re.search(r"independent quarantine.{0,140}"
+                     r"(?:not sufficient|insufficient|cannot|ignore)",
+                     warning_lower, re.DOTALL)
+    assert "pre-d" not in warning_lower
+    assert "quarantine restricted devices before any downgrade" not in warning_lower
     main = open(gui_server.__file__).read().split('def main():', 1)[1]
     assert '_log_peer_policy_startup(state_dir)' in main
 
@@ -954,6 +969,75 @@ def test_login_bad_credentials_401(tmp_path):
         stop()
 
 
+def test_canonical_quarantine_keeps_gui_filter_explain_and_event_wire_shape(
+        role_api):
+    """The canonical quarantine map has the legacy API's stable projections."""
+    import auth
+    import peer_endpoints
+    import peer_policy
+
+    request, _fleet, cat = role_api
+    policy_path = os.path.join(cat.state_dir, "peer-policy.json")
+    lkg_path = os.path.join(cat.state_dir, "peer-policy.lkg.json")
+    doc = peer_policy.load_policy(policy_path, lkg_path).document
+    doc["acls"]["manual"] = {"rules": [
+        {"seq": 20, "action": "permit", "match": {"type": "any"}},
+    ]}
+    doc["assignments"] = {"d1": "manual", "d2": "quarantine"}
+    doc["roles"]["role_of"] = {"d1": "boat", "d2": "boat"}
+    doc["quarantined_devices"] = {"d1": True}
+    for path in (policy_path, lkg_path):
+        with open(path, "w") as stream:
+            json.dump(doc, stream, sort_keys=True)
+    endpoints = os.path.join(cat.state_dir, "peer-endpoints.json")
+    peer_endpoints.record_endpoint(
+        endpoints, auth.Principal("device", "d1"), "192.0.2.1", 6881,
+        time.time())
+    peer_endpoints.record_endpoint(
+        endpoints, auth.Principal("device", "d2"), "192.0.2.2", 6881,
+        time.time())
+
+    status, _headers, view = request("GET", "/api/peer-policy")
+    assert status == 200
+    assert view["quarantine_assignments"] == ["d1", "d2"]
+    assert "quarantined_devices" not in json.dumps(view)
+
+    status, _headers, filtered = request(
+        "GET", "/api/devices?peer=quarantined")
+    assert status == 200
+    assert filtered["total"] == 2
+    assert [row["device_id"] for row in filtered["devices"]] == ["d1", "d2"]
+
+    status, _headers, explained = request(
+        "GET", "/api/peer-policy/explain?a=device:d1&b=device:d2")
+    assert status == 200
+    assert set(explained["a"]) == {
+        "principal", "acl_name", "acl_source", "matched_seq", "decision",
+        "role", "role_unknown", "role_shadowed_by"}
+    assert explained["a"]["acl_name"] == "quarantine"
+    assert explained["a"]["acl_source"] == "assignment:quarantine"
+    assert explained["a"]["decision"] == "deny"
+    assert explained["a"]["role"] == "boat"
+    assert explained["a"]["role_shadowed_by"] == "boat"
+
+    revision = peer_policy.load_policy(policy_path, lkg_path).document["revision"]
+    before_events = list(peer_policy.load_policy(
+        policy_path, lkg_path).document["operation_outbox"])
+    status, _headers, _ = request(
+        "PUT", "/api/peer-policy/quarantine/d2",
+        {"quarantined": True, "if_revision": revision})
+    assert status == 200
+    saved = peer_policy.load_policy(policy_path, lkg_path).document
+    assert saved["quarantined_devices"] == {"d1": True, "d2": True}
+    assert saved["assignments"] == {"d1": "manual"}
+    assert "d2" not in saved["assignments"]
+    assert saved["operation_outbox"][:-1] == before_events
+    event = saved["operation_outbox"][-1]
+    assert set(event) == {"event_id", "revision", "action", "target",
+                          "actor", "created_at"}
+    assert event["action"] == "assign" and event["target"] == "d2"
+
+
 def test_login_sets_cookie_and_returns_csrf(tmp_path):
     host, port, _, stop = _serve(tmp_path)
     try:
@@ -1544,7 +1628,8 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert json.loads(raw) == {"ok": True, "revision": 2, "quarantined": True}
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
             doc = json.load(f)
-        assert doc["assignments"] == {"d1": "quarantine"}
+        assert doc["assignments"] == {}
+        assert doc["quarantined_devices"] == {"d1": True}
         event = doc["operation_outbox"][-1]
         assert set(event) == {"event_id", "revision", "action", "target", "actor", "created_at"}
         assert event["action"] == "assign" and event["target"] == "d1"
@@ -1579,7 +1664,10 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         assert compat_headers["Deprecation"] == "true"
         assert compat_headers["Sunset"] == "Sat, 04 Sep 2027 00:00:00 GMT"
         with open(os.path.join(cat.state_dir, "peer-policy.json")) as f:
-            assert [e["revision"] for e in json.load(f)["operation_outbox"]] == [3]
+            released = json.load(f)
+        assert [e["revision"] for e in released["operation_outbox"]] == [3]
+        assert released["assignments"] == {}
+        assert "quarantined_devices" not in released
         status, _, raw = _req(host, port, "PUT", "/api/peer-policy/quarantine/d1",
                               {"quarantined": False, "if_revision": 2}, headers)
         assert status == 409

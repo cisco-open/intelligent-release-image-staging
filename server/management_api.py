@@ -1119,8 +1119,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "quarantine": {"reserved": True,
                                "description": "reserved: fully isolate an assigned device"},
                 "quarantine_assignments": sorted(
-                    device_id for device_id, acl in doc.get("assignments", {}).items()
-                    if acl == peer_policy.RESERVED_QUARANTINE),
+                    peer_policy.quarantine_device_ids(doc)),
                 "roles_supported": True,
                 "roles_present": doc.get("roles_present", False),
                 "roles": {"defined": len(role_members),
@@ -1145,9 +1144,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         /api/devices poll that never touches it costs nothing extra."""
         auth_path, lkg_path, _ = policy_paths()
         result = peer_policy.load_policy(auth_path, lkg_path)
-        return {device_id for device_id, acl in
-                result.document.get("assignments", {}).items()
-                if acl == peer_policy.RESERVED_QUARANTINE}
+        return peer_policy.quarantine_device_ids(result.document)
 
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
@@ -3213,7 +3210,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         decision, seq = peer_policy.evaluate_for(
                             doc, owner, subject, subject_ip, compiled=compiled)
                         role = compiled.role_of.get(owner.id) if owner.type == "device" else None
-                        assignment = doc.get("assignments", {}).get(owner.id) \
+                        assignment = peer_policy.ordinary_assignment(doc, owner.id) \
                             if owner.type == "device" else None
                         return {"principal": {"type": owner.type, "id": owner.id},
                             "role": role,
@@ -3222,8 +3219,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             "decision": "deny" if policy.fail_closed else decision,
                             "matched_seq": None if policy.fail_closed else seq,
                             "role_unknown": bool(compiled.acl_by_role.get(role, {}).get("role_unknown")),
-                            "role_shadowed_by": role if role and assignment is not None and
-                                assignment != peer_policy.RESERVED_QUARANTINE else None}
+                            "role_shadowed_by": role if role and assignment is not None else None}
                     result.update(a=side(left, right, right_ip), b=side(right, left, left_ip))
                     result["mutual"] = all(result[key]["decision"] == "permit" for key in ("a", "b"))
                 self._json(200, result, extra_headers=[("ETag", _revision_etag("peer-policy", revision))])
@@ -5079,8 +5075,10 @@ def _log_peer_policy_startup(state_dir):
             "roles" not in policy.document
         if roles_lost:
             signal = ("WARNING: role state lost; roles were previously configured "
-                      "but the loaded policy has no roles. Restore the policy; "
-                      "quarantine restricted devices before any downgrade.")
+                      "but the loaded policy has no roles. Restore the policy. "
+                      "Independent quarantine is ignored by older servers. "
+                      "Use a separately reviewed containment and compatibility "
+                      "procedure before a downgrade.")
         elif policy.fail_closed:
             signal = "WARNING: peer policy is fail_closed; restore a valid policy."
         elif policy.degraded:
