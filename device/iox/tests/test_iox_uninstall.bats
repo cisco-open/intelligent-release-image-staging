@@ -471,10 +471,23 @@ def request(value):
             'residue_log_monitor':'logging monitor discriminator IRISQ\n',
             'residue_app_row':'iris RUNNING\n',
             'residue_vlan':'interface Vlan666\n',
+            'residue_l2_vlan':'vlan 666\n',
         }
         stdout=residues.get(scenario,'')
     elif name=='cleanup_stage_probe':
-        if scenario=='residue_stage': stdout='Directory of sdflash:/guest-share/iris\n'
+        residues={
+            'residue_stage':'Directory of sdflash:/guest-share/iris\n',
+            'residue_staged_file':'  12 -rw- 100 Sep 8 2026 iris-staged.bin\n',
+            'residue_staged_part':'  13 -rw- 100 Sep 8 2026 iris-staged.bin.part\n',
+            'residue_probe_file':'  14 -rw- 10 Sep 8 2026 iris-probe.txt\n',
+            'residue_arm_wrapper':'  15 -rw- 100 Sep 8 2026 iris-arm64.tar\n',
+            'residue_ca_file':'  16 -rw- 100 Sep 8 2026 iris-ca.pem\n',
+            'residue_catalog_file':'  17 -rw- 100 Sep 8 2026 iris-catalog.pem\n',
+            'residue_transaction_wrapper':'  18 -rw- 100 Sep 8 2026 iris-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tar\n',
+            'residue_share_directory':'Directory of usbflash1:iox_host_data_share/iris\n',
+            'residue_share_entry':'  19 drwx 4096 Sep 8 2026 iris\n',
+        }
+        stdout=residues.get(scenario,'')
     elif name=='cleanup':
         if action=='install' and admitted and phase=='disabled_confirmed':
             revision+=1
@@ -719,17 +732,82 @@ ASSERTIONS
   _iox_assert_trace finish ''
 }
 
-@test "cleanup proof rejects every IRIS logging form plus app VLAN and stage residue" {
-  for scenario in residue_log_bare residue_log_buffered residue_log_console \
-      residue_log_monitor residue_app_row residue_vlan residue_stage; do
-    _iox_fixture_setup
-    run _iox_controller_run uninstall "$scenario" recorded
-    [ "$status" -ne 0 ]
-    [ "$status" -ne 97 ]
-    _iox_assert_trace ordered cleanup finish
-    _iox_assert_trace absent save
-    rm -rf "$STUBDIR"
-  done
+_assert_uninstall_residue_refused() {
+  _iox_fixture_setup
+  run _iox_controller_run uninstall "$1" recorded
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 97 ]
+  _iox_assert_trace absent save
+  _iox_assert_trace count cleanup 1
+  _iox_assert_trace count finish 1
+}
+
+@test "cleanup proof rejects a bare IRIS logging discriminator" {
+  _assert_uninstall_residue_refused residue_log_bare
+}
+
+@test "cleanup proof rejects the buffered IRIS logging discriminator" {
+  _assert_uninstall_residue_refused residue_log_buffered
+}
+
+@test "cleanup proof rejects the console IRIS logging discriminator" {
+  _assert_uninstall_residue_refused residue_log_console
+}
+
+@test "cleanup proof rejects the monitor IRIS logging discriminator" {
+  _assert_uninstall_residue_refused residue_log_monitor
+}
+
+@test "cleanup proof rejects a remaining iris application row" {
+  _assert_uninstall_residue_refused residue_app_row
+}
+
+@test "cleanup proof rejects a remaining IRIS SVI" {
+  _assert_uninstall_residue_refused residue_vlan
+}
+
+@test "cleanup proof rejects a remaining bound L2 VLAN" {
+  _assert_uninstall_residue_refused residue_l2_vlan
+}
+
+@test "stage proof rejects a remaining guest-share iris directory" {
+  _assert_uninstall_residue_refused residue_stage
+}
+
+@test "stage proof rejects iris-staged.bin" {
+  _assert_uninstall_residue_refused residue_staged_file
+}
+
+@test "stage proof rejects iris-staged.bin.part" {
+  _assert_uninstall_residue_refused residue_staged_part
+}
+
+@test "stage proof rejects iris-probe.txt" {
+  _assert_uninstall_residue_refused residue_probe_file
+}
+
+@test "stage proof rejects iris-arm64.tar" {
+  _assert_uninstall_residue_refused residue_arm_wrapper
+}
+
+@test "stage proof rejects iris-ca.pem" {
+  _assert_uninstall_residue_refused residue_ca_file
+}
+
+@test "stage proof rejects legacy iris-catalog.pem" {
+  _assert_uninstall_residue_refused residue_catalog_file
+}
+
+@test "stage proof rejects a transaction-bound wrapper" {
+  _assert_uninstall_residue_refused residue_transaction_wrapper
+}
+
+@test "stage proof rejects the share iris directory header" {
+  _assert_uninstall_residue_refused residue_share_directory
+}
+
+@test "stage proof rejects a bare iris share directory entry" {
+  _assert_uninstall_residue_refused residue_share_entry
 }
 
 @test "handled TERM during uninstall IPC commits its ready binding before cleanup and finish" {
