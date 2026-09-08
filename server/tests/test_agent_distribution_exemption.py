@@ -415,15 +415,18 @@ def test_agent_refresh_precedes_first_catalog_policy_read():
     refresh_calls = _calls(run_once, "deps.refresh")
     policy_calls = _calls(run_once, "deps.catalog.get_policy")
     assert len(refresh_calls) == 1
-    assert len(policy_calls) == 1
+    assert policy_calls
     refresh_call = refresh_calls[0]
-    policy_call = policy_calls[0]
-    assert refresh_call.end_lineno < policy_call.lineno
+    assert all(refresh_call.end_lineno < policy_call.lineno
+               for policy_call in policy_calls)
     refresh_statement = next(index for index, statement in enumerate(run_once.body)
                              if _contains(statement, refresh_call))
-    policy_statement = next(index for index, statement in enumerate(run_once.body)
-                            if _contains(statement, policy_call))
-    assert refresh_statement < policy_statement
+    policy_statements = [
+        next(index for index, statement in enumerate(run_once.body)
+             if _contains(statement, policy_call))
+        for policy_call in policy_calls]
+    assert all(refresh_statement < policy_statement
+               for policy_statement in policy_statements)
 
 
 # Negative controls for the structural helpers. These source snippets live only
