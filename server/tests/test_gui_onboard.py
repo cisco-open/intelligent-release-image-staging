@@ -3863,21 +3863,36 @@ def test_real_iox_install_routes_only_through_the_controller(tmp_path):
     assert "controller-owned IOx output" in job["lines"]
 
 
-def test_iox_runtime_credentials_are_resolved_only_inside_controller(tmp_path):
+def test_iox_runtime_credentials_are_resolved_only_inside_controller(
+        tmp_path, monkeypatch):
     class ControllerOwnedCredentials:
         def get_secrets(self, _profile_id):
             raise AssertionError(
                 "OnboardService resolved an IOx runtime credential")
 
+    for name in ("DEVICE_USER", "DEVICE_PASS", "DEVICE_ENABLE",
+                 "DEVICE_SSH_USER", "DEVICE_SSH_PASS"):
+        monkeypatch.setenv(name, "inherited-secret")
+    observed_env = {}
+
+    def preflight(_dev, env, _resolved):
+        observed_env.update(env)
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
     controller = _FrozenIoxController()
     service = _iox_controller_service(
-        tmp_path, controller, creds=ControllerOwnedCredentials())
+        tmp_path, controller, creds=ControllerOwnedCredentials(),
+        preflight_fn=preflight)
 
     job = _wait(service, service.start("d1"))
 
     assert job["state"] == "done", job["lines"]
     assert len(controller.requests) == 1
     assert _request_value(controller.requests[0], "credential_ref") == "lab"
+    for name in ("DEVICE_USER", "DEVICE_PASS", "DEVICE_ENABLE",
+                 "DEVICE_SSH_USER", "DEVICE_SSH_PASS"):
+        assert name not in observed_env
 
 
 def test_iox_request_target_preserves_device_feature_intent():
