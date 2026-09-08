@@ -658,6 +658,24 @@ def test_transcript_is_canonical_private_and_reference_counts_physical_prefix(tm
     }
 
 
+def test_transcript_prefix_accepts_owned_shared_state_root_with_private_iox_tree(
+        tmp_path):
+    # The established deployment state root is shared by several server
+    # components and may be 0775. IOx authority begins below state/iox and
+    # remains private at 0700; transcript files remain 0600.
+    os.chmod(str(tmp_path), 0o775)
+    writer = _writer(tmp_path)
+
+    loaded = _module()._load_transcript_prefix(
+        str(tmp_path), writer.reference(), CONTROLLER)
+
+    assert loaded["id"] == ATTEMPT
+    assert loaded["controller_id"] == CONTROLLER
+    assert stat.S_IMODE((tmp_path / "iox").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "iox" / "transcripts").stat().st_mode) == 0o700
+    assert stat.S_IMODE(_transcript_path(tmp_path).stat().st_mode) == 0o600
+
+
 @pytest.mark.parametrize("change", [
     {"unexpected": 1}, {"command_id": True}, {"command_id": 0},
     {"kind": "shell"}, {"purpose": "invented"}, {"board_identity": None},
