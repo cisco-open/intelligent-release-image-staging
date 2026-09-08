@@ -64,13 +64,14 @@ def test_management_sigterm_is_latched_before_local_admission(tmp_path):
     ready = tmp_path / "startup-ready"
     cleaned = tmp_path / "startup-cleaned"
     served = tmp_path / "served"
+    admitted = tmp_path / "admitted"
     program = r'''
 import signal
 import sys
 import time
 import management_api
 
-ready, cleaned, served = sys.argv[1:]
+ready, cleaned, served, admitted = sys.argv[1:]
 latch = management_api._SigtermLatch()
 latch.install()
 with open(ready, "w"):
@@ -83,10 +84,12 @@ class Server:
             pass
 
 management_api._serve_with_shutdown(
-    Server(), lambda: open(cleaned, "w").write("drained"), latch=latch)
+    Server(), lambda: open(cleaned, "w").write("drained"), latch=latch,
+    start_admission=lambda: open(admitted, "w").write("accepted"))
 '''
     proc = subprocess.Popen(
-        [sys.executable, "-c", program, str(ready), str(cleaned), str(served)],
+        [sys.executable, "-c", program, str(ready), str(cleaned), str(served),
+         str(admitted)],
         env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True)
     try:
@@ -99,6 +102,7 @@ management_api._serve_with_shutdown(
         assert proc.returncode == 0, (stdout, stderr)
         assert cleaned.read_text() == "drained"
         assert not served.exists()
+        assert not admitted.exists()
     finally:
         if proc.poll() is None:
             proc.kill()
