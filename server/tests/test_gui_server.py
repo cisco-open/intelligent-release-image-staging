@@ -56,6 +56,55 @@ management_api._serve_with_shutdown(Server(), cleanup)
             proc.wait()
 
 
+def test_management_sigterm_is_latched_before_local_admission(tmp_path):
+    import subprocess
+    import sys
+    import time
+
+    ready = tmp_path / "startup-ready"
+    cleaned = tmp_path / "startup-cleaned"
+    served = tmp_path / "served"
+    program = r'''
+import signal
+import sys
+import time
+import management_api
+
+ready, cleaned, served = sys.argv[1:]
+latch = management_api._SigtermLatch()
+latch.install()
+with open(ready, "w"):
+    pass
+time.sleep(0.3)
+
+class Server:
+    def serve_forever(self):
+        with open(served, "w"):
+            pass
+
+management_api._serve_with_shutdown(
+    Server(), lambda: open(cleaned, "w").write("drained"), latch=latch)
+'''
+    proc = subprocess.Popen(
+        [sys.executable, "-c", program, str(ready), str(cleaned), str(served)],
+        env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    try:
+        deadline = time.time() + 3.0
+        while not ready.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), proc.communicate(timeout=1)
+        proc.terminate()
+        stdout, stderr = proc.communicate(timeout=3)
+        assert proc.returncode == 0, (stdout, stderr)
+        assert cleaned.read_text() == "drained"
+        assert not served.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
     assert '<th>Device</th><th>Role</th>' in html
