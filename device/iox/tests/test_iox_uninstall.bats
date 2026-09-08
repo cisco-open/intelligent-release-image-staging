@@ -444,7 +444,7 @@ def request(value):
         assert state=='DEPLOYED' and admitted
         resolved=True
         revision+=1
-        phase='restored' if phase!='unchanged' else phase
+        phase=('relinquished' if scenario=='deployed_relinquished' else 'restored') if phase!='unchanged' else phase
     elif name=='app_activate':
         assert admitted and resolved,'activation preceded restoration acknowledgement'
         if scenario!='activation_timeout': state='ACTIVATED'
@@ -514,10 +514,11 @@ def request(value):
             result['revision']=None
             result['phase']=None
         if scenario=='malformed_install_phase': result['phase']='restored'
+        if scenario=='malformed_uninstall_journal_half': result['revision']=0
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
-    if scenario.startswith(('malformed_response','malformed_success','malformed_install_')):
+    if scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
         control.shutdown(socket.SHUT_WR)
         return
     if finished:
@@ -739,7 +740,8 @@ ASSERTIONS
 }
 
 @test "uninstall rejects inconsistent successful results before a second request" {
-  for scenario in malformed_success_timed_out malformed_success_framing malformed_success_returncode; do
+  for scenario in malformed_success_timed_out malformed_success_framing malformed_success_returncode \
+      malformed_uninstall_journal_half; do
     _iox_fixture_setup
     run _iox_controller_run uninstall "$scenario" recorded
     [ "$status" -ne 0 ]

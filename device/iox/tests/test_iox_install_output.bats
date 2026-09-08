@@ -458,7 +458,7 @@ def request(value):
         assert state=='DEPLOYED' and admitted
         resolved=True
         revision+=1
-        phase='restored' if phase!='unchanged' else phase
+        phase=('relinquished' if scenario=='deployed_relinquished' else 'restored') if phase!='unchanged' else phase
     elif name=='app_activate':
         assert admitted and resolved,'activation preceded restoration acknowledgement'
         if scenario!='activation_timeout': state='ACTIVATED'
@@ -528,10 +528,11 @@ def request(value):
             result['revision']=None
             result['phase']=None
         if scenario=='malformed_install_phase': result['phase']='restored'
+        if scenario=='malformed_uninstall_journal_half': result['revision']=0
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
-    if scenario.startswith(('malformed_response','malformed_success','malformed_install_')):
+    if scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
         control.shutdown(socket.SHUT_WR)
         return
     if finished:
@@ -862,6 +863,13 @@ ASSERTIONS
   [ "$status" -ne 0 ]
   [ "$status" -ne 97 ]
   _iox_assert_trace first_only
+}
+
+@test "deployed recovery may relinquish ownership after an enabled probe" {
+  _iox_fixture_setup
+  run _iox_controller_run install deployed_relinquished
+  [ "$status" -eq 0 ]
+  _iox_assert_trace ordered deployed app_activate app_start finish
 }
 
 @test "inband dry-run validates the IOS management host before rendering" {
