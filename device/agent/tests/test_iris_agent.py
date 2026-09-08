@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 
 import pytest
 
 import iris_agent
+from device.agent.tests import test_instr_apply as task16
 
 # telemetry (#13): completion-jitter sleep is a module seam; never sleep in
 # unit tests.
@@ -165,6 +167,39 @@ def test_no_assignment_still_heartbeats():
     assert hb["current_image_id"] is None
     assert hb["stage_state"] == "unassigned"
     assert hb["stage_error"] is None
+
+
+def test_outer_state_save_failure_does_not_skip_real_staging_work(
+        tmp_path, monkeypatch):
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin", "size": 5,
+                       "sha256": "abc"})
+    stage_path = str(tmp_path / "img1.bin")
+    deps, emitted, _, _, copied, _, _, _ = make_deps(
+        cat, {stage_path: 5}, verify_ok=True)
+    deps = deps._replace(
+        instruction_step=task16.InstructionStep(),
+        aria_rpc=task16.AriaRPC(),
+        torrent_defaults={})
+    cfg = dict(CFG, catalog_url="https://192.0.2.10:8443",
+               max_peers="65535", stage_dir=str(tmp_path))
+    state_path = tmp_path / "iris-agent.state"
+    monkeypatch.setenv("IRIS_AGENT_STATE", str(state_path))
+    monkeypatch.setattr(sys, "argv", ["iris_agent.py", "--once"])
+    monkeypatch.setattr(iris_agent.agent_config, "load", lambda _path: cfg)
+    monkeypatch.setattr(
+        iris_agent, "build_deps", lambda *_args, **_kwargs: deps)
+
+    def fail_save(*_args):
+        raise OSError("outer state save unavailable")
+
+    monkeypatch.setattr(iris_agent, "_atomic_write_state", fail_save)
+    iris_agent.main()
+    assert copied == ["img1.bin"]
+    assert cat.heartbeats
+    assert cat.heartbeats[-1]["current_image_id"] == "img1"
+    assert any(tag == "MAX-PEERS-IGNORED" for tag, _message in emitted)
+    assert any(tag == "STATE-WRITE-FAIL" for tag, _message in emitted)
 
 
 def test_missing_assigned_image_heartbeats_error():
@@ -3898,7 +3933,7 @@ def test_bad_tier_defers_send_and_keeps_data():
     tele = state["img1"]["tele"]
     assert tele["report_pending"] is True
     assert tele["report_attempts"] == 1
-    assert tele["report_next_ts"] >= before + telemetry_report.TICK_SECONDS
+    assert tele["report_next_ts"] >= before + 60
     assert tele["event"] == "staging-complete"       # data survives for later
 
 

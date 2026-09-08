@@ -17,6 +17,7 @@ STAGE_DIR="${STAGE_DIR:-/flash/guest-share/iris}"
 EXEC_DIR="${EXEC_DIR:-/home/guestshell}"
 ARIA2_SRC="${ARIA2_SRC:-$STAGE_DIR/aria2c}"
 ARIA2="$EXEC_DIR/aria2c"
+ARIA2_CONF="$EXEC_DIR/aria2.conf"
 RPC_PORT="${RPC_PORT:-6800}"
 RPC_SECRET_FILE="${RPC_SECRET_FILE:-$STAGE_DIR/rpc-secret}"
 HOOK_SRC="${HOOK_SRC:-$STAGE_DIR/agent/peer-transfer-hook.sh}"
@@ -129,14 +130,100 @@ else
 fi
 
 # The installer bakes rpc-secret EMPTY (the agent fetches the real value on
-# its first token-refresh), and Aria2 Next rejects --rpc-secret= outright
-# ("Empty string is not allowed"; aria2 1.37 accepted it — field incident
-# 2026-08-20: aria2c never launched, bootstrap aborted before the agent, and
-# every freshly onboarded Guest Shell device stayed silent). Launch with the
-# same placeholder the IOx entrypoint uses; bootstrap's secret sync bounces
-# aria2c onto the real secret right after that first refresh.
-RPC_SECRET="$(tr -d '[:space:]' < "$RPC_SECRET_FILE" 2>/dev/null || true)"
+# its first token-refresh). Resolve that one special case to the established
+# placeholder, then apply the same small single-line alphabet as the container
+# launcher. Never trim or repair input: whitespace, extra lines, unsafe bytes,
+# and unreadable non-files all fail without exposing the value.
+if [ ! -f "$RPC_SECRET_FILE" ] || [ ! -r "$RPC_SECRET_FILE" ]; then
+  echo "invalid RPC secret input; refusing to start aria2c" >&2
+  exit 1
+fi
+if ! RPC_SECRET="$(python3 -c '
+import re, sys
+value = open(sys.argv[1], "rb").read()
+if value.endswith(b"\n"):
+    value = value[:-1]
+if re.fullmatch(br"[A-Za-z0-9._~-]*", value) is None:
+    raise SystemExit(1)
+sys.stdout.buffer.write(value)
+' "$RPC_SECRET_FILE" 2>/dev/null)"; then
+  echo "invalid RPC secret input; refusing to start aria2c" >&2
+  exit 1
+fi
 RPC_SECRET="${RPC_SECRET:-iris}"
+case "$RPC_SECRET" in
+  *[!A-Za-z0-9._~-]*)
+    echo "invalid RPC secret input; refusing to start aria2c" >&2
+    exit 1 ;;
+esac
+
+# aria2 reads the secret from this fixed owner-only file, keeping it out of
+# /proc/<pid>/cmdline. Build the complete owner-only replacement now, but keep
+# changed bytes pending until the daemon using the old secret has stopped.
+RPC_CONFIG_CHANGED=1
+_aria2_conf_tmp="$(umask 077; mktemp "$ARIA2_CONF.new.XXXXXX")" \
+  || { echo "cannot create private aria2 RPC config" >&2; exit 1; }
+cleanup_rpc_config_tmp() {
+  if [ -n "${_aria2_conf_tmp:-}" ]; then
+    rm -f "$_aria2_conf_tmp" 2>/dev/null || true
+  fi
+}
+trap cleanup_rpc_config_tmp EXIT
+if ! printf 'rpc-secret=%s\n' "$RPC_SECRET" > "$_aria2_conf_tmp" 2>/dev/null \
+   || ! chmod 600 "$_aria2_conf_tmp" 2>/dev/null; then
+  echo "cannot install private aria2 RPC config" >&2
+  exit 1
+fi
+# Compare bytes before publishing so a rotated secret forces replacement of a
+# daemon that still has the previous value in memory. Mode-only repair does not
+# change the content generation. Reject non-regular existing destinations.
+if ! RPC_CONFIG_CHANGED="$(python3 -c '
+import os, stat, sys
+source, destination = sys.argv[1:3]
+try:
+    destination_stat = os.lstat(destination)
+except FileNotFoundError:
+    changed = 1
+else:
+    if not stat.S_ISREG(destination_stat.st_mode):
+        raise SystemExit(1)
+    with open(source, "rb") as new_file:
+        new_bytes = new_file.read()
+    with open(destination, "rb") as old_file:
+        changed = int(new_bytes != old_file.read())
+print(changed)
+' "$_aria2_conf_tmp" "$ARIA2_CONF" 2>/dev/null)"; then
+  echo "cannot install private aria2 RPC config" >&2
+  exit 1
+fi
+
+publish_rpc_config() {
+  # Recheck after any daemon shutdown wait, then use no-target-directory
+  # replacement. A directory or symlink must fail rather than absorb the temp.
+  if ! python3 -c '
+import os, stat, sys
+destination = sys.argv[1]
+try:
+    destination_stat = os.lstat(destination)
+except FileNotFoundError:
+    pass
+else:
+    if not stat.S_ISREG(destination_stat.st_mode):
+        raise SystemExit(1)
+' "$ARIA2_CONF" 2>/dev/null \
+     || ! mv -fT "$_aria2_conf_tmp" "$ARIA2_CONF" 2>/dev/null; then
+    echo "cannot install private aria2 RPC config" >&2
+    exit 1
+  fi
+  unset _aria2_conf_tmp
+  trap - EXIT
+}
+
+# Even identical bytes are republished to repair owner-only mode. This is safe
+# while the daemon is live because its in-memory secret is already identical.
+if [ "$RPC_CONFIG_CHANGED" = "0" ]; then
+  publish_rpc_config
+fi
 
 # The per-peer transfer-record hook (--on-bt-download-complete, appended below).
 # aria2 execs the value directly -- execlp with no shell (util.cc:2328) -- so
@@ -189,7 +276,8 @@ esac
 # disagree (that skew IS the 2026-08-20 incident), and an empty file
 # legitimately means the daemon is on the "iris" placeholder resolved above --
 # so the value in this variable is the only one guaranteed to be the one the
-# daemon is actually using. No new exposure: it is already on aria2c's argv.
+# daemon is actually using. The daemon reads it from ARIA2_CONF, while the
+# hook receives the same value by inheritance without putting it in argv.
 # (The hook needs no stage path: aria2 hands it the staged file as argv[3].)
 export IRIS_RPC_PORT="$RPC_PORT"
 export IRIS_RPC_SECRET="$RPC_SECRET"
@@ -212,10 +300,11 @@ RPC_CONNECT_TIMEOUT="${RPC_CONNECT_TIMEOUT:-2}"
 RPC_HEALTH_TIMEOUT="${RPC_HEALTH_TIMEOUT:-10}"
 
 rpc_probe() {
-  curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
-    "http://127.0.0.1:$RPC_PORT/jsonrpc" \
-    -d '{"jsonrpc":"2.0","id":"p","method":"aria2.getVersion","params":["token:'"$RPC_SECRET"'"]}' \
-    >/dev/null 2>&1
+  printf '%s' \
+    '{"jsonrpc":"2.0","id":"p","method":"aria2.getVersion","params":["token:'"$RPC_SECRET"'"]}' \
+    | curl -s --connect-timeout "$RPC_CONNECT_TIMEOUT" --max-time "$RPC_HEALTH_TIMEOUT" \
+      "http://127.0.0.1:$RPC_PORT/jsonrpc" --data-binary @- \
+      >/dev/null 2>&1
 }
 
 rpc_up() {
@@ -280,9 +369,8 @@ iris_aria2_pids() {
 aria2_tracker_tls_ready() {
   # A successful RPC answer proves the daemon is alive, not that it was
   # launched with HTTPS tracker verification. Inspect each matching daemon's
-  # own command line and require the configured RPC port plus both exact TLS
-  # options on the same PID. Never log the command line: it also carries the
-  # RPC secret on Guest Shell.
+  # own command line and require the exact private conf path plus both exact TLS
+  # options on the same PID. Never log the command line.
   local pid cmd
   while IFS= read -r pid; do
     # Re-read this exact PID rather than trusting the discovery snapshot. The
@@ -290,6 +378,13 @@ aria2_tracker_tls_ready() {
     # an unrelated daemon from satisfying the healthy-IRIS decision too.
     aria2_pid_is_iris_rpc "$pid" || continue
     cmd="$(aria2_pid_command "$pid")" || continue
+    case " $cmd " in
+      *" --conf-path=$ARIA2_CONF "*) ;;
+      *) continue ;;
+    esac
+    case " $cmd " in
+      *" --rpc-secret"*) continue ;;
+    esac
     case " $cmd " in
       *" --ca-certificate=$ARIA2_CA "*) ;;
       *) continue ;;
@@ -304,7 +399,9 @@ aria2_tracker_tls_ready() {
 # already up? (skip the probe in tests)
 if [ "${SKIP_RPC_PROBE:-0}" != "1" ]; then
   if rpc_up; then
-    if [ "$CA_SNAPSHOT_CHANGED" = "0" ] && aria2_tracker_tls_ready; then
+    if [ "$CA_SNAPSHOT_CHANGED" = "0" ] \
+       && [ "$RPC_CONFIG_CHANGED" = "0" ] \
+       && aria2_tracker_tls_ready; then
       echo "aria2c RPC already up on :$RPC_PORT with current tracker TLS verification"
       exit 0
     fi
@@ -360,6 +457,13 @@ if [ -n "$_iris_pids" ]; then
 fi
 unset _iris_pids _signaled_pids _still_running _pid _w
 
+# A content change stayed private in its sibling temp until every broadly
+# owned old daemon was gone. A missing config follows this path too, so it is
+# published before the new daemon launches.
+if [ "$RPC_CONFIG_CHANGED" = "1" ]; then
+  publish_rpc_config
+fi
+
 # copy the binary to an exec-capable fs and run it
 cp -f "$ARIA2_SRC" "$ARIA2" \
   || { echo "cannot install aria2c from $ARIA2_SRC to $ARIA2" >&2; exit 1; }
@@ -384,7 +488,7 @@ exec "$ARIA2" \
   --enable-rpc=true \
   --rpc-listen-all=false \
   --rpc-listen-port="$RPC_PORT" \
-  --rpc-secret="$RPC_SECRET" \
+  --conf-path="$ARIA2_CONF" \
   --ca-certificate="$ARIA2_CA" \
   --check-certificate=true \
   --enable-dht=false \

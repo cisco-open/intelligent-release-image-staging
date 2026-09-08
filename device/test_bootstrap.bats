@@ -56,8 +56,8 @@ teardown() { rm -rf "$TMP"; }
 # ---------------------------------------------------------------------------
 # Persisted aria2c launch overrides from iris-agent.conf (issue #122):
 # guestshell-start.sh only reads its own live process environment, refreshed
-# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or
-# RPC_PORT/MAX_PEERS, which had the identical gap) stick without this. These
+# on each 60s EEM tick, so an operator has no way to make IRIS_LOG (or RPC_PORT)
+# stick without this. Legacy max_peers remains parseable but inert. These
 # tests run the REAL guestshell-start.sh (not a stub) against a stub aria2c
 # so the launch line it actually builds can be inspected end to end.
 # ---------------------------------------------------------------------------
@@ -115,8 +115,8 @@ teardown() { rm -rf "$TMP"; }
   [[ "$(cat "$TMP/launched.txt")" != *"--log="* ]]
 }
 
-@test "bootstrap propagates rpc_port and max_peers from iris-agent.conf to aria2c's real launch line" {
-  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 25\n' > "$STAGE/iris-agent.conf"
+@test "bootstrap propagates rpc_port while ignoring legacy max_peers" {
+  printf 'rpc_secret = SAME\nrpc_port = 6900\nmax_peers = 65535\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
   chmod +x "$STAGE/guestshell-start.sh"
@@ -129,11 +129,13 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   out="$(cat "$TMP/launched.txt")"
   [[ "$out" == *"--rpc-listen-port=6900"* ]]
-  [[ "$out" == *"--bt-max-peers=25"* ]]
+  [[ "$out" == *"--bt-max-peers=10"* ]]
+  [[ "$out" != *"--bt-max-peers=65535"* ]]
+  [[ "$output" != *"max_peers"* ]]
 }
 
-@test "bootstrap ignores an invalid rpc_port/max_peers in iris-agent.conf and keeps the builtin defaults" {
-  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 999999\n' \
+@test "bootstrap ignores invalid rpc_port but accepts inert max_peers in iris-agent.conf" {
+  printf 'rpc_secret = SAME\nrpc_port = not-a-port\nmax_peers = 65535\n' \
     > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
   cp "$BATS_TEST_DIRNAME/guestshell-start.sh" "$STAGE/guestshell-start.sh"
@@ -146,7 +148,7 @@ teardown() { rm -rf "$TMP"; }
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"ignoring invalid rpc_port"* ]]
-  [[ "$output" == *"ignoring out-of-range max_peers"* ]]
+  [[ "$output" != *"max_peers"* ]]
   out="$(cat "$TMP/launched.txt")"
   [[ "$out" == *"--rpc-listen-port=6800"* ]]   # builtin default, unchanged
   [[ "$out" == *"--bt-max-peers=10"* ]]        # builtin default, unchanged

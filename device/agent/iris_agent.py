@@ -89,6 +89,22 @@ _FIXED_CONTROL = {
 }
 _ALLOW_COMPLEMENT_CACHE = {"digest": None, "rules": None}
 
+
+def _normalize_tick_seconds(value):
+    """Return a bounded mechanical launcher tick, compatibly defaulting to 60."""
+    if isinstance(value, bool):
+        return 60
+    if isinstance(value, int):
+        tick_seconds = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        significant = value.lstrip("0") or "0"
+        if len(significant) > 5:
+            return 60
+        tick_seconds = int(significant)
+    else:
+        return 60
+    return tick_seconds if 1 <= tick_seconds <= 86400 else 60
+
 _INSTRUCTION_ARIA_ADD_PROTOCOL = "iris-instruction-aria-add/v1"
 
 
@@ -579,7 +595,8 @@ def _not_active_observation(tele_on, now):
         return None
 
 
-def _build_observation(cfg, deps, state, img_id, stage, phase, now):
+def _build_observation(cfg, deps, state, img_id, stage, phase, now,
+                       tick_seconds=60):
     """Build the state-first v2 `telemetry_observation` envelope for an assigned
     heartbeat, and — when the state is `observed` — checkpoint the incremented
     sample_seq BEFORE returning it, so the heartbeat POST that carries the seq
@@ -628,10 +645,12 @@ def _build_observation(cfg, deps, state, img_id, stage, phase, now):
         if not telemetry_report.stream_enabled(cfg):
             return state_envelope("paused"), None
         tier = telemetry_report.classify(state, tele.get("avg_bps"))
-        _every, paused = telemetry_report.active_directives(state, now)
+        _every, paused = telemetry_report.active_directives(
+            state, now, tick_seconds=tick_seconds)
         if paused:
             return state_envelope("paused"), None
-        if not telemetry_report.should_sample(state, tele, tier, now):
+        if not telemetry_report.should_sample(
+                state, tele, tier, now, tick_seconds=tick_seconds):
             return state_envelope("not_due"), None
         stats = deps.aria_stats(stage)
         peers = deps.aria_peers(stage)
@@ -762,7 +781,7 @@ def _arm_terminal_report(state, img_id, tele, event, drop_frozen):
 
 
 def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
-                    peers=None):
+                    peers=None, tick_seconds=60):
     """Per-tick telemetry glue (issue #13). phase is which run_once path is
     calling: 'downloading' | 'seeding-only' | 'copied' | 'steady' | 'no-space'.
 
@@ -926,7 +945,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                 if tier == "bad":
                     tele["report_attempts"] = tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                        tele["report_attempts"], now)
+                        tele["report_attempts"] - 1, now,
+                        tick_seconds=tick_seconds)
                 elif _send_frozen_report(cfg, deps, state, img_id, now):
                     tele["report_pending"] = False
                     tele["report_sent_ts"] = now
@@ -934,7 +954,8 @@ def _telemetry_tick(cfg, deps, state, img_id, stage, phase, hb_resp, now,
                     tele["report_attempts"] = \
                         tele.get("report_attempts", 0) + 1
                     tele["report_next_ts"] = telemetry_report.next_backoff_ts(
-                        tele["report_attempts"], now)
+                        tele["report_attempts"] - 1, now,
+                        tick_seconds=tick_seconds)
     except Exception as e:
         try:
             deps.emit("TELEMETRY-FAIL", "telemetry tick failed (ignored): %s" % e)
@@ -1298,16 +1319,18 @@ class _ImageTick:
     between the end of the loop and the POST), followed by the same telemetry
     tick with the same response."""
 
-    __slots__ = ("hb", "tele", "stage_state", "stage_error")
+    __slots__ = ("hb", "tele", "stage_state", "stage_error",
+                 "tick_seconds")
 
     # Index of _telemetry_tick()'s hb_resp parameter in the recorded call.
     _HB_RESP_ARG = 6
 
-    def __init__(self):
+    def __init__(self, tick_seconds=60):
         self.hb = None
         self.tele = None
         self.stage_state = None
         self.stage_error = None
+        self.tick_seconds = _normalize_tick_seconds(tick_seconds)
 
     def heartbeat(self, *args, **kwargs):
         """Record this image's _heartbeat() call. Returns None because the
@@ -1322,6 +1345,7 @@ class _ImageTick:
         return None
 
     def telemetry(self, *args, **kwargs):
+        kwargs["tick_seconds"] = self.tick_seconds
         self.tele = (args, kwargs)
 
     def build(self, staged_image_ids=None, errored_image_ids=None):
@@ -1966,8 +1990,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # The observation phase stays 'steady' whatever the report does:
             # aria2 is seeding here, not downloading, and _build_observation
             # takes an aria snapshot only for 'downloading'/'seeding-only'.
-            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
-                                        "steady", time.time())
+            obs, _ = _build_observation(
+                cfg, deps, state, img_id, stage, "steady", time.time(),
+                tick_seconds=tick.tick_seconds)
             hb = tick.heartbeat(image, deps, "ready",
                                 target_fs=state.get("stage_fs"),
                                 tele_on=tele_on,
@@ -2339,7 +2364,7 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                                      copy_bytes + flashcheck.HEADROOM, mode))
                         obs, peers = _build_observation(
                             cfg, deps, state, img_id, stage, "seeding-only",
-                            time.time())
+                            time.time(), tick_seconds=tick.tick_seconds)
                         hb = tick.heartbeat(image, deps,
                                             "flash_full_seeding_only",
                                             target_fs=state.get("stage_fs"),
@@ -2468,8 +2493,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             # "ready" only when the flash-root copy is actually placed; a failed
             # copy_to_root (signature fail / never appeared) keeps "staging" so
             # the heartbeat never claims a verified root copy that isn't there.
-            obs, _ = _build_observation(cfg, deps, state, img_id, stage,
-                                        "seeding-only", time.time())
+            obs, _ = _build_observation(
+                cfg, deps, state, img_id, stage, "seeding-only", time.time(),
+                tick_seconds=tick.tick_seconds)
             hb = tick.heartbeat(image, deps,
                                 "ready" if st.get("copied") else
                                 ("copy_failed" if st.get("copy_terminal")
@@ -2750,8 +2776,9 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
         # old 10s IRIS-MONITOR raced and spammed). Computed from the on-disk size.
         deps.emit("PROGRESS", "%s %d%% (%dMB/%dMB)"
                   % (image["filename"], have * 100 // size, have >> 20, size >> 20))
-    obs, peers = _build_observation(cfg, deps, state, img_id, stage,
-                                    "downloading", time.time())
+    obs, peers = _build_observation(
+        cfg, deps, state, img_id, stage, "downloading", time.time(),
+        tick_seconds=tick.tick_seconds)
     hb = tick.heartbeat(image, deps,
                         target_fs=state.get("stage_fs"),
                         tele_on=tele_on,
@@ -3242,11 +3269,12 @@ def _cadence_due(state, interval, boot, monotonic_now):
 
 def _cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
                        attestation):
+    now = time.time()
     if not ids:
         payload = _heartbeat(
             None, deps, "unassigned", target_fs=cfg.get("target_fs"),
             tele_on=tele_on, stream_on=stream_on,
-            observation=_not_active_observation(tele_on, time.time()))
+            observation=_not_active_observation(tele_on, now))
     else:
         first = ids[0]
         staged = _staged_image_ids(state, ids)
@@ -3255,10 +3283,13 @@ def _cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
             {"id": first}, deps, "ready" if ready else "staging",
             target_fs=cfg.get("target_fs"), tele_on=tele_on,
             stream_on=stream_on,
-            observation=_not_active_observation(tele_on, time.time()),
+            observation=_not_active_observation(tele_on, now),
             staged_image_ids=staged if len(ids) > 1 else None)
     response = _send_heartbeat(
         deps, cfg["device_id"], payload, attestation)
+    # A cadence-only tick deliberately takes no sample, but its heartbeat is
+    # still authoritative for renewing or clearing stream directives.
+    telemetry_report.store_directives(state, response, now)
     response_date = getattr(deps.catalog, "response_authenticated_date", None)
     _record_heartbeat_hint(state, response, response_date)
     return response
@@ -3279,7 +3310,8 @@ def _contained_cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
         return None
 
 
-def run_once(cfg, deps, state):
+def run_once(cfg, deps, state, tick_seconds=60):
+    tick_seconds = _normalize_tick_seconds(tick_seconds)
     # Self-refresh the catalog token BEFORE any catalog work, once it's past
     # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
     # POST + client rebind + atomic conf rewrite and returns the updated cfg,
@@ -3340,6 +3372,23 @@ def run_once(cfg, deps, state):
         state["schema_version"] = _STATE_SCHEMA
         if cleared:
             deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
+
+    if "max_peers" in cfg:
+        instruction_bag = state.get("instructions")
+        if not isinstance(instruction_bag, dict):
+            instruction_bag = {}
+            state["instructions"] = instruction_bag
+        if instruction_bag.get("max_peers_ignored") is not True:
+            # Mark before the best-effort notice so a failed syslog write does
+            # not repeat forever or suppress the tick's heartbeat/staging work.
+            instruction_bag["max_peers_ignored"] = True
+            try:
+                deps.emit(
+                    "MAX-PEERS-IGNORED",
+                    "legacy max_peers configuration is ignored; signed "
+                    "instructions control peer limits")
+            except Exception:
+                pass
 
     task16 = _task16_runtime(deps)
     instruction_attestation = None
@@ -3572,7 +3621,7 @@ def run_once(cfg, deps, state):
     ticks = []
     statuses = []
     for idx, img_id in enumerate(ids):
-        tick = _ImageTick()
+        tick = _ImageTick(tick_seconds)
         ticks.append(tick)
         # The FIRST image of the set carries the legacy top-level "image_id"
         # pointer; _stage_image writes it where the single-image agent did,
@@ -5439,6 +5488,11 @@ def main():  # pragma: no cover
         return
 
     cfg = agent_config.load(conf_path)
+    if cfg.get("device_platform") in ("iox", "xr-appmgr"):
+        tick_seconds = _normalize_tick_seconds(
+            os.environ.get("IRIS_TICK_SECONDS"))
+    else:
+        tick_seconds = 60
     load_error = None
     try:
         with open(state_path) as f:
@@ -5453,7 +5507,7 @@ def main():  # pragma: no cover
         deps.emit("STATE-LOAD-FAIL",
                   "%s unreadable; starting with empty state: %s"
                   % (state_path, load_error))
-    result = run_once(cfg, deps, state)
+    result = run_once(cfg, deps, state, tick_seconds)
     try:
         # Ordinary final state save: durable, best-effort. A crash-critical
         # identity/sequence fact was already checkpointed BEFORE its POST, so

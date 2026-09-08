@@ -268,6 +268,11 @@ MAX_PEERS="${IRIS_MAX_PEERS:-10}"
 MAX_CONCURRENT="${IRIS_MAX_CONCURRENT:-100}"
 uint_between IRIS_RPC_PORT "$RPC_PORT" 1 65535
 uint_between IRIS_TICK_SECONDS "$TICK" 1 86400
+# Shell arithmetic may interpret a leading zero as an octal prefix.  Keep the
+# validated cadence canonical so this launcher and the Python agent use the
+# same base-10 value.
+while [ "${TICK#0}" != "$TICK" ]; do TICK="${TICK#0}"; done
+export IRIS_TICK_SECONDS="$TICK"
 uint_between IRIS_TICK_JITTER_PCT "$JITTER_PCT" 0 100
 uint_between IRIS_TICK_BACKOFF_MAX "$BACKOFF_MAX" 1 86400
 uint_between IRIS_MAX_PEERS "$MAX_PEERS" 1 1000
@@ -444,7 +449,6 @@ if [ ! -f "$CONF" ]; then
         "device_version = ${IRIS_VERSION:-}"
     fi
     printf '%s\n' \
-      "max_peers = ${MAX_PEERS}" \
       "telemetry = ${IRIS_TELEMETRY:-on}" \
       "telemetry_stream = ${IRIS_TELEMETRY_STREAM:-off}" \
       "rpc_port = ${RPC_PORT}" \
@@ -488,12 +492,9 @@ for _key in stage_dir share_dir catalog_ca device_ssh_known_hosts; do
   _value="$(conf_value "$_key" "$CONF")"
   [ -z "$_value" ] || absolute_path "$_key" "$_value"
 done
-for _key in rpc_port max_peers device_ssh_port; do
+for _key in rpc_port device_ssh_port; do
   _value="$(conf_value "$_key" "$CONF")"
-  [ -z "$_value" ] || case "$_key" in
-    rpc_port|device_ssh_port) uint_between "$_key" "$_value" 1 65535 ;;
-    max_peers) uint_between "$_key" "$_value" 1 1000 ;;
-  esac
+  [ -z "$_value" ] || uint_between "$_key" "$_value" 1 65535
 done
 _value="$(conf_value target_fs "$CONF")"
 [ -z "$_value" ] || printf '%s' "$_value" | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:$' \

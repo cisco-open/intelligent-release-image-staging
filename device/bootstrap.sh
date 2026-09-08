@@ -124,11 +124,11 @@ fi
 # config file (rpc_secret above is synced from the very same file) and
 # agent_config.load()/write_conf() already round-trip a key they don't
 # recognize (device/agent/agent_config.py), so an operator can set
-# `iris_log = on` (or `rpc_port` / `max_peers`) there with nothing more than
+# `iris_log = on` (or `rpc_port`) there with nothing more than
 # a text edit, on an already-deployed device, with no reinstall and no
 # change to a file the agent rewrites out from under them -- the NEXT EEM
-# tick picks it up. This covers `RPC_PORT`/`MAX_PEERS` too: they had the
-# identical gap before `IRIS_LOG` made it operator-relevant.
+# tick picks it up. This covers `RPC_PORT` too: it had the identical gap
+# before `IRIS_LOG` made it operator-relevant.
 #
 # Read raw with sed, exactly like the rpc_secret line above -- never eval'd,
 # so there is no path from a malformed or hostile conf value to shell
@@ -169,20 +169,6 @@ if [ -f "$STAGE/iris-agent.conf" ]; then
     esac
   fi
 
-  _v="$(conf_value max_peers)"
-  if [ -n "$_v" ]; then
-    case "$_v" in
-      *[!0-9]*)
-        echo "IRIS-BOOTSTRAP: ignoring invalid max_peers in iris-agent.conf: $_v" >&2 ;;
-      *)
-        if [ "$_v" -ge 1 ] && [ "$_v" -le 65535 ]; then
-          export MAX_PEERS="$_v"
-        else
-          echo "IRIS-BOOTSTRAP: ignoring out-of-range max_peers in iris-agent.conf: $_v" >&2
-        fi
-        ;;
-    esac
-  fi
   unset _v
 fi
 

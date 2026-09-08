@@ -32,7 +32,7 @@ DEFAULTS = {
     "target_fs": "",       # optional writable IOS prefix, e.g. sdflash:
     "rpc_port": "6800",
     "rpc_secret": "",
-    "max_peers": "10",     # cap BT peer connections per torrent on a device
+    "max_peers": "10",     # legacy compatibility text; signed instructions own QoS
     "telemetry_stream": "off",  # live sample streaming opt-in (fail-closed; spec §5.5)
     "token_expires_at": "0",   # epoch secs of catalog_token expiry; 0 => refresh next tick
     # catalog_ca is intentionally absent from DEFAULTS -- see module docstring.
@@ -262,7 +262,6 @@ def validate_config(cfg):
         validate_bearer_token("announce_token", cfg.get("announce_token"))
     validate_ios_path("share_ios_path", cfg.get("share_ios_path", ""))
     _validate_uint(cfg, "rpc_port", 1, 65535)
-    _validate_uint(cfg, "max_peers", 1, 1000)
 
     for key in ("stage_dir", "share_dir", "device_ssh_known_hosts"):
         value = (cfg.get(key) or "").strip()

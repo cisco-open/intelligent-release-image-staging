@@ -4,6 +4,8 @@
 
 import stat
 
+import pytest
+
 import agent_config
 
 
@@ -152,6 +154,18 @@ def test_absent_selector_preserves_legacy_guestshell_config_grammar(tmp_path):
     assert cfg["stage_dir"] == "relative-legacy-path"
     assert cfg["max_peers"] == "legacy-value"
     assert cfg["legacy key"] == "retained"
+
+
+@pytest.mark.parametrize("value", ["1", "10", "1000", "1001", "65535"])
+def test_container_max_peers_is_parsed_as_ignored_compatibility_text(
+        tmp_path, value):
+    """Old container confs keep loading after max_peers loses policy authority."""
+    p = tmp_path / "agent.conf"
+    p.write_text(
+        "catalog_url = https://x\ncatalog_token = t\ndevice_id = d\n"
+        "device_platform = xr-appmgr\ntarget_fs = harddisk:\n"
+        "max_peers = %s\n" % value)
+    assert agent_config.load(str(p))["max_peers"] == value
 
 
 def test_iox_rejects_option_shaped_ssh_username(tmp_path):

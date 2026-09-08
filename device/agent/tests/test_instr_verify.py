@@ -249,7 +249,8 @@ def test_closed_envelope_schema_rejects_whole_instruction(instr, where, field, v
 @pytest.mark.parametrize("field,value", [
     ("max_peers", 0), ("max_peers", 1001), ("max_concurrent", True),
     ("overall_down_bps", 8191), ("overall_up_bps", 10000000001),
-    ("request_peer_speed_limit_bps", 1000000001), ("unknown", 0),
+    ("request_peer_speed_limit_bps", 1000000001),
+    ("bt-tracker-interval", 60), ("unknown", 0),
 ])
 def test_qos_bounds_reject_whole_instruction(instr, field, value):
     part = part_value()

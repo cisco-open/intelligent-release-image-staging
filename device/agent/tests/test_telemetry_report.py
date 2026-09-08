@@ -185,16 +185,15 @@ def test_pull_requested_true_only_for_dict_true():
 
 # ---- next_backoff_ts(): defer schedule for the 'bad' tier ----
 
-def test_next_backoff_ts_doubles_then_caps():
+@pytest.mark.parametrize("tick_seconds", [1, 60, 300, 900])
+def test_next_backoff_ts_doubles_then_caps_in_mechanical_ticks(tick_seconds):
     t = telemetry_report
     now = 1000.0
-    assert t.next_backoff_ts(0, now) == now + 60
-    assert t.next_backoff_ts(1, now) == now + 120
-    assert t.next_backoff_ts(2, now) == now + 240
-    assert t.next_backoff_ts(3, now) == now + 480
-    assert t.next_backoff_ts(4, now) == now + 960     # 16-tick cap reached
-    assert t.next_backoff_ts(5, now) == now + 960     # stays capped
-    assert t.next_backoff_ts(t.MAX_ATTEMPTS, now) == now + 960
+    for attempts, multiplier in ((0, 1), (1, 2), (2, 4), (3, 8),
+                                 (4, 16), (5, 16), (t.MAX_ATTEMPTS, 16)):
+        assert t.next_backoff_ts(
+            attempts, now, tick_seconds=tick_seconds
+        ) == now + multiplier * tick_seconds
 
 
 # ---- constants are the cross-task contract; pin them ----
@@ -206,7 +205,7 @@ def test_module_constants_pin_contract_values():
     assert (t.RTT_CONSTRAINED_MS, t.SLOW_BPS, t.FAIL_STREAK_BAD) == \
         (250, 1048576, 3)
     assert (t.BACKOFF_CAP_TICKS, t.MAX_ATTEMPTS) == (16, 60)
-    assert (t.STATE_PEER_SET_CAP, t.TICK_SECONDS) == (512, 60)
+    assert t.STATE_PEER_SET_CAP == 512
 
 
 # ---- live streaming samples (device transfer telemetry spec, section 5) ----
@@ -253,45 +252,79 @@ class TestStreamDirectives:
         assert state["stream_directives"] == {
             "every": 1, "pause": False, "received_ts": 300.0}
 
-    def test_active_fresh_vs_stale(self):
+    @pytest.mark.parametrize("tick_seconds", [1, 60, 300, 900])
+    def test_active_fresh_for_exactly_three_mechanical_ticks(
+            self, tick_seconds):
         state = {}
         telemetry_report.store_directives(
             state, {"stream_every": 8, "stream_pause": True}, 1000.0)
-        assert telemetry_report.active_directives(state, 1179.0) == (8, True)
-        assert telemetry_report.active_directives(state, 1181.0) == (1, False)
+        assert telemetry_report.active_directives(
+            state, 1000.0 + 3 * tick_seconds,
+            tick_seconds=tick_seconds) == (8, True)
+        assert telemetry_report.active_directives(
+            state, 1000.001 + 3 * tick_seconds,
+            tick_seconds=tick_seconds) == (1, False)
+
+    def test_future_directive_timestamp_fails_safely(self):
+        state = {}
+        telemetry_report.store_directives(
+            state, {"stream_every": 8, "stream_pause": True}, 1001.0)
+        assert telemetry_report.active_directives(
+            state, 1000.0, tick_seconds=300) == (1, False)
 
     def test_active_tolerates_hand_edited_state(self):
         for junk in ("x", {"every": "9", "received_ts": "soon"},
                      {"every": 99, "pause": True, "received_ts": 100.0}):
             state = {"stream_directives": junk}
-            every, pause = telemetry_report.active_directives(state, 100.0)
+            every, pause = telemetry_report.active_directives(
+                state, 100.0, tick_seconds=60)
             assert every == 1
 
 
 class TestShouldSample:
     def test_bad_tier_never_samples(self):
-        assert not telemetry_report.should_sample({}, {}, "bad", 0.0)
+        assert not telemetry_report.should_sample(
+            {}, {}, "bad", 0.0, tick_seconds=60)
 
     def test_pause_suppresses(self):
         state = {}
         telemetry_report.store_directives(state, {"stream_pause": True}, 100.0)
-        assert not telemetry_report.should_sample(state, {}, "good", 100.0)
+        assert not telemetry_report.should_sample(
+            state, {}, "good", 100.0, tick_seconds=60)
 
-    def test_good_tier_every_tick_with_half_tick_slop(self):
+    @pytest.mark.parametrize("tick_seconds", [1, 60, 300, 900])
+    def test_good_tier_every_tick_with_half_tick_slop(
+            self, tick_seconds):
         tele = {"stream_last_ts": 1000.0}
-        assert telemetry_report.should_sample({}, tele, "good", 1031.0)
-        assert not telemetry_report.should_sample({}, tele, "good", 1029.0)
+        boundary = 1000.0 + 0.5 * tick_seconds
+        assert telemetry_report.should_sample(
+            {}, tele, "good", boundary, tick_seconds=tick_seconds)
+        assert not telemetry_report.should_sample(
+            {}, tele, "good", boundary - 0.001,
+            tick_seconds=tick_seconds)
 
     def test_constrained_every_fourth_tick(self):
         tele = {"stream_last_ts": 1000.0}
-        assert not telemetry_report.should_sample({}, tele, "constrained", 1180.0)
-        assert telemetry_report.should_sample({}, tele, "constrained", 1211.0)
+        assert not telemetry_report.should_sample(
+            {}, tele, "constrained", 2049.999, tick_seconds=300)
+        assert telemetry_report.should_sample(
+            {}, tele, "constrained", 2050.0, tick_seconds=300)
 
     def test_stream_every_stretches_good_tier(self):
         state = {}
-        telemetry_report.store_directives(state, {"stream_every": 10}, 1000.0)
+        # The heartbeat has renewed this directive inside its three-tick
+        # freshness window even though the last sample is much older.
+        telemetry_report.store_directives(state, {"stream_every": 10}, 3000.0)
         tele = {"stream_last_ts": 1000.0}
-        assert not telemetry_report.should_sample(state, tele, "good", 1120.0)
+        assert not telemetry_report.should_sample(
+            state, tele, "good", 3849.999, tick_seconds=300)
+        assert telemetry_report.should_sample(
+            state, tele, "good", 3850.0, tick_seconds=300)
+
+    def test_future_sample_timestamp_fails_safely(self):
+        assert not telemetry_report.should_sample(
+            {}, {"stream_last_ts": 1001.0}, "good", 1000.0,
+            tick_seconds=300)
 
 
 class TestConfDefault:
