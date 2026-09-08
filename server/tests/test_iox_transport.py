@@ -1686,6 +1686,7 @@ def test_composite_ipc_packs_two_maximum_streams_across_constituent_boundaries(
 
 @pytest.mark.parametrize("payload,state", [
     ("App signature verification: enabled\n", "enabled"),
+    ("\nApp signature verification: enabled\n\n", "enabled"),
     ("APP SIGNATURE VERIFICATION: ENABLED\n", "enabled"),
     ("aPp SiGnAtUrE vErIfIcAtIoN: DiSaBlEd\n", "disabled"),
     ("App signature verification: disabled\n", "disabled"),
@@ -1715,6 +1716,9 @@ def test_executable_closed_parser_records_recomputed_state(tmp_path, peer_factor
 @pytest.mark.parametrize("purpose,command,payload,exit_code,transition,category", [
     ("verification_disable", b"app-hosting verification disable",
      "App hosting verification disabled successfully\n", 0,
+     "disabled_successfully", None),
+    ("verification_disable", b"app-hosting verification disable",
+     "\nApp hosting verification disabled successfully\n\n", 0,
      "disabled_successfully", None),
     ("verification_disable", b"app-hosting verification disable",
      "APP HOSTING VERIFICATION DISABLED SUCCESSFULLY\n", 0,
