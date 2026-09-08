@@ -3897,6 +3897,44 @@ def test_iox_request_target_preserves_device_feature_intent():
     assert target["log"] == "on"
 
 
+def test_shutdown_cancels_queued_jobs_and_waits_for_running_job():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run(_path, _env, _on_line):
+        entered.set()
+        assert release.wait(3.0)
+        return 0
+
+    service = _svc(run, max_concurrent=1)
+    service.fleet._d["d2"] = dict(
+        service.fleet._d["d1"], device_id="d2", device_ip="10.0.0.9")
+    running = service.start("d1")
+    assert entered.wait(2.0)
+    queued = service.start("d2")
+
+    stopped = threading.Event()
+    shutdown = threading.Thread(
+        target=lambda: (service.shutdown(), stopped.set()))
+    shutdown.start()
+    try:
+        deadline = time.time() + 2.0
+        while (service.get_job(queued)["state"] != "cancelled" and
+               time.time() < deadline):
+            time.sleep(0.01)
+        assert service.get_job(queued)["state"] == "cancelled"
+        assert not stopped.is_set()
+        with pytest.raises(ValueError, match="shutting down"):
+            service.start("d2")
+    finally:
+        release.set()
+        shutdown.join(3.0)
+
+    assert stopped.is_set()
+    assert service.get_job(running)["state"] == "done"
+    assert service._workers == []
+
+
 def test_iox_prepare_is_deferred_inside_controller(tmp_path):
     events = []
     entered = threading.Event()
