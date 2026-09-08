@@ -24,6 +24,7 @@ import secrets
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 
 
@@ -99,6 +100,14 @@ CONTROL_RANGES = {
     "catalog_tick_s": (60, 900),
     "telemetry_every_ticks": (1, 60),
 }
+
+_TORRENT_OPTION_CONTEXT = threading.local()
+_KRL_UNSET = object()
+
+
+def torrent_option_context():
+    """Return the process-wide context shared by every agent module load."""
+    return _TORRENT_OPTION_CONTEXT
 
 def _pairs(pairs):
     result = {}
@@ -826,11 +835,14 @@ class _GuardedVerifier:
         return _GuardedVerifier(self.verifier, self.state, self.boot, self.krl,
                                 fallback=True, attempts=self.attempts)
 
-    def _attempt(self, kind, digest, function):
+    def _attempt(self, kind, digest, function, krl=_KRL_UNSET):
         bag = _bag(self.state)
         records = bag.get("verifier_timeouts")
         if not isinstance(records, dict):
             records = {}
+        actual_krl = self.krl if krl is _KRL_UNSET else krl
+        krl_identity = ("absent" if actual_krl is None else
+                        "sha256:" + hashlib.sha256(actual_krl).hexdigest())
         # Three fixed custody slots; never grow a remote-controlled digest map.
         bounded = {}
         for name in ("role", "lkg", "keylist"):
@@ -841,29 +853,48 @@ class _GuardedVerifier:
                     and type(record.get("count")) is int and 0 <= record["count"] <= 3
                     and "boot_id" in record
                     and (record.get("boot_id") is None or isinstance(record.get("boot_id"), str)
-                         and len(record["boot_id"]) <= 128)):
-                bounded[name] = {field: record[field] for field in ("digest", "count", "boot_id")}
+                         and len(record["boot_id"]) <= 128)
+                    and isinstance(record.get("krl_identity"), str)
+                    and (record["krl_identity"] == "absent"
+                         or (record["krl_identity"].startswith("sha256:")
+                             and HEX64.fullmatch(record["krl_identity"][7:])
+                             is not None))):
+                bounded[name] = {field: record[field] for field in (
+                    "digest", "count", "boot_id", "krl_identity")}
         records = bounded
         bag["verifier_timeouts"] = records
+        shared_kind = "role" if kind == "lkg" else kind
+        key = (shared_kind, digest, krl_identity)
+        attempted_count = self.attempts.get(key)
+        if type(attempted_count) is not int or not 0 <= attempted_count <= 3:
+            attempted_count = 0
         previous = records.get(kind)
         if (self.boot is None or not isinstance(previous, dict)
-                or previous.get("digest") != digest or previous.get("boot_id") != self.boot):
-            previous = {"digest": digest, "count": 0, "boot_id": self.boot}
+                or previous.get("digest") != digest
+                or previous.get("boot_id") != self.boot
+                or previous.get("krl_identity") != krl_identity):
+            previous = {"digest": digest, "count": attempted_count,
+                        "boot_id": self.boot,
+                        "krl_identity": krl_identity}
             records[kind] = previous
         if self.boot is not None and kind in ("role", "lkg"):
             other = records.get("lkg" if kind == "role" else "role", {})
-            if other.get("digest") == digest and other.get("boot_id") == self.boot:
+            if (other.get("digest") == digest
+                    and other.get("boot_id") == self.boot
+                    and other.get("krl_identity") == krl_identity):
                 previous["count"] = max(previous["count"], other["count"])
         count = previous.get("count", 0)
         if type(count) is not int or not 0 <= count <= 3:
             count = 0
+        count = max(count, attempted_count)
         previous["count"] = count
-        key = ("role" if kind == "lkg" else kind, digest)
 
         def publish():
             if kind in ("role", "lkg"):
                 other = records.get("lkg" if kind == "role" else "role", {})
-                if other.get("digest") == digest and other.get("boot_id") == self.boot:
+                if (other.get("digest") == digest
+                        and other.get("boot_id") == self.boot
+                        and other.get("krl_identity") == krl_identity):
                     other["count"] = previous["count"]
             visible = previous
             if not previous["count"]:
@@ -884,7 +915,7 @@ class _GuardedVerifier:
         except InstructionError as exc:
             if exc.reason == "verifier_timeout":
                 previous["count"] = min(3, count + 1)
-                self.attempts[key] = True
+                self.attempts[key] = previous["count"]
             else:
                 previous["count"] = 0
             publish()
@@ -893,8 +924,8 @@ class _GuardedVerifier:
         publish()
         return value
 
-    def keylist_attempt(self, digest, function):
-        return self._attempt("keylist", digest, function)
+    def keylist_attempt(self, digest, function, krl=_KRL_UNSET):
+        return self._attempt("keylist", digest, function, krl=krl)
 
     def verify(self, body, signature, namespace, identity, verify_time, **kwargs):
         kwargs.setdefault("krl", self.krl)
@@ -956,7 +987,14 @@ class KeylistStore:
         if raw is None:
             return None
         try:
-            value = parse_json(raw)
+            # This is local custody metadata rather than a signed canonical
+            # artifact.  Accept semantically identical JSON written by an
+            # older/runtime helper while retaining duplicate-key, finite-value
+            # and closed-shape checks below.
+            value = json.loads(
+                raw.decode("utf-8"), object_pairs_hook=_pairs,
+                parse_constant=lambda _v: (_ for _ in ()).throw(
+                    _Invalid("non-finite JSON number")))
             _closed(value, ("schema", "keylist_seq", "artifact_sha256", "krl_sha256",
                             "krl_b64", "issued_at", "verified_root_id"))
             if value["schema"] != KEYLIST_STATE_SCHEMA or _i63(value["keylist_seq"], "sequence") == 0:
@@ -979,16 +1017,19 @@ class KeylistStore:
         return copy.deepcopy(self._state())
 
     def _verified_state(self, parsed, previous, date):
+        krl = (None if previous is None else
+               _unb64(previous["krl_b64"].encode("ascii")))
         if isinstance(self.verifier, _GuardedVerifier):
             return self.verifier.keylist_attempt(
-                parsed["digest"], lambda: self._verify_roots(parsed, previous, date))
-        return self._verify_roots(parsed, previous, date)
+                parsed["digest"],
+                lambda: self._verify_roots(parsed, previous, date, krl),
+                krl=krl)
+        return self._verify_roots(parsed, previous, date, krl)
 
-    def _verify_roots(self, parsed, previous, date):
+    def _verify_roots(self, parsed, previous, date, krl):
         metadata = parsed["metadata"]
         if not _number(date) or metadata["issued_at"] > date + 60:
             raise InstructionError("tamper_rejected")
-        krl = None if previous is None else _unb64(previous["krl_b64"].encode("ascii"))
         self.verifier.validate_krl(parsed["krl"])
         matches = []
         for root_id in self.verifier.root_lines():
@@ -1067,6 +1108,10 @@ class LKGStore:
         self.persist_config, self.verifier = persist_config, verifier
         self.path = os.path.join(work_dir, LKG_NAME)
         self.previous_path = self.path + ".previous"
+        # Transient only: stale=defaults deliberately removes the public
+        # role/device values, but Task 16 must retain a signature-verified
+        # deny posture in memory.  This value is never persisted or attested.
+        self.verified_peers = None
 
     def recover(self, state):
         previous = _read_bytes(self.previous_path, INSTR_RESPONSE_MAX)
@@ -1136,6 +1181,7 @@ class LKGStore:
 
     def load(self, device_id, platform, authenticated_date, monotonic_now, boot_id, state):
         try:
+            self.verified_peers = None
             self.recover(state)
             raw = _read_bytes(self.path, INSTR_RESPONSE_MAX)
             if raw is None:
@@ -1156,6 +1202,7 @@ class LKGStore:
                 raise InstructionError("lkg_unreadable") from None
             role = validate_role_body(parse_json(rb))
             _identity(header, role, rb)
+            self.verified_peers = copy.deepcopy(part["peers"])
             bag = state.get("instructions", {})
             if bag.get("lkg_digest") not in (None, hashlib.sha256(raw).hexdigest()):
                 raise InstructionError("lkg_rejected")
@@ -1233,13 +1280,40 @@ def _effective(verified):
     return copy.deepcopy(verified["device"])
 
 
+def _tracker_only():
+    return {"mode": "tracker-only", "include_origin": False}
+
+
+def _effective_peers(peers, effective_time):
+    """Return the private in-memory peer posture from verified plaintext."""
+    if not isinstance(peers, dict):
+        return _tracker_only(), None
+    mode = peers.get("mode")
+    if mode == "deny":
+        return copy.deepcopy(peers), None
+    if mode == "tracker-only":
+        return copy.deepcopy(peers), None
+    if mode == "allow":
+        expires = peers.get("allowed_expires_at")
+        if (effective_time is None or isinstance(expires, bool)
+                or not isinstance(expires, int) or effective_time >= expires):
+            return _tracker_only(), "allowlist_expired"
+        return copy.deepcopy(peers), None
+    return _tracker_only(), None
+
+
 def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
-                         work_dir, boot_id, monotonic_now, verifier, persist_config, emit, checkpoint=None):
+                         work_dir, boot_id, monotonic_now, verifier,
+                         persist_config, emit, checkpoint=None,
+                         cache_only=False, verification_attempts=None):
     """Contain instruction processing; return data for later RPC application."""
     result = {"instruction": None, "effective": None, "attestation": {"instr_state": "none"}}
+    if cache_only:
+        result["effective_peers"] = _tracker_only()
     header = None
     bag = _bag(state)
-    guarded = _GuardedVerifier(verifier, state, boot_id)
+    guarded = _GuardedVerifier(
+        verifier, state, boot_id, attempts=verification_attempts)
     store = LKGStore(work_dir, cfg, persist_config, guarded)
     hint = hints.get("instr_rev") if isinstance(hints, dict) else None
     pointer = _pair(hint)
@@ -1255,15 +1329,17 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
     try:
         # Persist invalidation on reboot/regression even if no envelope arrives.
         instruction_time = project_clock(state, "instruction", monotonic_now, boot_id)
-        authenticated_hint = False
-        try:
-            if _number(catalog_date) and boot_id:
-                observe_clock(state, "catalog", catalog_date, monotonic_now, boot_id)
-                authenticated_hint = True
-        except InstructionError:
-            note_hint(state, hint, authenticated=False)
-            raise
-        note_hint(state, hint, authenticated=authenticated_hint)
+        if not cache_only:
+            authenticated_hint = False
+            try:
+                if _number(catalog_date) and boot_id:
+                    observe_clock(
+                        state, "catalog", catalog_date, monotonic_now, boot_id)
+                    authenticated_hint = True
+            except InstructionError:
+                note_hint(state, hint, authenticated=False)
+                raise
+            note_hint(state, hint, authenticated=authenticated_hint)
         keylists = KeylistStore(work_dir, guarded)
         installed = keylists.recover()
         keylist_failure = keylists.recovery_error
@@ -1272,7 +1348,9 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
             bag["keylist_seq"] = installed["keylist_seq"]
             bag["keylist_digest"] = installed["artifact_sha256"]
         desired_keylist = hints.get("keylist_seq") if isinstance(hints, dict) else None
-        if (type(desired_keylist) is int and 1 <= desired_keylist <= MAX_I63
+        if (not cache_only
+                and type(desired_keylist) is int
+                and 1 <= desired_keylist <= MAX_I63
                 and (installed is None or desired_keylist > installed["keylist_seq"])):
             try:
                 status, raw, headers = catalog.get_instruction_keylist(
@@ -1298,19 +1376,27 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
                 loaded = store.load(cfg["device_id"], platform, None,
                                     monotonic_now, boot_id, state)
                 header = loaded["header"]
+                peers, peer_state = _effective_peers(
+                    store.verified_peers, instruction_time)
                 result.update(instruction=loaded, effective=_effective(loaded),
-                              attestation=_fact(loaded["instr_state"], header))
+                              effective_peers=peers,
+                              attestation=_fact(
+                                  peer_state or loaded["instr_state"], header))
             except InstructionError as exc:
                 result["attestation"] = _fact(exc.state, reason=exc.reason)
                 if exc.state == "verifier_missing":
                     result["effective"] = {"peers": {"mode": "tracker-only", "include_origin": False}}
+                    result["effective_peers"] = _tracker_only()
                     result["attestation"]["verify_level"] = "sig"
         if keylist_failure is not None:
             result["attestation"] = _fact(keylist_failure.state, header, keylist_failure.reason)
             if keylist_failure.state == "verifier_missing":
                 if result["effective"] is None:
                     result["effective"] = {"peers": {"mode": "tracker-only", "include_origin": False}}
+                result["effective_peers"] = _tracker_only()
                 result["attestation"]["verify_level"] = "sig"
+        if cache_only:
+            return result
         if pointer is None:
             return result
         cached_pointer = _pair(bag.get("fetched_pointer"))
@@ -1379,6 +1465,12 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
             bag["pointer_skew_count"] = 0
         result.update(instruction=verified, effective=_effective(verified),
                       attestation=_fact("floor_reset" if reset_applied else "applied", header))
+        peers, peer_state = _effective_peers(
+            verified["device"]["peers"],
+            project_clock(state, "instruction", monotonic_now, boot_id))
+        result["effective_peers"] = peers
+        if peer_state is not None:
+            result["attestation"] = _fact(peer_state, header)
         return result
     except InstructionError as exc:
         if exc.state == "key_rejected" and exc.reason == "unknown_key":
@@ -1393,6 +1485,7 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
         if exc.state == "verifier_missing":
             if result["effective"] is None:
                 result["effective"] = {"peers": {"mode": "tracker-only", "include_origin": False}}
+            result["effective_peers"] = _tracker_only()
             result["attestation"]["verify_level"] = "sig"
         return result
     except Exception as exc:

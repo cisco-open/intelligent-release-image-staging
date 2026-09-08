@@ -11,6 +11,8 @@ All side effects are injected via Deps so the logic is testable off-box; on-box,
 build_deps() wires the real cli module / aria2 RPC / filesystem."""
 import collections
 import errno
+import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -20,6 +22,8 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 
 import agent_config
 import flashcheck
@@ -54,6 +58,81 @@ _ROOT_COPY_BACKOFF_MAX = 60 * 60
 # separately scoped per-download Bearer header.
 _TORRENT_TRANSPORT_BEARER_HTTPS = "bearer-https-v2"
 _TORRENT_TRANSPORT_QUERY_HTTPS = "legacy-query-https-v1"
+
+_MAX_I63 = (1 << 63) - 1
+_ARIA_GID_RE = re.compile(r"^[0-9a-f]{16}$")
+_ARIA_GLOBAL_OPTIONS = (
+    ("bt-max-peers", "bt_max_peers"),
+    ("max-upload-limit", "max_upload_limit"),
+    ("max-download-limit", "max_download_limit"),
+    ("max-overall-upload-limit", "overall_up"),
+    ("max-overall-download-limit", "overall_down"),
+    ("bt-request-peer-speed-limit", "request_peer_speed_limit"),
+    ("max-concurrent-downloads", "max_concurrent"),
+)
+_ARIA_LIVE_OPTIONS = _ARIA_GLOBAL_OPTIONS[:3] + (_ARIA_GLOBAL_OPTIONS[5],)
+_FIXED_QOS = {
+    "max_peers": 10,
+    "seed_up_bps": 0,
+    "seed_down_bps": 0,
+    "leech_up_bps": 0,
+    "leech_down_bps": 0,
+    "overall_up_bps": 0,
+    "overall_down_bps": 0,
+    "max_concurrent": 100,
+    "request_peer_speed_limit_bps": 51200,
+}
+_FIXED_CONTROL = {
+    "catalog_tick_s": 60,
+    "telemetry_every_ticks": 1,
+    "telemetry_pause": False,
+}
+_ALLOW_COMPLEMENT_CACHE = {"digest": None, "rules": None}
+
+_INSTRUCTION_ARIA_ADD_PROTOCOL = "iris-instruction-aria-add/v1"
+
+
+class _InstructionAriaAdd:
+    """Scope one dependency instance's verified defaults to addTorrent."""
+
+    def __init__(self, function, defaults):
+        self.function = function
+        self.defaults = defaults
+        self.instruction_aria_add_protocol = _INSTRUCTION_ARIA_ADD_PROTOCOL
+
+    def __call__(self, *args, **kwargs):
+        import instr
+        context = instr.torrent_option_context()
+        marker = object()
+        previous = getattr(context, "defaults", marker)
+        context.defaults = self.defaults
+        try:
+            return self.function(*args, **kwargs)
+        finally:
+            if previous is marker:
+                try:
+                    del context.defaults
+                except AttributeError:
+                    pass
+            else:
+                context.defaults = previous
+
+    def with_instruction_defaults(self, defaults):
+        return _InstructionAriaAdd(self.function, defaults)
+
+    def unwrap_instruction_aria_add(self):
+        return self.function
+
+
+def _instruction_aria_add_protocol(value):
+    if (getattr(value, "instruction_aria_add_protocol", None)
+            != _INSTRUCTION_ARIA_ADD_PROTOCOL):
+        return None
+    replace = getattr(value, "with_instruction_defaults", None)
+    unwrap = getattr(value, "unwrap_instruction_aria_add", None)
+    if not callable(replace) or not callable(unwrap):
+        return None
+    return replace, unwrap
 
 
 def _choose_ios_stage_prefix(platform, filesystems, model,
@@ -176,21 +255,46 @@ class Deps(_BaseDeps):
 
     def __new__(cls, *args, **kwargs):
         instruction_step = kwargs.pop("instruction_step", None)
+        aria_rpc = kwargs.pop("aria_rpc", None)
+        torrent_defaults = kwargs.pop("torrent_defaults", None)
         value = _BaseDeps.__new__(cls, *args, **kwargs)
         value._instruction_step = instruction_step
+        value._aria_rpc = aria_rpc
+        value._torrent_defaults = torrent_defaults
         return value
 
     @property
     def instruction_step(self):
         return self._instruction_step
 
+    @property
+    def aria_rpc(self):
+        return self._aria_rpc
+
+    @property
+    def torrent_defaults(self):
+        return self._torrent_defaults
+
     def _replace(self, **kwargs):
         marker = object()
         instruction_step = kwargs.pop("instruction_step", marker)
+        aria_rpc = kwargs.pop("aria_rpc", marker)
+        torrent_defaults = kwargs.pop("torrent_defaults", marker)
+        replaced_defaults = torrent_defaults is not marker
         if instruction_step is marker:
             instruction_step = self.instruction_step
+        if aria_rpc is marker:
+            aria_rpc = self.aria_rpc
+        if torrent_defaults is marker:
+            torrent_defaults = self.torrent_defaults
         value = _BaseDeps._replace(self, **kwargs)
+        wrapper = _instruction_aria_add_protocol(value.aria_add)
+        if replaced_defaults and wrapper is not None:
+            value = _BaseDeps._replace(
+                value, aria_add=wrapper[0](torrent_defaults))
         value._instruction_step = instruction_step
+        value._aria_rpc = aria_rpc
+        value._torrent_defaults = torrent_defaults
         return value
 
 
@@ -276,6 +380,55 @@ _INSTRUCTION_STATES = frozenset((
     "instr_forbidden", "tracker-only",
 ))
 _INSTRUCTION_REASONS = frozenset(("unknown_key", "bad_mac"))
+_APPLIED_FIELDS = tuple(name for _option, name in _ARIA_GLOBAL_OPTIONS)
+_QOS_DRIFT_MAX_ROWS = 47
+
+
+def _public_i63(value):
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 0 or value > _MAX_I63):
+        raise ValueError("invalid bounded integer")
+    return value
+
+
+def _public_integer_unit(value, fields):
+    if not isinstance(value, dict) or set(value) != set(fields):
+        raise ValueError("invalid bounded unit")
+    return {name: _public_i63(value[name]) for name in fields}
+
+
+def _public_drift_pair(value):
+    pair = _public_integer_unit(value, ("expected", "observed"))
+    if pair["expected"] == pair["observed"]:
+        raise ValueError("not drift")
+    return pair
+
+
+def _public_drift(value):
+    if (not isinstance(value, dict)
+            or not set(value).issubset({
+                "options", "blocklist_revision", "blocklist_rules"})
+            or "options" not in value):
+        raise ValueError("invalid drift")
+    rows = value["options"]
+    if not isinstance(rows, list) or len(rows) > _QOS_DRIFT_MAX_ROWS:
+        raise ValueError("invalid drift rows")
+    clean = {"options": []}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {
+                "option", "expected", "observed"}:
+            raise ValueError("invalid drift row")
+        if row["option"] not in _APPLIED_FIELDS:
+            raise ValueError("invalid drift option")
+        pair = _public_drift_pair({
+            "expected": row["expected"], "observed": row["observed"]})
+        clean["options"].append(dict(pair, option=row["option"]))
+    for name in ("blocklist_revision", "blocklist_rules"):
+        if name in value:
+            clean[name] = _public_drift_pair(value[name])
+    if not rows and len(clean) == 1:
+        raise ValueError("empty drift")
+    return clean
 
 
 def _heartbeat_with_instruction(payload, attestation):
@@ -283,21 +436,45 @@ def _heartbeat_with_instruction(payload, attestation):
     if not isinstance(attestation, dict):
         return payload
     clean = {}
+    if "applied" in attestation:
+        try:
+            clean["applied"] = _public_integer_unit(
+                attestation["applied"], _APPLIED_FIELDS)
+        except (KeyError, TypeError, ValueError):
+            pass
     instr_state = attestation.get("instr_state")
-    if isinstance(instr_state, str) and instr_state in _INSTRUCTION_STATES:
-        clean["instr_state"] = instr_state
     instr_reason = attestation.get("instr_reason")
-    if (instr_state == "key_rejected"
-            and isinstance(instr_reason, str)
-            and instr_reason in _INSTRUCTION_REASONS):
-        clean["instr_reason"] = instr_reason
+    if isinstance(instr_state, str) and instr_state in _INSTRUCTION_STATES:
+        if instr_state == "key_rejected":
+            if (isinstance(instr_reason, str)
+                    and 1 <= len(instr_reason) <= 128
+                    and instr_reason in _INSTRUCTION_REASONS):
+                clean.update(instr_state=instr_state,
+                             instr_reason=instr_reason)
+        elif "instr_reason" not in attestation:
+            clean["instr_state"] = instr_state
     instr_serial = attestation.get("instr_serial")
     if (not isinstance(instr_serial, bool) and isinstance(instr_serial, int)
-            and 0 <= instr_serial <= (1 << 63) - 1):
+            and 0 <= instr_serial <= _MAX_I63):
         clean["instr_serial"] = instr_serial
     verify_level = attestation.get("verify_level")
     if verify_level in ("sig", "none"):
         clean["verify_level"] = verify_level
+    if ("blocklist_rules" in attestation
+            or "blocklist_revision" in attestation):
+        pair = {name: attestation[name] for name in (
+            "blocklist_rules", "blocklist_revision")
+            if name in attestation}
+        try:
+            clean.update(_public_integer_unit(
+                pair, ("blocklist_rules", "blocklist_revision")))
+        except (KeyError, TypeError, ValueError):
+            pass
+    if "qos_drift" in attestation:
+        try:
+            clean["qos_drift"] = _public_drift(attestation["qos_drift"])
+        except (KeyError, TypeError, ValueError):
+            pass
     if not clean:
         return payload
     result = dict(payload)
@@ -327,7 +504,11 @@ def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
         return deps.catalog.heartbeat(
             sid, _heartbeat_with_instruction(payload, instruction_attestation))
     except Exception as e:
-        deps.emit("HEARTBEAT-FAIL", "%s heartbeat failed (ignored): %s" % (sid, e))
+        try:
+            deps.emit("HEARTBEAT-FAIL", "%s heartbeat failed (ignored): %s"
+                      % (sid, type(e).__name__))
+        except Exception:
+            pass
         return None
 
 
@@ -1470,8 +1651,13 @@ def _staged_image_ids(state, ids):
     """The images of the set this device has fully staged: content verified
     (`done`) AND placed at the target-FS root (`copied`) — the same pair the
     steady-state short-circuit trusts."""
-    return [i for i in ids
-            if (state.get(i) or {}).get("done") and (state.get(i) or {}).get("copied")]
+    staged = []
+    for image_id in ids:
+        entry = state.get(image_id)
+        if (isinstance(entry, dict) and entry.get("done")
+                and entry.get("copied")):
+            staged.append(image_id)
+    return staged
 
 
 # Aggregate stage_state for a set of more than one image, most actionable
@@ -2588,6 +2774,511 @@ def _torrent_identity(image):
     return "sha:" + str(image.get("sha256") or "")
 
 
+class InstructionApplyError(ValueError):
+    """A bounded instruction could not be applied to the local aria2."""
+
+
+def _decimal_i63(value):
+    if isinstance(value, bool):
+        raise InstructionApplyError("invalid option")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        number = int(value)
+    else:
+        raise InstructionApplyError("invalid option")
+    if number < 0 or number > _MAX_I63:
+        raise InstructionApplyError("invalid option")
+    return number
+
+
+def _owned_aria_options(value, names):
+    if not isinstance(value, dict):
+        raise InstructionApplyError("invalid option result")
+    try:
+        return {name: _decimal_i63(value[name]) for name in names}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise InstructionApplyError("invalid option result") from None
+
+
+def _instruction_rpc(rpc, method, params):
+    try:
+        return rpc(method, params)
+    except InstructionApplyError:
+        raise
+    except Exception:
+        raise InstructionApplyError("RPC unavailable") from None
+
+
+def _instruction_values(result):
+    qos = dict(_FIXED_QOS)
+    control = dict(_FIXED_CONTROL)
+    instruction = result.get("instruction") if isinstance(result, dict) else None
+    if not isinstance(instruction, dict):
+        return qos, control
+    role = instruction.get("role")
+    device = instruction.get("device")
+    if not isinstance(role, dict) or not isinstance(device, dict):
+        return qos, control
+    role_qos = role.get("qos")
+    role_control = role.get("control")
+    device_qos = device.get("qos_override")
+    device_control = device.get("control_override")
+    if isinstance(role_qos, dict):
+        qos.update({name: role_qos[name] for name in _FIXED_QOS
+                    if name in role_qos})
+    if isinstance(device_qos, dict):
+        qos.update({name: device_qos[name] for name in _FIXED_QOS
+                    if name in device_qos})
+    if isinstance(role_control, dict):
+        control.update({name: role_control[name] for name in _FIXED_CONTROL
+                        if name in role_control})
+    if isinstance(device_control, dict):
+        control.update({name: device_control[name] for name in _FIXED_CONTROL
+                        if name in device_control})
+    return qos, control
+
+
+def _canonical_ipv4(value):
+    if not isinstance(value, str):
+        raise InstructionApplyError("invalid peer rule")
+    try:
+        parsed = (ipaddress.IPv4Network(value, strict=True)
+                  if "/" in value else ipaddress.IPv4Address(value))
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError,
+            ValueError):
+        raise InstructionApplyError("invalid peer rule") from None
+    if str(parsed) != value:
+        raise InstructionApplyError("invalid peer rule")
+    return parsed
+
+
+def _allow_complement(allowed):
+    canonical = sorted(str(_canonical_ipv4(value)) for value in allowed)
+    digest = hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    if (_ALLOW_COMPLEMENT_CACHE["digest"] == digest
+            and isinstance(_ALLOW_COMPLEMENT_CACHE["rules"], list)):
+        return list(_ALLOW_COMPLEMENT_CACHE["rules"])
+    intervals = []
+    for text in canonical:
+        item = _canonical_ipv4(text)
+        if isinstance(item, ipaddress.IPv4Address):
+            start = end = int(item)
+        else:
+            start, end = int(item.network_address), int(item.broadcast_address)
+        intervals.append((start, end))
+    intervals.sort(key=lambda interval: interval[0])
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    intervals = merged
+    rules = []
+    cursor = 0
+    maximum = (1 << 32) - 1
+    for start, end in intervals:
+        if cursor < start:
+            rules.extend(str(network) for network in
+                         ipaddress.summarize_address_range(
+                             ipaddress.IPv4Address(cursor),
+                             ipaddress.IPv4Address(start - 1)))
+        cursor = max(cursor, end + 1)
+    if cursor <= maximum:
+        rules.extend(str(network) for network in
+                     ipaddress.summarize_address_range(
+                         ipaddress.IPv4Address(cursor),
+                         ipaddress.IPv4Address(maximum)))
+    rules.append("::/0")
+    _ALLOW_COMPLEMENT_CACHE.update(digest=digest, rules=list(rules))
+    return list(rules)
+
+
+def _peer_blocklist(result, cfg):
+    peers = result.get("effective_peers") if isinstance(result, dict) else None
+    if not isinstance(peers, dict):
+        return [], False
+    mode = peers.get("mode")
+    if mode == "tracker-only":
+        return [], False
+    if mode == "deny":
+        if set(peers) != {"mode", "rules", "include_origin",
+                          "allowed_expires_at"}:
+            raise InstructionApplyError("invalid peer posture")
+        if (not isinstance(peers["rules"], list)
+                or not isinstance(peers["include_origin"], bool)):
+            raise InstructionApplyError("invalid peer posture")
+        _public_i63(peers["allowed_expires_at"])
+        rules = list(peers["rules"]) + ["::/0"]
+    elif mode == "allow":
+        if set(peers) != {"mode", "allowed", "include_origin",
+                          "allowed_expires_at"}:
+            raise InstructionApplyError("invalid peer posture")
+        if (not isinstance(peers["allowed"], list)
+                or not isinstance(peers["include_origin"], bool)):
+            raise InstructionApplyError("invalid peer posture")
+        _public_i63(peers["allowed_expires_at"])
+        allowed = list(peers["allowed"])
+        if peers["include_origin"]:
+            try:
+                hostname = urllib.parse.urlsplit(cfg.get("catalog_url", "")).hostname
+                address = ipaddress.IPv4Address(hostname)
+                if str(address) != hostname:
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError,
+                    ipaddress.AddressValueError):
+                return [], True
+            allowed.append(str(address))
+        rules = _allow_complement(allowed)
+    else:
+        raise InstructionApplyError("invalid peer posture")
+    for rule in rules:
+        try:
+            if ":" in rule:
+                parsed = ipaddress.IPv6Network(rule, strict=True)
+                canonical = str(parsed)
+            else:
+                canonical = str(_canonical_ipv4(rule))
+        except (ValueError, TypeError):
+            raise InstructionApplyError("invalid peer rule") from None
+        if canonical != rule:
+            raise InstructionApplyError("invalid peer rule")
+    return rules, False
+
+
+def _valid_apply_baseline(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"session_id", "rules_digest",
+                              "blocklist_revision", "blocklist_rules",
+                              "applied"}):
+        return None
+    session = value.get("session_id")
+    digest = value.get("rules_digest")
+    try:
+        applied = _public_integer_unit(value.get("applied"), _APPLIED_FIELDS)
+        revision = _public_i63(value.get("blocklist_revision"))
+        count = _public_i63(value.get("blocklist_rules"))
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(session, str) or not 1 <= len(session) <= 128
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        return None
+    return dict(value, applied=applied, blocklist_revision=revision,
+                blocklist_rules=count)
+
+
+def _apply_instruction(result, cfg, state, rpc, torrent_defaults):
+    """Read, reassert and attest the closed Task 16 aria2 transaction."""
+    if not callable(rpc) or not isinstance(torrent_defaults, dict):
+        raise InstructionApplyError("instruction application unavailable")
+    qos, _control = _instruction_values(result)
+    global_write = {
+        "bt-max-peers": str(qos["max_peers"]),
+        "max-upload-limit": str(qos["leech_up_bps"]),
+        "max-download-limit": str(qos["leech_down_bps"]),
+        "max-overall-upload-limit": str(qos["overall_up_bps"]),
+        "max-overall-download-limit": str(qos["overall_down_bps"]),
+        "bt-request-peer-speed-limit": str(
+            qos["request_peer_speed_limit_bps"]),
+        "max-concurrent-downloads": str(qos["max_concurrent"]),
+    }
+    applied = {public: _decimal_i63(global_write[option])
+               for option, public in _ARIA_GLOBAL_OPTIONS}
+    rules, peer_degraded = _peer_blocklist(result, cfg)
+    rules_digest = hashlib.sha256(
+        json.dumps(rules, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+    session_result = _instruction_rpc(rpc, "aria2.getSessionInfo", [])
+    if (not isinstance(session_result, dict)
+            or set(session_result) != {"sessionId"}
+            or not isinstance(session_result["sessionId"], str)
+            or not 1 <= len(session_result["sessionId"]) <= 128):
+        raise InstructionApplyError("invalid session")
+    session = session_result["sessionId"]
+    global_read = _owned_aria_options(
+        _instruction_rpc(rpc, "aria2.getGlobalOption", []),
+        tuple(option for option, _public in _ARIA_GLOBAL_OPTIONS))
+    active_raw = _instruction_rpc(
+        rpc, "aria2.tellActive", [["gid", "files", "seeder"]])
+    active = []
+    row = None
+    try:
+        if not isinstance(active_raw, list) or len(active_raw) > 10:
+            raise InstructionApplyError("invalid active downloads")
+        for row in active_raw:
+            if (not isinstance(row, dict)
+                    or set(row) != {"gid", "files", "seeder"}
+                    or not isinstance(row["gid"], str)
+                    or _ARIA_GID_RE.fullmatch(row["gid"]) is None
+                    or not isinstance(row["files"], list)
+                    or row["seeder"] not in ("true", "false")):
+                raise InstructionApplyError("invalid active download")
+            active.append((row["gid"], row["seeder"] == "true"))
+    finally:
+        row = None
+        active_raw = None
+    live_reads = []
+    live_names = tuple(option for option, _public in _ARIA_LIVE_OPTIONS)
+    for gid, seeder in active:
+        current = _owned_aria_options(
+            _instruction_rpc(rpc, "aria2.getOption", [gid]), live_names)
+        live_reads.append((gid, seeder, current))
+
+    if _instruction_rpc(
+            rpc, "aria2.changeGlobalOption", [dict(global_write)]) != "OK":
+        raise InstructionApplyError("global write failed")
+    for gid, seeder, _current in live_reads:
+        live_write = {
+            "bt-max-peers": str(qos["max_peers"]),
+            "max-upload-limit": str(
+                qos["seed_up_bps"] if seeder else qos["leech_up_bps"]),
+            "max-download-limit": str(
+                qos["seed_down_bps"] if seeder else qos["leech_down_bps"]),
+            "bt-request-peer-speed-limit": str(
+                qos["request_peer_speed_limit_bps"]),
+        }
+        if _instruction_rpc(
+                rpc, "aria2.changeOption", [gid, live_write]) != "OK":
+            raise InstructionApplyError("download write failed")
+    block = _instruction_rpc(
+        rpc, "aria2.setBtPeerBlocklist", [list(rules)])
+    block = _public_integer_unit(
+        block, ("ruleCount", "revision", "disconnectedPeers",
+                "removedPeers"))
+
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        bag = {}
+        state["instructions"] = bag
+    previous = _valid_apply_baseline(bag.get("aria_apply"))
+    same_session = previous is not None and previous["session_id"] == session
+    drift_rows = []
+    if same_session:
+        for option, public in _ARIA_GLOBAL_OPTIONS:
+            observed = global_read[option]
+            expected = applied[public]
+            if observed != expected:
+                drift_rows.append({"option": public, "expected": expected,
+                                   "observed": observed})
+        for _gid, seeder, current in sorted(live_reads, key=lambda row: row[0]):
+            expected_live = {
+                "bt_max_peers": qos["max_peers"],
+                "max_upload_limit": (qos["seed_up_bps"] if seeder
+                                     else qos["leech_up_bps"]),
+                "max_download_limit": (qos["seed_down_bps"] if seeder
+                                       else qos["leech_down_bps"]),
+                "request_peer_speed_limit":
+                    qos["request_peer_speed_limit_bps"],
+            }
+            for option, public in _ARIA_LIVE_OPTIONS:
+                if current[option] != expected_live[public]:
+                    drift_rows.append({
+                        "option": public, "expected": expected_live[public],
+                        "observed": current[option]})
+    fact = _heartbeat_with_instruction(
+        {}, result.get("attestation") if isinstance(result, dict) else None)
+    source_state = fact.get("instr_state")
+    if peer_degraded:
+        fact["instr_state"] = "tracker-only"
+        fact.pop("instr_reason", None)
+    elif (previous is not None
+          and source_state in ("none", "applied", "lkg")):
+        fact["instr_state"] = "reasserted"
+    fact.update(applied=applied, blocklist_rules=block["ruleCount"],
+                blocklist_revision=block["revision"])
+    drift = {"options": drift_rows}
+    if same_session and previous["rules_digest"] == rules_digest:
+        if previous["blocklist_revision"] != block["revision"]:
+            drift["blocklist_revision"] = {
+                "expected": previous["blocklist_revision"],
+                "observed": block["revision"]}
+        if previous["blocklist_rules"] != block["ruleCount"]:
+            drift["blocklist_rules"] = {
+                "expected": previous["blocklist_rules"],
+                "observed": block["ruleCount"]}
+    if drift_rows or len(drift) > 1:
+        fact["qos_drift"] = drift
+    bag["aria_apply"] = {
+        "session_id": session, "rules_digest": rules_digest,
+        "blocklist_revision": block["revision"],
+        "blocklist_rules": block["ruleCount"], "applied": dict(applied),
+    }
+    future = {option: global_write[option]
+              for option, _public in _ARIA_LIVE_OPTIONS}
+    torrent_defaults.clear()
+    torrent_defaults.update(future)
+    return fact
+
+
+def _task16_runtime(deps):
+    return (callable(getattr(deps, "instruction_step", None))
+            and callable(getattr(deps, "aria_rpc", None))
+            and isinstance(getattr(deps, "torrent_defaults", None), dict))
+
+
+def _policy_assignment_ids(policy):
+    if not isinstance(policy, dict):
+        raise ValueError("invalid policy")
+    single = policy.get("approved_image_id")
+    if ("approved_image_id" in policy and single is not None
+            and (not isinstance(single, str)
+                 or not 1 <= len(single) <= 128)):
+        raise ValueError("invalid policy")
+    if "approved_image_ids" in policy:
+        values = policy["approved_image_ids"]
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("invalid policy")
+        ids = list(values)
+        if not ids and single is not None:
+            ids = [single]
+    else:
+        ids = [] if single is None else [single]
+    if (len(ids) > 10
+            or any(not isinstance(value, str) or not 1 <= len(value) <= 128
+                   for value in ids)):
+        raise ValueError("invalid policy")
+    return list(dict.fromkeys(ids))
+
+
+def _bounded_finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and 0 <= value <= _MAX_I63
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _valid_poll_marker(value):
+    if (not isinstance(value, dict)
+            or set(value) != {"boot_id", "monotonic", "assignment_ids"}):
+        return None
+    boot = value.get("boot_id")
+    stamp = value.get("monotonic")
+    ids = value.get("assignment_ids")
+    if (not isinstance(boot, str) or not 1 <= len(boot) <= 128
+            or not _bounded_finite_number(stamp)
+            or not isinstance(ids, list) or len(ids) > 10
+            or any(not isinstance(item, str) or not 1 <= len(item) <= 128
+                   for item in ids)):
+        return None
+    return {"boot_id": boot, "monotonic": stamp,
+            "assignment_ids": list(ids)}
+
+
+def _valid_heartbeat_hint(value):
+    if not isinstance(value, dict) or not set(value).issubset({
+            "instr_rev", "keylist_seq"}):
+        return None
+    clean = {}
+    revision = value.get("instr_rev")
+    if revision is not None:
+        if (not isinstance(revision, dict)
+                or set(revision) != {"epoch", "instr_serial"}
+                or any(isinstance(revision.get(name), bool)
+                       or not isinstance(revision.get(name), int)
+                       or not 0 <= revision[name] <= _MAX_I63
+                       for name in ("epoch", "instr_serial"))):
+            return None
+        clean["instr_rev"] = dict(revision)
+    if "keylist_seq" in value:
+        sequence = value["keylist_seq"]
+        if (isinstance(sequence, bool) or not isinstance(sequence, int)
+                or not 1 <= sequence <= _MAX_I63):
+            return None
+        clean["keylist_seq"] = sequence
+    return clean or None
+
+
+def _record_heartbeat_hint(state, response, authenticated_date):
+    if not _bounded_finite_number(authenticated_date):
+        return
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        bag = {}
+        state["instructions"] = bag
+    candidate = {}
+    if isinstance(response, dict):
+        for name in ("instr_rev", "keylist_seq"):
+            if name in response:
+                candidate[name] = response[name]
+    clean = _valid_heartbeat_hint(candidate)
+    if clean is None:
+        bag.pop("heartbeat_hint", None)
+    else:
+        bag["heartbeat_hint"] = clean
+
+
+def _cadence_due(state, interval, boot, monotonic_now):
+    if interval == 60:
+        return True
+    bag = state.get("instructions")
+    if not isinstance(bag, dict):
+        return True
+    marker = _valid_poll_marker(bag.get("poll"))
+    if marker is None or marker["boot_id"] != boot:
+        return True
+    if monotonic_now < marker["monotonic"]:
+        return True
+    if monotonic_now - marker["monotonic"] >= interval:
+        return True
+    hint = _valid_heartbeat_hint(bag.get("heartbeat_hint"))
+    if hint is not None:
+        revision = hint.get("instr_rev")
+        if revision is not None:
+            local = (bag.get("accepted_epoch"), bag.get("accepted_serial"))
+            if local != (revision["epoch"], revision["instr_serial"]):
+                return True
+        if ("keylist_seq" in hint
+                and bag.get("keylist_seq") != hint["keylist_seq"]):
+            return True
+    return False
+
+
+def _cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
+                       attestation):
+    if not ids:
+        payload = _heartbeat(
+            None, deps, "unassigned", target_fs=cfg.get("target_fs"),
+            tele_on=tele_on, stream_on=stream_on,
+            observation=_not_active_observation(tele_on, time.time()))
+    else:
+        first = ids[0]
+        staged = _staged_image_ids(state, ids)
+        ready = len(staged) == len(ids)
+        payload = _heartbeat(
+            {"id": first}, deps, "ready" if ready else "staging",
+            target_fs=cfg.get("target_fs"), tele_on=tele_on,
+            stream_on=stream_on,
+            observation=_not_active_observation(tele_on, time.time()),
+            staged_image_ids=staged if len(ids) > 1 else None)
+    response = _send_heartbeat(
+        deps, cfg["device_id"], payload, attestation)
+    response_date = getattr(deps.catalog, "response_authenticated_date", None)
+    _record_heartbeat_hint(state, response, response_date)
+    return response
+
+
+def _contained_cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
+                                 attestation):
+    try:
+        return _cadence_heartbeat(
+            cfg, deps, state, ids, tele_on, stream_on, attestation)
+    except Exception as exc:
+        try:
+            deps.emit("HEARTBEAT-FAIL",
+                      "%s heartbeat construction failed (ignored): %s"
+                      % (cfg["device_id"], type(exc).__name__))
+        except Exception:
+            pass
+        return None
+
+
 def run_once(cfg, deps, state):
     # Self-refresh the catalog token BEFORE any catalog work, once it's past
     # half-life (or its expiry is unknown). Best-effort: deps.refresh() does the
@@ -2650,66 +3341,195 @@ def run_once(cfg, deps, state):
         if cleared:
             deps.emit("UPGRADE", "re-verifying flash-root copy after upgrade")
 
-    policy = deps.catalog.get_policy(sid)
-    cumulative_catalog_date = getattr(
-        deps.catalog, "last_authenticated_date", None)
-    _missing_response_date = object()
-    authenticated_date = getattr(
-        deps.catalog, "response_authenticated_date", _missing_response_date)
-    if authenticated_date is _missing_response_date:
-        # Compatibility for established test doubles. The production
-        # CatalogClient exposes the per-response property and resets it before
-        # every request, so a missing/invalid Date on this policy response can
-        # never inherit an older value.
-        authenticated_date = cumulative_catalog_date
-    catalog_clock_date = (cumulative_catalog_date
-                          if cumulative_catalog_date is not None
-                          else authenticated_date)
-    if catalog_clock_date is not None:
-        # Anchor at response receipt, after any token refresh and policy I/O;
-        # the pre-request sample would under-project elapsed authenticated time.
+    task16 = _task16_runtime(deps)
+    instruction_attestation = None
+    if task16:
+        # Refresh is deliberately complete before this fresh launcher-local
+        # verifier budget and cache-only LKG preview are created.
         monotonic_now = time.monotonic()
         if instruction_runtime is None:
             import instr
             instruction_runtime = instr
-            current_boot_id = instr.boot_id()
+        current_boot_id = instruction_runtime.boot_id()
+        verification_attempts = {}
         try:
-            instruction_runtime.observe_clock(
-                state, "catalog", catalog_clock_date,
-                monotonic_now, current_boot_id)
-        except instruction_runtime.InstructionError:
-            # A rejected catalog-clock update cannot suppress staging. The
-            # existing trusted anchor, if any, remains the refresh authority.
-            pass
+            preview = deps.instruction_step(
+                cfg=cfg, state=state, hints={}, catalog_date=None,
+                cache_only=True,
+                verification_attempts=verification_attempts)
+            if not isinstance(preview, dict):
+                raise ValueError("invalid preview")
+        except Exception as e:
+            deps.emit("INSTRUCTION-FAIL",
+                      "instruction preview failed (ignored): %s"
+                      % type(e).__name__)
+            preview = {
+                "instruction": None, "effective": None,
+                "effective_peers": {"mode": "tracker-only",
+                                    "include_origin": False},
+                "attestation": {"instr_state": "instr_unavailable"},
+            }
+        _qos, preview_control = _instruction_values(preview)
+        interval = preview_control.get("catalog_tick_s", 60)
+        if (isinstance(interval, bool) or not isinstance(interval, int)
+                or not 60 <= interval <= 900 or interval % 60):
+            interval = 60
+        due = _cadence_due(
+            state, interval, current_boot_id, monotonic_now)
+        marker = _valid_poll_marker(
+            state.get("instructions", {}).get("poll")
+            if isinstance(state.get("instructions"), dict) else None)
+        if not due:
+            ids = marker["assignment_ids"]
+            try:
+                instruction_attestation = _apply_instruction(
+                    preview, cfg, state, deps.aria_rpc,
+                    deps.torrent_defaults)
+            except Exception as e:
+                deps.emit("INSTRUCTION-APPLY-FAIL",
+                          "instruction apply failed: %s"
+                          % type(e).__name__)
+                instruction_attestation = {
+                    "instr_state": "instr_unavailable"}
+                _contained_cadence_heartbeat(
+                    cfg, deps, state, ids, tele_on, stream_on,
+                    instruction_attestation)
+                return "instruction-apply-unavailable"
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "catalog-not-due"
 
-    instruction_attestation = None
-    if callable(deps.instruction_step):
+        try:
+            policy = deps.catalog.get_policy(sid)
+            # Bind all hint/clock decisions to this response's own Date before
+            # any heartbeat or other request can replace the client property.
+            authenticated_date = getattr(
+                deps.catalog, "response_authenticated_date", None)
+            policy_received_monotonic = time.monotonic()
+            ids = _policy_assignment_ids(policy)
+        except Exception as e:
+            try:
+                instruction_runtime.note_hint(
+                    state, None, authenticated=False)
+            except Exception:
+                pass
+            deps.emit("CATALOG-UNAVAILABLE",
+                      "catalog policy unavailable: %s" % type(e).__name__)
+            ids = [] if marker is None else marker["assignment_ids"]
+            try:
+                instruction_attestation = _apply_instruction(
+                    preview, cfg, state, deps.aria_rpc,
+                    deps.torrent_defaults)
+            except Exception as apply_error:
+                deps.emit("INSTRUCTION-APPLY-FAIL",
+                          "instruction apply failed: %s"
+                          % type(apply_error).__name__)
+                instruction_attestation = {
+                    "instr_state": "instr_unavailable"}
+                _contained_cadence_heartbeat(
+                    cfg, deps, state, ids, tele_on, stream_on,
+                    instruction_attestation)
+                return "instruction-apply-unavailable"
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "catalog-unavailable"
+
+        if authenticated_date is not None:
+            try:
+                instruction_runtime.observe_clock(
+                    state, "catalog", authenticated_date,
+                    policy_received_monotonic, current_boot_id)
+            except instruction_runtime.InstructionError:
+                pass
         try:
             instruction_result = deps.instruction_step(
                 cfg=cfg, state=state, hints=policy,
-                catalog_date=authenticated_date)
-            if isinstance(instruction_result, dict):
-                instruction_attestation = instruction_result.get("attestation")
+                catalog_date=authenticated_date, cache_only=False,
+                verification_attempts=verification_attempts)
+            if not isinstance(instruction_result, dict):
+                raise ValueError("invalid instruction result")
         except Exception as e:
-            # Do not format the exception: instruction artifacts and verifier
-            # failures can contain material that must never reach syslog or a
-            # heartbeat. Only the exception class is useful operationally.
             deps.emit("INSTRUCTION-FAIL",
                       "instruction step failed (ignored): %s"
                       % type(e).__name__)
+            instruction_result = {
+                "instruction": None, "effective": None,
+                "effective_peers": {"mode": "tracker-only",
+                                    "include_origin": False},
+                "attestation": {"instr_state": "instr_unavailable"},
+            }
+        bag = state.get("instructions")
+        if not isinstance(bag, dict):
+            bag = {}
+            state["instructions"] = bag
+        bag["poll"] = {
+            "boot_id": current_boot_id,
+            "monotonic": policy_received_monotonic,
+            "assignment_ids": list(ids),
+        }
+        try:
+            instruction_attestation = _apply_instruction(
+                instruction_result, cfg, state, deps.aria_rpc,
+                deps.torrent_defaults)
+        except Exception as e:
+            deps.emit("INSTRUCTION-APPLY-FAIL",
+                      "instruction apply failed: %s" % type(e).__name__)
             instruction_attestation = {"instr_state": "instr_unavailable"}
-    # The server assigns an ORDERED SET of images (at most 10). Older servers,
-    # and policy rows they wrote, carry only the singular approved_image_id —
-    # fall back to it and stage a set of one, which is byte-for-byte the old
-    # single-image behaviour.
-    ids = policy.get("approved_image_ids")
-    if not isinstance(ids, (list, tuple)) or not ids:
-        single = policy.get("approved_image_id")
-        ids = [single] if single else []
-    # De-duplicate, keeping assignment order. The server rejects duplicates, so
-    # this only guards a hand-edited policy: staging the same id twice in one
-    # tick would double every emit and list it twice in staged_image_ids.
-    ids = list(dict.fromkeys(i for i in ids if i))
+            _contained_cadence_heartbeat(
+                cfg, deps, state, ids, tele_on, stream_on,
+                instruction_attestation)
+            return "instruction-apply-unavailable"
+    else:
+        # Task 15 compatibility path for downstream callers that have not
+        # supplied Task 16's RPC/default metadata.
+        policy = deps.catalog.get_policy(sid)
+        cumulative_catalog_date = getattr(
+            deps.catalog, "last_authenticated_date", None)
+        _missing_response_date = object()
+        authenticated_date = getattr(
+            deps.catalog, "response_authenticated_date", _missing_response_date)
+        if authenticated_date is _missing_response_date:
+            authenticated_date = cumulative_catalog_date
+        catalog_clock_date = (cumulative_catalog_date
+                              if cumulative_catalog_date is not None
+                              else authenticated_date)
+        if catalog_clock_date is not None:
+            monotonic_now = time.monotonic()
+            if instruction_runtime is None:
+                import instr
+                instruction_runtime = instr
+                current_boot_id = instr.boot_id()
+            try:
+                instruction_runtime.observe_clock(
+                    state, "catalog", catalog_clock_date,
+                    monotonic_now, current_boot_id)
+            except instruction_runtime.InstructionError:
+                pass
+        if callable(deps.instruction_step):
+            try:
+                instruction_result = deps.instruction_step(
+                    cfg=cfg, state=state, hints=policy,
+                    catalog_date=authenticated_date)
+                if isinstance(instruction_result, dict):
+                    instruction_attestation = instruction_result.get(
+                        "attestation")
+            except Exception as e:
+                deps.emit("INSTRUCTION-FAIL",
+                          "instruction step failed (ignored): %s"
+                          % type(e).__name__)
+                instruction_attestation = {
+                    "instr_state": "instr_unavailable"}
+    if not task16:
+        # Older servers and policy rows carry only the singular assignment.
+        # Keep this permissive parsing only on the compatibility path; Task 16
+        # already validated its bounded ordered set above.
+        ids = policy.get("approved_image_ids")
+        if not isinstance(ids, (list, tuple)) or not ids:
+            single = policy.get("approved_image_id")
+            ids = [single] if single else []
+        ids = list(dict.fromkeys(i for i in ids if i))
     # The server's per-image transfer identities, to be adopted per image by
     # _stage_image. Only the SHAPE is settled here: a `plans` value that is not
     # a map at all (older server, legacy-bootstrap policy row, captive-portal
@@ -2735,13 +3555,18 @@ def run_once(cfg, deps, state):
         # Still heartbeat: an unassigned device must register (devices.json,
         # swarm map, telemetry posture) or console onboarding can never see
         # it come up — assignment only gates staging, not presence.
-        _send_heartbeat(deps, sid,
-                        _heartbeat(None, deps, "unassigned",
-                                   target_fs=cfg.get("target_fs"),
-                                   tele_on=tele_on, stream_on=stream_on,
-                                   observation=_not_active_observation(
-                                       tele_on, time.time())),
-                        instruction_attestation)
+        hb_resp = _send_heartbeat(
+            deps, sid,
+            _heartbeat(None, deps, "unassigned",
+                       target_fs=cfg.get("target_fs"),
+                       tele_on=tele_on, stream_on=stream_on,
+                       observation=_not_active_observation(
+                           tele_on, time.time())),
+            instruction_attestation)
+        if task16:
+            heartbeat_date = getattr(
+                deps.catalog, "response_authenticated_date", None)
+            _record_heartbeat_hint(state, hb_resp, heartbeat_date)
         return "no-assignment"
 
     ticks = []
@@ -2763,6 +3588,10 @@ def run_once(cfg, deps, state):
     # then each image's telemetry replayed against the answer it carried.
     hb_resp = _send_set_heartbeat(
         deps, sid, state, ids, ticks, instruction_attestation)
+    if task16:
+        heartbeat_date = getattr(
+            deps.catalog, "response_authenticated_date", None)
+        _record_heartbeat_hint(state, hb_resp, heartbeat_date)
     for tick in ticks:
         tick.replay(hb_resp)
 
@@ -2849,9 +3678,22 @@ def _tracker_headers(cfg, conf_path=None):
 
 def _aria_torrent_options(cfg, dest_dir, conf_path=None,
                           require_tracker_bearer=False):
-    """Build addTorrent options, preserving legacy Guest Shell behavior."""
-    options = {"dir": dest_dir, "bt-seed-unverified": "true",
-               "bt-max-peers": cfg.get("max_peers", "10")}
+    """Build addTorrent options from the current verified private context."""
+    import instr
+    defaults = getattr(instr.torrent_option_context(), "defaults", None)
+    names = tuple(option for option, _public in _ARIA_LIVE_OPTIONS)
+    if (not isinstance(defaults, dict) or set(defaults) != set(names)
+            or any(not isinstance(defaults.get(name), str)
+                   for name in names)):
+        defaults = {
+            "bt-max-peers": str(_FIXED_QOS["max_peers"]),
+            "max-upload-limit": str(_FIXED_QOS["leech_up_bps"]),
+            "max-download-limit": str(_FIXED_QOS["leech_down_bps"]),
+            "bt-request-peer-speed-limit": str(
+                _FIXED_QOS["request_peer_speed_limit_bps"]),
+        }
+    options = {"dir": dest_dir, "bt-seed-unverified": "true"}
+    options.update({name: defaults[name] for name in names})
     if require_tracker_bearer:
         options["header"] = _tracker_headers(cfg, conf_path)
     return options
@@ -4045,7 +4887,7 @@ def _instruction_platform(platform, cfg):
 
 
 def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
-    """Attach Task 15's contained instruction step to platform dependencies."""
+    """Attach the contained instruction and loopback aria2 runtime."""
     # Preserve the established platform-dispatch seam: tests and downstream
     # wrappers may return an opaque sentinel from a substituted builder.  Only
     # the real dependency contract can safely receive runtime wiring.
@@ -4061,15 +4903,79 @@ def _with_instruction_step(deps, cfg, conf_path, platform):  # pragma: no cover
         paths["signers"], paths["root_signers"], paths["work_dir"])
     current_boot_id = instr.boot_id()
 
-    def instruction_step(cfg, state, hints, catalog_date):
+    def instruction_step(cfg, state, hints, catalog_date, cache_only=False,
+                         verification_attempts=None):
         return instr.run_instruction_step(
             cfg, state, deps.catalog, hints, catalog_date,
             runtime_platform, paths["work_dir"], current_boot_id,
             time.monotonic(), verifier,
             lambda updated: agent_config.write_conf(conf_path, updated),
-            deps.emit, checkpoint=deps.checkpoint)
+            deps.emit, checkpoint=deps.checkpoint, cache_only=cache_only,
+            verification_attempts=verification_attempts)
 
-    return deps._replace(instruction_step=instruction_step)
+    endpoint = None
+    secret = None
+    try:
+        port_text = str(cfg["rpc_port"])
+        if not port_text.isdigit():
+            raise ValueError
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            raise ValueError
+        configured_secret = cfg.get("rpc_secret", "")
+        if (not isinstance(configured_secret, str)
+                or len(configured_secret) > 128):
+            raise ValueError
+        secret = agent_config.validate_single_line(
+            "rpc_secret", configured_secret)
+        if not secret:
+            secret = "iris"
+        endpoint = "http://127.0.0.1:%d/jsonrpc" % port
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    if endpoint is None:
+        def aria_rpc(_method, _params):
+            raise InstructionApplyError("RPC unavailable")
+    else:
+        def aria_rpc(method, params):
+            if not isinstance(method, str) or not isinstance(params, list):
+                raise InstructionApplyError("invalid RPC request")
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": "p", "method": method,
+                "params": ["token:" + secret] + params,
+            }, separators=(",", ":")).encode("ascii")
+            request = urllib.request.Request(
+                endpoint, data=payload,
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    raw = response.read(64 * 1024 + 1)
+                if len(raw) > 64 * 1024:
+                    raise InstructionApplyError("RPC response too large")
+                decoded = json.loads(raw.decode("utf-8"))
+                if (not isinstance(decoded, dict)
+                        or set(decoded) != {"jsonrpc", "id", "result"}
+                        or decoded.get("jsonrpc") != "2.0"
+                        or decoded.get("id") != "p"):
+                    raise InstructionApplyError("invalid RPC response")
+                return decoded["result"]
+            except InstructionApplyError:
+                raise
+            except Exception:
+                # Never expose a JSON-RPC error body, credential-bearing URL or
+                # transport exception text to callers, emits or heartbeats.
+                raise InstructionApplyError("RPC unavailable") from None
+
+    defaults = {}
+    aria_add = deps.aria_add
+    wrapper = _instruction_aria_add_protocol(aria_add)
+    if wrapper is not None:
+        aria_add = wrapper[1]()
+    return deps._replace(
+        instruction_step=instruction_step, aria_rpc=aria_rpc,
+        torrent_defaults=defaults,
+        aria_add=_InstructionAriaAdd(aria_add, defaults))
 
 
 def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
