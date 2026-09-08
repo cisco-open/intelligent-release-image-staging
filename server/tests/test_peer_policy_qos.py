@@ -16,7 +16,11 @@ import peer_endpoints
 import peer_policy
 
 
-def _doc(defs=None, role_of=None, qos_default=None, qos_device=None):
+_MISSING = object()
+
+
+def _doc(defs=None, role_of=None, qos_default=None, qos_device=None,
+         qos_state_default=_MISSING):
     doc = peer_policy.base_document()
     doc["roles"] = {
         "defs": defs or {},
@@ -24,23 +28,48 @@ def _doc(defs=None, role_of=None, qos_default=None, qos_device=None):
         "qos_default": qos_default or {},
         "qos_device": qos_device or {},
     }
+    if qos_state_default is not _MISSING:
+        doc["roles"]["qos_state_default"] = qos_state_default
     return doc
 
 
-def _boat_doc(qos=None, device_qos=None):
+def _boat_doc(qos=None, device_qos=None, qos_state=_MISSING,
+              qos_state_default=_MISSING):
+    boat = {
+        "restricted": True,
+        "peers": ["boat"],
+        "origin": True,
+        "qos": qos or {},
+    }
+    if qos_state is not _MISSING:
+        boat["qos_state"] = qos_state
     return _doc(
         defs={
-            "boat": {
-                "restricted": True,
-                "peers": ["boat"],
-                "origin": True,
-                "qos": qos or {},
-            },
+            "boat": boat,
             "fiber": {"restricted": False},
         },
         role_of={"boat-1": "boat", "fiber-1": "fiber"},
         qos_device={"boat-1": device_qos or {}} if device_qos else {},
+        qos_state_default=qos_state_default,
     )
+
+
+def _scoped_state_doc(scope, state_map=_MISSING):
+    if scope == "global":
+        return _boat_doc(qos_state_default=state_map)
+    if scope == "role":
+        return _boat_doc(qos_state=state_map)
+    raise AssertionError("unknown test scope: %s" % scope)
+
+
+def _tree_bytes(root):
+    result = {}
+    for directory, _subdirs, filenames in os.walk(root):
+        for filename in filenames:
+            path = os.path.join(directory, filename)
+            with open(path, "rb") as stream:
+                result[os.path.relpath(path, root)] = stream.read()
+    return result
 
 
 @pytest.fixture
@@ -279,6 +308,114 @@ class TestQosGrammar:
         peer_policy.validate_document(unrestricted)
 
 
+class TestTrackerStateCompatibility:
+    def test_base_document_remains_exact_and_state_free(self):
+        expected = {
+            "schema": 1,
+            "revision": 1,
+            "acls": {"quarantine": {
+                "reserved": True,
+                "description": "reserved: fully isolate an assigned device",
+                "rules": [{"seq": 10, "action": "deny",
+                           "match": {"type": "any"}}]}},
+            "assignments": {},
+            "seeder_assignment": None,
+            "operation_outbox": [],
+        }
+
+        assert peer_policy.base_document() == expected
+        assert "roles" not in peer_policy.base_document()
+
+    def test_scalar_only_authoritative_load_preserves_deliberate_bytes(
+            self, tmp_path):
+        document = _boat_doc(
+            qos={"announce_min_interval_s": 75, "numwant": 17},
+            device_qos={"max_peers": 3})
+        peer_policy.validate_document(document)
+        payload = (json.dumps(
+            document, indent=3, sort_keys=False) + "\n").encode()
+        auth = tmp_path / "peer-policy.json"
+        auth.write_bytes(payload)
+
+        loaded = peer_policy.load_policy(
+            str(auth), str(tmp_path / "peer-policy.lkg.json"))
+
+        assert loaded.document == document
+        assert loaded.degraded is False
+        assert loaded.fail_closed is False
+        assert auth.read_bytes() == payload
+        assert not (tmp_path / "peer-policy.lkg.json").exists()
+
+
+class TestTrackerStateQosGrammar:
+    def test_empty_and_partial_state_maps_are_valid(self):
+        documents = [
+            _doc(qos_state_default={}),
+            _doc(qos_state_default={"seeder": {}}),
+            _doc(qos_state_default={
+                "seeder": {"announce_min_interval_s": 10},
+                "leecher": {"numwant": 200}}),
+            _boat_doc(qos_state={}),
+            _boat_doc(qos_state={"leecher": {}}),
+            _boat_doc(qos_state={
+                "seeder": {"numwant": 4},
+                "leecher": {"announce_min_interval_s": 300}}),
+        ]
+        for document in documents:
+            assert peer_policy.validate_document(document) is document
+
+    def test_state_maps_reject_unknown_names_keys_and_non_objects(self):
+        documents = []
+        for bad_state in ("complete", "SEEDER", ""):
+            for scope in ("global", "role"):
+                documents.append(_scoped_state_doc(
+                    scope, {bad_state: {"numwant": 10}}))
+        for bad_outer in ([], "seeder", 1, True, None):
+            for scope in ("global", "role"):
+                documents.append(_scoped_state_doc(scope, bad_outer))
+        for scope in ("global", "role"):
+            for state in ("seeder", "leecher"):
+                for bad_value in ([], "values", 1, True, None):
+                    documents.append(_scoped_state_doc(
+                        scope, {state: bad_value}))
+                for bad_key in (
+                        "max_peers", "interval", "announce_min_interval"):
+                    documents.append(_scoped_state_doc(
+                        scope, {state: {bad_key: 10}}))
+
+        for document in documents:
+            with pytest.raises(peer_policy.PolicyError):
+                peer_policy.validate_document(document)
+
+    def test_state_values_reuse_integer_ranges_and_reject_other_types(self):
+        ranges = (
+            ("announce_min_interval_s", 10, 300),
+            ("numwant", 4, 200),
+        )
+        for scope in ("global", "role"):
+            for state in ("seeder", "leecher"):
+                for key, minimum, maximum in ranges:
+                    for value in (minimum, maximum):
+                        peer_policy.validate_document(_scoped_state_doc(
+                            scope, {state: {key: value}}))
+                    invalid = (minimum - 1, maximum + 1,
+                               True, False, 10.0, "10", None, [], {})
+                    for value in invalid:
+                        with pytest.raises(peer_policy.PolicyError):
+                            peer_policy.validate_document(_scoped_state_doc(
+                                scope, {state: {key: value}}))
+
+    def test_state_is_rejected_at_unknown_and_device_scopes(self):
+        unknown = _doc()
+        unknown["roles"]["qos_state_defaults"] = {}
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.validate_document(unknown)
+
+        device_state = _doc(qos_device={"d1": {
+            "qos_state": {"seeder": {"numwant": 4}}}})
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.validate_document(device_state)
+
 class TestCompileQos:
     def test_global_role_device_precedence_and_absent_inheritance(self):
         doc = _boat_doc(
@@ -324,6 +461,136 @@ class TestCompileQos:
         before = copy.deepcopy(doc)
         peer_policy.compile_qos(doc, "boat-1")
         assert doc == before
+
+
+class TestCompileTrackerQos:
+    def test_scalar_only_policy_is_state_independent(self):
+        doc = _boat_doc(qos={"announce_min_interval_s": 75,
+                             "numwant": 17})
+        before = copy.deepcopy(doc)
+
+        for state in ("seeder", "leecher"):
+            assert peer_policy.compile_tracker_qos(doc, "boat-1", state) == {
+                "announce_min_interval_s": 75,
+                "numwant": 17,
+            }
+            assert peer_policy.explain_tracker_qos(doc, "boat-1", state) == {
+                "announce_min_interval_s": {
+                    "value": 75, "source": "role:boat"},
+                "numwant": {"value": 17, "source": "role:boat"},
+            }
+        assert doc == before
+
+    def test_state_layers_do_not_enter_scalar_compilation_or_explanation(self):
+        state_free = _boat_doc(
+            qos={"announce_min_interval_s": 75, "numwant": 17},
+            device_qos={"max_peers": 3, "seed_up_bps": 90_000})
+        doc = _boat_doc(
+            qos={"announce_min_interval_s": 75, "numwant": 17},
+            device_qos={"max_peers": 3, "seed_up_bps": 90_000},
+            qos_state_default={"seeder": {
+                "announce_min_interval_s": 120, "numwant": 10}},
+            qos_state={"seeder": {
+                "announce_min_interval_s": 180, "numwant": 4}})
+        before = copy.deepcopy(doc)
+
+        assert peer_policy.compile_qos(doc, "boat-1") == \
+            peer_policy.compile_qos(state_free, "boat-1")
+        assert peer_policy.explain_qos(doc, "boat-1") == \
+            peer_policy.explain_qos(state_free, "boat-1")
+        assert doc == before
+
+    def test_five_layer_precedence_for_both_keys_states_and_exact_sources(self):
+        for state in ("seeder", "leecher"):
+            for key, builtin in (("announce_min_interval_s", 30),
+                                 ("numwant", 50)):
+                other_state = "leecher" if state == "seeder" else "seeder"
+                values = {
+                    "global": builtin + 1,
+                    "global-state:%s" % state: builtin + 2,
+                    "role:boat": builtin + 3,
+                    "role-state:boat:%s" % state: builtin + 4,
+                }
+
+                documents = [
+                    (peer_policy.base_document(), "d1", builtin, "builtin"),
+                    (_doc(qos_default={key: values["global"]}),
+                     "d1", values["global"], "global"),
+                    (_doc(qos_default={key: values["global"]},
+                          qos_state_default={
+                              state: {key: values[
+                                  "global-state:%s" % state]},
+                              other_state: {key: builtin + 10}}),
+                     "d1", values["global-state:%s" % state],
+                     "global-state:%s" % state),
+                    (_boat_doc(
+                        qos={key: values["role:boat"]},
+                        qos_state_default={state: {key: values[
+                            "global-state:%s" % state]}}),
+                     "boat-1", values["role:boat"], "role:boat"),
+                    (_boat_doc(
+                        qos={key: values["role:boat"]},
+                        qos_state_default={state: {key: values[
+                            "global-state:%s" % state]}},
+                        qos_state={
+                            state: {key: values[
+                                "role-state:boat:%s" % state]},
+                            other_state: {key: builtin + 11}}),
+                     "boat-1", values["role-state:boat:%s" % state],
+                     "role-state:boat:%s" % state),
+                ]
+
+                for doc, device_id, expected, source in documents:
+                    compiled = peer_policy.compile_tracker_qos(
+                        doc, device_id, state)
+                    explained = peer_policy.explain_tracker_qos(
+                        doc, device_id, state)
+                    assert compiled[key] == expected
+                    assert explained[key] == {
+                        "value": expected, "source": source}
+
+    def test_partial_state_override_inherits_each_key_independently(self):
+        keys = ("announce_min_interval_s", "numwant")
+        role_values = {"announce_min_interval_s": 80, "numwant": 30}
+        state_values = {"announce_min_interval_s": 180, "numwant": 8}
+        for state in ("seeder", "leecher"):
+            other_state = "leecher" if state == "seeder" else "seeder"
+            for overridden in keys:
+                doc = _boat_doc(
+                    qos=role_values,
+                    qos_state_default={state: {
+                        "announce_min_interval_s": 120, "numwant": 20}},
+                    qos_state={
+                        state: {overridden: state_values[overridden]},
+                        other_state: {
+                            "announce_min_interval_s": 200,
+                            "numwant": 6}})
+                before = copy.deepcopy(doc)
+                expected = dict(role_values)
+                expected[overridden] = state_values[overridden]
+                explanation = {
+                    key: {
+                        "value": expected[key],
+                        "source": ("role-state:boat:%s" % state
+                                   if key == overridden else "role:boat"),
+                    }
+                    for key in keys
+                }
+
+                assert peer_policy.compile_tracker_qos(
+                    doc, "boat-1", state) == expected
+                assert peer_policy.explain_tracker_qos(
+                    doc, "boat-1", state) == explanation
+                assert doc == before
+
+    def test_tracker_compilers_reject_every_state_outside_closed_enum(self):
+        for state in ("", "seed", "SEEDER", "complete", None, 0, True):
+            with pytest.raises(peer_policy.PolicyError):
+                peer_policy.compile_tracker_qos(peer_policy.base_document(),
+                                                "d1", state)
+            with pytest.raises(peer_policy.PolicyError):
+                peer_policy.explain_tracker_qos(peer_policy.base_document(),
+                                                "d1", state)
 
 
 class TestCompiledRoleMembershipIndex:
@@ -598,6 +865,233 @@ class TestRoleLifecycle:
         with open(auth) as f:
             assert json.load(f) == committed
 
+class TestTrackerStateQosMutation:
+    def test_unrelated_role_mutation_does_not_materialize_state(self, paths):
+        auth, lkg = paths
+        assert "roles" not in peer_policy.base_document()
+        doc = peer_policy.define_role(
+            auth, lkg, "boat", {"restricted": True}, "operator", 1.0)
+
+        assert "qos_state_default" not in doc["roles"]
+        assert "qos_state" not in doc["roles"]["defs"]["boat"]
+
+    def test_global_omission_preserves_and_empty_state_clears_only_state(
+            self, paths):
+        auth, lkg = paths
+        scalar = {"announce_min_interval_s": 60, "numwant": 25}
+        state_qos = {"seeder": {"announce_min_interval_s": 120,
+                                 "numwant": 8}}
+        prior = peer_policy.set_qos(
+            auth, lkg, scalar, "operator", 1.0)
+        with_state = peer_policy.set_qos(
+            auth, lkg, None, "operator", 2.0,
+            qos_state=state_qos, expected_revision=prior["revision"])
+
+        assert with_state["roles"]["qos_default"] == scalar
+        assert with_state["roles"]["qos_state_default"] == state_qos
+        assert with_state["revision"] == prior["revision"] + 1
+        assert with_state["operation_outbox"][-1]["target"] == "qos:global"
+
+        scalar_empty = peer_policy.set_qos(
+            auth, lkg, {}, "operator", 3.0, qos_state=None,
+            expected_revision=with_state["revision"])
+        assert scalar_empty["roles"]["qos_default"] == {}
+        assert scalar_empty["roles"]["qos_state_default"] == state_qos
+
+        cleared = peer_policy.set_qos(
+            auth, lkg, None, "operator", 4.0, qos_state={},
+            expected_revision=scalar_empty["revision"])
+        assert "qos_state_default" not in cleared["roles"]
+        assert cleared["roles"]["qos_default"] == {}
+
+    def test_role_scalar_and_state_replacements_are_atomic_and_independent(
+            self, paths):
+        auth, lkg = paths
+        prior = peer_policy.define_role(
+            auth, lkg, "boat", {
+                "restricted": True,
+                "qos": {"announce_min_interval_s": 70},
+                "qos_state": {"leecher": {"numwant": 18}},
+            }, "operator", 1.0)
+
+        state_only = peer_policy.set_qos(
+            auth, lkg, None, "operator", 2.0, role="boat",
+            qos_state={"seeder": {"numwant": 6}},
+            expected_revision=prior["revision"])
+        definition = state_only["roles"]["defs"]["boat"]
+        assert definition["qos"] == {"announce_min_interval_s": 70}
+        assert definition["qos_state"] == {"seeder": {"numwant": 6}}
+
+        scalar_only = peer_policy.set_qos(
+            auth, lkg, {"announce_min_interval_s": 90}, "operator", 3.0,
+            role="boat", qos_state=None,
+            expected_revision=state_only["revision"])
+        definition = scalar_only["roles"]["defs"]["boat"]
+        assert definition["qos"] == {"announce_min_interval_s": 90}
+        assert definition["qos_state"] == {"seeder": {"numwant": 6}}
+
+        both = peer_policy.set_qos(
+            auth, lkg, {"announce_min_interval_s": 100}, "operator", 4.0,
+            role="boat", qos_state={"leecher": {"numwant": 12}},
+            expected_revision=scalar_only["revision"])
+        definition = both["roles"]["defs"]["boat"]
+        assert definition["qos"] == {"announce_min_interval_s": 100}
+        assert definition["qos_state"] == {"leecher": {"numwant": 12}}
+        assert both["revision"] == scalar_only["revision"] + 1
+        assert len(both["operation_outbox"]) == \
+            len(scalar_only["operation_outbox"]) + 1
+
+        state_cleared = peer_policy.set_qos(
+            auth, lkg, None, "operator", 5.0, role="boat", qos_state={},
+            expected_revision=both["revision"])
+        definition = state_cleared["roles"]["defs"]["boat"]
+        assert "qos_state" not in definition
+        assert definition["qos"] == {"announce_min_interval_s": 100}
+
+    def test_state_mutation_requires_a_component_and_rejects_device_scope(
+            self, paths):
+        auth, lkg = paths
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.set_qos(
+                auth, lkg, None, "operator", 1.0, qos_state=None)
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.set_qos(
+                auth, lkg, None, "operator", 1.0, device_id="d1",
+                qos_state={"seeder": {"numwant": 4}})
+
+    def test_state_only_dry_run_changes_no_store_bytes(self, paths):
+        auth, lkg = paths
+        root = os.path.dirname(auth)
+        before = _tree_bytes(root)
+        candidate = peer_policy.set_qos(
+            auth, lkg, None, "operator", 1.0,
+            qos_state={"seeder": {"announce_min_interval_s": 120}},
+            dry_run=True)
+
+        assert candidate["roles"]["qos_state_default"] == {
+            "seeder": {"announce_min_interval_s": 120}}
+        assert _tree_bytes(root) == before
+
+
+class TestTrackerStatePersistenceBoundaries:
+    def test_state_bearing_authority_and_lkg_load_without_rewriting(
+            self, tmp_path):
+        valid = _boat_doc(
+            qos_state_default={
+                "seeder": {"announce_min_interval_s": 120},
+                "leecher": {"numwant": 25}},
+            qos_state={
+                "seeder": {"numwant": 8},
+                "leecher": {"announce_min_interval_s": 45}})
+        valid["revision"] = 9
+        invalid = copy.deepcopy(valid)
+        invalid["roles"]["defs"]["boat"]["qos_state"]["leecher"] = []
+        auth = tmp_path / "peer-policy.json"
+        lkg = tmp_path / "peer-policy.lkg.json"
+
+        auth_payload = (json.dumps(valid, indent=2) + "\n").encode()
+        lkg_payload = json.dumps(peer_policy.base_document()).encode()
+        auth.write_bytes(auth_payload)
+        lkg.write_bytes(lkg_payload)
+        result = peer_policy.load_policy(str(auth), str(lkg))
+        assert result.document == valid
+        assert result.degraded is False
+        assert auth.read_bytes() == auth_payload
+        assert lkg.read_bytes() == lkg_payload
+
+        invalid_payload = json.dumps(invalid).encode()
+        lkg_payload = (json.dumps(valid, indent=4) + "\n").encode()
+        auth.write_bytes(invalid_payload)
+        lkg.write_bytes(lkg_payload)
+        result = peer_policy.load_policy(str(auth), str(lkg))
+        assert result.document == valid
+        assert result.degraded is True
+        assert result.fail_closed is False
+        assert auth.read_bytes() == invalid_payload
+        assert lkg.read_bytes() == lkg_payload
+
+        auth_payload = b"{ invalid authoritative"
+        lkg_payload = invalid_payload
+        auth.write_bytes(auth_payload)
+        lkg.write_bytes(lkg_payload)
+        result = peer_policy.load_policy(str(auth), str(lkg))
+        assert result.degraded is True
+        assert result.fail_closed is True
+        assert auth.read_bytes() == auth_payload
+        assert lkg.read_bytes() == lkg_payload
+
+    def test_state_bearing_retained_revision_restores_as_one_new_commit(
+            self, paths):
+        auth, lkg = paths
+        role_state = {"seeder": {"numwant": 8}}
+        global_state = {"leecher": {"announce_min_interval_s": 45}}
+        role_doc = peer_policy.define_role(
+            auth, lkg, "boat", {
+                "restricted": True, "qos_state": role_state},
+            "operator", 1.0)
+        state_doc = peer_policy.set_qos(
+            auth, lkg, None, "operator", 2.0,
+            qos_state=global_state,
+            expected_revision=role_doc["revision"])
+        current = peer_policy.set_qos(
+            auth, lkg, {"numwant": 20}, "operator", 3.0,
+            expected_revision=state_doc["revision"])
+
+        restored = peer_policy.restore_lkg_revision(
+            auth, lkg, state_doc["revision"], actor="operator", now=4.0,
+            expected_revision=current["revision"])
+
+        assert restored["revision"] == current["revision"] + 1
+        assert restored["roles"]["qos_state_default"] == global_state
+        assert restored["roles"]["defs"]["boat"]["qos_state"] == role_state
+        assert len(restored["operation_outbox"]) == \
+            len(current["operation_outbox"]) + 1
+        assert restored["operation_outbox"][-1]["action"] == "restore"
+
+    def test_malformed_state_retained_revision_is_not_restored(self, paths):
+        auth, lkg = paths
+        current = peer_policy.set_qos(
+            auth, lkg, {"numwant": 20}, "operator", 1.0)
+        retained_path = peer_policy.lkg_revision_path(lkg, 1)
+        malformed = _boat_doc(qos_state={
+            "seeder": {"announce_min_interval_s": "120"}})
+        malformed["revision"] = 1
+        with open(retained_path, "w") as stream:
+            json.dump(malformed, stream)
+        root = os.path.dirname(auth)
+        before = _tree_bytes(root)
+
+        with pytest.raises(peer_policy.PolicyError):
+            peer_policy.restore_lkg_revision(
+                auth, lkg, 1, actor="operator", now=2.0,
+                expected_revision=current["revision"])
+
+        assert _tree_bytes(root) == before
+
+    def test_invalid_combined_scalar_state_dry_run_and_commit_write_nothing(
+            self, paths):
+        auth, lkg = paths
+        current = peer_policy.define_role(
+            auth, lkg, "boat", {"restricted": True}, "operator", 1.0)
+        root = os.path.dirname(auth)
+        before = _tree_bytes(root)
+        invalid_pairs = (
+            ({"numwant": 3}, {"seeder": {"numwant": 8}}),
+            ({"numwant": 20}, {"seeder": {"numwant": 3}}),
+        )
+
+        for scope in ("global", "role"):
+            scoped = {"role": "boat"} if scope == "role" else {}
+            for qos, qos_state in invalid_pairs:
+                for dry_run in (True, False):
+                    with pytest.raises(peer_policy.PolicyError):
+                        peer_policy.set_qos(
+                            auth, lkg, qos, "operator", 2.0,
+                            qos_state=qos_state, dry_run=dry_run,
+                            expected_revision=current["revision"], **scoped)
+                    assert _tree_bytes(root) == before
+
+
 class TestBlastRadius:
     @staticmethod
     def documents():
@@ -844,6 +1338,46 @@ class TestBlastRadius:
         assert not peer_policy.confirm_blast_radius(
             prior, drifted, peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD,
             preview.confirm_token)
+
+    def test_global_and_role_state_add_change_remove_have_bound_tokens(self):
+        threshold = peer_policy.BLAST_RADIUS_CONFIRM_THRESHOLD
+        for scope in ("global", "role"):
+            absent = _scoped_state_doc(scope)
+            explicit_empty = _scoped_state_doc(scope, {})
+            initial = _scoped_state_doc(
+                scope, {"seeder": {"numwant": 8}})
+            changed = _scoped_state_doc(
+                scope, {"seeder": {"numwant": 9}})
+            transitions = (
+                (absent, explicit_empty),
+                (explicit_empty, absent),
+                (absent, initial),
+                (initial, changed),
+                (initial, absent),
+            )
+            for prior, candidate in transitions:
+                preview = peer_policy.blast_radius(
+                    prior, candidate, threshold=threshold)
+                assert preview[:4] == (0, 0, 0, 0)
+                assert preview.qos_changed is True
+                assert preview.requires_confirmation is True
+                assert len(preview.confirm_token) == 64
+                assert peer_policy.confirm_blast_radius(
+                    prior, candidate, threshold, preview.confirm_token)
+
+            add_token = peer_policy.blast_radius(
+                absent, initial, threshold=threshold).confirm_token
+            token_mismatches = (
+                _scoped_state_doc(
+                    scope, {"seeder": {"numwant": 10}}),
+                _scoped_state_doc(
+                    scope, {"seeder": {"announce_min_interval_s": 120}}),
+                _scoped_state_doc(
+                    scope, {"leecher": {"numwant": 8}}),
+            )
+            for mismatch in token_mismatches:
+                assert not peer_policy.confirm_blast_radius(
+                    absent, mismatch, threshold, add_token)
 
     def test_precommit_refusal_leaves_policy_and_ring_unchanged(self, paths):
         auth, lkg = paths

@@ -105,6 +105,85 @@ def test_iris_role_export_import_round_trip_final_wire_units(tmp_path):
         _policy(tmp_path).document["roles"]["defs"]
 
 
+def test_iris_role_export_omits_state_and_define_replacement_clears_it(
+        tmp_path):
+    auth = str(tmp_path / "peer-policy.json")
+    lkg = str(tmp_path / "peer-policy.lkg.json")
+    peer_policy.define_role(auth, lkg, "boat", {
+        "restricted": True,
+        "qos": {"announce_min_interval_s": 60},
+        "qos_state": {"seeder": {"numwant": 8}},
+    }, "test", 1)
+
+    exported = _run(tmp_path, "export")
+    assert exported.returncode == 0, exported.stderr
+    assert "qos_state" not in exported.stdout
+    rows = list(csv.DictReader(io.StringIO(exported.stdout)))
+    assert len(rows) == 1
+    assert rows[0]["role"] == "boat"
+    assert rows[0]["announce_min_interval_s"] == "60"
+
+    preview = _run(
+        tmp_path, "define", "boat", "--restricted",
+        "--qos", "announce_min_interval_s=60", "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    payload = json.loads(preview.stdout)
+    assert [payload[key] for key in (
+        "member_delta", "origin_access_lost", "empty_permitted_sets",
+        "role_pairs_stopped")] == [0, 0, 0, 0]
+    assert payload["qos_changed"] is True
+    assert payload["requires_confirmation"] is True
+
+    refused = _run(
+        tmp_path, "define", "boat", "--restricted",
+        "--qos", "announce_min_interval_s=60")
+    assert refused.returncode != 0
+    assert "qos_state" in _policy(tmp_path).document["roles"]["defs"]["boat"]
+
+    applied = _run(
+        tmp_path, "define", "boat", "--restricted",
+        "--qos", "announce_min_interval_s=60",
+        "--confirm", payload["confirm_token"])
+    assert applied.returncode == 0, applied.stderr
+    definition = _policy(tmp_path).document["roles"]["defs"]["boat"]
+    assert definition["qos"] == {"announce_min_interval_s": 60}
+    assert "qos_state" not in definition
+
+
+def test_iris_role_import_replacement_clears_all_omitted_state(tmp_path):
+    auth = str(tmp_path / "peer-policy.json")
+    lkg = str(tmp_path / "peer-policy.lkg.json")
+    for index, role in enumerate(("boat", "fiber"), 1):
+        peer_policy.define_role(auth, lkg, role, {
+            "restricted": False,
+            "qos_state": {"leecher": {
+                "announce_min_interval_s": 40 + index}},
+        }, "test", index)
+
+    exported = _run(tmp_path, "export")
+    assert exported.returncode == 0, exported.stderr
+    assert "qos_state" not in exported.stdout
+    source = tmp_path / "roles.csv"
+    source.write_text(exported.stdout)
+
+    preview = _run(tmp_path, "import", str(source), "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    payload = json.loads(preview.stdout)
+    assert payload["qos_changed"] is True
+    assert payload["requires_confirmation"] is True
+    assert [payload[key] for key in (
+        "member_delta", "origin_access_lost", "empty_permitted_sets",
+        "role_pairs_stopped")] == [0, 0, 0, 0]
+
+    applied = _run(
+        tmp_path, "import", str(source), "--confirm", payload["confirm_token"])
+    assert applied.returncode == 0, applied.stderr
+    definitions = _policy(tmp_path).document["roles"]["defs"]
+    assert set(definitions) == {"boat", "fiber"}
+    assert all("qos_state" not in definition
+               for definition in definitions.values())
+
+
 def test_iris_role_import_rejects_duplicate_and_undefined_peer_without_write(
         tmp_path):
     header = "role,restricted,peers,origin,nets,on_stale\n"

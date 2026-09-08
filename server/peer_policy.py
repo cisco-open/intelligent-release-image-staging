@@ -149,6 +149,10 @@ _QOS_RANGES = {
     "origin_max_peers": (1, 1000),
 }
 
+_TRACKER_QOS_KEYS = ("announce_min_interval_s", "numwant")
+_TRACKER_STATES = frozenset(("seeder", "leecher"))
+_QOS_STATE_UNSET = object()
+
 _QOS_SCOPES = {
     key: _GLOBAL_ROLE_DEVICE for key in (
         "max_peers", "per_peer_bps", "fanout", *PER_TORRENT_RATE_KEYS,
@@ -335,6 +339,26 @@ def _validate_qos(qos, scope):
             raise PolicyError("catalog_tick_s must be a launcher tick multiple")
 
 
+def _validate_qos_state(qos_state):
+    if not isinstance(qos_state, dict):
+        raise PolicyError("bad qos state")
+    if set(qos_state) - _TRACKER_STATES:
+        raise PolicyError("unknown tracker state")
+    for state, values in qos_state.items():
+        if not isinstance(values, dict):
+            raise PolicyError("bad tracker state qos: %s" % state)
+        if set(values) - set(_TRACKER_QOS_KEYS):
+            raise PolicyError("unknown tracker state qos key")
+        for key, value in values.items():
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise PolicyError("tracker state qos value must be int: %s" %
+                                  key)
+            minimum, maximum = _QOS_RANGES[key]
+            if not minimum <= value <= maximum:
+                raise PolicyError(
+                    "tracker state qos value out of range: %s" % key)
+
+
 def _qos_layers(doc, device_id):
     roles = doc.get("roles", {}) if isinstance(doc, dict) else {}
     if not isinstance(roles, dict):
@@ -408,6 +432,60 @@ def compile_qos(doc, device_id):
     return _compile_qos_layers(*_qos_layers(doc, device_id))
 
 
+def _tracker_qos_layers(doc, device_id, state):
+    if not isinstance(state, str) or state not in _TRACKER_STATES:
+        raise PolicyError("bad tracker state")
+    roles = doc.get("roles", {}) if isinstance(doc, dict) else {}
+    if not isinstance(roles, dict):
+        roles = {}
+    defs = roles.get("defs", {})
+    role_of = roles.get("role_of", {})
+    if not isinstance(defs, dict):
+        defs = {}
+    if not isinstance(role_of, dict):
+        role_of = {}
+    role = role_of.get(device_id) if isinstance(device_id, str) else None
+    definition = defs.get(role, {})
+    if not isinstance(definition, dict):
+        definition = {}
+
+    def selected_state(values):
+        if not isinstance(values, dict):
+            return {}
+        selected = values.get(state, {})
+        return selected if isinstance(selected, dict) else {}
+
+    global_qos = roles.get("qos_default", {})
+    role_qos = definition.get("qos", {})
+    return (
+        (global_qos if isinstance(global_qos, dict) else {}, "global"),
+        (selected_state(roles.get("qos_state_default", {})),
+         "global-state:%s" % state),
+        (role_qos if isinstance(role_qos, dict) else {}, "role:%s" % role),
+        (selected_state(definition.get("qos_state", {})),
+         "role-state:%s:%s" % (role, state)),
+    )
+
+
+def explain_tracker_qos(doc, device_id, state):
+    """Compile tracker cadence values and their scalar/state provenance."""
+    effective = {
+        key: {"value": QOS_DEFAULTS[key], "source": "builtin"}
+        for key in _TRACKER_QOS_KEYS}
+    for layer, source in _tracker_qos_layers(doc, device_id, state):
+        for key in _TRACKER_QOS_KEYS:
+            if key in layer:
+                effective[key] = {"value": layer[key], "source": source}
+    return effective
+
+
+def compile_tracker_qos(doc, device_id, state):
+    """Compile the two tracker cadence values without mutating *doc*."""
+    return {
+        key: row["value"]
+        for key, row in explain_tracker_qos(doc, device_id, state).items()}
+
+
 def _validate_compiled_qos(qos):
     if qos["fanout"] > qos["max_peers"]:
         raise PolicyError("fanout exceeds max_peers")
@@ -472,7 +550,9 @@ def _validate_roles(roles):
     """
     if not isinstance(roles, dict):
         raise PolicyError("bad roles")
-    if set(roles) - {"defs", "role_of", "qos_default", "qos_device"}:
+    if set(roles) - {
+            "defs", "role_of", "qos_default", "qos_device",
+            "qos_state_default"}:
         raise PolicyError("bad roles key")
     defs = roles.get("defs", {})
     if not isinstance(defs, dict) or len(defs) > MAX_ROLES:
@@ -482,7 +562,8 @@ def _validate_roles(roles):
         if not isinstance(definition, dict):
             raise PolicyError("bad role definition")
         if set(definition) - {
-                "restricted", "peers", "origin", "nets", "on_stale", "qos"}:
+                "restricted", "peers", "origin", "nets", "on_stale", "qos",
+                "qos_state"}:
             raise PolicyError("bad role definition key")
         restricted = definition.get("restricted", False)
         if not isinstance(restricted, bool):
@@ -513,6 +594,7 @@ def _validate_roles(roles):
                 and definition["on_stale"] not in ("keep", "defaults"):
             raise PolicyError("bad on_stale")
         _validate_qos(definition.get("qos", {}), "role")
+        _validate_qos_state(definition.get("qos_state", {}))
 
     # An unrestricted role has an implicit permit ACL, so its side of every
     # relation is already open. Two restricted roles must name one another in
@@ -538,6 +620,7 @@ def _validate_roles(roles):
         if role not in defs:
             raise PolicyError("assignment to unknown role")
     _validate_qos(roles.get("qos_default", {}), "global")
+    _validate_qos_state(roles.get("qos_state_default", {}))
     qos_device = roles.get("qos_device", {})
     if not isinstance(qos_device, dict):
         raise PolicyError("bad qos_device")
@@ -1316,25 +1399,48 @@ def delete_role(auth_path, lkg_path, name, actor, now, acked_revision=0,
 
 def set_qos(auth_path, lkg_path, qos, actor, now, role=None, device_id=None,
             acked_revision=0, expected_revision=None, dry_run=False,
-            precommit=None):
-    """Replace global, role, or device QoS in one policy commit."""
-    if not isinstance(qos, dict):
+            precommit=None, qos_state=_QOS_STATE_UNSET):
+    """Replace scalar and optional tracker-state QoS in one policy commit."""
+    scalar_supplied = qos is not None
+    state_supplied = qos_state is not _QOS_STATE_UNSET and qos_state is not None
+    if not scalar_supplied and not state_supplied:
+        raise PolicyError("qos or qos_state required")
+    if scalar_supplied and not isinstance(qos, dict):
         raise PolicyError("bad qos")
+    if state_supplied and not isinstance(qos_state, dict):
+        raise PolicyError("bad qos state")
     if role is not None and device_id is not None:
         raise PolicyError("ambiguous qos scope")
-    replacement = json.loads(json.dumps(qos))
+    if device_id is not None and state_supplied:
+        raise PolicyError("tracker state qos has no device scope")
+    replacement = json.loads(json.dumps(qos)) if scalar_supplied else None
+    state_replacement = json.loads(json.dumps(qos_state)) \
+        if state_supplied else None
 
     def _mutate(candidate):
         roles = _ensure_roles(candidate)
         if role is not None:
             _require_known_role(roles, role)
-            roles["defs"][role]["qos"] = replacement
+            definition = roles["defs"][role]
+            if scalar_supplied:
+                definition["qos"] = replacement
+            if state_supplied:
+                if state_replacement:
+                    definition["qos_state"] = state_replacement
+                else:
+                    definition.pop("qos_state", None)
         elif device_id is not None:
             if not isinstance(device_id, str) or not device_id:
                 raise PolicyError("bad device qos id")
             roles["qos_device"][device_id] = replacement
         else:
-            roles["qos_default"] = replacement
+            if scalar_supplied:
+                roles["qos_default"] = replacement
+            if state_supplied:
+                if state_replacement:
+                    roles["qos_state_default"] = state_replacement
+                else:
+                    roles.pop("qos_state_default", None)
 
     target = ("role:%s" % role if role is not None else
               device_id if device_id is not None else "qos:global")
@@ -1397,11 +1503,13 @@ def _qos_policy_content(doc):
         values = {}
         if definition.get("qos"):
             values["qos"] = definition["qos"]
+        if "qos_state" in definition:
+            values["qos_state"] = definition["qos_state"]
         if "on_stale" in definition:
             values["on_stale"] = definition["on_stale"]
         if values:
             role_qos[name] = values
-    return {
+    content = {
         "qos_default": roles.get("qos_default", {}),
         "qos_device": {
             device_id: qos
@@ -1409,6 +1517,9 @@ def _qos_policy_content(doc):
             if qos},
         "roles": role_qos,
     }
+    if "qos_state_default" in roles:
+        content["qos_state_default"] = roles["qos_state_default"]
+    return content
 
 
 def _token_policy_content(doc):
