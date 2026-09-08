@@ -74,6 +74,13 @@ setup() {
   [[ "$output" == *"PKG_FS must be an IOS filesystem prefix"* ]]
 }
 
+@test "dry-run rejects a newline in every rendered package name before output" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    PKG=$'safe\nreload' run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" != *$'\nreload\n'* ]]
+}
+
 @test "share dry-run renders the bind mount and its matching container/IOS paths" {
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
@@ -292,7 +299,10 @@ sequence=1
 finished=False
 expected_exit=None
 protocol_error=None
+signal_sent=False
 uploaded=False
+remote_wrapper=False
+remote_certificate=False
 admitted=False
 resolved=False
 certificate=False
@@ -325,6 +335,8 @@ def ready():
         outgoing['unexpected']='fixture-login-secret'
     if scenario=='malformed_ready_tuple' and sequence==1:
         outgoing['transaction_id']='e'*32 if action=='uninstall' else None
+    if scenario=='malformed_ready_revision' and sequence==2:
+        outgoing['expected_revision']+=1
     send(outgoing)
 
 
@@ -342,6 +354,7 @@ def command_names():
 
 def request(value):
     global sequence,finished,expected_exit,uploaded,admitted,resolved,certificate,state,revision,phase
+    global signal_sent,remote_wrapper,remote_certificate
     keys=set('version sequence attempt_id action teardown_mode record_id transaction_id expected_revision board_identity wrapper_sha256 operation arguments'.split())
     assert set(value)==keys,'request is not the exact closed schema'
     assert type(value['sequence']) is int and value['sequence']==sequence
@@ -371,6 +384,10 @@ def request(value):
     trace.flush()
     counts[name]=counts.get(name,0)+1
     assert sum(counts.values())<=128,'unbounded recipe requests'
+    if scenario=='signal_during_ipc' and not signal_sent:
+        os.kill(child.pid,signal.SIGTERM)
+        signal_sent=True
+        time.sleep(0.05)
     code=0
     category=None
     detail=''
@@ -417,7 +434,13 @@ def request(value):
             timed_out=True
             framing=False
             returncode=None
-    elif name=='upload_wrapper': uploaded=True
+    elif name=='upload_wrapper':
+        uploaded=True
+        remote_wrapper=True
+        if scenario=='upload_wrapper_failure':
+            code,category,detail=4,'transport','fixture upload failed after creating remote file'
+            returncode=1
+    elif name=='upload_certificate': remote_certificate=True
     elif name=='begin_install':
         assert uploaded,'begin_install preceded bound upload'
         admitted=True
@@ -452,6 +475,20 @@ def request(value):
         assert certificate and state=='ACTIVATED'
         state='RUNNING'
     elif name=='save': stdout='[OK]\n'
+    elif name=='remove_wrapper': remote_wrapper=False
+    elif name=='remove_certificate': remote_certificate=False
+    elif name=='cleanup_config_probe':
+        residues={
+            'residue_log_bare':'logging discriminator IRISQ\n',
+            'residue_log_buffered':'logging buffered discriminator IRISQ\n',
+            'residue_log_console':'logging console discriminator IRISQ\n',
+            'residue_log_monitor':'logging monitor discriminator IRISQ\n',
+            'residue_app_row':'iris RUNNING\n',
+            'residue_vlan':'interface Vlan666\n',
+        }
+        stdout=residues.get(scenario,'')
+    elif name=='cleanup_stage_probe':
+        if scenario=='residue_stage': stdout='Directory of sdflash:/guest-share/iris\n'
     elif name=='cleanup':
         if action=='install' and admitted and phase=='disabled_confirmed':
             revision+=1
@@ -466,6 +503,11 @@ def request(value):
             resolved=True
         if scenario in ('finish_failure','copy_failure_cleanup_failure'):
             code,category,detail=5,'journal_durability','fixture finish durability failure'
+        if action=='install' and code==0:
+            remote_wrapper=False
+            remote_certificate=False
+            trace.write(json.dumps(dict(event='artifact_cleanup',wrapper=False,certificate=False))+'\n')
+            trace.flush()
         finished=True
     for stream,data in (('stdout',stdout),('stderr',stderr)):
         raw=data.encode('utf-8')
@@ -478,6 +520,14 @@ def request(value):
         stdout_truncated=False,stderr_truncated=False,framing_complete=framing,
         error_category=category,detail=detail,transcript_ref=None,
         recipe_returncode=None,recovery_code=None)
+    if sum(counts.values())==1:
+        if scenario=='malformed_success_timed_out': result['timed_out']=True
+        if scenario=='malformed_success_framing': result['framing_complete']=False
+        if scenario=='malformed_success_returncode': result['returncode']=7
+        if scenario=='malformed_install_journal_none':
+            result['revision']=None
+            result['phase']=None
+        if scenario=='malformed_install_phase': result['phase']='restored'
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
@@ -593,6 +643,9 @@ else:
     elif check=='preserve_primary':
         finish=[row for row in records if row['event']=='finish'][0]
         assert finish['exit_intent']!=0 and finish['expected_exit']==finish['exit_intent']
+    elif check=='artifact_clean':
+        clean=[row for row in records if row['event']=='artifact_cleanup']
+        assert clean and clean[-1]['wrapper'] is False and clean[-1]['certificate'] is False,records
 ASSERTIONS
   [ ! -s "$IOX_DIRECT_LOG" ]
 }
@@ -770,6 +823,45 @@ ASSERTIONS
   [ "$status" -ne 5 ]
   _iox_assert_trace preserve_primary
   _iox_assert_trace finish ACTIVATED
+}
+
+@test "controller cleanup removes admitted uploads after upload prerequisite and lifecycle failure" {
+  for scenario in upload_wrapper_failure routing_missing certificate_copy_failure; do
+    _iox_fixture_setup
+    run _iox_controller_run install "$scenario"
+    [ "$status" -ne 0 ]
+    _iox_assert_trace ordered cleanup finish
+    _iox_assert_trace artifact_clean
+    rm -rf "$STUBDIR"
+  done
+}
+
+@test "handled TERM during an IPC request commits its ready binding before cleanup and finish" {
+  _iox_fixture_setup
+  run _iox_controller_run install signal_during_ipc
+  [ "$status" -eq 143 ]
+  _iox_assert_trace ordered upload_wrapper cleanup finish
+  _iox_assert_trace artifact_clean
+}
+
+@test "inconsistent successful results are rejected before a second request" {
+  for scenario in malformed_success_timed_out malformed_success_framing \
+      malformed_success_returncode malformed_install_journal_none malformed_install_phase; do
+    _iox_fixture_setup
+    run _iox_controller_run install "$scenario"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 97 ]
+    _iox_assert_trace first_only
+    rm -rf "$STUBDIR"
+  done
+}
+
+@test "next ready must retain the acknowledged install journal revision" {
+  _iox_fixture_setup
+  run _iox_controller_run install malformed_ready_revision
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 97 ]
+  _iox_assert_trace first_only
 }
 
 @test "inband dry-run validates the IOS management host before rendering" {
