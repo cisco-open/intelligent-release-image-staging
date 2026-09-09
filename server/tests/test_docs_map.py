@@ -854,14 +854,50 @@ def _compact(text):
 
 def _units(text):
     """Prose sentences, table rows, and paragraphs used for relationship tests."""
-    paragraphs = [unit for unit in re.split(r"\n\s*\n", text)
-                  if unit.strip()]
-    sentences = []
-    for paragraph in paragraphs:
-        paragraph = re.sub(r"\s+", " ", paragraph).strip()
-        sentences.extend(re.split(r"(?<=[.!?])\s+", paragraph))
-    return [unit for unit in list(text.splitlines()) + paragraphs + sentences
-            if unit.strip()]
+    units = []
+
+    def prose_units(lines):
+        lines = [line for line in lines if line.strip()]
+        if not lines:
+            return
+        paragraph = "\n".join(lines)
+        normalized = re.sub(r"\s+", " ", paragraph).strip()
+        units.extend(lines)
+        units.append(paragraph)
+        units.extend(re.split(r"(?<=[.!?])\s+", normalized))
+
+    for block in re.split(r"\n\s*\n", text):
+        lines = [line for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if any(re.match(r"^\s*\|", line) for line in lines):
+            # A Markdown table often has no blank lines between rows. Each row
+            # is its own relationship boundary.
+            units.extend(lines)
+            continue
+        if any(re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line)
+               for line in lines):
+            prelude = []
+            item = []
+            for line in lines:
+                if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
+                    if item:
+                        prose_units(item)
+                    elif prelude:
+                        prose_units(prelude)
+                        prelude = []
+                    item = [line]
+                elif item:
+                    item.append(line)
+                else:
+                    prelude.append(line)
+            if item:
+                prose_units(item)
+            elif prelude:
+                prose_units(prelude)
+            continue
+        prose_units(lines)
+    return [unit for unit in units if unit.strip()]
 
 
 def _assert_unit(text, terms, message):
@@ -876,14 +912,17 @@ def _assert_ordered(text, terms, message, distance=500):
     assert re.search(expression, text, re.IGNORECASE | re.DOTALL), message
 
 
-def _section(text, heading, next_heading=None):
-    """Return one Markdown section so relationships cannot match elsewhere."""
-    parts = text.split(heading, 1)
-    assert len(parts) == 2, "missing section: %s" % heading
-    section = parts[1]
-    if next_heading:
-        section = section.split(next_heading, 1)[0]
-    return section
+def _section(text, heading):
+    """Return an ATX section including nested headings, ending at a peer."""
+    match = re.search(
+        r"^(#{1,6})[ \t]+%s[ \t]*#*[ \t]*$" % re.escape(heading),
+        text, re.IGNORECASE | re.MULTILINE)
+    assert match, "missing section: %s" % heading
+    level = len(match.group(1))
+    remainder = text[match.end():]
+    boundary = re.search(r"^#{1,%d}[ \t]+" % level, remainder,
+                         re.MULTILINE)
+    return remainder[:boundary.start()] if boundary else remainder
 
 
 def _assert_phase1_network_relationship(text):
@@ -1108,8 +1147,7 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
 
 def test_docs_phase1_iox_verification_transaction():
     iox = _page("iox.md")
-    transaction = _section(iox, "## App-hosting verification transaction",
-                           "## ")
+    transaction = _section(iox, "App-hosting verification transaction")
     _assert_unit(transaction, ("device-global", "app-hosting verification"),
                  "the IOx control scope must be named")
     _assert_unit(transaction, ("signed wrapper", "no", "state change"),
@@ -1208,6 +1246,16 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
             ("multi-replica server tier", ("not covered", "unsupported"))):
         _assert_unit(validation, (layout,) + terms,
                      "%s validation is not operationally meaningful" % layout)
+    _assert_unit(validation, ("single-host Compose", "depends_on",
+                              "healthy server", "initial fallback certificate",
+                              "prerequisite", "cannot cold-start"),
+                 "combined Compose must name its Console startup dependencies")
+    _assert_unit(validation, ("split-host Compose", "independent browser certificate",
+                              "cold-start", "server outage"),
+                 "split-host Console must retain server-outage cold start")
+    _assert_unit(validation, ("single-replica Kubernetes", "iris-console-tls",
+                              "cold-start", "server outage"),
+                 "Kubernetes Console must retain server-outage cold start")
 
 
 def test_docs_phase1_operations_root_and_offline_runbooks():
