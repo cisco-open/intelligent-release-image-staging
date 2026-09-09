@@ -196,6 +196,13 @@ The request body cannot be decoded as the schema required by the operation.
 The catalog torrent request selected an unsupported tracker authentication
 mode.
 
+## invalid_schedule
+
+A schedule definition, patch, or CSV row failed validation. The schema is
+closed: unknown fields, an unknown verb, a payload that does not match the
+verb, an out-of-range window, or an unknown IANA time zone are all refused
+before anything durable is written. Nothing was changed.
+
 ## management-api-unavailable
 
 The Console tier cannot establish its authenticated, CA-verified management
@@ -325,6 +332,41 @@ membership accidentally.
 
 No registered API route matches the request. Authentication is checked before
 this distinction is disclosed.
+
+## schedule_conflict
+
+The schedule could not be changed as asked because its authority moved: the id
+already exists, the definition changed under the request, or an occurrence and
+its evidence no longer agree with the definition being written. Reread the
+schedule and reapply the same intent.
+
+## schedule_not_found
+
+No schedule with that id exists. Occurrence and outcome history stays readable
+after a definition is deleted, so a history read can still succeed where this
+does not.
+
+## schedule_state_unavailable
+
+The durable schedule store could not be read or written. No schedule state was
+changed, and nothing was fired on the strength of an unreadable store.
+
+## schedule_target_heartbeat_unavailable
+
+The target uses a filter that only the heartbeat authority can resolve (`q`,
+`telemetry`, or `status`) and that authority could not be read. The target is
+refused rather than resolved against a partial fleet.
+
+## schedule_target_policy_unavailable
+
+Peer policy is unavailable or degraded, so a role-aware target cannot be
+resolved. Roles are enforced from that policy; resolving without it would
+silently ignore role membership.
+
+## schedule_target_status_unavailable
+
+A `status` filter needs the management job authority, which is not available in
+this context. Use a filter that does not depend on live job state.
 
 ## service-unavailable
 

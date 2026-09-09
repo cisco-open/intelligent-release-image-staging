@@ -189,6 +189,9 @@ not establish that an agent package works on a particular device.
 | Partial failure | A current per-image hash, catalog, or RPC error stays visible while other assigned images continue. |
 | Clear assignments | Torrents stop, including when the last assignment is cleared. IOS-XE keeps root copies; XR removes downloaded files but retains adopted files or files of unknown origin. |
 | Undeploy from deployment record | Teardown targets only resources tracked in the deployment record; router adoption is refused and requires re-onboarding. For `router-nat`, teardown clears only translations for the deployment record's app IP, verifies the overload rule is gone before deleting its ACL, and reports no leftover IRIS NAT rule. |
+| Scheduled window stages and stops there | A `once` schedule targeting the current Devices filter fires inside its window, its occurrence records the target it resolved, and every device it reached has a durable outcome. The staged image is verified at the storage root; no install, activation, boot-variable change, or reload happens anywhere in the window. |
+| Window closes honestly | A window whose length is shorter than the work it was given closes with `window_closed` outcomes for the devices it never reached, and no work continues after the window end. |
+| Wave gate holds and stalls visibly | A schedule gated on a preceding one does not admit work until the ratios are met, and an unmet gate ends the occurrence `stalled` at its deadline carrying staged / errored / missing counts, with missing distinguished from errored. |
 | No activation occurs | Boot variables, install state, and reload state remain operator-controlled. |
 
 Automated coverage for the management-type/deployment-record behavior lives in

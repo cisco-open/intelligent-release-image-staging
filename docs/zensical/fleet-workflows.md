@@ -215,6 +215,99 @@ The agent picks up assignments on its next policy poll. Approval alone is not
 staging activity: the Console shows **Waiting for staging** until the device
 reports work, then uses that device's progress and errors.
 
+## Scheduling
+
+A schedule runs one action inside one maintenance window, and it has exactly
+two verbs: **assign**, which approves images for staging, and **onboard**,
+which deploys the IRIS agent to devices that do not have it. There is no third
+verb, and neither of these two installs, activates, changes a boot variable, or
+reloads anything. A scheduled window stages images and nothing else — the same
+hard limit that applies to every other path into IRIS.
+
+Create one from the Console (**Devices → Schedule…**, or the **Schedules**
+panel) or from the CLI, which reads and writes the same durable store:
+
+```bash
+iris-schedule list
+iris-schedule create core-wave --file core-wave.json
+iris-schedule get core-wave
+iris-schedule patch core-wave --file pause.json --if-match '"iris-schedule-core-wave-3"'
+iris-schedule export > fleet/schedules.exported.csv
+iris-schedule import fleet/schedules.csv
+```
+
+### What a schedule targets
+
+A target is a **filter** plus an optional list of named `device_ids`, and the
+two are combined with **and**: named ids narrow the filter, they never widen
+it. Empty filters and an empty id list explicitly select the whole fleet. The
+filter keys are the Devices table's own — `q`, `management_type`, `platform`,
+`cred`, `telemetry`, `peer`, `role`, `model_family`, `os_family`, `status` — so
+what the table shows is what the window will act on.
+
+`bind` decides when that set is fixed:
+
+| `bind` | Meaning |
+| --- | --- |
+| `late` (default) | The target is **resolved at fire** time, against the fleet as it then is. A device that has since been added, retired or re-roled is included or dropped accordingly. |
+| `early` | The set frozen in the **preview** at creation time is the set that runs. Devices matching later are not added. |
+
+Either way the occurrence records the `+N / −M` delta between the preview and
+what actually fired, so a target that moved is visible rather than silent.
+
+A `role` filter selects on the **declared** role — the value in the inventory
+`role` column, which an operator sets — not on the **compiled** peer-policy
+index the tracker enforces with. The two are normally the same; when they are
+not, the difference is reported as `role_drift`, and the schedule still targets
+what was declared. Fix the drift before relying on a role-targeted window.
+
+### When it runs, and what daylight saving does to that
+
+`once` names an **absolute instant** (`at`, an epoch). It is immune to daylight
+saving by construction: an absolute instant does not move when a civil clock
+does.
+
+`recurring` names a local weekday and time in an IANA zone, so twice a year
+that local time is ambiguous or absent. Each occurrence records which case it
+was, as `normal`, `gap` or `fold`:
+
+| Case | What happens |
+| --- | --- |
+| `normal` | The local time exists exactly once. It fires there. |
+| `gap` | Spring forward: the local time does not exist at all. It fires at the **first valid** instant after the gap — never skipped, never doubled. |
+| `fold` | Fall back: the local time happens **twice**. It fires at the **first** of the two, and the second is not a second run. |
+
+The window is `window_seconds` long and half-open: work is admitted from the
+scheduled instant up to, but not including, the end. A window that closes with
+devices still unreached closes them out honestly rather than running late — see
+[Scheduled outcomes](operations.md#scheduled-outcomes).
+
+### Waves
+
+A schedule may declare an `after` gate naming a preceding schedule and the
+ratios it must reach — `min_staged_ratio`, `max_errored_ratio`,
+`max_missing_ratio` — before this one admits any work, plus a
+`deadline_seconds` after which it stops waiting. That is how core → distribution
+→ access ordering is expressed. The gate reads the preceding occurrence's own
+result and counts **missing** apart from **errored**, so one powered-off device
+is not reported as a failure and cannot hold the chain open forever. See
+[Deployment waves](operations.md#deployment-waves).
+
+### Scheduled and manual work on the same device
+
+A scheduled `assign` writes the same approved set a manual one does, so the two
+paths can collide. The Console shows a **Scheduled** marker on the row of any
+device a pending schedule's approved preview names, so a manual assignment is
+not made in ignorance of one.
+
+The collision that actually loses work is narrowing:
+`iris-assign --replace DEVICE IMAGE` replaces the whole approved set with the
+single image named, including images a schedule put there — and a scheduled
+assignment with `"mode":"replace"` does the same to a manual one. Merge mode
+(the default on both paths) adds without removing. Every scheduled outcome
+records `before_image_ids`, `after_image_ids` and `removed_image_ids`, so a
+narrowing is visible after the fact even when nobody expected it.
+
 ## Workflow map
 
 ```mermaid

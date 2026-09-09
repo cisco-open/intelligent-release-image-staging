@@ -1430,3 +1430,121 @@ def test_docs_phase1_changelog_and_release_boundary():
     _assert_unit(_page("architecture.md"), ("one full tagged-release dwell",
                                              "separately authorized activation"),
                  "the activation gate must retain release dwell and authority")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: scheduling, targeting and per-device outcomes
+# ---------------------------------------------------------------------------
+
+def test_docs_phase2_verbs_targets_and_the_stage_only_invariant():
+    """A schedule has exactly two verbs, and neither of them installs."""
+    workflows = _page("fleet-workflows.md")
+    _assert_section_terms(
+        workflows, "Scheduling",
+        ("assign", "onboard", "stage", "never", "install"),
+        "the two schedule verbs must be stated with the stage-only limit")
+    _assert_unit(workflows, ("target", "filter", "device_ids", "and"),
+                 "named devices narrow the filter rather than widening it")
+    _assert_unit(workflows, ("late", "resolved", "fire"),
+                 "late binding must say when the target is resolved")
+    _assert_unit(workflows, ("early", "preview", "creation"),
+                 "early binding must say which set it freezes")
+    # Declared membership and the compiled index are different things, and a
+    # target names the declared one.
+    _assert_unit(workflows, ("declared", "compiled", "role"),
+                 "the declared/compiled role distinction is missing")
+
+
+def test_docs_phase2_dst_policy_is_stated_per_schedule_kind():
+    workflows = _page("fleet-workflows.md")
+    _assert_unit(workflows, ("once", "absolute", "instant"),
+                 "a one-time schedule's DST immunity must be stated")
+    _assert_unit(workflows, ("gap", "spring", "first valid"),
+                 "the DST gap policy must name the instant it fires at")
+    _assert_unit(workflows, ("fold", "twice", "first"),
+                 "the DST fold policy must say which of the two runs")
+    _require("fleet-workflows.md", ["`normal`", "`gap`", "`fold`"])
+
+
+def test_docs_phase2_window_sizing_and_the_pool_share_rule():
+    """An operator sizing a window needs the real numbers, not an estimate."""
+    operations = _page("operations.md")
+    _assert_section_terms(
+        operations, "Sizing a maintenance window",
+        ("25", "1000", "7200", "75", "90"),
+        "window sizing must carry the pool, queue and per-device budgets")
+    _require("operations.md", [
+        "`IRIS_ONBOARD_CONCURRENCY`", "`IRIS_ONBOARD_JOB_TIMEOUT`",
+        "7-10 minutes", "250-device"])
+    _assert_unit(operations, ("10", "rounds", "pool"),
+                 "a 250-device wave must be stated in pool rounds")
+    # Half the pool is reserved for manual work, so a window can never starve
+    # an operator out of their own console.
+    _assert_unit(operations, ("half", "manual", "reserved"),
+                 "the pool-share rule must name the manual reservation")
+
+
+def test_docs_phase2_outcomes_recovery_and_every_refusal_reason():
+    operations = _page("operations.md")
+    _require("operations.md", [
+        "`conflict`", "`vanished`", "`device_revoked`",
+        "`all_targets_quarantined`", "`peer_quarantined`",
+        "`unclassified_management_type`", "`window_closed`",
+        "`wave_deadline`", "`gate_unavailable`"])
+    _assert_unit(operations, ("idempotent", "occurrence", "device"),
+                 "idempotency must be scoped to one occurrence and device")
+    _assert_unit(operations, ("restart", "resume", "own"),
+                 "restart recovery must say whose records are resumed")
+    _assert_unit(operations, ("manual", "wins", "conflict"),
+                 "a manual/scheduled collision must name the winner")
+    # The wave gate is operational, and the docs must not sell it as a
+    # security control.
+    _assert_unit(operations, ("wave", "operational", "not a security"),
+                 "the wave gate must be documented as an operational signal")
+    _assert_unit(operations, ("missing", "errored", "apart"),
+                 "missing must be documented apart from errored")
+
+
+def test_docs_phase2_orphaned_schedule_and_narrowing_caveats():
+    console = _page("console.md")
+    _assert_unit(console, ("actor no longer exists", "re-affirm"),
+                 "the orphaned-schedule marker and its action must be named")
+    _assert_unit(console, ("re-affirm", "created_by", "rev"),
+                 "re-affirming must say what it rewrites")
+    _assert_unit(console, ("schedule", "device row", "manual"),
+                 "the device row must warn before a manual/scheduled clash")
+    workflows = _page("fleet-workflows.md")
+    _assert_unit(workflows, ("iris-assign", "--replace", "narrow"),
+                 "the single-image narrowing caveat must be stated")
+
+
+def test_docs_phase2_problem_types_and_schedule_api_reference():
+    problems = _page("problems.md")
+    for code in ("invalid_schedule", "schedule_conflict", "schedule_not_found",
+                 "schedule_state_unavailable",
+                 "schedule_target_status_unavailable",
+                 "schedule_target_heartbeat_unavailable",
+                 "schedule_target_policy_unavailable"):
+        assert "## " + code in problems, code
+    reference = _page("reference.md")
+    _require("reference.md", [
+        "`GET /api/v1/schedules`", "`POST /api/v1/schedules`",
+        "/schedules/{id}/occurrences", "/schedules/{id}/receipts",
+        "/schedules/{id}/reaffirm", "`If-Match`"])
+    _assert_unit(reference, ("next_fire", "server", "slot"),
+                 "the response-only next-fire slot must be documented")
+
+
+def test_docs_phase2_csv_template_and_validation_are_mapped():
+    fleet_readme = os.path.join(REPO, "fleet", "README.md")
+    with open(fleet_readme) as handle:
+        readme = handle.read()
+    assert "schedules.csv.example" in readme
+    assert "iris-schedule import" in readme and "iris-schedule export" in readme
+    _assert_unit(_page("validation.md"), ("schedule", "window", "stage"),
+                 "validation must cover a scheduled staging window")
+    with open(os.path.join(REPO, "CHANGELOG.md")) as handle:
+        changelog = handle.read()
+    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+    for entry in ("schedule", "wave", "target"):
+        assert entry in unreleased.lower(), entry

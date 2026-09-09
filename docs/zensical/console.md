@@ -408,6 +408,37 @@ lowercase/kebab form underneath: `onboarding`, `undeploying`,
 `not-enrolled`, and `offline` — the last being a modifier, since a device
 filtered on `deployed` (rendered `Staged`) can still have gone quiet.
 
+### Schedules
+
+**Devices → Schedules** opens the schedule list: what is going to run, against
+what, when it next runs, its state, and how its latest run went. Each row
+carries the target summary, the server-computed next run (local time in the
+schedule's own zone, so the console never recomputes a weekly time across a
+daylight-saving boundary), and, for the latest occurrence, its state, the
+`+N / −M since preview` delta and the wave gate's staged / errored / missing
+counts.
+
+**Schedule…** in the bulk bar creates one. Its target is the **current Devices
+filter**, not the rows that happen to be checked: the filter is re-resolved at
+each run, which is the reason to schedule against it. The modal says how many
+devices that filter matches now and offers naming the selected devices instead
+as the explicit second choice. Editing a window, its wave gate or its payload
+is not in the console — that stays with `iris-schedule` and the API, which own
+the full closed schema.
+
+A schedule whose creator is gone shows `created_by <actor> (actor no longer
+exists)`, and **Re-affirm** on that row takes ownership of it. Firing never
+depended on that account, so the schedule kept running either way.
+Re-affirming rewrites `created_by` to the current operator and bumps `rev`,
+against the revision on screen — a concurrent edit makes it a refusal, not an
+overwrite.
+
+Any device row a pending schedule's approved preview names carries a
+**Scheduled** marker, so a **manual** assignment is not made in ignorance of a
+scheduled one. The marker reads the schedule's last approved preview; a
+late-bound target is re-resolved when it fires, so it is the last approved
+answer, not a promise about the next run.
+
 ### Paging and selection at fleet scale
 
 A fleet larger than 200 devices (after filtering) pages: the table shows 200

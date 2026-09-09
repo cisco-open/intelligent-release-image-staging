@@ -299,6 +299,14 @@ ALLOWLIST = [
 # Tasks 22–23's dedicated schedule implementation/tests and generated OpenAPI
 # document use "receipt" as a new, intentionally separate domain term. Exempt
 # only that pattern; the attachment guard remains active in every listed file.
+# Task 26 documents the Task 22 schedule history routes. The route path is the
+# API's own spelling; the surrounding operator prose uses "outcome".
+ALLOWLIST.append((
+    "docs/zensical/reference.md",
+    ("`GET /api/v1/schedules/{id}/receipts`",),
+    "Task 22 schedule-history route path in the operator API reference"))
+
+
 TERM_FILE_ALLOWLIST = [
     ("docs/zensical/openapi.yaml", ("receipt",),
      "generated Task 22 schedule-receipt API contract"),
@@ -339,6 +347,9 @@ TERM_SCOPE_ALLOWLIST = [
     ("server/tests/test_iris_assign.py",
      "test_terminal_receipt_acknowledgement_reclaims_ambiguous_claim",
      ("receipt",), "Task 23 pins terminal schedule-receipt claim cleanup"),
+    ("server/tests/test_docs_map.py",
+     "test_docs_phase2_problem_types_and_schedule_api_reference", ("receipt",),
+     "Task 26 pins the Task 22 schedule-history route path in the reference"),
 ]
 
 

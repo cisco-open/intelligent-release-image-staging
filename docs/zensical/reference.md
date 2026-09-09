@@ -691,6 +691,33 @@ Successful logs end with `onboard complete: <IP>` or
 | `POST /api/v1/credentials` | Creates or updates a profile; returns `{profile}` redacted the same way. |
 | `DELETE /api/v1/credentials/<id>` | `{deleted: <bool>}`. |
 
+### Schedules
+
+Every mutation is CAS-protected: a write carries the schedule's strong
+`If-Match` ETag, and a stale or missing one is a refusal rather than an
+overwrite. Occurrence and outcome history stays readable after a definition is
+deleted.
+
+| Route | Body / result |
+| --- | --- |
+| `GET /api/v1/schedules` | `{schedules: [...], total}`. Each view is the stored definition plus three response-only fields: `etag`, `creator_exists`, and `next_fire`. |
+| `POST /api/v1/schedules` | Creates one schedule from `{id, kind, target, payload, when, after?, state?}`; 201 with `Location` and `ETag`. `kind` is `assign` or `onboard` — there is no third verb, and neither installs, activates or reloads anything. |
+| `GET /api/v1/schedules/{id}` | `{schedule}` with its `ETag`. |
+| `PUT /api/v1/schedules/{id}` | Replaces the whole definition. Requires `If-Match`. |
+| `PATCH /api/v1/schedules/{id}` | Changes named fields only; `{"after": null}` removes a wave gate. Requires `If-Match`. |
+| `DELETE /api/v1/schedules/{id}` | 204. Requires `If-Match`. Occurrences and outcomes are retained. |
+| `POST /api/v1/schedules/{id}/reaffirm` | Empty body. Rewrites `created_by` to the calling operator and bumps `rev`, for a schedule whose creator no longer exists. Requires `If-Match`. |
+| `GET /api/v1/schedules/{id}/occurrences` | `{occurrences: [...], total, offset, truncated}`, oldest first, `limit` ≤ 100. Each occurrence carries its frozen definition, slot, target snapshot, `delta`, state, and any annotations — including the wave gate's counts. |
+| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}` — the durable per-device outcome for every occurrence of the schedule, `limit` ≤ 1000. The response cap bounds the page, never the durable evidence. |
+
+`next_fire` is the schedule's current or next slot, computed by the **server**
+from the same authority the runner fires from — `{scheduled_at, window_end,
+status, resolution, tz, local_time, next_at}` — so no client recomputes local
+weekly time across a daylight-saving boundary. It is `null` for a paused or
+completed schedule, and for a one-time schedule with no further slot.
+`resolution` is `normal`, `gap`, or `fold`; see
+[Scheduling](fleet-workflows.md#scheduling).
+
 ### Monitoring
 
 | Route | Body / result |

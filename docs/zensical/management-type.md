@@ -317,6 +317,13 @@ The device table shows each device's **Management type**, and onboarding uses
 an applied deployment record. See
 [Web Console](console.md).
 
+A scheduled onboarding needs the same choice: a row that is still inventory
+only has no plan to run, so a scheduled window records it as
+`unclassified_management_type` and moves on rather than guessing a network for
+it. Classify the row, then let the next window pick it up — a late-bound
+target re-resolves at each run. See
+[Scheduled outcomes](operations.md#scheduled-outcomes).
+
 ## Deployment environments
 
 Deployment records use the same contract on both deployments:

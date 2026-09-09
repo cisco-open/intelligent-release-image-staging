@@ -66,6 +66,31 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   settings out of device installer options.
 
 ### Added
+- Schedule stage-only maintenance windows. A schedule runs one of two verbs —
+  `assign` or `onboard` — against a device **target**: the Devices filter,
+  optionally narrowed by named devices, resolved at fire time or frozen at
+  creation. One-time windows name an absolute instant; weekly windows resolve
+  local time in an IANA zone and record whether the slot was `normal`, a
+  daylight-saving `gap`, or a `fold`. Neither verb installs, activates,
+  changes a boot variable, or reloads a device.
+- Record durable per-device evidence for every scheduled window: an occurrence
+  with the target it actually resolved, its `+N / -M` delta against the
+  approved preview, and one outcome per device carrying a stable reason.
+  Scheduled work is idempotent per occurrence and device, a restart resumes
+  only its own records, and manual work wins a conflict rather than being
+  overwritten.
+- Gate deployment waves on the preceding window's corroborated staging counts,
+  ordering core before distribution before access. The gate counts **missing**
+  apart from **errored**, so one powered-off device is not reported as a
+  failure and cannot hold a chain open forever; an unmet gate ends its
+  occurrence `stalled` at its deadline carrying those counts. It is an
+  operational signal about when work is admitted, not a security boundary.
+- List schedules in the Console and create one from the Devices filter with
+  **Schedule…**, at list-plus-action depth. Rows show the target, the
+  server-computed next run, the latest run's delta and wave counts, and an
+  orphaned creator with a re-affirm that rewrites `created_by` and bumps
+  `rev`. A device row marks a pending schedule aimed at it, so a manual
+  assignment is not made in ignorance of one.
 - Add Phase 0 server-side peer roles with one declared role per device,
   in-memory virtual ACLs, explicit-ACL shadowing, lifecycle/migration tooling,
   fleet/CSV membership, strong-CAS API mutations, dry-run impact counts,

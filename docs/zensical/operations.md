@@ -97,6 +97,95 @@ device session each. State-polling loops make a fresh observation on every
 iteration. Guest Shell readiness waits 2, 4, 6, and then up to 15 seconds
 between observations.
 
+## Sizing a maintenance window
+
+A scheduled window is only as long as the work it has to fit. The numbers that
+decide that are the same ones onboarding uses every day:
+
+| Budget | Value | Where it comes from |
+| --- | --- | --- |
+| Worker pool | 25 simultaneous jobs | `IRIS_ONBOARD_CONCURRENCY` |
+| Queue depth | 1000 waiting jobs | fixed; a submission past it is refused, not silently dropped |
+| Per-job deadline | 7200 s | `IRIS_ONBOARD_JOB_TIMEOUT` |
+| First device contact | 75 s | the reachability/`show version` probe |
+| Preflight session | 90 s | the job's first real session against the device |
+| Router recipe | 7-10 minutes | measured, per router, end to end |
+
+Half the pool is **reserved for manual work** and can never be taken by a
+schedule: with the default pool of 25, at most 12 scheduled jobs run at once
+and 13 slots stay available to an operator. The same split applies to the
+queue. A maintenance window therefore never starves an operator out of their
+own console, and it also means a window has half the pool, not all of it, when
+you size it.
+
+Size from pool rounds, not from device count. A **250-device** wave of routers
+needs at least **10 rounds** of the scheduled half of the pool, and each round
+costs a router recipe, so budget on the order of 70-100 minutes of window for
+it plus margin — not the 7-10 minutes one device takes. A window that is too
+short does not run late: it closes, and every device it never reached says so.
+
+## Scheduled outcomes
+
+Every scheduled attempt against one device leaves a durable outcome, and every
+outcome carries a reason. Work is **idempotent per occurrence and device**: an
+attempt already recorded for that pair is never repeated, so a restart in the
+middle of a window cannot double-assign or double-onboard.
+
+A restart **resumes its own records only**. Interrupted occurrences are
+re-entered, their existing outcomes are kept as they stand, and work already
+admitted is reconciled by its own identity rather than re-submitted — a job
+that succeeded just before the process lost its result is recognised, not run
+again.
+
+Reasons an operator will actually meet:
+
+| Reason | What it means |
+| --- | --- |
+| `conflict` | The device was changed by another writer — usually a **manual** action. Manual work **wins** the conflict: the schedule stands down and records it rather than overwriting. |
+| `vanished` | The device is no longer in the fleet. |
+| `device_revoked` | The device's credentials are revoked; nothing was attempted. |
+| `unclassified_management_type` | The row is inventory only and has no management type yet, so there is no plan to run. See [Management type](management-type.md). |
+| `window_closed` | The window ended before this device was reached. The occurrence is closed honestly instead of running late. |
+| `wave_deadline` | A wave gate never opened before its deadline; the occurrence ends `stalled` carrying the counts that held it. |
+| `gate_unavailable` | The wave gate could not be evaluated at all. Nothing is admitted on an unreadable gate. |
+
+Two of them are recorded as notes beside the outcome rather than as refusals:
+`peer_quarantined` marks a device that is quarantined from peering but was
+still assigned to (quarantine controls peering, not approval), and
+`all_targets_quarantined` marks an occurrence whose entire target set was
+quarantined at window start. Both are facts about the run; neither stops it.
+
+## Deployment waves
+
+A schedule with an `after` gate waits for the preceding schedule's own
+occurrence to reach the ratios the operator set, and is re-read inside the
+window on its own cadence until it does. The gate reports three counts over
+that preceding occurrence's target:
+
+* **staged** — the device's heartbeat reports every image of that run staged,
+  corroborated where the tracker has anything to say by its own `left == 0`.
+  The tracker can contradict a staged claim but never creates one, and its
+  silence is never read as "not staged": the registry is in memory and is
+  empty for one prune horizon after a tracker restart.
+* **errored** — the run failed for that device, or its heartbeat reports the
+  image as errored.
+* **missing** — no evidence at all: a powered-off device, or one whose
+  heartbeat cadence has not reported since. Missing is counted **apart** from
+  errored on purpose. Folding the two together would either raise an alarm
+  nobody can act on or let one dark device hold a wave chain open forever, so
+  `max_missing_ratio` is the operator's own answer to how many silent devices
+  a wave may proceed over.
+
+The remainder is still in flight and is deliberately not named as anything
+else.
+
+The wave gate is an **operational** signal about when work is admitted. It is
+**not a security** boundary: it decides only when the next wave starts, never what
+that wave may do, and every per-device authority check still runs afterwards.
+An occurrence whose gate never opens ends `stalled` — at `deadline_seconds`, or
+at the window edge — carrying the three counts on the occurrence and on the
+outcomes that closed it, so a chain that stopped says why it stopped.
+
 ## Role-policy operations and rollback
 
 Treat a role change like a network-policy change. Read the current policy and
