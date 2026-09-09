@@ -18,6 +18,8 @@ streamed job lines are the installer's stdout, which never echoes the password
 deliberately NOT exported: the console always stages locally
 (IRIS_STAGE_LOCAL=1), so no recipe can reach the ssh branch that reads it."""
 import copy
+from collections import deque
+from contextlib import contextmanager, nullcontext
 import inspect
 import ipaddress
 import os
@@ -1092,6 +1094,40 @@ def _default_xr_preflight(dev, env, resolved, repo_root):
     return evidence
 
 
+class ScheduledAdmissionError(ValueError):
+    """A non-secret, machine-readable refusal of internal scheduled work."""
+
+    def __init__(self, reason):
+        if not isinstance(reason, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", reason):
+            raise ValueError("invalid scheduled admission reason")
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _WorkQueueView:
+    """Compatibility view for embedded callers that drain work themselves."""
+
+    def __init__(self, service):
+        self.service = service
+
+    def get_nowait(self):
+        with self.service._condition:
+            job = self.service._reserve_work_locked()
+            if job is None:
+                raise queue.Empty
+        return lambda: self.service._execute_reserved(job)
+
+    def task_done(self):
+        # Execution itself releases accounting, including on exceptions.
+        pass
+
+    def join(self):
+        with self.service._condition:
+            while (self.service._manual_queue or self.service._scheduled_queue
+                   or self.service._active_work):
+                self.service._condition.wait()
+
+
 class OnboardService:
     def __init__(self, fleet, creds, server_dir=None, device_install=None,
                  crt_public=None, host_ip=None, catalog_url=None,
@@ -1159,7 +1195,14 @@ class OnboardService:
         # A bounded queue plus at most max_concurrent workers prevents one
         # parked daemon thread per submission. Workers are created lazily so a
         # service that never onboards does not consume 25 idle threads.
-        self._work_queue = queue.Queue(maxsize=_MAX_QUEUED_JOBS)
+        self._manual_queue = deque()
+        self._scheduled_queue = deque()
+        self._manual_reservation = (self.max_concurrent + 1) // 2
+        self._scheduled_limit = self.max_concurrent // 2
+        self._scheduled_inflight = set()
+        self._reserved = set()
+        self._active_work = 0
+        self._work_queue = _WorkQueueView(self)
         self._workers = []
         self._jobs = {}
         self._procs = {}   # job_id -> live installer Popen (for abort)
@@ -1172,6 +1215,7 @@ class OnboardService:
         except (TypeError, ValueError):
             self._run_supports_proc = False
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         # The autonomous escalation driver: started on the first submission,
         # and it retires itself once no job is left (see _maintenance_loop).
         self._maintenance = None
@@ -1219,29 +1263,203 @@ class OnboardService:
         for path, identity in paths:
             _unlink_snapshot(path, identity)
 
+    @staticmethod
+    def _schedule_provenance(context, device_id):
+        if context is None:
+            return None
+        keys = ("schema_version", "schedule_id", "schedule_rev",
+                "occurrence_id", "device_id")
+        if (not isinstance(context, dict) or set(context) != set(keys)
+                or type(context["schema_version"]) is not int
+                or context["schema_version"] != 1
+                or type(context["schedule_rev"]) is not int
+                or context["schedule_rev"] < 1
+                or context["device_id"] != device_id):
+            raise ValueError("invalid schedule provenance")
+        for key in ("schedule_id", "occurrence_id", "device_id"):
+            value = context[key]
+            if (not isinstance(value, str) or not value or len(value) > 256
+                    or any(ord(ch) < 32 for ch in value)):
+                raise ValueError("invalid schedule provenance")
+        return tuple((key, context[key]) for key in keys)
+
+    @contextmanager
+    def _authority(self, job, phase):
+        guard = job.get("_authority_guard")
+        try:
+            with guard(phase) if guard else nullcontext():
+                yield
+        except ScheduledAdmissionError as exc:
+            # The nested job-lock section has unwound before this handler.
+            # Retain refusal provenance even at IOx's deferred boundary.
+            if job.get("_schedule_context"):
+                with self._condition:
+                    job["admission_reason"] = exc.reason
+            raise
+
+    @staticmethod
+    def _check_authority(job, phase):
+        check = job.get("_authority_check")
+        if check:
+            check(phase)
+
+    def _cancel_queued_locked(self, job, reason="cancelled before start"):
+        job["state"] = "cancelled"
+        job["finished_at"] = int(self._now())
+        if job.get("_defer_iox_prepare"):
+            job["result_code"] = 130
+            job["error_category"] = "cancelled"
+        self._append_locked(job, reason)
+        job.pop("_work", None)
+        if job.get("_schedule_context") and reason == "manual_override":
+            job["admission_reason"] = reason
+        jid = job["id"]
+        for pending in (self._manual_queue, self._scheduled_queue):
+            try:
+                pending.remove(jid)
+            except ValueError:
+                pass
+        self._reserved.discard(jid)
+        self._scheduled_inflight.discard(jid)
+        self._condition.notify_all()
+
+    def _admit(self, job, work, prepare=None):
+        """Guard -> job lock -> record transaction; no enqueue failure gap."""
+        with self._authority(job, "admission"):
+            with self._condition:
+                scheduled = bool(job.get("_schedule_context"))
+                if self._closing:
+                    if scheduled:
+                        raise ScheduledAdmissionError("service_unavailable")
+                    raise ValueError("onboarding service is shutting down")
+                if scheduled and not self._scheduled_limit:
+                    raise ScheduledAdmissionError("capacity_unavailable")
+                superseded = []
+                for current in self._jobs.values():
+                    if (current["device_id"] != job["device_id"] or
+                            current["state"] in _TERMINAL):
+                        continue
+                    if (not scheduled and current["state"] == "queued"
+                            and current.get("_schedule_context")):
+                        superseded.append(current)
+                        continue
+                    if ((job.get("_maintenance_key") is not None and
+                         current.get("_maintenance_key") == job["_maintenance_key"])
+                            or (job.get("_maintenance_key") is None and
+                                current.get("action", "onboard") == job["action"])):
+                        self._check_authority(job, "admission")
+                        return current["id"]
+                    if scheduled:
+                        raise ScheduledAdmissionError("device_busy")
+                    raise ValueError(
+                        "device %s is busy with an active %s job (%s)" %
+                        (job["device_id"], current.get("action", "onboard"),
+                         current["id"]))
+                pending = sum(j["state"] == "queued" for j in self._jobs.values())
+                if pending - len(superseded) >= _MAX_QUEUED_JOBS:
+                    if scheduled:
+                        raise ScheduledAdmissionError("queue_full")
+                    raise ValueError("onboarding queue is full")
+                scheduled_pending = sum(
+                    j["state"] == "queued" and bool(j.get("_schedule_context"))
+                    for j in self._jobs.values())
+                if (scheduled and scheduled_pending >=
+                        max(0, _MAX_QUEUED_JOBS - self._manual_reservation)):
+                    raise ScheduledAdmissionError("queue_full")
+                self._check_authority(job, "admission")
+                # Supersession and its record retirement precede the replacement
+                # record create, so the old planned record cannot block manual intent.
+                for current in superseded:
+                    if current.get("record_id") and self.record_store:
+                        self.record_store.transition(current["record_id"], "removed")
+                    self._cancel_queued_locked(current, "manual_override")
+                if prepare and not job.get("_defer_iox_prepare"):
+                    prepared = prepare()
+                    if job.get("record_id") is not None and prepared != job["record_id"]:
+                        raise ValueError("prepared record does not match request")
+                    job["record_id"] = prepared
+                self._evict_old(self._now())
+                job["_work"] = work
+                self._jobs[job["id"]] = job
+                pending_queue = self._scheduled_queue if scheduled else self._manual_queue
+                pending_queue.append(job["id"])
+                self._ensure_workers()
+                self._ensure_maintenance()
+                self._condition.notify_all()
+                return job["id"]
+
+    def _reserve_work_locked(self):
+        if self._manual_queue:
+            jid = self._manual_queue.popleft()
+        elif (self._scheduled_queue and
+              len(self._scheduled_inflight) < self._scheduled_limit):
+            jid = self._scheduled_queue.popleft()
+            self._scheduled_inflight.add(jid)
+        else:
+            return None
+        self._reserved.add(jid)
+        self._active_work += 1
+        return self._jobs[jid]
+
+    def _execute_reserved(self, job):
+        jid = job["id"]
+        try:
+            # Never enter an outer role/fleet/secrets guard under the job lock.
+            with self._authority(job, "execution"):
+                with self._condition:
+                    if job["state"] != "queued" or jid not in self._reserved:
+                        return
+                    self._check_authority(job, "execution")
+                    self._reserved.remove(jid)
+                    job["state"] = "running"
+                    job["started_at"] = int(self._now())
+            job["_work"]()
+        except Exception as exc:
+            reason = (exc.reason if isinstance(exc, ScheduledAdmissionError)
+                      else "execution_failed")
+            with self._condition:
+                queued = job["state"] == "queued"
+                if job["state"] in _TERMINAL:
+                    return
+                if job.get("_schedule_context"):
+                    job["admission_reason"] = reason
+                if queued:
+                    self._cancel_queued_locked(job, reason)
+            if queued:
+                if job.get("record_id"):
+                    self._transition_or_note(jid, job["record_id"], "removed")
+            else:
+                self._append(jid, "ERROR: execution failed")
+                if job.get("record_id"):
+                    self._transition_or_note(jid, job["record_id"], "needs-reconcile")
+                self._finish(jid, "error", None)
+        finally:
+            with self._condition:
+                self._reserved.discard(jid)
+                self._scheduled_inflight.discard(jid)
+                self._active_work -= 1
+                job.pop("_work", None)
+                self._condition.notify_all()
+
     def _worker_loop(self):
         while True:
-            try:
-                work = self._work_queue.get(timeout=60)
-            except queue.Empty:
-                # TTL cleanup does not depend on another submission: an idle
-                # worker drives it for free. The maintenance thread covers the
-                # case where NO worker is idle to wake up.
-                with self._lock:
+            with self._condition:
+                job = self._reserve_work_locked()
+                if job is None:
+                    if self._closing:
+                        return
+                    self._condition.wait(timeout=60)
                     self._evict_old(self._now())
-                # The reaper's SIGTERM -> SIGKILL escalation must advance even
-                # when no operator submits anything for hours.
+                    job = self._reserve_work_locked()
+            if job is None:
+                # Preserve the idle pool's reaper as well as the independent
+                # maintenance thread that covers a completely occupied pool.
                 try:
                     self.reap_overdue_jobs()
                 except Exception:
                     pass
                 continue
-            try:
-                if work is None:
-                    return
-                work()
-            finally:
-                self._work_queue.task_done()
+            self._execute_reserved(job)
 
     def _ensure_workers(self):
         """Grow the fixed-size pool lazily, never beyond max_concurrent."""
@@ -1319,8 +1537,8 @@ class OnboardService:
         self._work_queue.join()
         with self._lock:
             workers = list(self._workers)
-        for _worker in workers:
-            self._work_queue.put(None)
+        with self._condition:
+            self._condition.notify_all()
         for worker in workers:
             worker.join()
         with self._lock:
@@ -1643,7 +1861,8 @@ class OnboardService:
 
     def start(self, device_id, action="onboard", resolved=None, prepare=None,
               pre_apply=None, env_extra=None, on_success=None, record_id=None,
-              teardown_mode=None):
+              teardown_mode=None, schedule_context=None,
+              authority_guard=None, authority_check=None):
         """Create a job and run the action's script on a daemon thread.
         Returns the job id immediately. action is "onboard"
         (the platform's install recipe: device-install.sh, device/iox/install.sh
@@ -1667,10 +1886,22 @@ class OnboardService:
         returns the record id to bind to the job, so a concurrent double-onboard
         cannot leave an orphan planned record behind.
 
+        Internal scheduled callers may supply closed immutable schedule_context
+        provenance and authority_guard(phase)/authority_check(phase). The guard
+        returns a context manager and is entered without the job lock; the check
+        runs with that guard and the job condition held and must never acquire
+        outer locks. Both are repeated at admission, execution, and (for IOx)
+        iox_prepare. Checks raise ScheduledAdmissionError with a stable reason.
+        Only short authority/record operations belong in these callbacks: no
+        probes, scripts, credential minting or controller waits. IOx controller
+        work happens outside both locks and reacquires the guard only at its
+        deferred record creation boundary.
+
         Jobs are in-memory and per-process: a server restart loses all job state
         and abandons any in-flight job (re-running either script is
         idempotent). Terminal (done/error/cancelled) jobs are evicted after
         _JOB_TTL."""
+        provenance = self._schedule_provenance(schedule_context, device_id)
         if action not in ("onboard", "undeploy"):
             raise ValueError("unknown action: %s" % action)
         if action == "onboard":
@@ -1706,7 +1937,13 @@ class OnboardService:
                 "record_id": record_id,
                 "resolved": resolved, "env_extra": env_extra,
                 "teardown_mode": teardown_mode,
-                "_defer_iox_prepare": defer_iox_prepare}
+                "_defer_iox_prepare": defer_iox_prepare,
+                "_schedule_context": provenance,
+                "_authority_guard": authority_guard,
+                "_authority_check": authority_check}
+        if provenance:
+            job["schedule_id"] = dict(provenance)["schedule_id"]
+            job["occurrence_id"] = dict(provenance)["occurrence_id"]
         # Reap BEFORE the busy guard, not after it. The reaper used to run
         # further down, past every path that returns or raises — so it could
         # only ever fire on a start() for some OTHER device, and never for the
@@ -1714,40 +1951,11 @@ class OnboardService:
         # _JOB_DEADLINE window with no way to clear it, which is exactly the
         # strand the reaper exists to prevent.
         self.reap_overdue_jobs()
-        with self._lock:
-            if self._closing:
-                raise ValueError("onboarding service is shutting down")
-            # Never run two scripts against the same device at once: the same
-            # action again (double-click, overlapping batches) joins the
-            # active job; the OPPOSITE action is refused — silently attaching
-            # an undeploy click to a running onboard (or vice versa) would do
-            # the exact reverse of what the operator asked.
-            for j in self._jobs.values():
-                if j["device_id"] == device_id and j["state"] not in _TERMINAL:
-                    if j.get("action", "onboard") == action:
-                        return j["id"]
-                    raise ValueError(
-                        "device %s is busy with an active %s job (%s)"
-                        % (device_id, j.get("action", "onboard"), j["id"]))
-            # Only non-IOx jobs create their record under this process-local
-            # mutex. IOx preparation occurs later inside controller custody,
-            # after cross-process board exclusion and predecessor recovery.
-            if prepare and not defer_iox_prepare:
-                prepared = prepare()
-                if record_id is not None and prepared != record_id:
-                    raise ValueError("prepared record does not match request")
-                job["record_id"] = prepared
-            self._evict_old(self._now())
-            self._jobs[job_id] = job
-
         def run():
             with self._lock:
                 j = self._jobs.get(job_id)
-                # cancelled (or TTL-evicted) while parked on the semaphore
-                if j is None or j["state"] != "queued":
+                if j is None or j["state"] != "running":
                     return
-                j["state"] = "running"
-                j["started_at"] = int(self._now())
             try:
                 # Build credentials and resolve the recipe without minting. A
                 # Router preflight runs only here, in the bounded worker pool,
@@ -2018,14 +2226,18 @@ class OnboardService:
 
                 def controller_prepare(_request, identity):
                     del identity
-                    prepared = prepare() if prepare else j.get("record_id")
-                    if (j.get("record_id") is not None and prepared !=
-                            j.get("record_id")):
-                        raise ValueError("prepared record does not match request")
-                    if prepared:
-                        with self._lock:
+                    with self._authority(j, "iox_prepare"):
+                        with self._condition:
                             current = self._jobs.get(job_id)
-                            if current is not None:
+                            if (current is None or current["state"] != "running"
+                                    or current.get("_abort_requested")):
+                                raise ValueError("window_closed")
+                            self._check_authority(j, "iox_prepare")
+                            prepared = prepare() if prepare else j.get("record_id")
+                            if (j.get("record_id") is not None and prepared !=
+                                    j.get("record_id")):
+                                raise ValueError("prepared record does not match request")
+                            if prepared:
                                 current["record_id"] = prepared
                     try:
                         if (action == "onboard" and
@@ -2221,27 +2433,7 @@ class OnboardService:
                 self._transition_or_note(job_id, record_id, "removed")
             self._finish(job_id, "done" if rc == 0 else "error", rc)
 
-        admission_error = None
-        with self._lock:
-            if self._closing:
-                self._jobs.pop(job_id, None)
-                admission_error = "onboarding service is shutting down"
-            else:
-                try:
-                    self._work_queue.put_nowait(run)
-                except queue.Full:
-                    self._jobs.pop(job_id, None)
-                    admission_error = "onboarding queue is full"
-                else:
-                    self._ensure_workers()
-                    # Under the same lock, and after the job is in self._jobs:
-                    # the reaper advances even if this job wedges every worker.
-                    self._ensure_maintenance()
-        if admission_error is not None:
-            if job.get("record_id"):
-                self._transition_or_note(job_id, job["record_id"], "removed")
-            raise ValueError(admission_error)
-        return job_id
+        return self._admit(job, run, prepare)
 
     def _start_iox_maintenance(self, operation, device_id, credential_ref,
                                board_identity, record_id=None,
@@ -2294,29 +2486,11 @@ class OnboardService:
         }
 
         self.reap_overdue_jobs()
-        with self._lock:
-            if self._closing:
-                raise ValueError("onboarding service is shutting down")
-            for current in self._jobs.values():
-                if (current["device_id"] != device_id or
-                        current["state"] in _TERMINAL):
-                    continue
-                if current.get("_maintenance_key") == maintenance_key:
-                    return current["id"]
-                raise ValueError(
-                    "device %s is busy with an active %s job (%s)" %
-                    (device_id, current.get("action", "onboard"),
-                     current["id"]))
-            self._evict_old(self._now())
-            self._jobs[job_id] = job
-
         def run():
             with self._lock:
                 current = self._jobs.get(job_id)
-                if current is None or current["state"] != "queued":
+                if current is None or current["state"] != "running":
                     return
-                current["state"] = "running"
-                current["started_at"] = int(self._now())
             cancel = threading.Event()
             cancel._iris_job_id = job_id
             cancel._iris_device_id = device_id
@@ -2372,23 +2546,7 @@ class OnboardService:
                      "cancelled" if code == 130 else "error")
             self._finish(job_id, state, result.get("returncode"))
 
-        admission_error = None
-        with self._lock:
-            if self._closing:
-                self._jobs.pop(job_id, None)
-                admission_error = "onboarding service is shutting down"
-            else:
-                try:
-                    self._work_queue.put_nowait(run)
-                except queue.Full:
-                    self._jobs.pop(job_id, None)
-                    admission_error = "onboarding queue is full"
-                else:
-                    self._ensure_workers()
-                    self._ensure_maintenance()
-        if admission_error is not None:
-            raise ValueError(admission_error)
-        return job_id
+        return self._admit(job, run)
 
     def start_iox_recovery(self, device_id, credential_ref, board_identity,
                            record_id=None):
@@ -2632,6 +2790,19 @@ class OnboardService:
             return ({k: v for k, v in j.items() if not k.startswith("_")} |
                     {"lines": list(j["lines"])}) if j else None
 
+    def get_schedule_context(self, job_id):
+        """Return detached internal provenance, never mutable job authority."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            context = job.get("_schedule_context") if job else None
+            return dict(context) if context else None
+
+    def jobs_for_occurrence(self, occurrence_id, device_id=None):
+        """Find retained jobs for durable receipt reconciliation."""
+        return [job for job in self.list_jobs()
+                if job.get("occurrence_id") == occurrence_id
+                and (device_id is None or job["device_id"] == device_id)]
+
     def list_jobs(self):
         """Summaries of every retained job (no 'lines' — cheap to poll from
         the console's batch panel; 'last_line' carries the newest line for a
@@ -2671,31 +2842,33 @@ class OnboardService:
                     best[did] = j
             return {did: {"action": j.get("action", "onboard"),
                           "state": j["state"],
-                          "finished_at": j.get("finished_at")}
+                          "finished_at": j.get("finished_at"),
+                          **({"pending_schedule_id": j["schedule_id"],
+                              "pending_occurrence_id": j["occurrence_id"]}
+                             if j["state"] == "queued" and j.get("_schedule_context")
+                             else {})}
                     for did, j in best.items()}
 
-    def cancel_queued(self, job_ids=None):
+    def cancel_queued(self, job_ids=None, occurrence_id=None):
         """Flip still-queued jobs to 'cancelled' — only those in job_ids when
         given (the console scopes a cancel to its own batch; other sessions'
         queued jobs must survive), every queued job when None. Running
         installers are NOT killed (an interrupted device-install.sh
-        mid-IOS-config is worse than letting it finish). A cancelled job's
-        parked thread exits without running when it eventually wins a slot.
-        Returns the count cancelled."""
+        mid-IOS-config is worse than letting it finish). Cancelled entries
+        release pending capacity and reservations immediately. occurrence_id
+        additionally scopes internal schedule cancellation. Returns the count
+        cancelled."""
         n = 0
         record_ids = []
         with self._lock:
-            now = int(self._now())
             for jid, j in self._jobs.items():
                 if job_ids is not None and jid not in job_ids:
                     continue
+                if (occurrence_id is not None and
+                        j.get("occurrence_id") != occurrence_id):
+                    continue
                 if j["state"] == "queued":
-                    j["state"] = "cancelled"
-                    j["finished_at"] = now
-                    if j.get("_defer_iox_prepare"):
-                        j["result_code"] = 130
-                        j["error_category"] = "cancelled"
-                    self._append_locked(j, "cancelled before start")
+                    self._cancel_queued_locked(j)
                     if (j.get("action") == "onboard" and
                             j.get("record_id")):
                         record_ids.append((jid, j["record_id"]))

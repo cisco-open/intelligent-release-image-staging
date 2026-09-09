@@ -4328,3 +4328,391 @@ def test_forced_iox_uninstall_uses_explicit_controller_mode_without_a_record(
     assert {key: target[key] for key in ("host", "port", "platform")} == {
         "host": "10.0.0.1", "port": 22, "platform": "iox"}
     assert minted == []
+
+
+# Scheduled work shares device exclusion with manual work but only half the pool.
+def _schedule_context(did, occurrence="occurrence-1"):
+    return {"schema_version": 1, "schedule_id": "schedule-1", "schedule_rev": 3,
+            "occurrence_id": occurrence, "device_id": did}
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 25])
+def test_scheduled_pool_reserves_manual_workers(limit):
+    release = threading.Event()
+    started = []
+    lock = threading.Lock()
+
+    def run(_path, env, _output):
+        with lock:
+            started.append(env["DEVICE_ID"])
+        assert release.wait(5)
+        return 0
+
+    service = _multi_svc(limit + 2, run, max_concurrent=limit)
+    try:
+        assert service._manual_reservation == (limit + 1) // 2
+        assert service._scheduled_limit == limit // 2
+        if limit == 1:
+            with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+                service.start("d1", schedule_context=_schedule_context("d1"))
+            assert refused.value.reason == "capacity_unavailable"
+            assert service.list_jobs() == []
+        else:
+            scheduled = [service.start("d%d" % i,
+                         schedule_context=_schedule_context("d%d" % i))
+                         for i in range(1, limit // 2 + 2)]
+            assert _wait_for(lambda: len(started) == limit // 2)
+            assert len(service._scheduled_inflight) == limit // 2
+            assert service.get_job(scheduled[-1])["state"] == "queued"
+        manual_ids = ["d%d" % i for i in range(limit // 2 + 2, limit + 2)]
+        for did in manual_ids:
+            service.start(did)
+        assert _wait_for(lambda: all(did in started for did in manual_ids))
+        assert len(started) == limit
+    finally:
+        release.set()
+        service.shutdown()
+    assert service._scheduled_inflight == set()
+    assert service._active_work == 0
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 25])
+def test_pending_capacity_and_manual_reservation_have_no_prepare_side_effect(monkeypatch, limit):
+    service = _multi_svc(1001, lambda *_args: 0, max_concurrent=limit)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    prepared = []
+    scheduled_count = 0 if limit == 1 else 1000 - (limit + 1) // 2
+    try:
+        for i in range(1, scheduled_count + 1):
+            did = "d%d" % i
+            service.start(did, schedule_context=_schedule_context(did))
+        if limit > 1:
+            did = "d%d" % (scheduled_count + 1)
+            with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+                service.start(did, schedule_context=_schedule_context(did),
+                              prepare=lambda: prepared.append(did))
+            assert refused.value.reason == "queue_full"
+        for i in range(scheduled_count + 1, 1001):
+            service.start("d%d" % i)
+        with pytest.raises(ValueError, match="onboarding queue is full"):
+            service.start("d1001", prepare=lambda: prepared.append("d1001"))
+        assert prepared == []
+        assert len(service.list_jobs()) == 1000
+        assert len(service._manual_queue) + len(service._scheduled_queue) == 1000
+        assert service.cancel_queued() == 1000
+        assert service.start("d1001", prepare=lambda: prepared.append("accepted"))
+        assert prepared == ["accepted"]
+    finally:
+        service.shutdown()
+
+
+def test_manual_dequeue_priority_and_same_device_supersession(monkeypatch):
+    order = []
+    retired = []
+    service = _multi_svc(3, lambda _p, env, _o: order.append(env["DEVICE_ID"]) or 0,
+                         max_concurrent=2)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    scheduled = service.start("d1", schedule_context=_schedule_context("d1"))
+    first = service.start("d2")
+    service._work_queue.get_nowait()()
+    assert order == ["d2"]
+    assert service.get_job(first)["state"] == "done"
+    assert service.get_job(scheduled)["state"] == "queued"
+    # The record retirement must happen before replacement preparation.
+    service._jobs[scheduled]["record_id"] = "scheduled-record"
+    service.record_store = SimpleNamespace(
+        transition=lambda record, state: retired.append((record, state)))
+    replacement = service.start("d1", action="undeploy", prepare=lambda: (
+        retired.append("manual-prepare") or None))
+    assert replacement != scheduled
+    assert retired == [("scheduled-record", "removed"), "manual-prepare"]
+    assert service.get_job(scheduled)["state"] == "cancelled"
+    assert service.get_job(scheduled)["admission_reason"] == "manual_override"
+    assert service.get_job(replacement)["state"] == "queued"
+    assert service._scheduled_queue == gui_onboard.deque()
+    service.shutdown()
+
+
+def test_authority_changes_after_reservation_are_rechecked_without_lock_inversion():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    authority_lock = threading.Lock()
+    valid = [True]
+    executions = []
+    checked = []
+    service = _multi_svc(2, lambda *_args: executions.append(True) or 0,
+                         max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        # A worker waiting for outer authority must not obstruct cancellation
+        # or another authority holder acquiring the inner job condition.
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        with authority_lock:
+            yield
+
+    def check(phase):
+        assert authority_lock.locked()
+        assert service._lock.locked()
+        checked.append(phase)
+        if not valid[0]:
+            raise gui_onboard.ScheduledAdmissionError("device_revoked")
+
+    try:
+        jid = service.start("d1", schedule_context=_schedule_context("d1"),
+                            authority_guard=guard, authority_check=check)
+        assert reserved.wait(2)
+        with authority_lock:
+            with service._condition:
+                assert len(service._scheduled_inflight) == 1
+                assert jid in service._reserved
+                assert service._jobs[jid]["state"] == "queued"
+                valid[0] = False
+        # The other half of the pool remains usable while the guard waits.
+        manual = service.start("d2")
+        assert _wait(service, manual)["state"] == "done"
+        release.set()
+        result = _wait(service, jid)
+        assert result["state"] == "cancelled"
+        assert result["admission_reason"] == "device_revoked"
+        assert checked == ["admission", "execution"]
+        assert executions == [True]
+        assert _wait_for(lambda: not service._scheduled_inflight)
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_cancellation_releases_reserved_scheduled_capacity_and_scopes_occurrence():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    ran = []
+    service = _multi_svc(2, lambda _p, env, _o: ran.append(env["DEVICE_ID"]) or 0,
+                         max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        yield
+
+    try:
+        first = service.start("d1", schedule_context=_schedule_context("d1"),
+                              authority_guard=guard)
+        assert reserved.wait(2)
+        second = service.start("d2", schedule_context=_schedule_context("d2", "other"))
+        assert service.get_job(second)["state"] == "queued"
+        assert service.cancel_queued([first, second], occurrence_id="wrong") == 0
+        assert service.cancel_queued([first, second], occurrence_id="occurrence-1") == 1
+        assert service.get_job(first)["state"] == "cancelled"
+        assert _wait(service, second)["state"] == "done"
+        release.set()
+        assert _wait_for(lambda: service._active_work == 0)
+        assert ran == ["d2"]
+        assert not service._reserved and not service._scheduled_inflight
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_manual_supersedes_scheduled_worker_waiting_for_authority():
+    from contextlib import contextmanager
+    reserved = threading.Event()
+    release = threading.Event()
+    ran = []
+    service = _multi_svc(1, lambda *_args: ran.append(True) or 0, max_concurrent=2)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            reserved.set()
+            assert release.wait(5)
+        yield
+
+    try:
+        scheduled = service.start("d1", schedule_context=_schedule_context("d1"),
+                                  authority_guard=guard)
+        assert reserved.wait(2)
+        manual = service.start("d1")
+        assert _wait(service, manual)["state"] == "done"
+        assert service.get_job(scheduled)["admission_reason"] == "manual_override"
+        release.set()
+        assert _wait_for(lambda: service._active_work == 0)
+        assert ran == [True]
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_schedule_provenance_is_immutable_and_manual_projection_unchanged(monkeypatch):
+    service = _multi_svc(2, lambda *_args: 0, max_concurrent=2)
+    monkeypatch.setattr(service, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(service, "_ensure_maintenance", lambda: None)
+    context = _schedule_context("d1")
+    jid = service.start("d1", schedule_context=context)
+    context["schedule_rev"] = 999
+    detached = service.get_schedule_context(jid)
+    assert detached["schedule_rev"] == 3
+    detached["schedule_id"] = "forged"
+    assert service.get_schedule_context(jid)["schedule_id"] == "schedule-1"
+    assert [j["id"] for j in service.jobs_for_occurrence("occurrence-1", "d1")] == [jid]
+    assert service.jobs_for_occurrence("other") == []
+    assert service.latest_jobs_by_device()["d1"]["pending_schedule_id"] == "schedule-1"
+    manual = service.start("d2")
+    assert service.get_schedule_context(manual) is None
+    assert "schedule_id" not in service.get_job(manual)
+    assert service.latest_jobs_by_device()["d2"] == {
+        "action": "onboard", "state": "queued", "finished_at": None}
+    service.shutdown()
+
+
+@pytest.mark.parametrize("patch", [
+    {"schema_version": True}, {"schedule_rev": True}, {"schedule_rev": 0},
+    {"device_id": "other"}, {"occurrence_id": ""}, {"schedule_id": "a\nb"},
+    {"extra": "forbidden"},
+])
+def test_schedule_provenance_rejects_invalid_or_extra_fields(patch):
+    service = _svc(lambda *_args: 0)
+    context = _schedule_context("d1") | patch
+    with pytest.raises(ValueError, match="invalid schedule provenance"):
+        service.start("d1", schedule_context=context)
+    assert service.list_jobs() == []
+    service.shutdown()
+
+
+def test_scheduled_running_join_and_manual_opposite_action_busy():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run(*_args):
+        entered.set()
+        assert release.wait(5)
+        return 0
+
+    service = _multi_svc(1, run, max_concurrent=2)
+    try:
+        scheduled = service.start("d1", schedule_context=_schedule_context("d1"))
+        assert entered.wait(2)
+        assert service.start("d1", prepare=lambda: pytest.fail("joined prepare")) == scheduled
+        assert service.start("d1", schedule_context=_schedule_context("d1")) == scheduled
+        with pytest.raises(ValueError, match="busy with an active onboard"):
+            service.start("d1", action="undeploy")
+        assert service.cancel_queued(occurrence_id="occurrence-1") == 0
+    finally:
+        release.set()
+        service.shutdown()
+
+
+def test_admission_authority_refusal_creates_no_job_or_record():
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    prepared = []
+    service = _multi_svc(1, lambda *_args: 0, max_concurrent=2)
+
+    @contextmanager
+    def guard(_phase):
+        assert not service._lock.locked()
+        with outer:
+            yield
+
+    def check(phase):
+        assert phase == "admission" and outer.locked() and service._lock.locked()
+        raise gui_onboard.ScheduledAdmissionError("vanished")
+
+    try:
+        with pytest.raises(gui_onboard.ScheduledAdmissionError) as refused:
+            service.start("d1", schedule_context=_schedule_context("d1"),
+                          authority_guard=guard, authority_check=check,
+                          prepare=lambda: prepared.append(True))
+        assert refused.value.reason == "vanished"
+        assert prepared == [] and service.list_jobs() == []
+        assert not service._reserved and not service._scheduled_inflight
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("revoke_at_prepare", [False, True])
+def test_iox_deferred_authority_recheck_releases_locks_for_controller_and_probe(
+        tmp_path, revoke_at_prepare):
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+    phases = []
+    prepared = []
+    valid = [True]
+    controller = _FrozenIoxController(entered=entered, release=release)
+    service = None
+
+    def assert_unlocked():
+        assert outer.acquire(blocking=False)
+        outer.release()
+        assert service._lock.acquire(blocking=False)
+        service._lock.release()
+
+    def preflight(*_args, **_kwargs):
+        assert_unlocked()
+        return {"status": "passed", "device_identity": "FDO2547X9AB",
+                "detected_model": "IE-3400"}
+
+    def mint(_did):
+        assert_unlocked()
+        return "fixture-token"
+
+    service = _iox_controller_service(tmp_path, controller, preflight_fn=preflight,
+                                       mint_fn=mint)
+
+    @contextmanager
+    def guard(phase):
+        # Guard acquisition itself must never take place under the job lock.
+        assert service._lock.acquire(blocking=False)
+        service._lock.release()
+        with outer:
+            phases.append(phase)
+            yield
+
+    def check(_phase):
+        assert outer.locked() and service._lock.locked()
+        if not valid[0]:
+            raise gui_onboard.ScheduledAdmissionError("device_revoked")
+
+    def prepare():
+        assert outer.locked() and service._lock.locked()
+        prepared.append(True)
+        return "new-record"
+
+    try:
+        jid = service.start("d1", prepare=prepare,
+                            schedule_context=_schedule_context("d1"),
+                            authority_guard=guard, authority_check=check)
+        assert entered.wait(2)
+        assert_unlocked()
+        request = controller.requests[0]
+        assert _request_value(request, "record_id") is None
+        assert not _request_has(request, "schedule_context")
+        assert not _request_has(request, "schedule_id")
+        assert prepared == []
+        with outer:
+            valid[0] = not revoke_at_prepare
+        release.set()
+        job = _wait(service, jid)
+        assert phases == ["admission", "execution", "iox_prepare"]
+        if revoke_at_prepare:
+            assert prepared == []
+            assert job["state"] == "error"
+            assert job["admission_reason"] == "device_revoked"
+            assert job["record_id"] is None
+        else:
+            assert prepared == [True]
+            assert job["state"] == "done"
+            assert job["record_id"] == "new-record"
+    finally:
+        release.set()
+        service.shutdown()
