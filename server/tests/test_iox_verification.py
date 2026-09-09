@@ -1776,6 +1776,22 @@ def test_legacy_and_adopted_uninstall_use_the_recorded_target_without_a_journal(
     assert all(call[2] is True for call in store.calls if call[0] == "get")
 
 
+def test_recorded_teardown_never_inherits_unrecorded_cleanup_paths(tmp_path):
+    record = _record(address="192.0.2.10")
+    seed = _request(action="uninstall", record_id="r1")["target"]
+    seed["share_ios_path"] = "flash:operator/unowned"
+    seed["share_guest_path"] = "/operator/unowned"
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path, records=[record]),
+        _TransportFactory())
+    try:
+        projected = controller._record_target(record, seed, "uninstall")
+    finally:
+        controller.close()
+    assert projected.get("share_ios_path") != "flash:operator/unowned"
+    assert projected.get("share_guest_path") != "/operator/unowned"
+
+
 @pytest.mark.parametrize("adopted", [False, True])
 def test_record_without_historical_identity_requires_two_matching_live_reads(
         tmp_path, adopted):
@@ -2272,6 +2288,43 @@ def test_verification_read_fence_durability_failure_stops_all_later_commands(
     assert result["result_code"] != 0
     assert _command_calls(factory, "verification_disable") == []
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+def test_discovery_cleanup_failure_dominates_the_original_error(
+        tmp_path, monkeypatch):
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    abandoned = []
+
+    class Supervisor(object):
+        pid = os.getpid()
+        start_ticks = 0
+        def reap_all(self, deadline):
+            return False
+        def release(self, deadline):
+            pytest.fail("unreaped discovery supervisor was released")
+        def abandon(self, deadline):
+            abandoned.append(deadline)
+            return False
+
+    monkeypatch.setattr(module._SupervisorClient, "start",
+                        classmethod(lambda cls, *args: Supervisor()))
+    monkeypatch.setattr(
+        controller, "_make_transport",
+        lambda *args: (_ for _ in ()).throw(
+            RuntimeError("injected discovery construction failure")))
+    attempt = module._Attempt(
+        controller, "install", _request(), _Cancel(), False)
+    attempt.target = _request()["target"]
+    try:
+        with pytest.raises(module._ControllerFailure) as failed:
+            controller._discover_and_lock(attempt)
+    finally:
+        controller.close()
+    assert failed.value.category == "descendant_unreaped"
+    assert failed.value.code == 5
+    assert len(abandoned) == 1
 
 
 @pytest.mark.parametrize("fault", [
