@@ -3134,6 +3134,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     definition = {key: value for key, value in body.items()
                                   if key != "id"}
                     definition = schedules.normalize_definition(definition)
+                    # Validate the key and detect an existing row before any
+                    # fleet/policy authority read. The atomic create still
+                    # owns the race with another writer.
+                    if schedule_store.get(schedule_id) is not None:
+                        raise schedules.ScheduleConflict(
+                            "schedule already exists")
                     coordinator = role_coordinator()
                     if coordinator is None:
                         raise ScheduleTargetError("fleet state is unavailable")

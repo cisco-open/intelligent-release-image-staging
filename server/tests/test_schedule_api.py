@@ -355,6 +355,23 @@ def test_schedule_problem_type_is_stable(schedule_api):
     assert problem["type"] == api_problem.TYPE_BASE + "invalid_schedule"
     assert problem["code"] == "invalid_schedule"
 
+    for body, expected_status, expected_code in (
+            ({"id": "bad/id", **_definition()}, 422, "invalid_schedule"),
+            ({"id": "unknown-role", **_definition(role="missing")},
+             422, "role_not_found")):
+        status, _, raw = _request(
+            server, "POST", "/api/schedules", body, auth)
+        assert (status, json.loads(raw)["code"]) == (
+            expected_status, expected_code)
+    status, _, raw = _request(
+        server, "POST", "/api/schedules", raw=b"[]", headers=auth)
+    assert (status, json.loads(raw)["code"]) == (400, "invalid-request")
+
+    valid = {"id": "duplicate", **_definition(role=None)}
+    assert _request(server, "POST", "/api/schedules", valid, auth)[0] == 201
+    status, _, raw = _request(server, "POST", "/api/schedules", valid, auth)
+    assert (status, json.loads(raw)["code"]) == (409, "schedule_conflict")
+
 
 def test_target_resolution_fails_closed_without_process_authorities(tmp_path):
     fleet = gui_fleet.FleetStore(str(tmp_path))
