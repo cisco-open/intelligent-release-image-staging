@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+"""Manage stage-only schedules through their durable server-side stores."""
+
+import argparse
+import copy
+import csv
+import io
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import catalog  # noqa: E402
+import deployment_records  # noqa: E402
+import gui_fleet  # noqa: E402
+import management_api  # noqa: E402
+import peer_policy  # noqa: E402
+import role_management  # noqa: E402
+import schedules  # noqa: E402
+import secrets_store  # noqa: E402
+
+
+ACTOR = "cli:iris-schedule"
+CSV_FIELDS = ("id", "kind", "target", "payload", "when", "after", "state")
+MAX_INPUT_BYTES = 4 * 1024 * 1024
+MAX_IMPORT_ROWS = schedules.MAX_TARGETS
+
+
+class CliInputError(ValueError):
+    """An operator input failed before any durable mutation."""
+
+    def __init__(self, message, code="invalid_schedule"):
+        self.code = code
+        super().__init__(message)
+
+
+class CliFailure(RuntimeError):
+    """A safe operational failure with a stable machine-readable code."""
+
+    def __init__(self, message, code):
+        self.code = code
+        super().__init__(message)
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, _message):
+        _print_error("invalid_arguments", "invalid command arguments")
+        raise SystemExit(2)
+
+
+def _json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise CliInputError("JSON object contains a duplicate key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value):
+    raise CliInputError("JSON contains a non-finite number")
+
+
+def _decode_json(raw, field):
+    try:
+        value = json.loads(raw, object_pairs_hook=_json_pairs,
+                           parse_constant=_reject_constant)
+    except CliInputError:
+        raise
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError):
+        raise CliInputError("%s must contain valid JSON" % field) from None
+    if not isinstance(value, dict):
+        raise CliInputError("%s must contain a JSON object" % field)
+    return value
+
+
+def _read_text(path):
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(MAX_INPUT_BYTES + 1)
+    except (OSError, ValueError):
+        raise CliInputError("input file is unavailable", "input_unavailable") \
+            from None
+    if len(raw) > MAX_INPUT_BYTES:
+        raise CliInputError("input file is too large", "input_too_large")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeError:
+        raise CliInputError("input file is not UTF-8", "invalid_input") \
+            from None
+
+
+def _definition_file(path):
+    value = _decode_json(_read_text(path), "schedule file")
+    try:
+        return schedules.normalize_definition(value)
+    except schedules.ScheduleValidationError as exc:
+        raise CliInputError(str(exc), exc.code) from None
+
+
+def _patch_file(path, current):
+    patch = _decode_json(_read_text(path), "patch file")
+    if set(patch) - schedules.DEFINITION_KEYS:
+        raise CliInputError("invalid schedule patch fields")
+    definition = {key: current[key] for key in schedules.DEFINITION_KEYS
+                  if key in current}
+    definition.update(copy.deepcopy(patch))
+    if definition.get("after", False) is None:
+        definition.pop("after")
+    try:
+        normalized = schedules.normalize_definition(definition)
+    except schedules.ScheduleValidationError as exc:
+        raise CliInputError(str(exc), exc.code) from None
+    return {
+        key: (None if key == "after" and value is None else normalized[key])
+        for key, value in patch.items()
+    }
+
+
+def _print_json(value):
+    print(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                     allow_nan=False))
+
+
+def _print_error(code, message):
+    print(json.dumps({"error": {"code": code, "message": message}},
+                     sort_keys=True, separators=(",", ":"), allow_nan=False),
+          file=sys.stderr)
+
+
+def _view(row):
+    result = copy.deepcopy(row)
+    result["etag"] = schedules.schedule_etag(row)
+    return result
+
+
+def _now():
+    raw = os.environ.get("IRIS_SCHEDULE_NOW")
+    if raw is None:
+        return int(time.time())
+    try:
+        if not raw or raw != raw.strip() or any(character not in "0123456789"
+                                                for character in raw):
+            raise ValueError
+        value = int(raw)
+        if not 0 <= value <= schedules.MAX_EPOCH:
+            raise ValueError
+        return value
+    except (TypeError, ValueError):
+        raise CliInputError("IRIS_SCHEDULE_NOW must be an epoch integer",
+                            "invalid_environment") from None
+
+
+class Runtime:
+    """One direct-store view of the authorities used by target resolution."""
+
+    def __init__(self):
+        self.state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+        self.now = _now()
+        self.store = schedules.ScheduleStore(self.state_dir)
+        self.fleet = gui_fleet.FleetStore(self.state_dir)
+        self.catalog = catalog.CatalogStore(self.state_dir)
+        self.records = deployment_records.DeploymentRecordStore(
+            self.state_dir, now_fn=lambda: self.now)
+        auth_path = os.path.join(self.state_dir, "peer-policy.json")
+        lkg_path = os.path.join(self.state_dir, "peer-policy.lkg.json")
+        self.manager = role_management.RoleCoordinator(
+            self.fleet, auth_path, lkg_path, now_fn=lambda: self.now,
+            schedule_store=self.store)
+
+    def resolve_target(self, target, role_policy=None):
+        # The direct CLI has no authoritative process-local onboarding-job
+        # map. Passing jobs=None is intentional: status targeting must refuse
+        # instead of approximating that state from durable records.
+        secrets_path = os.environ.get("IRIS_SECRETS",
+                                      "/run/iris/secrets.json")
+        try:
+            revoked = management_api._instruction_revoked_principals(
+                secrets_store.load(secrets_path))
+        except (OSError, TypeError, ValueError, RecursionError, OverflowError):
+            revoked = None
+        if role_policy is None:
+            role_policy = peer_policy.load_policy(
+                self.manager.auth_path, self.manager.lkg_path)
+        return management_api.resolve_schedule_target(
+            target, fleet=self.fleet, catalog=self.catalog,
+            record_store=self.records, role_policy=role_policy,
+            now=self.now, jobs=None,
+            revoked_principals=revoked)
+
+
+def _existing(store, schedule_id):
+    row = store.get(schedule_id)
+    if row is None:
+        raise schedules.ScheduleNotFound("no such schedule")
+    return row
+
+
+def _expected_revision(args, row):
+    if args.force:
+        return "*"
+    if args.if_match is not None:
+        if args.if_match != schedules.schedule_etag(row):
+            raise CliFailure("schedule precondition failed",
+                             "precondition_failed")
+    return row["rev"]
+
+
+def _json_cell(raw, field):
+    if not isinstance(raw, str) or not raw:
+        raise CliInputError("CSV %s must contain a JSON object" % field)
+    return _decode_json(raw, "CSV %s" % field)
+
+
+def _csv_rows(path):
+    text = _read_text(path)
+    try:
+        reader = csv.DictReader(io.StringIO(text, newline=""))
+        if tuple(reader.fieldnames or ()) != CSV_FIELDS:
+            raise CliInputError(
+                "CSV header must be exactly %s" % ",".join(CSV_FIELDS),
+                "invalid_schedule_csv")
+        rows = []
+        seen = set()
+        for number, raw in enumerate(reader, 2):
+            if len(rows) >= MAX_IMPORT_ROWS:
+                raise CliInputError("CSV has too many rows",
+                                    "invalid_schedule_csv")
+            if None in raw or any(value is None for value in raw.values()):
+                raise CliInputError("CSV row %d has the wrong column count" %
+                                    number, "invalid_schedule_csv")
+            schedule_id = raw["id"]
+            try:
+                schedules._identifier(schedule_id, "schedule id")
+            except schedules.ScheduleValidationError as exc:
+                raise CliInputError(str(exc), "invalid_schedule_csv") from None
+            if schedule_id in seen:
+                raise CliInputError("CSV contains duplicate schedule id",
+                                    "invalid_schedule_csv")
+            seen.add(schedule_id)
+            definition = {
+                "kind": raw["kind"],
+                "target": _json_cell(raw["target"], "target"),
+                "payload": _json_cell(raw["payload"], "payload"),
+                "when": _json_cell(raw["when"], "when"),
+                "state": raw["state"],
+            }
+            if raw["after"] != "":
+                definition["after"] = _json_cell(raw["after"], "after")
+            try:
+                normalized = schedules.normalize_definition(definition)
+            except schedules.ScheduleValidationError as exc:
+                raise CliInputError(str(exc), "invalid_schedule_csv") from None
+            if normalized.get("after", {}).get("schedule_id") == schedule_id:
+                raise CliInputError("schedule cannot follow itself",
+                                    "invalid_schedule_csv")
+            rows.append((schedule_id, normalized))
+    except csv.Error:
+        raise CliInputError("CSV is malformed", "invalid_schedule_csv") \
+            from None
+    return rows
+
+
+def _definition_from_row(row):
+    return {key: copy.deepcopy(row[key]) for key in schedules.DEFINITION_KEYS
+            if key in row}
+
+
+def _validate_import_references(rows, current):
+    prospective = {schedule_id: _definition_from_row(row)
+                   for schedule_id, row in current.items()}
+    prospective.update({schedule_id: copy.deepcopy(definition)
+                        for schedule_id, definition in rows})
+    imported = {schedule_id for schedule_id, _definition in rows}
+    for schedule_id in sorted(imported):
+        reference = prospective[schedule_id].get("after", {}).get("schedule_id")
+        if reference is not None and reference not in prospective:
+            raise CliInputError("CSV schedule references an unknown schedule",
+                                "invalid_schedule_csv")
+
+    visited = set()
+    for start in sorted(imported):
+        path = []
+        positions = {}
+        schedule_id = start
+        while schedule_id in prospective and schedule_id not in visited:
+            if schedule_id in positions:
+                raise CliInputError("CSV schedule references form a cycle",
+                                    "invalid_schedule_csv")
+            positions[schedule_id] = len(path)
+            path.append(schedule_id)
+            schedule_id = prospective[schedule_id].get("after", {}).get(
+                "schedule_id")
+        visited.update(path)
+
+
+def _import(runtime, rows):
+    """Preflight every row, then apply all rows in deterministic ID order."""
+    ordered = sorted(rows, key=lambda item: item[0])
+    manager = runtime.manager
+    with secrets_store.store_lock(manager.lock_path):
+        policy = manager._load()
+        current = {row["id"]: row for row in runtime.store.list()}
+        _validate_import_references(ordered, current)
+        resolved = {}
+        for schedule_id, definition in ordered:
+            manager._require_scheduled_role(definition, policy)
+            resolved[schedule_id] = runtime.resolve_target(
+                definition["target"], role_policy=policy)
+
+        results = []
+        for schedule_id, definition in ordered:
+            preview = manager._schedule_preview(resolved[schedule_id])
+            try:
+                if schedule_id in current:
+                    row = runtime.store.put(
+                        schedule_id, definition,
+                        expected_rev=current[schedule_id]["rev"],
+                        preview=preview)
+                    action = "updated"
+                else:
+                    row = runtime.store.create(
+                        schedule_id, definition, actor=ACTOR, now=runtime.now,
+                        preview=preview)
+                    action = "created"
+                results.append({"action": action, "etag": schedules.schedule_etag(row),
+                                "id": schedule_id, "rev": row["rev"],
+                                "status": "applied"})
+            except (schedules.ScheduleConflict,
+                    schedules.ScheduleRevisionConflict) as exc:
+                results.append({"code": exc.code, "id": schedule_id,
+                                "status": "conflict"})
+            except Exception:
+                results.append({"code": "schedule_state_unavailable",
+                                "id": schedule_id, "status": "error"})
+        ok = all(result["status"] == "applied" for result in results)
+        return {"ok": ok, "results": results,
+                "applied": sum(result["status"] == "applied"
+                               for result in results),
+                "conflicts": sum(result["status"] == "conflict"
+                                 for result in results),
+                "errors": sum(result["status"] == "error"
+                              for result in results)}
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
+
+
+def _export(rows):
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=CSV_FIELDS,
+                            lineterminator="\n")
+    writer.writeheader()
+    for row in sorted(rows, key=lambda item: item["id"]):
+        writer.writerow({
+            "id": row["id"], "kind": row["kind"],
+            "target": _canonical_json(row["target"]),
+            "payload": _canonical_json(row["payload"]),
+            "when": _canonical_json(row["when"]),
+            "after": (_canonical_json(row["after"])
+                      if "after" in row else ""),
+            "state": row["state"],
+        })
+    return output.getvalue()
+
+
+def _parser():
+    parser = JsonArgumentParser(prog="iris-schedule")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("list", help="list schedules")
+    get = commands.add_parser("get", help="get one schedule")
+    get.add_argument("id")
+    create = commands.add_parser("create", help="create a schedule")
+    create.add_argument("id")
+    create.add_argument("--file", required=True)
+    for name in ("put", "patch"):
+        mutation = commands.add_parser(name, help="%s a schedule" % name)
+        mutation.add_argument("id")
+        mutation.add_argument("--file", required=True)
+        condition = mutation.add_mutually_exclusive_group()
+        condition.add_argument("--if-match", metavar="ETAG")
+        condition.add_argument("--force", action="store_true")
+    for name in ("delete", "reaffirm"):
+        mutation = commands.add_parser(name, help="%s a schedule" % name)
+        mutation.add_argument("id")
+        condition = mutation.add_mutually_exclusive_group()
+        condition.add_argument("--if-match", metavar="ETAG")
+        condition.add_argument("--force", action="store_true")
+    imported = commands.add_parser("import", help="import schedule CSV")
+    imported.add_argument("path")
+    commands.add_parser("export", help="export schedule CSV")
+    return parser
+
+
+def _run(args, runtime):
+    if args.command == "list":
+        rows = [_view(row) for row in runtime.store.list()]
+        _print_json({"schedules": rows, "total": len(rows)})
+        return 0
+    if args.command == "get":
+        _print_json({"schedule": _view(_existing(runtime.store, args.id))})
+        return 0
+    if args.command == "create":
+        definition = _definition_file(args.file)
+        row, _resolved = runtime.manager.create_schedule(
+            args.id, definition, actor=ACTOR, now=runtime.now,
+            resolve_target=runtime.resolve_target)
+        _print_json({"schedule": _view(row)})
+        return 0
+    if args.command in ("put", "patch", "delete", "reaffirm"):
+        before = _existing(runtime.store, args.id)
+        expected = _expected_revision(args, before)
+        if args.command == "delete":
+            runtime.store.delete(args.id, expected_rev=expected)
+            _print_json({"deleted": True, "id": args.id})
+            return 0
+        if args.command == "reaffirm":
+            row = runtime.store.reaffirm(args.id, ACTOR,
+                                         expected_rev=expected)
+        elif args.command == "put":
+            definition = _definition_file(args.file)
+            row, _resolved = runtime.manager.put_schedule(
+                args.id, definition, expected_rev=expected,
+                resolve_target=runtime.resolve_target)
+        else:
+            patch = _patch_file(args.file, before)
+            row, _resolved = runtime.manager.patch_schedule(
+                args.id, patch, expected_rev=expected,
+                resolve_target=runtime.resolve_target)
+        _print_json({"schedule": _view(row)})
+        return 0
+    if args.command == "import":
+        report = _import(runtime, _csv_rows(args.path))
+        _print_json(report)
+        if not report["ok"]:
+            _print_error("schedule_import_partial",
+                         "one or more schedule rows were not applied")
+            return 1
+        return 0
+    if args.command == "export":
+        sys.stdout.write(_export(runtime.store.list()))
+        return 0
+    raise CliInputError("unknown command", "invalid_arguments")
+
+
+def main(argv=None):
+    args = _parser().parse_args(argv)
+    try:
+        return _run(args, Runtime())
+    except CliInputError as exc:
+        _print_error(exc.code, str(exc))
+        return 2
+    except CliFailure as exc:
+        _print_error(exc.code, str(exc))
+        return 1
+    except (schedules.ScheduleNotFound, schedules.ScheduleRevisionConflict,
+            schedules.ScheduleConflict) as exc:
+        _print_error(exc.code, str(exc))
+        return 1
+    except schedules.ScheduleStateError:
+        _print_error("schedule_state_unavailable",
+                     "schedule state is unavailable")
+        return 1
+    except schedules.ScheduleValidationError as exc:
+        _print_error(exc.code, str(exc))
+        return 2
+    except role_management.RoleManagementError as exc:
+        _print_error(exc.code, str(exc))
+        return 2 if exc.status in (400, 422) else 1
+    except management_api.ScheduleTargetError as exc:
+        _print_error(exc.code, str(exc))
+        return 1
+    except (catalog.StateFileError, deployment_records.RecordStoreUnreadable,
+            gui_fleet.FleetStateError, peer_policy.PolicyError,
+            secrets_store.StoreCorruptError, OSError, RecursionError,
+            OverflowError):
+        _print_error("schedule_state_unavailable",
+                     "schedule state is unavailable")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
