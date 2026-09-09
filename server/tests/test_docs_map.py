@@ -1051,11 +1051,13 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
     _assert_unit(failures, ("body serial", "lower", "pointer", "fresh",
                             "pointer_skew", "apply"),
                  "a fresh body below its pointer must apply with skew evidence")
-    _assert_unit(failures, ("at or below", "accepted floor", "rollback",
-                            "reject"),
-                 "a body at or below the replay floor must be rejected")
-    _assert_unit(failures, ("equal identity", "different bytes", "reject"),
-                 "equal identity with changed bytes must be rejected")
+    _assert_unit(failures, ("below", "accepted floor", "rollback_rejected"),
+                 "a body below the replay floor must be rejected as rollback")
+    _assert_unit(failures, ("equal identity", "identical bytes", "accepted"),
+                 "an identical replay at the accepted identity must remain safe")
+    _assert_unit(failures, ("equal identity", "different bytes",
+                            "tamper_rejected"),
+                 "equal identity with changed bytes must be rejected as tamper")
 
 
 def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
@@ -1085,6 +1087,23 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
     _assert_unit(_page("containers.md"),
                  ("mechanical tick", "reassert", "heartbeat", "signed"),
                  "each mechanical tick must reassert and heartbeat")
+    operations = _page("operations.md")
+    _assert_unit(operations, ("unassignment", "quarantine", "next successful",
+                              "due policy poll", "aria2 apply"),
+                 "torrent removal must use the due-policy/apply boundary")
+    _assert_unit(operations, ("removal", "delay", "catalog_tick_s",
+                              "mechanical scheduling", "failures"),
+                 "containment timing must name every source of delay")
+    for unit in _units(operations):
+        if "unassign" not in unit.lower() and "quarantine" not in unit.lower():
+            continue
+        assert not re.search(
+            r"(?:unassign(?:ment)?|quarantine|removal|containment).{0,80}"
+            r"(?:\bis\s+|\boccurs?\s+|\bcompletes?\s+|\btakes effect\s+|"
+            r"\bwill\s+|\balways\s+)"
+            r"(?:immediate(?:ly)?|unconditional(?:ly)?|"
+            r"on (?:the )?next (?:mechanical )?tick)",
+            unit, re.IGNORECASE)
 
 
 def test_docs_phase1_iox_verification_transaction():
