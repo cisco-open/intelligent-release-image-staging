@@ -6,12 +6,14 @@
 
 # Stage the DERIVABLE served artifacts into the artifacts dir at container
 # startup, so a fresh deploy no longer fails onboarding on missing files. The
-# three files a device downloads that the container can produce itself:
+# files a Guest Shell device downloads that the container can produce itself:
 #   iris-agent.tgz    the Guest Shell agent bundle (rebuilt every start from the
 #                     image-baked device/ sources, so it always matches the
 #                     deployed agent code)
+#   iris-agent.tgz.sha256  the exact raw digest evidence for that archive
 #   bootstrap.sh      the on-device launcher (device/bootstrap.sh)
 #   iris-catalog.pem  the pinned CA the agent trusts = the server's PUBLIC cert
+#   iris-signers.pem  the two offline instruction roots in CA signer form
 # The served artifacts this CANNOT produce are the IOx packages iris-arm64.tar
 # (aarch64, IE-3x00/IR) and iris-amd64.tar (x86_64, Catalyst 9300) — both need
 # device/iox/build.sh; it just notes when they are absent.
@@ -27,6 +29,7 @@ ART="${1:-${IRIS_ARTIFACTS_DIR:-/srv/artifacts}}"
 DEVICE="${IRIS_DEVICE_DIR:-/opt/iris/device}"
 ARIA2="${IRIS_ARIA2:-/opt/iris/bin/aria2c}"
 CRT="${IRIS_CRT_SRC:-${IRIS_CONFIG:-/etc/iris}/tls/crt.pem}"
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SUMS="${IRIS_ARIA2_SUMS:-/opt/iris/tools/aria2c.sha256}"
 STATUS="${IRIS_RUN:-/run/iris}/served-bundle.json"
@@ -34,19 +37,63 @@ FAILED=0
 
 # Runtime status remains writable even when the artifacts mount is read-only.
 # Record an attempt before packing so an interrupted run cannot leave an old
-# success record. Bind success to both published files, not just their names.
+# success record. Bind success to every published and embedded trust input.
 write_status() {
   python3 - "$STATUS" "$ART" "$1" "$2" <<'PYTHON'
-import hashlib, json, os, sys, tempfile
+import hashlib, json, os, stat, sys, tarfile, tempfile
 path, artifacts, state, reason = sys.argv[1:]
 record = {"format": "iris-served-bundle-v1", "state": state, "reason": reason}
 if state == "ok":
-    for name in ("iris-agent.tgz", "bootstrap.sh"):
+    contents = {}
+    for name in ("iris-agent.tgz", "iris-agent.tgz.sha256", "bootstrap.sh",
+                 "iris-signers.pem"):
+        target = os.path.join(artifacts, name)
+        info = os.lstat(target)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise SystemExit("served publication contains a non-regular file")
         digest = hashlib.sha256()
-        with open(os.path.join(artifacts, name), "rb") as handle:
+        with open(target, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode) or \
+                    (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                raise SystemExit("served publication changed while opening")
+            if name == "iris-agent.tgz.sha256" and opened.st_size != 65:
+                raise SystemExit("served bundle digest sidecar is invalid")
+            if name == "iris-signers.pem" and opened.st_size > 128 * 1024:
+                raise SystemExit("served signer trust is too large")
+            data = bytearray()
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
+                if name in ("iris-agent.tgz.sha256", "iris-signers.pem"):
+                    limit = 65 if name == "iris-agent.tgz.sha256" else 128 * 1024
+                    if len(data) + len(chunk) > limit:
+                        raise SystemExit("served publication grew while being read")
+                    data.extend(chunk)
         record[name] = digest.hexdigest()
+        contents[name] = bytes(data)
+    bundle_digest = record["iris-agent.tgz"]
+    sidecar = contents["iris-agent.tgz.sha256"]
+    if len(sidecar) != 65 or sidecar != (bundle_digest + "\n").encode("ascii"):
+        raise SystemExit("served bundle digest sidecar is invalid")
+    with tarfile.open(os.path.join(artifacts, "iris-agent.tgz"), "r:gz") as archive:
+        archive_members = archive.getmembers()
+        if len(archive_members) > 1024:
+            raise SystemExit("served bundle contains too many members")
+        for name in ("iris-signers.allowed_signers",
+                     "iris-root.allowed_signers"):
+            members = [member for member in archive_members
+                       if member.name == name]
+            if len(members) != 1 or not members[0].isfile() \
+                    or not 0 < members[0].size <= 128 * 1024:
+                raise SystemExit("served bundle trust member is invalid")
+            handle = archive.extractfile(members[0])
+            data = handle.read(128 * 1024 + 1) if handle is not None else b""
+            if not data or len(data) != members[0].size:
+                raise SystemExit("served bundle trust member is invalid")
+            record[name] = hashlib.sha256(data).hexdigest()
+            if name == "iris-signers.allowed_signers" \
+                    and data != contents["iris-signers.pem"]:
+                raise SystemExit("public and bundled signer trust differ")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
 try:
@@ -108,28 +155,56 @@ stage_atomic() {  # stage_atomic <tmp-file> <final-name>
   mv -f "$1" "$ART/$2"
 }
 
+render_trust() {  # render_trust <output-directory>
+  PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - "$ROOTS" "$1" <<'PYTHON'
+import sys
+from instruction_keys import InstructionKeyError, render_device_trust
+
+try:
+    render_device_trust(sys.argv[1], sys.argv[2])
+except InstructionKeyError as exc:
+    print("provision-served: instruction trust unavailable: " + str(exc),
+          file=sys.stderr)
+    raise SystemExit(1)
+PYTHON
+}
+
 # Guest Shell bundle — rebuilt every start from the image-baked device/ sources
 # (server/Dockerfile COPYs device/ into /opt/iris/device; there is no bind
 # mount, so a host-side edit under device/ reaches the served bundle only
 # after an image rebuild), so the served bundle can never drift from the
 # agent code this image carries.
+TX="$(mktemp -d "$ART/.served-bundle.XXXXXX")" || {
+  bundle_failed artifacts-unwritable
+  exit 1
+}
+trap 'rm -rf "$TX"' EXIT
 if [ ! -d "$DEVICE/agent" ] || [ ! -f "$ARIA2" ]; then
   bundle_failed inputs-missing
 elif ! verify_aria2; then
   bundle_failed verification-failed
-elif "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$ART/.iris-agent.tgz.tmp" \
-    && cp "$DEVICE/bootstrap.sh" "$ART/.bootstrap.sh.tmp" \
-    && stage_atomic "$ART/.iris-agent.tgz.tmp" iris-agent.tgz \
-    && stage_atomic "$ART/.bootstrap.sh.tmp" bootstrap.sh; then
+elif ! render_trust "$TX/trust"; then
+  bundle_failed instruction-roots-unavailable
+elif "$HERE/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$TX/iris-agent.tgz" \
+      --instruction-roots-dir "$ROOTS" \
+    && cp "$DEVICE/bootstrap.sh" "$TX/bootstrap.sh" \
+    && cp "$TX/trust/iris-signers.allowed_signers" "$TX/iris-signers.pem" \
+    && chmod 0644 "$TX/bootstrap.sh" "$TX/iris-signers.pem" \
+    && stage_atomic "$TX/iris-signers.pem" iris-signers.pem \
+    && stage_atomic "$TX/bootstrap.sh" bootstrap.sh \
+    && stage_atomic "$TX/iris-agent.tgz" iris-agent.tgz \
+    && stage_atomic "$TX/iris-agent.tgz.sha256" iris-agent.tgz.sha256; then
   if write_status ok ready; then
-    echo "provision-served: staged iris-agent.tgz + bootstrap.sh (Guest Shell agent)"
+    echo "provision-served: staged digest- and trust-bound Guest Shell bundle"
   else
     bundle_failed status-write-failed
   fi
 else
-  rm -f "$ART/.iris-agent.tgz.tmp" "$ART/.bootstrap.sh.tmp"
   bundle_failed publication-failed
 fi
+rm -rf "$TX"
+trap - EXIT
 
 # Pinned CA the devices download = the server's PUBLIC cert (plaintext on the
 # config volume, no decrypt needed). Refresh every start so a rotated cert

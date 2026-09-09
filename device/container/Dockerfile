@@ -22,7 +22,7 @@ LABEL org.opencontainers.image.title="IRIS device staging agent" \
 # remain identical for both wrappers.
 # curl drives the loopback RPC health probe and completion hook. BusyBox in
 # Alpine supplies ps, top, free and kill for field diagnosis; keep all four.
-RUN apk add --no-cache openssh-client sshpass ca-certificates curl
+RUN apk add --no-cache openssh-client openssh-keygen sshpass ca-certificates curl
 
 # Both architecture binaries are checksum-verified into the canonical build
 # context. BuildKit selects exactly one for each platform manifest in the OCI
@@ -35,18 +35,19 @@ COPY agent/*.py /opt/iris/agent/
 # execs it directly -- execlp, no shell -- so it needs the exec bit below.
 COPY agent/peer-transfer-hook.sh /opt/iris/agent/peer-transfer-hook.sh
 COPY agent/VERSION /opt/iris/agent/VERSION
+COPY agent/iris-signers.allowed_signers /opt/iris/agent/iris-signers.allowed_signers
+COPY agent/iris-root.allowed_signers /opt/iris/agent/iris-root.allowed_signers
 COPY entrypoint.sh /entrypoint.sh
 COPY reconcile.sh /reconcile.sh
 RUN chmod +x /entrypoint.sh /opt/iris/bin/aria2c /opt/iris/agent/peer-transfer-hook.sh \
-    && chmod 0444 /reconcile.sh
+    && chmod 0444 /reconcile.sh /opt/iris/agent/iris-signers.allowed_signers \
+        /opt/iris/agent/iris-root.allowed_signers
 
 ENV PATH="/opt/iris/bin:${PATH}" \
     PYTHONPATH="/opt/iris/agent" \
     PYTHONUNBUFFERED=1 \
     IRIS_RPC_PORT="6800" \
     IRIS_TICK_SECONDS="60" \
-    IRIS_MAX_PEERS="10" \
-    IRIS_MAX_CONCURRENT="100" \
     IRIS_TELEMETRY="on" \
     IRIS_LOG="off"
 

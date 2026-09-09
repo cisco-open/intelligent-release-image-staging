@@ -45,11 +45,13 @@ _PUBLIC_ARTIFACT = re.compile(
     r"^(?:bootstrap\.sh|iris-[A-Za-z0-9._-]+\.(?:tgz|tar|rpm|pem))$")
 _LEGACY_STATIC_ARTIFACTS = frozenset((
     "bootstrap.sh", "iris-agent.tgz", "iris-agent-arm.tgz",
-    "iris-catalog.pem",
+    "iris-catalog.pem", "iris-signers.pem",
 ))
 _LEGACY_STAGING_ARTIFACT = re.compile(
     r"^(?:iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf|"
-    r"rpc-secret-[0-9A-Fa-f]{32})$")
+    r"rpc-secret-[0-9A-Fa-f]{32}|"
+    r"iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope|"
+    r"bundle-sha256-[0-9a-f]{32})$")
 
 
 def _legacy_guest_shell_target(request_path):

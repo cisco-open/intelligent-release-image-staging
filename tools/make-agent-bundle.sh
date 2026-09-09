@@ -17,17 +17,19 @@ MANIFEST_ARCH="x86_64"
 ARCH="amd64"
 ARIA2_EXPLICIT=0
 OUT=""
+ROOTS="${IRIS_INSTRUCTION_ROOTS_DIR:-${IRIS_CONFIG:-/etc/iris}/instr/roots.d}"
 usage() {
-  echo "usage: $0 [--arch amd64|arm64] [--aria2 /path/to/aria2c] [--out output.tgz]"
+  echo "usage: $0 [--arch amd64|arm64] [--aria2 /path/to/aria2c] [--out output.tgz] [--instruction-roots-dir DIR]"
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --arch|--aria2|--out)
+    --arch|--aria2|--out|--instruction-roots-dir)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { usage >&2; exit 2; }
       case "$1" in
         --arch) ARCH="$2" ;;
         --aria2) ARIA2="$2"; ARIA2_EXPLICIT=1 ;;
         --out) OUT="$2" ;;
+        --instruction-roots-dir) ROOTS="$2" ;;
       esac
       shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -152,7 +154,19 @@ mkdir -p "$(dirname "$OUT")"
 # container's startup self-provisioning, so the served bundle never drifts.
 say ""
 say "Packing the bundle..."
-"$REPO_ROOT/server/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$OUT"
+"$REPO_ROOT/server/pack-agent-bundle.sh" "$DEVICE" "$ARIA2" "$OUT" \
+  --instruction-roots-dir "$ROOTS"
+
+# The one packer owns this adjacent evidence. Refuse to report success if a
+# substituted wrapper failed to produce the exact raw digest contract.
+EXPECTED="$( (shasum -a 256 "$OUT" 2>/dev/null || sha256sum "$OUT") \
+  | awk '{print $1}')"
+[ -f "$OUT.sha256" ] \
+  && [ "$(wc -c < "$OUT.sha256" | tr -d ' ')" -eq 65 ] \
+  && [ "$(cat "$OUT.sha256")" = "$EXPECTED" ] || {
+    echo "bundle digest sidecar is missing or invalid: $OUT.sha256" >&2
+    exit 1
+  }
 
 # also place the bootstrap next to it — the installer fetches both from :8000
 cp "$DEVICE/bootstrap.sh" "$(dirname "$OUT")/bootstrap.sh"

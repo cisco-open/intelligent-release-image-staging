@@ -33,6 +33,8 @@ INSTRUCTION_NAMESPACE = "iris-instructions-v1"
 KEYLIST_NAMESPACE = "iris-keylist-v1"
 ONLINE_PRINCIPAL = "iris-server"
 ROOT_PRINCIPAL = "iris-root"
+DEVICE_SIGNERS_FILE = "iris-signers.allowed_signers"
+DEVICE_ROOTS_FILE = "iris-root.allowed_signers"
 EPOCH_SCHEMA = "iris-instructions-epoch/v1"
 KEYLIST_STATE_SCHEMA = "iris-instruction-keylist-state/v1"
 STATUS_SCHEMA = "iris-instruction-key-status/v1"
@@ -404,6 +406,77 @@ def discover_roots(paths):
             raise InstructionKeyError("configured root public key must be a regular file")
         roots[root_id] = _public_key_bytes(entry.path)
     return _snapshot_roots(roots)
+
+
+def _strict_root_directory(directory):
+    """Load the exact two public roots used to build device trust.
+
+    Runtime custody discovery remains tolerant of an unconfigured directory so
+    status can report that state. Build and publication paths use this stricter
+    interface: an absent root ceremony or any extra directory entry is an
+    error, and no output is created.
+    """
+    directory = os.fspath(directory)
+    try:
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise InstructionKeyError("instruction roots directory is invalid")
+        with os.scandir(directory) as scan:
+            entries = sorted(scan, key=lambda entry: entry.name)
+    except InstructionKeyError:
+        raise
+    except OSError as exc:
+        raise InstructionKeyError("instruction roots directory is unreadable") from exc
+    if len(entries) != 2 or any(not entry.name.endswith(".pub")
+                                for entry in entries):
+        raise InstructionKeyError(
+            "device trust requires exactly two unambiguous public roots")
+    roots = {}
+    for entry in entries:
+        root_id = entry.name[:-4]
+        if not _ROOT_ID.fullmatch(root_id):
+            raise InstructionKeyError("configured root id is invalid")
+        try:
+            info = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise InstructionKeyError(
+                "configured root public key is unreadable") from exc
+        if entry.is_symlink() or not stat.S_ISREG(info.st_mode):
+            raise InstructionKeyError(
+                "configured root public key must be a regular file")
+        roots[root_id] = _public_key_bytes(entry.path)
+    snapshots = _snapshot_roots(roots)
+    if len(snapshots) != 2:
+        raise InstructionKeyError("device trust requires exactly two public roots")
+    return snapshots
+
+
+def render_device_trust(roots_dir, output_dir):
+    """Render deterministic device verifier trust from two offline roots.
+
+    The root files are parsed and canonicalized here so shell build helpers do
+    not acquire a second public-key parser. Both outputs are fully prepared
+    before their mode-0644 atomic writes begin.
+    """
+    roots = _strict_root_directory(roots_dir)
+    ca_lines = []
+    root_lines = []
+    for root_id, public_key in roots.items():
+        key_type, blob = _read_public_key(public_key)
+        ca_lines.append(
+            '%s cert-authority,namespaces="%s" %s %s\n' % (
+                ONLINE_PRINCIPAL, INSTRUCTION_NAMESPACE, key_type, blob))
+        root_lines.append(
+            '%s:%s namespaces="%s" %s %s\n' % (
+                ROOT_PRINCIPAL, root_id, KEYLIST_NAMESPACE, key_type, blob))
+    rendered = {
+        DEVICE_SIGNERS_FILE: "".join(ca_lines).encode("ascii"),
+        DEVICE_ROOTS_FILE: "".join(root_lines).encode("ascii"),
+    }
+    output_dir = os.fspath(output_dir)
+    for name, data in rendered.items():
+        _atomic_write(os.path.join(output_dir, name), data, mode=0o644)
+    return tuple(os.path.join(output_dir, name) for name in rendered)
 
 
 def write_allowed_signers(path, identity, public_keys, *, namespace,

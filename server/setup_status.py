@@ -25,6 +25,8 @@ import json
 import os
 import re
 import ssl
+import stat
+import tarfile
 
 IOX_PACKAGES = ("iris-amd64.tar", "iris-arm64.tar")
 XR_PACKAGE = "iris-xr.rpm"
@@ -205,7 +207,7 @@ def package_readiness(path, name, kind, platform, remedy):
 
 
 def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
-    """Bind the latest startup provisioning result to both served files."""
+    """Bind provisioning to the bundle, raw digest and both trust views."""
     entry = {"name": "iris-agent.tgz", "fingerprint": None, "built_at": None,
              "provenance": None, "state": "unknown",
              "remedy": "Rebuild the server image and restart after correcting the provisioning error.",
@@ -230,27 +232,89 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
             entry.update(state="stale", reason="provisioning-failed",
                          detail="The latest Guest Shell bundle provisioning did not succeed; inspect server startup logs.")
             return entry
-        for name in ("iris-agent.tgz", "bootstrap.sh"):
+        contents = {}
+        for name in ("iris-agent.tgz", "iris-agent.tgz.sha256",
+                     "bootstrap.sh", "iris-signers.pem"):
             expected = record.get(name)
             if not isinstance(expected, str) or not _HEX_SHA256.fullmatch(expected):
                 return entry
-            with open(os.path.join(artifacts_dir, name), "rb") as handle:
+            target = os.path.join(artifacts_dir, name)
+            before = os.lstat(target)
+            if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+                return entry
+            with open(target, "rb") as handle:
                 info = os.fstat(handle.fileno())
-                if not info.st_size:
+                if not stat.S_ISREG(info.st_mode) \
+                        or (before.st_dev, before.st_ino) != \
+                        (info.st_dev, info.st_ino) or not info.st_size:
+                    return entry
+                if name == "iris-agent.tgz.sha256" and info.st_size != 65:
+                    entry.update(state="stale", reason="served-bundle-changed",
+                                 detail="The served bundle digest sidecar is not canonical.")
+                    return entry
+                if name == "iris-signers.pem" and info.st_size > 128 * 1024:
                     return entry
                 digest = hashlib.sha256()
+                data = bytearray()
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
+                    if name in ("iris-agent.tgz.sha256", "iris-signers.pem"):
+                        limit = 65 if name == "iris-agent.tgz.sha256" \
+                            else 128 * 1024
+                        if len(data) + len(chunk) > limit:
+                            entry.update(
+                                state="stale", reason="served-bundle-changed",
+                                detail="A bounded served publication input grew while being read.")
+                            return entry
+                        data.extend(chunk)
                 if name == "iris-agent.tgz":
                     entry["built_at"] = int(info.st_mtime)
             if digest.hexdigest() != expected:
                 entry.update(state="stale", reason="served-bundle-changed",
-                             detail="The served bundle or bootstrap changed after verified provisioning.")
+                             detail="A served bundle publication input changed after verified provisioning.")
                 return entry
-    except (OSError, ValueError, UnicodeError):
+            contents[name] = bytes(data)
+        bundle_digest = record["iris-agent.tgz"]
+        if contents["iris-agent.tgz.sha256"] != \
+                (bundle_digest + "\n").encode("ascii"):
+            entry.update(state="stale", reason="served-bundle-changed",
+                         detail="The served bundle digest sidecar is not the exact digest of the bundle.")
+            return entry
+        embedded = {}
+        with tarfile.open(os.path.join(artifacts_dir, "iris-agent.tgz"),
+                          "r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) > 1024:
+                return entry
+            for name in ("iris-signers.allowed_signers",
+                         "iris-root.allowed_signers"):
+                matches = [member for member in members
+                           if member.name == name]
+                if len(matches) != 1 or not matches[0].isfile() \
+                        or not 0 < matches[0].size <= 128 * 1024:
+                    return entry
+                handle = archive.extractfile(matches[0])
+                data = handle.read(128 * 1024 + 1) if handle is not None else b""
+                if not data or len(data) != matches[0].size:
+                    return entry
+                embedded[name] = data
+                expected = record.get(name)
+                if not isinstance(expected, str) \
+                        or not _HEX_SHA256.fullmatch(expected):
+                    return entry
+                if hashlib.sha256(data).hexdigest() != expected:
+                    entry.update(state="stale", reason="served-bundle-changed",
+                                 detail="Embedded device instruction trust changed after verified provisioning.")
+                    return entry
+        if embedded["iris-signers.allowed_signers"] != \
+                contents["iris-signers.pem"]:
+            entry.update(state="stale", reason="served-bundle-changed",
+                         detail="Public and bundled instruction signer trust do not match.")
+            return entry
+    except (OSError, ValueError, UnicodeError, tarfile.TarError):
         return entry
     entry.update(state="ok", reason="ready",
-                 detail="The served bundle and bootstrap match the latest successful provisioning from a checksum- and architecture-verified aria2c.")
+                 detail="The served bundle, raw digest, bootstrap and device instruction trust match the latest successful provisioning from a checksum- and architecture-verified aria2c.")
     return entry
 
 

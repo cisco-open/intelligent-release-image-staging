@@ -684,6 +684,8 @@ def _path_parameters(path):
                 "oneOf": [
                     {"pattern": r"^iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf$"},
                     {"pattern": r"^rpc-secret-[0-9A-Fa-f]{32}$"},
+                    {"pattern": r"^iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope$"},
+                    {"pattern": r"^bundle-sha256-[0-9a-f]{32}$"},
                 ],
             } if name == "legacy_artifact" else
                 {"type": "string", "minLength": 1}),
@@ -2207,7 +2209,7 @@ def _description(route):
         notes.extend([
             "Only the current same-device catalog Bearer is accepted. Previous catalog tokens are limited to token-refresh. Missing/malformed Bearer returns 401 before any store access; usable Bearer meets strict credential-store validation before dispatch (503 on unavailable state). A valid credential naming another device returns 403 without revealing target existence.",
             "Both instruction routes share one process-local per-device token bucket: burst 2, refill one token per 10 seconds, 20,000 device bound, and 20-second idle pruning. Body, 304 and later resource-error requests all consume a token; authentication/authorization failures do not. Retry-After on 429 is max(1, ceil((1 - tokens) * 10)). Restart resets the limiter; multiple processes or replicas multiply the allowance. The supported deployment uses one catalog process/replica.",
-            "No instruction-key material, role artifacts, signatures or trust roots have separate delivery aliases. IRIS stages images only.",
+            "No instruction keys, role artifacts or signatures have separate delivery aliases. Device verifier roots use only the exact artifact and bundle trust files; IRIS stages images only.",
         ])
         if route.path == INSTRUCTION_RESOURCES[0]:
             notes.append("Reconstructs at most 256 KiB from one stored stamp and its validated immutable role artifact. The exact stamped non-revoked current key remains eligible regardless of rotation-trigger expiry; a non-revoked previous key is eligible only before its overlap deadline. Every response, including cache hits and 304, rechecks complete state and key eligibility. Missing stamp/named file returns counted 404; an unavailable stamped key returns stale_pointer 409. server_time equals stored issued_at; current HTTP Date does not change envelope bytes. The process-memory ciphertext cache is bounded at 256 entries and 16 MiB; per-device ciphertext is never persisted.")
@@ -2291,7 +2293,7 @@ def build_document():
             "trackerErrors": "BEP clients require bencoded failures, so tracker errors are not RFC 9457.",
             "probeErrors": "readyz 503 remains a deliberately non-disclosing {ok:false} health document.",
             "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
-            "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses four static files and two high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
+            "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses five static files and four high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
             "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
             "pagination": "Devices and audit expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
             "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",

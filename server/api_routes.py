@@ -178,6 +178,10 @@ ROUTES = tuple(
           "Download Guest Shell catalog CA"),
     Route("artifact", "HEAD", "/iris-catalog.pem", "guestShellAnonymousStatic",
           "Inspect Guest Shell catalog CA"),
+    Route("artifact", "GET", "/iris-signers.pem", "guestShellAnonymousStatic",
+          "Download Guest Shell instruction signer trust"),
+    Route("artifact", "HEAD", "/iris-signers.pem", "guestShellAnonymousStatic",
+          "Inspect Guest Shell instruction signer trust"),
     Route("artifact", "GET", "/staging/{legacy_artifact}",
           "legacyGuestShell", "Download Guest Shell enrollment capability"),
     Route("artifact", "HEAD", "/staging/{legacy_artifact}",
@@ -196,7 +200,9 @@ def _pattern(template):
             atom = ".+"
         elif match.group(1) == "legacy_artifact":
             atom = (r"(?:iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf|"
-                    r"rpc-secret-[0-9A-Fa-f]{32})")
+                    r"rpc-secret-[0-9A-Fa-f]{32}|"
+                    r"iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope|"
+                    r"bundle-sha256-[0-9a-f]{32})")
         else:
             atom = "[^/]+"
         pieces.append("(?P<%s>%s)" % (match.group(1), atom))
