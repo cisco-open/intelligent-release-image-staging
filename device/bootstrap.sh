@@ -189,11 +189,28 @@ def write_phase(tx, value):
 
 
 def read_phase(tx):
+    path = os.path.join(tx, "phase")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
-        with open(os.path.join(tx, "phase"), "rb") as stream:
-            data = stream.read(32)
-    except OSError:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
         return "preparing"
+    except OSError:
+        return "invalid"
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32:
+            return "invalid"
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            data = stream.read(33)
+    except OSError:
+        return "invalid"
+    finally:
+        os.close(descriptor)
     try:
         value = data.decode("ascii").strip()
     except UnicodeDecodeError:
@@ -205,6 +222,8 @@ def open_regular(path, max_bytes):
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     try:
         fd = os.open(path, flags)
     except OSError:
@@ -213,65 +232,93 @@ def open_regular(path, max_bytes):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
             raise BundleError("invalid-evidence")
-        return os.fdopen(fd, "rb")
+        identity = (info.st_dev, info.st_ino, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns)
+        return os.fdopen(fd, "rb"), identity
     except Exception:
         os.close(fd)
         raise
 
 
+def stream_identity(stream):
+    info = os.fstat(stream.fileno())
+    return (info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
 def files_equal_regular(first, second, max_bytes):
-    left = open_regular(first, max_bytes)
-    right = open_regular(second, max_bytes)
+    left = None
+    right = None
     try:
-        left_info = os.fstat(left.fileno())
-        right_info = os.fstat(right.fileno())
-        if left_info.st_size == 0 or left_info.st_size != right_info.st_size:
+        left, left_identity = open_regular(first, max_bytes)
+        right, right_identity = open_regular(second, max_bytes)
+        if left_identity[2] == 0 or left_identity[2] != right_identity[2]:
             return False
+        copied = 0
         while True:
             left_chunk = left.read(65536)
             right_chunk = right.read(65536)
             if left_chunk != right_chunk:
                 return False
             if not left_chunk:
+                if copied != left_identity[2] \
+                        or stream_identity(left) != left_identity \
+                        or stream_identity(right) != right_identity:
+                    raise BundleError("invalid-evidence")
                 return True
+            copied += len(left_chunk)
+            if copied > max_bytes:
+                raise BundleError("invalid-evidence")
     finally:
-        left.close()
-        right.close()
+        if left is not None:
+            left.close()
+        if right is not None:
+            right.close()
 
 
 def checked_digest(bundle_path, digest_path):
     try:
-        digest_stream = open_regular(digest_path, 65)
+        digest_stream, digest_identity = open_regular(digest_path, 65)
         with digest_stream:
             raw = digest_stream.read(66)
+            if stream_identity(digest_stream) != digest_identity:
+                raise BundleError("invalid-evidence")
     except BundleError:
         raise BundleError("invalid-digest")
     if len(raw) != 65 or raw[64:] != b"\n" \
             or re.match(br"\A[0-9a-f]{64}\n\Z", raw) is None:
         raise BundleError("invalid-digest")
     try:
-        bundle_stream = open_regular(bundle_path, MAX_ARCHIVE)
+        bundle_stream, bundle_identity = open_regular(bundle_path, MAX_ARCHIVE)
     except BundleError:
         raise BundleError("invalid-archive")
-    info = os.fstat(bundle_stream.fileno())
-    if info.st_size == 0:
+    if bundle_identity[2] == 0:
         bundle_stream.close()
         raise BundleError("invalid-archive")
     actual = hashlib.sha256()
+    copied = 0
     while True:
         chunk = bundle_stream.read(1024 * 1024)
         if not chunk:
             break
+        copied += len(chunk)
+        if copied > MAX_ARCHIVE:
+            bundle_stream.close()
+            raise BundleError("invalid-archive")
         actual.update(chunk)
+    if copied != bundle_identity[2] \
+            or stream_identity(bundle_stream) != bundle_identity:
+        bundle_stream.close()
+        raise BundleError("invalid-archive")
     if actual.hexdigest().encode("ascii") != raw[:64]:
         bundle_stream.close()
         raise BundleError("digest-mismatch")
     bundle_stream.seek(0)
-    return bundle_stream
+    return bundle_stream, bundle_identity
 
 
 def inspect_and_extract(bundle_path, digest_path, new_dir):
-    stream = checked_digest(bundle_path, digest_path)
+    stream, bundle_identity = checked_digest(bundle_path, digest_path)
     expected = set(ARCHIVE_FILES)
     seen = set()
     total = 0
@@ -348,6 +395,8 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
                         raise BundleError("invalid-archive")
                 fsync_dir(os.path.join(new_dir, "agent"))
                 fsync_dir(new_dir)
+            if stream_identity(stream) != bundle_identity:
+                raise BundleError("invalid-archive")
     except BundleError:
         raise
     except (OSError, tarfile.TarError, EOFError):
@@ -357,10 +406,31 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
 def validate_prior(prior):
     files = os.path.join(prior, "files")
     absent = os.path.join(prior, "absent")
-    for name in TOP_LEVEL:
-        if not lexists(os.path.join(files, name)) \
-                and not lexists(os.path.join(absent, name)):
+    if not os.path.isdir(files) or os.path.islink(files) \
+            or not os.path.isdir(absent) or os.path.islink(absent):
+        raise BundleError("transaction-invalid")
+    allowed = set(TOP_LEVEL)
+    try:
+        if not set(os.listdir(files)).issubset(allowed) \
+                or not set(os.listdir(absent)).issubset(allowed):
             raise BundleError("transaction-invalid")
+    except OSError:
+        raise BundleError("transaction-invalid")
+    for name in TOP_LEVEL:
+        saved = os.path.join(files, name)
+        marker = os.path.join(absent, name)
+        has_saved = lexists(saved)
+        has_marker = lexists(marker)
+        if has_saved == has_marker:
+            raise BundleError("transaction-invalid")
+        if has_marker:
+            try:
+                marker_info = os.lstat(marker)
+            except OSError:
+                raise BundleError("transaction-invalid")
+            if not stat.S_ISREG(marker_info.st_mode) \
+                    or marker_info.st_size != 0:
+                raise BundleError("transaction-invalid")
 
 
 def rollback(stage, tx):
@@ -600,23 +670,18 @@ if [ -e "$STAGE/bundle.tgz" ] || [ -L "$STAGE/bundle.tgz" ]; then
       bundle_rejected=1
     }
     if [ "$bundle_rejected" -eq 0 ]; then
-      if ! sync_eem_bootstrap; then
+      # Commit the staged runtime before changing the EEM-facing launcher. If
+      # the sibling rename then fails, retain phase=committed so the next old
+      # launcher tick retries that rename and finalizes; do not roll a durable
+      # runtime back or launch through a mixed pair.
+      if ! bundle_transaction commit "$STAGE" >/dev/null; then
         bundle_transaction rollback "$STAGE" >/dev/null 2>&1 \
           || { echo "IRIS-BOOTSTRAP: bundle rollback failed; refusing to launch" >&2; exit 1; }
-        if [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ]; then
-          sync_eem_bootstrap >/dev/null 2>&1 || true
-        fi
         reject_bundle install-failed
         bundle_rejected=1
-      elif ! bundle_transaction commit "$STAGE" >/dev/null; then
-        bundle_transaction rollback "$STAGE" >/dev/null 2>&1 \
-          || { echo "IRIS-BOOTSTRAP: bundle rollback failed; refusing to launch" >&2; exit 1; }
-        if [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ]; then
-          sync_eem_bootstrap >/dev/null 2>&1 \
-            || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
-        fi
-        reject_bundle install-failed
-        bundle_rejected=1
+      elif ! sync_eem_bootstrap; then
+        echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2
+        exit 1
       else
         rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
               "$STAGE/.incoming-iris-signers.allowed_signers" 2>/dev/null || true
