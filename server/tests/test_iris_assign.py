@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """CLI and shared assignment transaction, fleet lifetime, and audit tests."""
+import copy
 import os
 import json
 import threading
@@ -175,6 +176,31 @@ def test_cli_retries_exactly_one_conflict(tmp_path, monkeypatch, conflicts):
     assert events[0]["result"] == ("ok" if conflicts == 1 else "fail")
     assert events[0]["before_image_ids"] == ["a", "b"]
     assert store.get_policy("sw-1")["approved_image_ids"] == (["a", "b", "c"] if conflicts == 1 else ["a", "b"])
+
+
+def test_cli_replace_rebases_its_retry(tmp_path, monkeypatch):
+    store = _images(tmp_path)
+    store.set_policy("sw-1", approved_image_ids=["a"])
+    original = catalog.CatalogStore.set_policy
+    calls = []
+
+    def conflicting(self, device_id, **kwargs):
+        calls.append(copy.deepcopy(kwargs))
+        if len(calls) == 1:
+            original(self, device_id, approved_image_ids=["a", "b"])
+            raise catalog.PolicyConflict(["a", "b"])
+        return original(self, device_id, **kwargs)
+
+    monkeypatch.setattr(catalog.CatalogStore, "set_policy", conflicting)
+
+    assert _load_cli().main(["--replace", "sw-1", "c"]) == 0
+    assert [call["expect_image_ids"] for call in calls] == [
+        ["a"], ["a", "b"]]
+    assert store.get_policy("sw-1")["approved_image_ids"] == ["c"]
+    event = _events(tmp_path)[0]
+    assert event["before_image_ids"] == ["a", "b"]
+    assert event["after_image_ids"] == ["c"]
+    assert event["removed_image_ids"] == ["a", "b"]
 
 
 def test_missing_fleet_refuses_without_policy_or_mint(tmp_path, monkeypatch):

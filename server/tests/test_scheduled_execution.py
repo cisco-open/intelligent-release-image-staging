@@ -4,6 +4,7 @@
 
 """Integrated scheduled assignment/onboarding authority and recovery tests."""
 import contextlib
+import copy
 import hashlib
 import json
 import sqlite3
@@ -220,6 +221,103 @@ def test_due_assignment_intents_keep_their_own_baselines(tmp_path):
     assert any(('before_ids=["image-a"]' in event["detail"] or
                 'before_ids=["image-b"]' in event["detail"])
                for event in audit_events)
+
+
+def test_overlapping_scheduled_replace_keeps_prepared_cas(
+        tmp_path, monkeypatch):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    for image_id in ("base", "image-a", "image-b"):
+        images.save_image(_image(image_id))
+    images.set_policy("edge-1", approved_image_ids=["base"])
+    original_set_policy = images.set_policy
+    policy_calls = []
+
+    def observe_policy_write(*args, **kwargs):
+        policy_calls.append(copy.deepcopy(kwargs))
+        return original_set_policy(*args, **kwargs)
+
+    monkeypatch.setattr(images, "set_policy", observe_policy_write)
+    authority = tmp_path / "assignment-authority.sqlite3"
+    writer = assignment_service.AssignmentService(
+        images, fleet, str(tmp_path / "audit.jsonl"),
+        authority_path=str(authority))
+    store = schedules.ScheduleStore(tmp_path)
+    definitions = (
+        ("merge", NOW - 1,
+         _definition(device_ids=["edge-1"], image_ids=["image-b"])),
+        ("replace", NOW,
+         _definition(device_ids=["edge-1"], image_ids=["image-a"],
+                     mode="replace")),
+    )
+    for schedule_id, scheduled_at, definition in definitions:
+        definition["when"]["at"] = scheduled_at
+        store.create(
+            schedule_id, definition, actor="console:test", now=NOW - 2,
+            preview={"revision": 1, "now": NOW - 2,
+                     "device_ids": ["edge-1"]})
+    clock, policy, errors = _Clock(), _Policy(), []
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        clock=clock)
+
+    def make_runner():
+        return schedule_runner.ScheduleRunner(
+            store,
+            lambda _row: {"revision": 2, "now": clock.now,
+                          "device_ids": ["edge-1"],
+                          "missing_os_family": 0, "role_drift": 0,
+                          "quarantined_ids": []},
+            executor=executor, role_guard=_role_guard(policy), now_fn=clock,
+            poll_interval=.01, error_fn=errors.append)
+
+    runner = make_runner()
+    runner.run_once()
+    occurrence_store = schedules.OccurrenceStore(tmp_path)
+    receipt_store = schedules.ReceiptStore(tmp_path)
+    occurrences = {row["schedule_id"]: row
+                   for row in occurrence_store.list()}
+    assert set(occurrences) == {"merge", "replace"}
+    assert all(receipt_store.get(row["id"], "edge-1")[
+                   "before_image_ids"] == ["base"]
+               for row in occurrences.values())
+
+    # A restarted runner orders the two active occurrences by scheduled time,
+    # so the earlier merge commits before the overlapping replacement.
+    clock.now += 1
+    runner = make_runner()
+    runner.run_once()
+    runner.run_once()
+
+    merge_receipt = receipt_store.get(
+        occurrences["merge"]["id"], "edge-1")
+    replace_receipt = receipt_store.get(
+        occurrences["replace"]["id"], "edge-1")
+    assert merge_receipt["status"] == "ok"
+    assert merge_receipt["before_image_ids"] == ["base"]
+    assert merge_receipt["after_image_ids"] == ["base", "image-b"]
+    assert replace_receipt["status"] == "skipped"
+    assert replace_receipt["reason"] == "conflict"
+    assert replace_receipt["before_image_ids"] == ["base"]
+    assert replace_receipt["after_image_ids"] == ["base", "image-b"]
+    assert replace_receipt["removed_image_ids"] == []
+    assert images.get_policy("edge-1")["approved_image_ids"] == [
+        "base", "image-b"]
+    assert [call["expect_image_ids"] for call in policy_calls] == [
+        ["base"], ["base"], ["base"]]
+    assert {row["state"] for row in occurrence_store.list()} == {
+        "completed"}
+    assert runner.last_error is None and errors == []
+    with sqlite3.connect(authority) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+    events = [json.loads(line) for line in
+              (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert [event["result"] for event in events] == ["ok", "fail"]
+    assert 'before_ids=["base"]' in events[0]["detail"]
+    assert 'after_ids=["base", "image-b"]' in events[0]["detail"]
+    assert 'before_ids=["base", "image-b"]' in events[1]["detail"]
+    assert 'after_ids=["base", "image-b"]' in events[1]["detail"]
 
 
 def test_manual_assignment_generation_wins_after_prepared_intent(tmp_path):

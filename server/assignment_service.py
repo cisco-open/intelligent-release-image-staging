@@ -398,9 +398,19 @@ class AssignmentService:
             elif conn is not None:
                 conn.execute("UPDATE authority SET manual_pending=1 WHERE device_id=?", (device_id,))
             try:
+                # A scheduled replacement owns the policy captured with its
+                # intent. Retrying against a newer policy would silently erase
+                # an overlapping merge. Manual replacements and merges retain
+                # their established one-time rebase behavior.
+                scheduled_replace = context is not None and mode == "replace"
                 for attempt in range(2 if retry_conflict else 1):
                     ids = list(dict.fromkeys(before + requested)) if mode == "merge" else requested
-                    expected = before if mode == "merge" or retry_conflict else expect_image_ids
+                    if scheduled_replace:
+                        expected = expect_image_ids
+                    elif mode == "merge" or retry_conflict:
+                        expected = before
+                    else:
+                        expected = expect_image_ids
                     for iid in ids:
                         if self.store.get_image(iid) is None:
                             raise ValueError("no such image")
@@ -413,7 +423,9 @@ class AssignmentService:
                         before[:] = exc.current_ids
                         if not retry_conflict or attempt == 1:
                             raise
-                        before[:] = self.store.get_policy(device_id)["approved_image_ids"]
+                        if not scheduled_replace:
+                            before[:] = self.store.get_policy(
+                                device_id)["approved_image_ids"]
             except (ValueError, catalog.PolicyConflict, catalog.QuarantinedImage) as exc:
                 # These catalog exceptions are known refusals before mutation.
                 # Other failures retain intent, since commit may have happened.
@@ -444,8 +456,9 @@ class AssignmentService:
               scheduled_context=None):
         """Apply replacement or ordered-unique merge, with one outcome audit.
 
-        CLI and scheduled callers opt into retry_conflict: at most two CAS attempts,
-        rebuilding a merge from the new snapshot after the first conflict.
+        CLI and scheduled callers opt into retry_conflict for at most two CAS
+        attempts. Merges and manual CLI replacements rebase after the first
+        conflict; a scheduled replacement retains its prepared CAS baseline.
         API replacement retains its caller-supplied CAS and does not retry.
         The returned before/after/removed IDs come from the successful shard
         callback, never the optimistic pre-read. Audit append is best-effort,
