@@ -120,8 +120,8 @@ def _instruction_identity_schema():
 
 
 def _instruction_evidence_schema():
-    return {"type": ["string", "null"],
-            "enum": ["agent-asserted", "server-observed", None]}
+    return {"type": "string",
+            "enum": ["agent-asserted", "server-observed"]}
 
 
 def _instruction_device_schema():
@@ -134,7 +134,8 @@ def _instruction_device_schema():
                              "enum": sorted(instructions.INSTR_STATES) + [None]},
         "underlying_label": {
             "type": "string", "minLength": 1, "maxLength": 96},
-        "underlying_evidence": _instruction_evidence_schema(),
+        "underlying_evidence": {
+            "type": "string", "const": "agent-asserted"},
         "reason": {"type": ["string", "null"],
                    "enum": sorted(instructions.INSTR_REASONS) + [None]},
         "reported_instr_serial": _nullable_instruction_integer(),
@@ -147,7 +148,8 @@ def _instruction_device_schema():
         "report_age_seconds": _nullable_instruction_integer(),
         "report_stale": {"type": ["boolean", "null"]},
         "revoked": {"type": ["boolean", "null"]},
-        "revocation_evidence": _instruction_evidence_schema(),
+        "revocation_evidence": {
+            "type": "string", "const": "server-observed"},
     }
     return {
         "type": "object", "properties": fields,
@@ -264,7 +266,7 @@ def _instruction_custody_example():
         "keylist_seq": 8, "keylist_age_days": 30,
         "keylist_resign_due": False, "roots_configured": 2,
         "roots_attested_180d": 2, "root_ceremony_overdue": "ok",
-        "root_quorum_degraded": False, "updated_at": 1788955200,
+        "root_quorum_degraded": False, "updated_at": 1788470400,
     }
 
 

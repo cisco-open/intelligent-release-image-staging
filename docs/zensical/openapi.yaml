@@ -593,7 +593,7 @@
                     "roots_attested_180d": 2,
                     "root_ceremony_overdue": "ok",
                     "root_quorum_degraded": false,
-                    "updated_at": 1788955200
+                    "updated_at": 1788470400
                   },
                   "enforcement": {
                     "state": null,
@@ -12030,14 +12030,10 @@
                                 "maxLength": 96
                               },
                               "evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
+                                "type": "string",
                                 "enum": [
                                   "agent-asserted",
-                                  "server-observed",
-                                  null
+                                  "server-observed"
                                 ]
                               },
                               "underlying_state": {
@@ -12074,15 +12070,8 @@
                                 "maxLength": 96
                               },
                               "underlying_evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "enum": [
-                                  "agent-asserted",
-                                  "server-observed",
-                                  null
-                                ]
+                                "type": "string",
+                                "const": "agent-asserted"
                               },
                               "reason": {
                                 "type": [
@@ -12183,15 +12172,8 @@
                                 ]
                               },
                               "revocation_evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "enum": [
-                                  "agent-asserted",
-                                  "server-observed",
-                                  null
-                                ]
+                                "type": "string",
+                                "const": "server-observed"
                               }
                             },
                             "required": [
@@ -30141,7 +30123,7 @@
                     "roots_attested_180d": 2,
                     "root_ceremony_overdue": "ok",
                     "root_quorum_degraded": false,
-                    "updated_at": 1788955200
+                    "updated_at": 1788470400
                   },
                   "enforcement": {
                     "state": null,
@@ -40445,14 +40427,10 @@
                                 "maxLength": 96
                               },
                               "evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
+                                "type": "string",
                                 "enum": [
                                   "agent-asserted",
-                                  "server-observed",
-                                  null
+                                  "server-observed"
                                 ]
                               },
                               "underlying_state": {
@@ -40489,15 +40467,8 @@
                                 "maxLength": 96
                               },
                               "underlying_evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "enum": [
-                                  "agent-asserted",
-                                  "server-observed",
-                                  null
-                                ]
+                                "type": "string",
+                                "const": "agent-asserted"
                               },
                               "reason": {
                                 "type": [
@@ -40598,15 +40569,8 @@
                                 ]
                               },
                               "revocation_evidence": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "enum": [
-                                  "agent-asserted",
-                                  "server-observed",
-                                  null
-                                ]
+                                "type": "string",
+                                "const": "server-observed"
                               }
                             },
                             "required": [
