@@ -1122,6 +1122,48 @@ def test_supervisor_eof_reap_uses_only_the_original_absolute_deadline():
                 pass
 
 
+def test_supervisor_reap_limits_term_phase_to_five_seconds(monkeypatch):
+    import signal
+
+    module = _verification_module()
+    now = [0.0]
+    signals = []
+
+    class Process(object):
+        pid = 4242
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    process = Process()
+    entries = {"token": {
+        "process": process, "root_started": 1, "known": {}}}
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        module.time, "sleep", lambda seconds: now.__setitem__(
+            0, now[0] + seconds))
+    monkeypatch.setattr(module, "_supervisor_refresh", lambda unused: None)
+    monkeypatch.setattr(module, "_supervisor_children", lambda unused: set())
+    monkeypatch.setattr(module, "_supervisor_start", lambda unused: None)
+
+    def capture_signal(unused_entry, sent):
+        signals.append((sent, now[0]))
+        if sent == signal.SIGKILL:
+            process.returncode = -signal.SIGKILL
+
+    monkeypatch.setattr(module, "_supervisor_signal", capture_signal)
+    reaped, remaining = module._supervisor_reap(entries, ["token"], 10.0)
+    assert reaped is True
+    assert remaining == 0
+    assert signals[0] == (signal.SIGTERM, 0.0)
+    kill_at = [at for sent, at in signals if sent == signal.SIGKILL]
+    assert len(kill_at) == 1
+    assert kill_at[0] <= 5.01
+    assert now[0] <= 10.0
+
+
 @pytest.mark.parametrize("path", ["discover", "known"])
 def test_post_flock_revalidation_failure_never_leaks_board_lock(
         tmp_path, monkeypatch, path):
