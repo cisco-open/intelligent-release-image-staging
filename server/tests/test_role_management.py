@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+import assignment_service
+import catalog
 import gui_fleet
 import keyed_state
 import peer_policy
@@ -902,6 +904,63 @@ def test_quarantine_waiting_on_retirement_rechecks_device_under_outer_lock(
     live = _policy(auth_path, lkg_path).document
     assert fleet.get_device("d00") is None
     assert "d00" not in live["assignments"]
+
+
+def test_retirement_holds_membership_through_catalog_purge(
+        tmp_path, monkeypatch):
+    fleet = _fleet(tmp_path)
+    manager = _manager(tmp_path, fleet)
+    store = catalog.CatalogStore(str(tmp_path))
+    for image_id in ("img1", "img2"):
+        store.save_image({
+            "id": image_id, "filename": image_id + ".bin", "size": 5,
+            "sha256": "ab" * 32, "cisco_signature_verified": False,
+            "info_hash_hex": "cc" * 20, "published_at": 111})
+    store.set_policy("d00", approved_image_ids=["img1"])
+    service = assignment_service.AssignmentService(store, fleet)
+    entered_delete = threading.Event()
+    allow_delete = threading.Event()
+    real_delete = fleet.delete
+
+    def blocked_delete(device_id):
+        entered_delete.set()
+        assert allow_delete.wait(3)
+        return real_delete(device_id)
+
+    monkeypatch.setattr(fleet, "delete", blocked_delete)
+    outcomes = {}
+
+    def retire():
+        try:
+            outcomes["retire"] = manager.retire_device(
+                "d00", actor="test", catalog=store)
+        except Exception as exc:
+            outcomes["retire_error"] = exc
+
+    def assign():
+        try:
+            service.apply("d00", ["img2"], actor="test")
+        except Exception as exc:
+            outcomes["assign_error"] = exc
+
+    retiring = threading.Thread(target=retire)
+    assigning = threading.Thread(target=assign)
+    retiring.start()
+    assert entered_delete.wait(3)
+    assigning.start()
+    time.sleep(0.05)
+    assert assigning.is_alive(), "assignment bypassed retirement membership guard"
+    allow_delete.set()
+    retiring.join(3)
+    assigning.join(3)
+
+    assert "retire_error" not in outcomes
+    assert outcomes["retire"]["deleted"] is True
+    assert outcomes["retire"]["catalog_purged"] is True
+    assert isinstance(outcomes.get("assign_error"),
+                      assignment_service.MissingFleetDevice)
+    assert fleet.get_device("d00") is None
+    assert store.read_policy_row_snapshot("d00") is None
 
 
 def test_role_confirmation_capture_runs_inside_policy_transaction(tmp_path, monkeypatch):
