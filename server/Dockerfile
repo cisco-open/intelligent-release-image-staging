@@ -45,7 +45,7 @@ LABEL org.opencontainers.image.title="IRIS seed server" \
       org.opencontainers.image.source="https://github.com/cisco-open/intelligent-release-image-staging"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 \
+    && apt-get install -y --no-install-recommends mktorrent openssl curl ca-certificates unzip age openssh-client sshpass iproute2 tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Static (musl) aria2c — the BitTorrent seeder.
@@ -99,6 +99,7 @@ ENV IRIS_VERSION=${IRIS_VERSION}
 RUN chmod +x /opt/iris/server/seed-launch.sh \
     /opt/iris/server/iris-publish \
     /opt/iris/server/iris-assign \
+    /opt/iris/server/iris-schedule \
     /opt/iris/server/iris-bootstrap \
     /opt/iris/server/iris-instructions \
     /opt/iris/server/iris-instr-key \

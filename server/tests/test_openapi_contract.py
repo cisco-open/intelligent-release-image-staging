@@ -1259,3 +1259,84 @@ def test_tracker_state_openapi_contract_is_closed_reusable_and_exactly_generated
         response = resolve(effective["responses"]["200"]["content"]["application/json"]["schema"])
         assert {"tracker_state", "tracker_qos"} <= set(response["properties"])
     assert len(set(state_refs)) == 1
+
+
+_SCHEDULE_OPERATIONS = (
+    ("GET", "/schedules", "200"), ("POST", "/schedules", "201"),
+    ("GET", "/schedules/{id}", "200"), ("PUT", "/schedules/{id}", "200"),
+    ("PATCH", "/schedules/{id}", "200"), ("DELETE", "/schedules/{id}", "204"),
+    ("GET", "/schedules/{id}/receipts", "200"),
+    ("POST", "/schedules/{id}/reaffirm", "200"),
+)
+
+
+def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
+    document = _load()
+    for prefix, service, security in (
+            ("/api/v1", "console", "consoleSession"),
+            ("/internal/v1", "management", "managementBearer+consoleSession")):
+        for method, suffix, success in _SCHEDULE_OPERATIONS:
+            operation = document["paths"][prefix + suffix][method.lower()]
+            assert operation["x-iris-service"] == service
+            assert operation["x-iris-security"] == security
+            assert success in operation["responses"]
+            assert "default" not in operation["responses"]
+            assert "only assign images or onboard staging agents" in operation["description"]
+            expected_errors = {401, 404, 422, 503}
+            if method != "GET":
+                expected_errors.update((400, 403, 413))
+            if service == "console":
+                expected_errors.update((400, 411, 413))
+            if method in ("PUT", "PATCH", "DELETE") or suffix.endswith("/reaffirm"):
+                expected_errors.update((412, 428))
+            if method == "POST" and suffix == "/schedules":
+                expected_errors.add(409)
+            assert set(operation["responses"]) == {success, *map(str, expected_errors)}
+            params = {p["name"]: p for p in operation["parameters"]}
+            assert "Idempotency-Key" not in params
+            conditional = method in ("PUT", "PATCH", "DELETE") or suffix.endswith("/reaffirm")
+            if conditional:
+                assert params["If-Match"]["required"] is True
+                description = params["If-Match"]["description"].lower()
+                for phrase in ("singleton", "strong", "duplicate", "weak", "comma", "428", "412", "race", "current etag"):
+                    assert phrase in description
+                assert operation["responses"]["412"]["x-iris-problem-codes"] == ["precondition_failed"]
+                assert operation["responses"]["428"]["x-iris-problem-codes"] == ["precondition_required"]
+                for status in ("412", "428"):
+                    assert "ETag" in operation["responses"][status]["headers"]
+                assert "409" not in operation["responses"]
+            else:
+                assert "If-Match" not in params
+                assert "412" not in operation["responses"]
+                assert "428" not in operation["responses"]
+            response = operation["responses"][success]
+            if suffix == "/schedules" and method == "GET" or suffix.endswith("/receipts"):
+                assert "ETag" not in response.get("headers", {})
+            else:
+                assert "ETag" in response["headers"]
+            if method == "POST" and suffix == "/schedules":
+                assert "Location" in response["headers"]
+                assert response["headers"]["Location"]["example"] == prefix + "/schedules/s-boat"
+                assert operation["responses"]["409"]["x-iris-problem-codes"] == ["schedule_conflict"]
+            if method in ("PUT", "PATCH") or method == "POST" and suffix == "/schedules":
+                assert "role_not_found" in operation["responses"]["422"]["x-iris-problem-codes"]
+                assert "role_not_found" not in operation["responses"]["404"]["x-iris-problem-codes"]
+                assert {"policy_fail_closed", "policy_error", "schedule_target_unavailable",
+                        "schedule_target_status_unavailable", "schedule_target_heartbeat_unavailable",
+                        "schedule_target_policy_unavailable"} <= set(
+                            operation["responses"]["503"]["x-iris-problem-codes"])
+            if method == "DELETE":
+                assert "content" not in response
+                assert "predecessor" in response["headers"]["ETag"]["description"]
+            assert "schedule_state_unavailable" in operation["responses"]["503"]["x-iris-problem-codes"]
+            if suffix != "/schedules":
+                assert "schedule_not_found" in operation["responses"]["404"]["x-iris-problem-codes"]
+
+
+def test_schedule_container_installs_timezone_data_and_executable_cli():
+    dockerfile = (SPEC.parents[2] / "server" / "Dockerfile").read_text()
+    logical = dockerfile.replace("\\\n", " ")
+    apt = re.search(r"apt-get install[^\n]+", logical).group()
+    assert "tzdata" in apt.split()
+    chmod = re.search(r"RUN chmod \+x [^\n]+", logical).group()
+    assert "/opt/iris/server/iris-schedule" in chmod.split()

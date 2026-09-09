@@ -495,3 +495,148 @@ def test_tracker_state_schemas_validate_mutations_presence_pairs_and_published_e
                                      "constraint_source"}
         else:
             assert set(interval) == {"value", "source"}
+
+
+def test_schedule_closed_schemas_cover_stage_only_defaults_and_patch_replacement():
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        paths = document["paths"]
+        def validator(suffix, method):
+            media = paths[prefix + suffix][method]["requestBody"]["content"]["application/json"]
+            return OAS32Validator(_local_schema(media["schema"], document))
+        create = validator("/schedules", "post")
+        put = validator("/schedules/{id}", "put")
+        patch = validator("/schedules/{id}", "patch")
+        reaffirm = validator("/schedules/{id}/reaffirm", "post")
+        definition = {"kind": "assign", "target": {}, "payload": {"image_ids": ["image-a"]},
+                      "when": {"kind": "once", "at": 1788883200, "window_seconds": 3600}}
+        create.validate(dict(definition, id="s-boat"))
+        put.validate(definition)
+        onboard = dict(definition, kind="onboard", payload={"max_devices": 20000}, when={
+            "kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+            "tz": "Australia/Lord_Howe", "window_seconds": 604800})
+        put.validate(onboard)
+        after = {"schedule_id": "s-earlier", "condition": "min_staged_ratio",
+                 "min_staged_ratio": 0.95, "max_errored_ratio": 0, "max_missing_ratio": 0.05,
+                 "deadline_seconds": 604800}
+        put.validate(dict(definition, after=after))
+        patch.validate({"after": after})
+        for value in ({}, {"state": "paused"}, {"after": None},
+                      {"payload": {"max_devices": 1}}, {"target": {}}):
+            patch.validate(value)
+        reaffirm.validate({})
+        for key in ("id", "generation", "rev", "created_by", "created_at", "preview", "etag", "creator_exists"):
+            assert list(put.iter_errors(dict(definition, **{key: "forged"}))), key
+            assert list(patch.iter_errors({key: "forged"})), key
+        for bad in (dict(definition, kind="install"), dict(definition, kind="activate"),
+                    dict(definition, kind="reload"), dict(definition, payload={"image_ids": []}),
+                    dict(definition, payload={"image_ids": ["image-a"], "reload": True}),
+                    dict(definition, payload={"max_devices": 1}),
+                    dict(onboard, payload={"max_devices": 0}),
+                    dict(onboard, payload={"max_devices": 1, "mode": "replace"}),
+                    dict(definition, target={"filters": {"unknown": "value"}}),
+                    dict(definition, target={"device_ids": ["seeder"]}),
+                    dict(definition, target={"device_ids": ["edge-1", "edge-1"]}),
+                    dict(definition, when=dict(definition["when"], weekday=0)),
+                    dict(onboard, when=dict(onboard["when"], weekday=7)),
+                    dict(definition, after=None),
+                    dict(definition, after=dict(after, min_staged_ratio=1.01)),
+                    dict(definition, after=dict(after, reload=True))):
+            assert list(put.iter_errors(bad)), bad
+        for bad in ({"payload": {"mode": "replace"}}, {"when": {"minute": 5}},
+                    {"after": {"schedule_id": "s-other"}}, {"target": {"bind": "unknown"}}):
+            assert list(patch.iter_errors(bad)), bad
+        assert list(reaffirm.iter_errors({"created_by": "console:forged"}))
+        for path, methods in paths.items():
+            if not path.startswith(prefix + "/schedules"):
+                continue
+            for operation in methods.values():
+                for body in [operation.get("requestBody", {})] + list(operation["responses"].values()):
+                    for media in body.get("content", {}).values():
+                        schema = OAS32Validator(_local_schema(media["schema"], document))
+                        for example in _media_examples(media):
+                            schema.validate(example)
+
+
+def test_schedule_response_views_and_receipts_are_closed_and_bounded():
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        paths = document["paths"]
+        media = paths[prefix + "/schedules/{id}"]["get"]["responses"]["200"]["content"]["application/json"]
+        schema = OAS32Validator(_local_schema(media["schema"], document))
+        example = copy.deepcopy(_media_examples(media)[0])
+        schema.validate(example)
+        for field in ("etag", "creator_exists", "generation", "rev", "preview"):
+            broken = copy.deepcopy(example)
+            broken["schedule"].pop(field)
+            assert list(schema.iter_errors(broken)), field
+        broken = copy.deepcopy(example)
+        broken["schedule"]["extra"] = True
+        assert list(schema.iter_errors(broken))
+        receipts = paths[prefix + "/schedules/{id}/receipts"]["get"]
+        page_media = receipts["responses"]["200"]["content"]["application/json"]
+        page_schema = OAS32Validator(_local_schema(page_media["schema"], document))
+        page = copy.deepcopy(_media_examples(page_media)[0])
+        page_schema.validate(page)
+        for field in ("schedule_id", "occurrence_id", "scheduled_at", "window_end",
+                      "occurrence_state", "schedule_rev", "attempt", "predecessors"):
+            broken = copy.deepcopy(page)
+            broken["receipts"][0].pop(field)
+            assert list(page_schema.iter_errors(broken)), field
+        broken = copy.deepcopy(page)
+        broken["receipts"][0]["status"] = "installed"
+        assert list(page_schema.iter_errors(broken))
+        broken = copy.deepcopy(page)
+        broken["receipts"] *= 1001
+        assert list(page_schema.iter_errors(broken))
+        params = {p["name"]: p for p in receipts["parameters"]}
+        assert params["limit"]["schema"]["maximum"] == 1000
+        assert params["limit"]["schema"]["default"] == 1000
+        assert params["offset"]["schema"]["minimum"] == 0
+        for method, nullable in (("post", False), ("put", False), ("patch", True)):
+            suffix = "/schedules" if method == "post" else "/schedules/{id}"
+            status = "201" if method == "post" else "200"
+            media = paths[prefix + suffix][method]["responses"][status]["content"]["application/json"]
+            schema = OAS32Validator(_local_schema(media["schema"], document))
+            example = copy.deepcopy(_media_examples(media)[0])
+            assert set(example) == {"schedule", "target_facts"}
+            assert list(schema.iter_errors({"schedule": example["schedule"]}))
+            null_facts = dict(example, target_facts=None)
+            assert bool(list(schema.iter_errors(null_facts))) is not nullable
+
+
+def test_schedule_examples_match_store_rows_and_if_match_rejects_invalid_tags():
+    import schedules
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        paths = document["paths"]
+        for method, suffix in (("put", "/schedules/{id}"), ("patch", "/schedules/{id}"),
+                               ("delete", "/schedules/{id}"), ("post", "/schedules/{id}/reaffirm")):
+            parameter = next(p for p in paths[prefix + suffix][method]["parameters"]
+                             if p["name"] == "If-Match")
+            validator = OAS32Validator(parameter["schema"])
+            for value in ('"iris-schedule-s-boat-1"', '*',
+                          '"iris-schedule-s-boat-9223372036854775807"'):
+                validator.validate(value)
+            for value in ('W/"iris-schedule-s-boat-1"', '"iris-schedule-s-boat-1", "other"',
+                          '*, "iris-schedule-s-boat-1"', '"iris-schedule-s-boat-0"',
+                          '"iris-schedule-s-boat-01"', '"iris-schedule-s-boat-9223372036854775808"',
+                          '"iris-schedule-s-boat-1"\n', ''):
+                assert list(validator.iter_errors(value)), value
+        for suffix, methods in paths.items():
+            if not suffix.startswith(prefix + "/schedules"):
+                continue
+            for operation in methods.values():
+                for response in operation["responses"].values():
+                    media = response.get("content", {}).get("application/json", {})
+                    for example in _media_examples(media):
+                        rows = [example["schedule"]] if "schedule" in example else example.get("schedules", [])
+                        for view in rows:
+                            stored = {key: value for key, value in view.items()
+                                      if key not in ("etag", "creator_exists")}
+                            schedules.validate_schedule(stored["id"], stored)
+                            assert schedules.schedule_etag(stored) == view["etag"]
+                        for receipt in example.get("receipts", []):
+                            stored = {key: value for key, value in receipt.items() if key not in (
+                                "schedule_id", "scheduled_at", "window_end", "occurrence_state", "schedule_rev")}
+                            schedules._validate_receipt(stored["device_id"], stored)

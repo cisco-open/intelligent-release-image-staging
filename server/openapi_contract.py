@@ -17,6 +17,7 @@ import api_problem
 import api_routes
 import instructions
 import peer_policy
+import schedules
 
 
 ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
@@ -360,6 +361,337 @@ def _instruction_attestation_request(schema, legacy):
         "unknownCapability": {"value": dict(legacy, instr_protocol=None)},
         "legacy": {"value": legacy},
     }}
+
+
+def _schedule_resource(route):
+    return (route.service in ("console", "management") and
+            _resource_suffix(route) in (
+                "/schedules", "/schedules/{id}",
+                "/schedules/{id}/receipts", "/schedules/{id}/reaffirm"))
+
+
+def _schedule_conditional(route):
+    return _schedule_resource(route) and (
+        route.method in ("PUT", "PATCH", "DELETE") or
+        _resource_suffix(route).endswith("/reaffirm"))
+
+
+def _schedule_object(properties, required=None):
+    return {"type": "object", "properties": properties,
+            "required": list(properties) if required is None else list(required),
+            "additionalProperties": False}
+
+
+def _schedule_integer(minimum=0, maximum=schedules.MAX_INTEGER):
+    return {"type": "integer", "minimum": minimum, "maximum": maximum}
+
+
+def _schedule_id_schema(device=False):
+    schema = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])"}
+    if device:
+        schema["not"] = {"const": "seeder"}
+    return schema
+
+
+def _schedule_ids_schema(images=False, minimum=0):
+    return {"type": "array", "uniqueItems": True, "minItems": minimum,
+            "maxItems": 10 if images else schedules.MAX_TARGETS,
+            "items": {"type": "string", "pattern": r"^[A-Za-z0-9._-]{1,128}(?![\s\S])"}
+            if images else _schedule_id_schema(device=True)}
+
+
+def _schedule_text_schema(limit=256, empty=False):
+    # JSON Schema counts characters; the byte bound remains an explicit wire
+    # constraint and is enforced by the schedule store's UTF-8 validation.
+    atom = r"[^\s\x00-\x1f\x7f-\x9f](?:[^\x00-\x1f\x7f-\x9f]*[^\s\x00-\x1f\x7f-\x9f])?"
+    return {"type": "string", "maxLength": limit, "minLength": 0 if empty else 1,
+            "pattern": "^(?:" + atom + ")" + ("?" if empty else "") + r"(?![\s\S])",
+            "x-iris-maxUtf8Bytes": limit,
+            "description": "Valid UTF-8, at most %d bytes; no leading/trailing whitespace or C0/C1 controls." % limit}
+
+
+def _schedule_target_schema(normalized=False):
+    filters = {key: _schedule_text_schema(empty=True) for key in sorted(schedules.FILTER_KEYS)}
+    filters["role"] = {"type": "string", "pattern": r"^(?:|__none|[a-z0-9][a-z0-9._-]{0,31})(?![\s\S])"}
+    return _schedule_object({
+        "filters": _schedule_object(filters, ()),
+        "device_ids": _schedule_ids_schema(),
+        "bind": {"type": "string", "enum": ["late", "early"], "default": "late"},
+    }, None if normalized else ())
+
+
+def _schedule_payload_schema(kind, normalized=False):
+    if kind == "assign":
+        return _schedule_object({
+            "image_ids": _schedule_ids_schema(images=True, minimum=1),
+            "mode": {"type": "string", "enum": ["merge", "replace"], "default": "merge"},
+        }, None if normalized else ("image_ids",))
+    return _schedule_object({
+        "telemetry": {"type": "boolean", "default": True},
+        "telemetry_stream": {"type": "boolean", "default": False},
+        "mode": {"type": "string", "const": "new-only", "default": "new-only"},
+        "max_devices": _schedule_integer(1, schedules.MAX_TARGETS),
+    }, None if normalized else ("max_devices",))
+
+
+def _schedule_when_schema(normalized=False):
+    common = {"tz": dict(_schedule_text_schema(128), default="UTC",
+                          description="IANA timezone available in server tzdata; defaults to UTC. Unknown names return invalid_schedule."),
+              "window_seconds": _schedule_integer(1, schedules.MAX_WINDOW_SECONDS)}
+    return {"oneOf": [
+        _schedule_object({"kind": {"const": "once"},
+                          "at": _schedule_integer(0, schedules.MAX_EPOCH - schedules.MAX_WINDOW_SECONDS),
+                          **common}, ("kind", "at", "window_seconds") + (("tz",) if normalized else ())),
+        _schedule_object({"kind": {"const": "recurring"},
+                          "weekday": dict(_schedule_integer(0, 6), description="Monday=0 through Sunday=6"),
+                          "hour": _schedule_integer(0, 23), "minute": _schedule_integer(0, 59),
+                          **common}, ("kind", "weekday", "hour", "minute", "window_seconds") + (("tz",) if normalized else ())),
+    ], "description": "Server-side half-open window. A nonexistent local time resolves to the first valid instant after it; an ambiguous local time fires once at its first occurrence. Epoch fields remain integer seconds."}
+
+
+def _schedule_after_schema():
+    return _schedule_object({
+        "schedule_id": _schedule_id_schema(),
+        "condition": {"type": "string", "const": "min_staged_ratio"},
+        **{field: {"type": "number", "minimum": 0, "maximum": 1} for field in (
+            "min_staged_ratio", "max_errored_ratio", "max_missing_ratio")},
+        "deadline_seconds": _schedule_integer(1, schedules.MAX_WINDOW_SECONDS),
+    })
+
+
+def _schedule_definition_schema(*, create=False, patch=False, normalized=False):
+    properties = {
+        "kind": {"type": "string", "enum": ["assign", "onboard"]},
+        "target": _schedule_target_schema(normalized),
+        "payload": {"oneOf": [_schedule_payload_schema(kind, normalized) for kind in ("assign", "onboard")]},
+        "when": _schedule_when_schema(normalized),
+        "after": {"oneOf": [_schedule_after_schema(), {"type": "null"}]} if patch else _schedule_after_schema(),
+        "state": {"type": "string", "enum": ["pending", "paused", "completed"], "default": "pending"},
+    }
+    required = [] if patch else ["kind", "target", "payload", "when"]
+    if normalized:
+        required.append("state")
+    if create:
+        properties = {"id": _schedule_id_schema(), **properties}
+        required.insert(0, "id")
+    schema = _schedule_object(properties, required)
+    schema["allOf"] = [{
+        "if": {"required": ["kind"], "properties": {"kind": {"const": kind}}},
+        "then": {"properties": {"payload": _schedule_payload_schema(kind, normalized)}},
+    } for kind in ("assign", "onboard")]
+    schema["description"] = (
+        "Closed stage-only definition: assign images or onboard the staging agent. "
+        "Unknown fields at every level are rejected. No install, activation, boot-variable or reload operation exists. "
+        "Empty target filters and IDs select the whole fleet; explicit IDs intersect filters. "
+        "Late binding resolves at fire time; early binding retains preview device IDs. "
+        "A referenced target role must exist. An after gate cannot reference this schedule itself.")
+    if patch:
+        schema["description"] += (
+            " PATCH replaces supplied top-level subobjects in full, without recursive merge; "
+            "after:null removes the gate. The resulting complete definition is validated, "
+            "including compatibility between an omitted existing kind and a supplied payload.")
+    return schema
+
+
+def _schedule_etag_header(description="Strong ETag of the returned schedule revision"):
+    revision = _DECIMAL_I63_PATTERN.removeprefix("^").removesuffix(r"(?![\s\S])")
+    pattern = (r'^"iris-schedule-[A-Za-z0-9][A-Za-z0-9._-]{0,63}-(?!0)' +
+               revision + r'"(?![\s\S])')
+    return {"description": description,
+            "schema": {"type": "string", "pattern": pattern},
+            "example": '"iris-schedule-s-boat-1"'}
+
+
+def _schedule_view_schema():
+    schema = _schedule_definition_schema(normalized=True)
+    fields = {
+        "id": _schedule_id_schema(),
+        "generation": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "rev": _schedule_integer(1),
+        "created_by": dict(_schedule_text_schema(), allOf=[{
+            "pattern": r"^[a-z][a-z0-9_-]{0,31}:.+"}],
+            description="Server-supplied creator identity; ordinary edits preserve it. Reaffirm derives the current actor server-side."),
+        "created_at": _schedule_integer(0, schedules.MAX_EPOCH),
+        "preview": _schedule_object({
+            "revision": _schedule_integer(), "now": _schedule_integer(0, schedules.MAX_EPOCH),
+            "device_ids": _schedule_ids_schema()}),
+        "etag": dict(_schedule_etag_header()["schema"], readOnly=True),
+        "creator_exists": {"type": "boolean", "readOnly": True, "description": "Response-only marker from the authoritative administrator record; an absent creator does not prevent firing."},
+    }
+    schema["properties"].update(fields)
+    schema["required"].extend(fields)
+    return schema
+
+
+def _schedule_target_facts_schema():
+    return _schedule_object({"missing_os_family": _schedule_integer(),
+                             "role_drift": _schedule_integer(),
+                             "quarantined_ids": _schedule_ids_schema()})
+
+
+def _schedule_receipt_schema(*, predecessor=False):
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    reason = {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"}
+    properties = {
+        "occurrence_id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "device_id": _schedule_id_schema(device=True), "rev": _schedule_integer(1),
+        "attempt": _schedule_integer(1, schedules.MAX_RECEIPT_ATTEMPTS),
+        "attempt_started_at": epoch,
+        "status": {"type": "string", "enum": sorted(schedules.RECEIPT_STATES)},
+        "reason": reason, "created_at": epoch, "updated_at": epoch,
+        "completed_at": {"oneOf": [epoch, {"type": "null"}]},
+        "notes": {"type": "array", "items": reason, "maxItems": 16},
+    }
+    if not predecessor:
+        properties["predecessors"] = {"type": "array", "maxItems": schedules.MAX_RECEIPT_ATTEMPTS - 1,
+                                      "items": _schedule_receipt_schema(predecessor=True)}
+        properties.update({
+            "schedule_id": _schedule_id_schema(), "scheduled_at": epoch, "window_end": epoch,
+            "occurrence_state": {"type": "string", "enum": sorted(schedules.OCCURRENCE_TRANSITIONS)},
+            "schedule_rev": _schedule_integer(1),
+        })
+    required = list(properties)
+    properties.update({field: _schedule_id_schema() for field in (
+        "job_id", "record_id", "predecessor_record_id")})
+    properties["manual_generation"] = _schedule_integer()
+    properties.update({field: _schedule_ids_schema(images=True) for field in (
+        "before_image_ids", "after_image_ids", "removed_image_ids")})
+    schema = _schedule_object(properties, required)
+    terminal = {"enum": sorted(schedules.TERMINAL_RECEIPT_STATES)}
+    schema["allOf"] = [{
+        "if": {"properties": {"status": terminal}},
+        "then": {"properties": {"completed_at": epoch}},
+        "else": {"properties": {"completed_at": {"type": "null"}},
+                 "not": {"anyOf": [{"required": ["after_image_ids"]}, {"required": ["removed_image_ids"]}]}},
+    }]
+    if predecessor:
+        schema["properties"]["status"] = {"type": "string", "enum": ["intent", "submitted", "running"]}
+    schema["description"] = (
+        "Durable attempt evidence. Timestamps are ordered created_at <= attempt_started_at <= updated_at; "
+        "terminal completed_at lies within the attempt. Predecessors retain prior nonterminal attempts "
+        "without nested history, with increasing revisions and shared device/occurrence identity. "
+        "The attempt number equals one plus predecessor count. Removed images equal before minus after when all three sets are present.")
+    return schema
+
+
+def _schedule_definition_example(kind="assign"):
+    return {"kind": kind, "target": {"filters": {"role": "boat"}, "device_ids": ["edge-01"], "bind": "late"},
+            "payload": {"image_ids": ["image-a"], "mode": "merge"} if kind == "assign" else
+                {"telemetry": True, "telemetry_stream": False, "mode": "new-only", "max_devices": 20},
+            "when": {"kind": "once", "at": 1788883260, "tz": "UTC", "window_seconds": 3600} if kind == "assign" else
+                {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+                 "tz": "Europe/Stockholm", "window_seconds": 3600},
+            "state": "pending"}
+
+
+def _schedule_view_example():
+    return dict(_schedule_definition_example(), id="s-boat", generation="0" * 32, rev=1,
+                created_by="console:alice", created_at=1788883200,
+                preview={"revision": 2, "now": 1788883200, "device_ids": ["edge-01"]},
+                etag='"iris-schedule-s-boat-1"', creator_exists=True)
+
+
+def _schedule_request_body(route):
+    suffix = _resource_suffix(route)
+    if route.method in ("GET", "DELETE"):
+        return None
+    if suffix.endswith("/reaffirm"):
+        return {"required": True, "content": {"application/json": _media(_schedule_object({}), {})}}
+    patch = route.method == "PATCH"
+    create = suffix == "/schedules"
+    schema = _schedule_definition_schema(create=create, patch=patch)
+    examples = {"pause": {"value": {"state": "paused"}},
+                "removeGate": {"value": {"after": None}},
+                "retarget": {"value": {"target": {"filters": {"role": "boat"}, "bind": "late"}}}} if patch else {
+        kind: {"value": dict(_schedule_definition_example(kind), **({"id": "s-boat"} if create else {}))}
+        for kind in ("assign", "onboard")}
+    return {"required": True, "content": {"application/json": {"schema": schema, "examples": examples}}}
+
+
+def _schedule_success(route):
+    suffix = _resource_suffix(route)
+    if route.method == "DELETE":
+        return "204", {"description": "Schedule deleted; empty body",
+                       "headers": {"ETag": _schedule_etag_header("Successfully matched predecessor ETag, including wildcard deletion")}}
+    row = _schedule_view_example()
+    if suffix.endswith("/receipts"):
+        schema = _schedule_object({
+            "schedule_id": _schedule_id_schema(),
+            "receipts": {"type": "array", "maxItems": schedules.MAX_RECEIPT_PAGE, "items": _ref("ScheduleReceipt")},
+            "total": _schedule_integer(), "offset": _schedule_integer(), "truncated": {"type": "boolean"},
+        })
+        receipt = {"occurrence_id": "1" * 32, "device_id": "edge-01", "rev": 1, "attempt": 1,
+                   "attempt_started_at": 1788883260, "predecessors": [], "status": "ok", "reason": "assigned",
+                   "created_at": 1788883260, "updated_at": 1788883260, "completed_at": 1788883260, "notes": [],
+                   "schedule_id": "s-boat", "scheduled_at": 1788883260, "window_end": 1788886860,
+                   "occurrence_state": "completed", "schedule_rev": 1,
+                   "before_image_ids": [], "after_image_ids": ["image-a"], "removed_image_ids": []}
+        return "200", {"description": "Schedule-wide receipt page, ordered by scheduled_at, occurrence_id, device_id. total counts all receipts; truncated is true when offset is nonzero or more rows remain. The response cap never prunes durable evidence.",
+                       "content": {"application/json": _media(schema, {
+                           "schedule_id": "s-boat", "receipts": [receipt], "total": 1, "offset": 0, "truncated": False})}}
+    if suffix == "/schedules" and route.method == "GET":
+        return "200", {"description": "All schedules; each row includes its own ETag, with no collection ETag",
+                       "content": {"application/json": _media(_schedule_object({
+                           "schedules": {"type": "array", "items": _ref("ScheduleView")}, "total": _schedule_integer()}),
+                           {"schedules": [row], "total": 1})}}
+    properties = {"schedule": _ref("ScheduleView")}
+    example = {"schedule": row}
+    if not suffix.endswith("/reaffirm") and route.method in ("POST", "PUT", "PATCH"):
+        facts = _schedule_target_facts_schema()
+        properties["target_facts"] = {"oneOf": [facts, {"type": "null"}]} if route.method == "PATCH" else facts
+        example["target_facts"] = {"missing_os_family": 0, "role_drift": 0, "quarantined_ids": []}
+    response = {"description": "Current schedule view" if route.method == "GET" else "Saved schedule view with server-owned identity and preview",
+                "headers": {"ETag": _schedule_etag_header()},
+                "content": {"application/json": _media(_schedule_object(properties), example)}}
+    if route.method == "PATCH":
+        response["description"] += "; target_facts is null when the patch does not retarget"
+        media = response["content"]["application/json"]
+        media.pop("example")
+        media["examples"] = {
+            "retarget": {"value": example},
+            "definitionOnly": {"value": {"schedule": row, "target_facts": None}},
+        }
+    if suffix == "/schedules":
+        response["headers"]["Location"] = {
+            "description": "Versioned resource path of the created schedule",
+            "schema": {"type": "string", "format": "uri-reference"}, "example": route.path + "/s-boat"}
+        return "201", response
+    return "200", response
+
+
+def _schedule_errors(route):
+    if not _schedule_resource(route):
+        return None
+    suffix = _resource_suffix(route)
+    errors = {401: {"console-session-required", "management-authentication-required"},
+              404: {"route-not-found"},
+              422: {"invalid_schedule"},
+              503: {"service-unavailable", "credential-store-unavailable",
+                    "schedule_state_unavailable"}}
+    if suffix != "/schedules":
+        errors[404].add("schedule_not_found")
+    if route.method in MUTATIONS:
+        errors[400] = {"invalid-request"}
+        errors[403] = {"csrf-validation-failed"}
+        errors[413] = {"payload-too-large"}
+    if route.method in ("PUT", "PATCH") or (route.method == "POST" and suffix == "/schedules"):
+        errors[422].add("role_not_found")
+        errors[503].update({"policy_fail_closed", "policy_error",
+                            "schedule_target_unavailable", "schedule_target_status_unavailable",
+                            "schedule_target_heartbeat_unavailable", "schedule_target_policy_unavailable"})
+    if route.method == "POST" and suffix == "/schedules":
+        errors[409] = {"schedule_conflict"}
+    if _schedule_conditional(route):
+        errors[412] = {"precondition_failed"}
+        errors[428] = {"precondition_required"}
+    if route.service == "console":
+        errors.setdefault(400, set()).add("invalid-content-length")
+        if route.method == "GET":
+            errors[400].add("request-body-not-supported")
+        errors[411] = {"content-length-required"}
+        errors[413] = {"payload-too-large"}
+        errors[503].add("management-api-unavailable")
+    return {status: tuple(sorted(codes)) for status, codes in errors.items()}
 
 
 def _policy_mutation(route):
@@ -775,6 +1107,10 @@ def _problem_variants(route, status):
         if status == 503 and suffix == "/status":
             return (("telemetry-status-unavailable",
                      "Telemetry status unavailable"),)
+    schedule_errors = _schedule_errors(route)
+    if schedule_errors is not None:
+        return tuple((code, code.replace("_", " ").replace("-", " ").capitalize())
+                     for code in schedule_errors[status])
     policy_errors = _policy_errors(route)
     if policy_errors is not None:
         return tuple((code, code.replace("_", " ").replace("-", " ").capitalize())
@@ -827,6 +1163,22 @@ def _problem_response(route, status):
         for code, title in variants
     ]
     media = {"schema": _ref("Problem")}
+    if _schedule_resource(route):
+        schemas = []
+        for doc in documents:
+            properties = {name: {"const": value} for name, value in doc.items()}
+            properties["title"] = {"type": "string"}
+            required = list(properties)
+            # Shared legacy framing/error adapters can retain their error
+            # member; schedule business failures use the closed stable code.
+            if doc["code"] in ("invalid-request", "service-unavailable"):
+                properties["error"] = {"type": "string", "deprecated": True}
+            if doc["code"] == "role_not_found":
+                properties["role"] = _role_name_schema()
+                required.append("role")
+                doc["role"] = "boat"
+            schemas.append(_schedule_object(properties, required))
+        media["schema"] = schemas[0] if len(schemas) == 1 else {"oneOf": schemas}
     if len(documents) == 1:
         media["example"] = documents[0]
     else:
@@ -871,6 +1223,10 @@ def _problem_response(route, status):
             "schema": {"type": "string"},
             "example": challenge,
         }
+    if _schedule_conditional(route) and status in (412, 428):
+        response.setdefault("headers", {})["ETag"] = _schedule_etag_header(
+            "Current ETag. Present for missing/stale/malformed conditions and revision races; "
+            "absent on 412 if the row disappeared between the preliminary read and locked mutation.")
     business_errors = _policy_business_errors(route)
     if business_errors is not None and status in business_errors:
         response.setdefault("headers", {})["ETag"] = {"schema": {"type": "string"}}
@@ -909,6 +1265,15 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
+    if _schedule_resource(route) and suffix.endswith("/receipts"):
+        params.extend([
+            {"name": "limit", "in": "query", "required": False,
+             "description": "Maximum receipts across all occurrences of this schedule",
+             "schema": dict(_schedule_integer(1, schedules.MAX_RECEIPT_PAGE), default=schedules.MAX_RECEIPT_PAGE), "example": 100},
+            {"name": "offset", "in": "query", "required": False,
+             "description": "Zero-based offset in scheduled_at, occurrence_id, device_id order",
+             "schema": dict(_schedule_integer(), default=0), "example": 0},
+        ])
     if _policy_mutation(route):
         params.append({"name": "dry_run", "in": "query", "required": False,
             "description": "1 previews the locked candidate without persistence; 0 commits after required confirmation.",
@@ -1241,6 +1606,8 @@ _JSON_REQUESTS = {
 
 
 def _request_body(route):
+    if _schedule_resource(route):
+        return _schedule_request_body(route)
     if route.method == "DELETE" and _policy_mutation(route):
         return {"required": False, "content": {"application/json": _media(
             {"type": "object", "properties": {"confirm_token": {"type": ["string", "null"]}},
@@ -1650,6 +2017,8 @@ def _json_success_example(route):
 
 
 def _success(route):
+    if _schedule_resource(route):
+        return _schedule_success(route)
     path = route.path
     suffix = _resource_suffix(route)
     if _instruction_resource(route):
@@ -2229,6 +2598,25 @@ def _operation(route):
         op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
             "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
             "schema": {"type": "string"}, "example": '\"iris-peer-policy-4\"'})
+    if _schedule_resource(route):
+        for parameter in op["parameters"]:
+            if parameter["in"] == "path" and parameter["name"] == "id":
+                parameter["schema"] = _schedule_id_schema()
+                parameter["example"] = "s-boat"
+        if _schedule_conditional(route):
+            tag = _schedule_etag_header()
+            op["parameters"].append({"name": "If-Match", "in": "header", "required": True,
+                "description": (
+                    "Exactly one singleton field containing the current strong schedule ETag or *. "
+                    "Missing: 428 precondition_required. Weak tags, comma lists, duplicate fields, "
+                    "malformed tags, mixed wildcard/tag values and stale tags: 412 precondition_failed. "
+                    "An item unknown before condition evaluation returns 404. Compare and mutation "
+                    "occur under the schedule shard lock; a revision race returns 412 with the newest "
+                    "current ETag, and a disappearance race returns 412 without an ETag. "
+                    "Other 412 and 428 responses include the current ETag. * matches any existing "
+                    "version and never creates a missing row."),
+                "schema": {"oneOf": [tag["schema"], {"type": "string", "const": "*"}]},
+                "example": tag["example"]})
     if route.path.endswith("/peer-policy/quarantine/{device_id}"):
         op["parameters"].append({
             "name": "If-Match", "in": "header", "required": False,
@@ -2296,6 +2684,9 @@ def _error_statuses(route):
         return ((401, 403, 404, 429, 503) if route.path == INSTRUCTION_RESOURCES[1]
                 else (401, 403, 404, 409, 429, 503))
     suffix = _resource_suffix(route)
+    schedule_errors = _schedule_errors(route)
+    if schedule_errors is not None:
+        return tuple(sorted(schedule_errors))
     policy_errors = _policy_errors(route)
     if policy_errors is not None:
         return tuple(sorted(policy_errors))
@@ -2509,6 +2900,25 @@ def _description(route):
         if route.path == "/scrape":
             notes.append("A device principal may scrape only an info hash in its current catalog assignment; unknown and cross-assignment hashes return the same result. The seeder service and authenticated unattributed principals can scrape all torrents.")
     suffix = _resource_suffix(route)
+    if _schedule_resource(route):
+        notes.append("Schedules only assign images or onboard staging agents; devices never evaluate schedule time. "
+                     "Each definition has its own revision, generation and strong ETag; occurrence progress does not change it. "
+                     "Creator existence comes from the current authoritative administrator record, not session expiry. "
+                     "An absent creator is marked but the schedule keeps firing as schedule:<id>.")
+        if suffix == "/schedules" and route.method == "POST":
+            notes.append("Create-if-absent: the caller selects id; a duplicate returns 409 schedule_conflict. "
+                         "The server supplies generation, revision, creator, creation time and target preview. "
+                         "No If-Match or process-local Idempotency-Key replay is required; inspect the selected id after an uncertain retry.")
+        elif route.method == "PUT":
+            notes.append("Replaces the complete mutable definition, preserving id, generation, created_by and created_at.")
+        elif route.method == "PATCH":
+            notes.append("Replaces supplied top-level subobjects in full; after:null removes the gate. "
+                         "target_facts is null unless the target is replaced.")
+        elif route.method == "DELETE":
+            notes.append("Deletion remains allowed when a referenced role or creator is gone.")
+        elif suffix.endswith("/reaffirm"):
+            notes.append("Accepts an empty object only. Replaces created_by with console:<current-session-username> "
+                         "derived server-side; identity fields cannot be supplied by the caller.")
     if suffix == "/install-options":
         notes.append("The model only restricts installer choices; null means no model-based restriction. The Console also restricts installers by management type, which alone controls network-field visibility. A saved free-text model does not confirm hardware support.")
     elif suffix == "/devices" and route.method == "GET":
@@ -2570,8 +2980,8 @@ def build_document():
             "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
             "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses five static files and four high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
             "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
-            "pagination": "Devices and audit expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
-            "compareAndSet": "Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
+            "pagination": "Devices, audit and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+            "compareAndSet": "Schedules require a singleton strong If-Match or * on existing-row mutations (428 missing, 412 stale or raced). Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
             "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
             "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying.",
         },
@@ -2620,6 +3030,8 @@ def build_document():
                                "ok": {"type": "boolean"},
                            },
                            "additionalProperties": False},
+                "ScheduleView": _schedule_view_schema(),
+                "ScheduleReceipt": _schedule_receipt_schema(),
                 "TrackerQosState": _tracker_qos_state_schema(),
                 "TrackerQosStateMap": _tracker_qos_state_map_schema(),
             },
