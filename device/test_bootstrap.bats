@@ -425,6 +425,47 @@ install_prior_agent() {
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
 }
 
+@test "tar extension metadata is rejected before the archive parser runs" {
+  install_prior_agent
+  python3 - "$SRC/bundle.tgz" <<'PYTHON'
+import io
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "w:gz", format=tarfile.PAX_FORMAT) as archive:
+    info = tarfile.TarInfo("unexpected")
+    info.pax_headers = {"comment": "x" * 4096}
+    info.size = 1
+    archive.addfile(info, io.BytesIO(b"x"))
+PYTHON
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  hook="$TMP/tar-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+import tarfile
+
+_real_open = tarfile.open
+
+
+def _record_open(*args, **kwargs):
+    with open(os.environ["IRIS_TAR_OPEN_MARKER"], "a") as stream:
+        stream.write("opened\n")
+    return _real_open(*args, **kwargs)
+
+
+tarfile.open = _record_open
+PYTHON
+  run env PYTHONPATH="$hook" IRIS_TAR_OPEN_MARKER="$TMP/tar-opened" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TMP/tar-opened" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
 @test "a standalone signer that differs from the verified bundle cannot change live trust" {
   install_prior_agent
   pack_valid_bundle "$SRC/bundle.tgz"
@@ -558,6 +599,66 @@ COPY
   [ ! -e "$STAGE/.bundle-transaction" ]
   [ -f "$TMP/new-agent-invoked" ]
   cmp -s "$SRC/bootstrap.sh" "$BUNDLE_TREE/bootstrap.sh"
+}
+
+@test "an interrupted rollback restarts from an immutable prior snapshot" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent" "$STAGE/agent"
+  printf 'open(r"%s/restartable-prior-agent", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho prior-started >> "%s/prior-started"\n' "$TMP" \
+    > "$TX/prior/files/guestshell-start.sh"
+  printf '#!/usr/bin/env bash\n: prior-bootstrap\n' \
+    > "$TX/prior/files/bootstrap.sh"
+  printf '#!/usr/bin/env bash\n: prior-rotate\n' \
+    > "$TX/prior/files/rotate-logs.sh"
+  printf 'prior aria2c\n' > "$TX/prior/files/aria2c"
+  printf 'prior signer\n' > "$TX/prior/files/iris-signers.allowed_signers"
+  printf 'prior root signer\n' > "$TX/prior/files/iris-root.allowed_signers"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/partial-agent", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  hook="$TMP/rollback-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+_real_replace = os.replace
+_stopped = False
+
+
+def _stop_after_first_restore(source, destination):
+    global _stopped
+    _real_replace(source, destination)
+    source_text = os.fspath(source)
+    destination_text = os.fspath(destination)
+    if not _stopped and os.path.basename(destination_text) == "agent" \
+            and ("/prior/files/agent" in source_text
+                 or "/restore/agent" in source_text):
+        _stopped = True
+        with open(os.environ["IRIS_ROLLBACK_STOP_MARKER"], "w") as stream:
+            stream.write("stopped\n")
+        os._exit(86)
+
+
+os.replace = _stop_after_first_restore
+PYTHON
+  run env PYTHONPATH="$hook" \
+      IRIS_ROLLBACK_STOP_MARKER="$TMP/rollback-stopped" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ -f "$TMP/rollback-stopped" ]
+
+  run env PYTHONPATH= PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/restartable-prior-agent" ]
+  [ -f "$TMP/prior-started" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ ! -e "$STAGE/.bundle-rollback-complete" ]
+  [ "$(cat "$STAGE/aria2c")" = "prior aria2c" ]
 }
 
 @test "a bad initial bundle fails after one fixed diagnostic" {
