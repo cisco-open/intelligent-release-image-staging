@@ -21,6 +21,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import struct
 import subprocess
 import tempfile
@@ -417,6 +418,7 @@ ROOT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 KEYLIST_NAME = "iris-instruction-keylist.current"
 KEYLIST_STATE_NAME = "iris-instruction-keylist-state.json"
 LKG_NAME = "iris-instructions.lkg"
+BOOTSTRAP_NAME = "iris-instructions.bootstrap"
 
 
 def boot_id():
@@ -436,6 +438,7 @@ def paths_for(platform, cfg):
     work = os.path.join(stage, "iris-work") if platform == "xr-appmgr" else stage
     trust = "/opt/iris/agent" if platform in ("iox", "xr-appmgr") else stage
     return {"work_dir": work, "lkg": os.path.join(work, LKG_NAME),
+            "bootstrap": os.path.join(work, BOOTSTRAP_NAME),
             "keylist": os.path.join(work, KEYLIST_NAME),
             "keylist_state": os.path.join(work, KEYLIST_STATE_NAME),
             "signers": os.path.join(trust, "iris-signers.allowed_signers"),
@@ -684,6 +687,80 @@ def _read_bytes(path, cap):
     if len(data) > cap:
         raise InstructionError("oversize")
     return data
+
+
+def _read_bootstrap(path):
+    """Read one fixed-name candidate without following or reopening its inode."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise InstructionError("instr_unavailable")
+    try:
+        observed = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(observed.st_mode):
+        raise InstructionError("instr_unavailable")
+    # O_NONBLOCK prevents a raced-in FIFO/device from waiting before fstat.
+    flags = (os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+             | getattr(os, "O_NONBLOCK", 0))
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    try:
+        before = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size,
+                    getattr(before, "st_mtime_ns", before.st_mtime),
+                    getattr(before, "st_ctime_ns", before.st_ctime))
+        if not stat.S_ISREG(before.st_mode):
+            raise InstructionError("instr_unavailable")
+        if before.st_size > INSTR_RESPONSE_MAX:
+            return {"raw": None, "identity": identity,
+                    "error": InstructionError("oversize")}
+        chunks = []
+        remaining = INSTR_RESPONSE_MAX
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        after_identity = (after.st_dev, after.st_ino, after.st_size,
+                          getattr(after, "st_mtime_ns", after.st_mtime),
+                          getattr(after, "st_ctime_ns", after.st_ctime))
+        if after_identity != identity:
+            raise InstructionError("instr_unavailable")
+        if after.st_size > INSTR_RESPONSE_MAX:
+            return {"raw": None, "identity": identity,
+                    "error": InstructionError("oversize")}
+        raw = b"".join(chunks)
+        if len(raw) != after.st_size:
+            raise InstructionError("instr_unavailable")
+        return {"raw": raw, "identity": identity,
+                "error": None}
+    finally:
+        os.close(fd)
+
+
+def _unlink_bootstrap(path, identity):
+    """Remove only the pathname that still identifies the opened candidate."""
+    try:
+        current = os.lstat(path)
+        current_identity = (
+            current.st_dev, current.st_ino, current.st_size,
+            getattr(current, "st_mtime_ns", current.st_mtime),
+            getattr(current, "st_ctime_ns", current.st_ctime))
+        if (not stat.S_ISREG(current.st_mode)
+                or current_identity != identity):
+            return False
+        os.unlink(path)
+        _directory_sync(os.path.dirname(path))
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
 
 
 def _directory_sync(directory):
@@ -1302,6 +1379,39 @@ def _effective_peers(peers, effective_time):
     return _tracker_only(), None
 
 
+def _promote_verified(store, verified, state, authenticated_date,
+                      monotonic_now, boot_id, checkpoint):
+    """Store, apply, and checkpoint one already verified envelope."""
+    header = verified["header"]
+    former_pair = _accepted(_bag(state))
+    reset_applied = (former_pair is not None
+                     and (header["epoch"], header["instr_serial"]) < former_pair)
+    prior_state = copy.deepcopy(state)
+    store.begin(state)
+    try:
+        store.store(verified, verified["device"], state)
+        apply_verified(
+            verified, state, authenticated_date, monotonic_now, boot_id)
+        if checkpoint is not None:
+            checkpoint(state)
+    except Exception:
+        # A failed checkpoint may already have replaced the state file.  Keep
+        # both local artifacts so restart can classify either outcome.
+        state.clear()
+        state.update(prior_state)
+        raise
+    if checkpoint is not None:
+        store.finish()
+    return reset_applied
+
+
+def _definitive_bootstrap_error(exc):
+    if exc.state in ("oversize", "audience_mismatch", "tamper_rejected",
+                     "stale_expired", "rollback_rejected"):
+        return True
+    return exc.state == "key_rejected" and exc.reason == "bad_mac"
+
+
 def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
                          work_dir, boot_id, monotonic_now, verifier,
                          persist_config, emit, checkpoint=None,
@@ -1319,6 +1429,9 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
     pointer = _pair(hint)
     loaded = None
     refresh_attempted = False
+    authenticated_hint = False
+    bootstrap_applied = False
+    bootstrap_seen = False
 
     def refresh_once():
         nonlocal refresh_attempted
@@ -1330,7 +1443,6 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
         # Persist invalidation on reboot/regression even if no envelope arrives.
         instruction_time = project_clock(state, "instruction", monotonic_now, boot_id)
         if not cache_only:
-            authenticated_hint = False
             try:
                 if _number(catalog_date) and boot_id:
                     observe_clock(
@@ -1399,9 +1511,87 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
             return result
         if pointer is None:
             return result
+        candidate_path = os.path.join(work_dir, BOOTSTRAP_NAME)
+        if authenticated_hint and checkpoint is not None:
+            candidate = None
+            try:
+                candidate = _read_bootstrap(candidate_path)
+                if candidate is not None:
+                    bootstrap_seen = True
+                    candidate_error = candidate["error"]
+                    raw = candidate["raw"]
+                    identity = candidate["identity"]
+                    if candidate_error is not None:
+                        if _definitive_bootstrap_error(candidate_error):
+                            _unlink_bootstrap(candidate_path, identity)
+                        result["attestation"] = _fact(
+                            candidate_error.state, header,
+                            candidate_error.reason)
+                    else:
+                        digest = hashlib.sha256(raw).hexdigest()
+                        accepted = _accepted(_bag(state))
+                        loaded_pair = ((loaded["header"]["epoch"],
+                                        loaded["header"]["instr_serial"])
+                                       if loaded is not None else None)
+                        if (loaded_pair is not None and loaded_pair == accepted
+                                and digest == _bag(state).get("envelope_digest")):
+                            _unlink_bootstrap(candidate_path, identity)
+                        else:
+                            effective_cfg = dict(cfg, platform=platform)
+                            verified = verify_envelope(
+                                raw, effective_cfg, state, catalog_date,
+                                monotonic_now, boot_id, guarded)
+                            try:
+                                reset_applied = _promote_verified(
+                                    store, verified, state, catalog_date,
+                                    monotonic_now, boot_id, checkpoint)
+                            except Exception:
+                                # A verified candidate is still retryable when
+                                # any local transaction operation is not durable.
+                                result["attestation"] = _fact(
+                                    "instr_unavailable", header)
+                            else:
+                                # Deletion failure deliberately leaves the
+                                # durable digest/LKG pair for the next tick.
+                                _unlink_bootstrap(candidate_path, identity)
+                                header = verified["header"]
+                                bag = _bag(state)
+                                result.update(
+                                    instruction=verified,
+                                    effective=_effective(verified),
+                                    attestation=_fact(
+                                        "floor_reset" if reset_applied
+                                        else "applied", header))
+                                peers, peer_state = _effective_peers(
+                                    verified["device"]["peers"],
+                                    project_clock(state, "instruction",
+                                                  monotonic_now, boot_id))
+                                result["effective_peers"] = peers
+                                if peer_state is not None:
+                                    result["attestation"] = _fact(
+                                        peer_state, header)
+                                bootstrap_applied = True
+            except InstructionError as exc:
+                if candidate is not None and _definitive_bootstrap_error(exc):
+                    _unlink_bootstrap(candidate_path, candidate["identity"])
+                result["attestation"] = _fact(exc.state, header, exc.reason)
+                if exc.state == "key_rejected" and exc.reason == "unknown_key":
+                    refresh_once()
+                if exc.state == "verifier_missing":
+                    if result["effective"] is None:
+                        result["effective"] = {
+                            "peers": {"mode": "tracker-only",
+                                      "include_origin": False}}
+                    result["effective_peers"] = _tracker_only()
+                    result["attestation"]["verify_level"] = "sig"
+            except Exception:
+                # Candidate I/O and durability failures retain the fixed file.
+                result["attestation"] = _fact("instr_unavailable", header)
+        bag = _bag(state)
         cached_pointer = _pair(bag.get("fetched_pointer"))
         unconditional = loaded is None or instruction_time is None
-        needs_fetch = (pointer != cached_pointer or unconditional or bag.get("fetch_pending")
+        needs_fetch = (bootstrap_seen or pointer != cached_pointer
+                       or unconditional or bag.get("fetch_pending")
                        or bag.get("pending_reset"))
         skew = bag.get("pointer_skew_count", 0)
         if pointer != cached_pointer or type(skew) is not int or not 0 <= skew <= 3:
@@ -1434,23 +1624,8 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
         effective_cfg = dict(cfg, platform=platform)
         verified = verify_envelope(raw, effective_cfg, state, date, monotonic_now, boot_id, guarded)
         candidate_header = verified["header"]
-        former_pair = _accepted(_bag(state))
-        reset_applied = former_pair is not None and (candidate_header["epoch"], candidate_header["instr_serial"]) < former_pair
-        prior_state = copy.deepcopy(state)
-        store.begin(state)
-        try:
-            store.store(verified, verified["device"], state)
-            apply_verified(verified, state, date, monotonic_now, boot_id)
-            if checkpoint is not None:
-                checkpoint(state)
-        except Exception:
-            # A failed checkpoint may already have replaced the state file.
-            # Keep both local artifacts so restart can classify either outcome.
-            state.clear()
-            state.update(prior_state)
-            raise
-        if checkpoint is not None:
-            store.finish()
+        reset_applied = _promote_verified(
+            store, verified, state, date, monotonic_now, boot_id, checkpoint)
         header = candidate_header
         bag = _bag(state)
         bag["fetch_pending"] = False
@@ -1481,6 +1656,8 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
                     refresh_once()
             except Exception:
                 pass
+        if bootstrap_applied:
+            return result
         result["attestation"] = _fact(exc.state, header, exc.reason)
         if exc.state == "verifier_missing":
             if result["effective"] is None:
@@ -1490,6 +1667,8 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
         return result
     except Exception as exc:
         # Neither arbitrary remote text nor credentials enter the public fact.
+        if bootstrap_applied:
+            return result
         message = str(exc).lower()
         result["attestation"] = _fact("oversize" if "exceeds" in message and "bytes" in message else "instr_unavailable")
         return result

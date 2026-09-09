@@ -318,6 +318,8 @@ def test_platform_paths_are_exact_and_instruction_state_is_never_an_image(
         assert paths == {
             "work_dir": work_dir,
             "lkg": os.path.join(work_dir, "iris-instructions.lkg"),
+            "bootstrap": os.path.join(
+                work_dir, "iris-instructions.bootstrap"),
             "keylist": os.path.join(
                 work_dir, "iris-instruction-keylist.current"),
             "keylist_state": os.path.join(
@@ -327,7 +329,8 @@ def test_platform_paths_are_exact_and_instruction_state_is_never_an_image(
             "root_signers": os.path.join(
                 trust_dir, "iris-root.allowed_signers"),
         }
-        for name in (paths["lkg"], paths["keylist"], paths["keylist_state"]):
+        for name in (paths["lkg"], paths["bootstrap"], paths["keylist"],
+                     paths["keylist_state"]):
             assert not os.path.basename(name).endswith(
                 (".bin", ".torrent", ".aria2", ".peers.json"))
     assert "instructions" in iris_agent._RESERVED_STATE_KEYS

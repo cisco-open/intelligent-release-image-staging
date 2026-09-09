@@ -15,7 +15,6 @@ import pytest
 from test_instr_verify import (
     AcceptVerifier,
     BOOT,
-    KEY,
     NOW,
     config,
     frame,
@@ -216,7 +215,9 @@ def test_symlink_and_failed_checkpoint_retain_candidate(instr, tmp_path):
     path.write_bytes(raw)
 
     def fail_checkpoint(_state):
-        raise OSError("test checkpoint failure")
+        # A local failure must never inherit the deletion policy of a remote
+        # verification state with the same name.
+        raise instr.InstructionError("rollback_rejected")
 
     _result, state, _catalog, _verifier, _checkpoints = _run(
         instr, tmp_path, checkpoint=fail_checkpoint)
