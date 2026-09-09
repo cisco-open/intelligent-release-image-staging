@@ -118,10 +118,12 @@ class StoreCorruptError(ValueError):
     never file content."""
 
 
-def load(path):
+def load(path, *, require_existing=False):
     """Load the store from *path*.
 
-    A MISSING file is the empty store (first run) and returns the skeleton.
+    A MISSING file is the empty store (first run) and returns the skeleton,
+    unless ``require_existing`` is true for an authority read that must not
+    reinterpret lost state as a fresh install.
     A present-but-unreadable or unparsable file raises StoreCorruptError so
     that no caller can mistake it for a fresh install: readers fail closed
     and writers never persist the emptiness over the durable ciphertext."""
@@ -131,7 +133,11 @@ def load(path):
         # Minimal shape guard
         if not isinstance(data, dict):
             raise ValueError("not a dict")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if require_existing:
+            raise StoreCorruptError(
+                "secrets store %s is unavailable (FileNotFoundError)" % path
+            ) from exc
         return {"devices": {}, "seeder": {}}
     except (OSError, ValueError) as exc:
         raise StoreCorruptError(

@@ -24,6 +24,13 @@ def test_load_missing_returns_skeleton(tmp_path):
     assert store == {"devices": {}, "seeder": {}}
 
 
+def test_load_can_require_existing_authority(tmp_path):
+    path = str(tmp_path / "nope.json")
+    with pytest.raises(secrets_store.StoreCorruptError,
+                       match="unavailable.*FileNotFoundError"):
+        secrets_store.load(path, require_existing=True)
+
+
 def test_load_corrupt_raises_not_skeleton(tmp_path):
     # Rewritten from test_load_corrupt_returns_skeleton: the old contract
     # (skeleton for a corrupt file) let every writer re-encrypt an empty

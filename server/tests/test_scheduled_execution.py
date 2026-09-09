@@ -193,6 +193,43 @@ def test_manual_assignment_generation_wins_after_prepared_intent(tmp_path):
     assert images.get_policy("edge-1")["approved_image_ids"] == ["manual"]
 
 
+def test_prepared_assignment_refuses_lost_revocation_authority(tmp_path):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    images.save_image(_image("image-a"))
+    writer = assignment_service.AssignmentService(
+        images, fleet,
+        authority_path=str(tmp_path / "assignment-authority.sqlite3"))
+    store = _make_schedule(
+        tmp_path, _definition(device_ids=["edge-1"]), ["edge-1"])
+    policy = _Policy()
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        clock=clock)
+    runner = _run_schedule(store, executor, policy, clock, ["edge-1"])
+
+    # A known revocation set must not become known-empty if its durable
+    # authority disappears between preparation and commit admission.
+    secrets_path = tmp_path / "secrets.json"
+    secrets_path.write_text(json.dumps({
+        "devices": {"edge-1": {"catalog_token": {
+            "value": "test-only", "created_at": NOW,
+            "expires_at": 0, "revoked": True}}},
+        "seeder": {}}))
+    secrets_path.unlink()
+    clock.now += 1
+    runner.run_once()
+
+    occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
+    receipt = schedules.ReceiptStore(tmp_path).get(
+        occurrence["id"], "edge-1")
+    assert receipt["status"] == "error"
+    assert receipt["reason"] == "revocation_unavailable"
+    assert images.get_policy("edge-1")["approved_image_ids"] == []
+
+
 class _Creds:
     def __init__(self):
         self.profile = {"device_user": "admin", "device_pass": "test-only",

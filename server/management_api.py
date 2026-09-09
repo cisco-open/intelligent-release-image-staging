@@ -2143,7 +2143,8 @@ class _ScheduledExecutor(object):
 
     def _strict_revocation(self):
         try:
-            state = secrets_store.load(self.secrets_path)
+            state = secrets_store.load(
+                self.secrets_path, require_existing=True)
             revoked = _instruction_revoked_principals(state)
         except (OSError, TypeError, ValueError, RecursionError,
                 OverflowError) as exc:

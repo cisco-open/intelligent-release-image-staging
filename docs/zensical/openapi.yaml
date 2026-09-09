@@ -79955,6 +79955,18 @@
               "removed"
             ],
             "additionalProperties": false
+          },
+          "annotations": {
+            "type": "object",
+            "properties": {
+              "all_targets_quarantined": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20000
+              }
+            },
+            "required": [],
+            "additionalProperties": false
           }
         },
         "required": [

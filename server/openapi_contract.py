@@ -613,9 +613,12 @@ def _schedule_occurrence_schema():
         "target_snapshot": snapshot,
         "delta": _schedule_object({"added": _schedule_integer(0, schedules.MAX_TARGETS),
                                     "removed": _schedule_integer(0, schedules.MAX_TARGETS)}),
+        "annotations": _schedule_object({
+            "all_targets_quarantined": _schedule_integer(
+                1, schedules.MAX_TARGETS)}, ()),
     }
     required = tuple(key for key in properties
-                     if key not in ("target_snapshot", "delta"))
+                     if key not in ("target_snapshot", "delta", "annotations"))
     schema = _schedule_object(properties, required)
     schema["allOf"] = [{
         "if": {"required": ["state"],

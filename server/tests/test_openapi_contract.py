@@ -11,6 +11,7 @@ import re
 import api_problem
 import api_routes
 import openapi_contract
+import schedules
 
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "zensical" / "openapi.yaml"
@@ -1273,6 +1274,14 @@ _SCHEDULE_OPERATIONS = (
 
 def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
     document = _load()
+    occurrence = document["components"]["schemas"]["ScheduleOccurrence"]
+    annotations = occurrence["properties"]["annotations"]
+    assert "annotations" not in occurrence["required"]
+    assert annotations["additionalProperties"] is False
+    assert annotations["required"] == []
+    assert annotations["properties"]["all_targets_quarantined"] == {
+        "type": "integer", "minimum": 1,
+        "maximum": schedules.MAX_TARGETS}
     for prefix, service, security in (
             ("/api/v1", "console", "consoleSession"),
             ("/internal/v1", "management", "managementBearer+consoleSession")):
