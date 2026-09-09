@@ -208,12 +208,22 @@ def _instruction_i63(value):
         else None
 
 
+def _instruction_timestamp(value):
+    """Return one finite, nonnegative timestamp in the bounded wire range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > _INSTRUCTION_I63_MAX:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def _instruction_report_age(heartbeat, observed_at):
     last_seen = heartbeat.get("last_seen") if isinstance(heartbeat, dict) else None
-    if (not isinstance(last_seen, (int, float)) or isinstance(last_seen, bool)
-            or not math.isfinite(last_seen)
-            or not isinstance(observed_at, (int, float))
-            or isinstance(observed_at, bool) or not math.isfinite(observed_at)):
+    last_seen = _instruction_timestamp(last_seen)
+    observed_at = _instruction_timestamp(observed_at)
+    if last_seen is None or observed_at is None:
         return None
     if last_seen > observed_at:
         return None
@@ -230,7 +240,8 @@ def _instruction_raw_state(heartbeat):
         return None, None
     if state == "key_rejected":
         reason = heartbeat.get("instr_reason")
-        return (state, reason) if reason in instructions.INSTR_REASONS \
+        return (state, reason) if isinstance(reason, str) \
+            and reason in instructions.INSTR_REASONS \
             else (None, None)
     if "instr_reason" in heartbeat:
         return None, None
@@ -240,12 +251,13 @@ def _instruction_raw_state(heartbeat):
 def _instruction_qos_drift_count(heartbeat, supported):
     if not supported or not isinstance(heartbeat, dict):
         return None
+    if "qos_drift" not in heartbeat:
+        return 0
     clean = instructions.sanitize_instruction_attestation({
-        "qos_drift": heartbeat.get("qos_drift")}) \
-        if "qos_drift" in heartbeat else {}
+        "qos_drift": heartbeat.get("qos_drift")})
     drift = clean.get("qos_drift")
     if drift is None:
-        return 0
+        return None
     return (len(drift.get("options", ()))
             + int("blocklist_revision" in drift)
             + int("blocklist_rules" in drift))
@@ -420,8 +432,7 @@ def _instruction_fleet_projection(inventory_rows, heartbeat_rows,
     return {
         "fleet_rollup": {
             "issued_revision": issued_revision,
-            "applied": {key: applied[key] for key in sorted(
-                applied, key=lambda value: int(value))},
+            "applied": applied,
             "states": {key: states[key] for key in sorted(states)},
         },
         "instruction_status": {

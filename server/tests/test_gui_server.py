@@ -12273,6 +12273,70 @@ def test_instruction_projection_distinguishes_capability_identity_and_revocation
         assert unknown_age["display_state"] == "unknown"
         assert unknown_age["report_age_seconds"] is None
         assert unknown_age["evidence"] == "server-observed"
+    for hostile_last_seen in (-1, -0.5, 10 ** 400):
+        hostile_age = gui_server._instruction_device_projection(
+            {"instr_protocol": 1, "instr_state": "applied",
+             "instr_epoch": 8, "instr_serial": 9,
+             "instr_policy_revision": 10, "last_seen": hostile_last_seen},
+            False, 1000)
+        assert hostile_age["display_state"] == "unknown"
+        assert hostile_age["report_age_seconds"] is None
+
+
+@pytest.mark.parametrize("hostile_reason", [[], {}])
+def test_instruction_projection_rejects_unhashable_key_reason_without_raising(
+        hostile_reason):
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "key_rejected",
+         "instr_reason": hostile_reason, "last_seen": 9}, False, 10)
+    assert projected["display_state"] == "unknown"
+    assert projected["underlying_state"] is None
+    assert projected["reason"] is None
+
+
+@pytest.mark.parametrize("hostile_reason", [[], {}])
+def test_instruction_chip_api_contains_unhashable_key_reason(tmp_path,
+                                                             hostile_reason):
+    import json
+    import time
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "a", "device_ip": "10.0.0.1"})
+        cat.record_heartbeat("a", {
+            "instr_protocol": 1, "instr_state": "key_rejected",
+            "instr_reason": hostile_reason,
+        }, now=time.time())
+        cookie, _ = _auth(host, port)
+        status, _, body = _req(host, port, "GET", "/api/devices",
+                               headers={"Cookie": cookie})
+        assert status == 200
+        instruction = json.loads(body)["devices"][0]["instruction"]
+        assert instruction["display_state"] == "unknown"
+        assert instruction["underlying_state"] is None
+        assert instruction["reason"] is None
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("hostile_drift", [
+    {}, [], "bad", {"options": "bad"},
+    {"options": [{"option": "bt_max_peers", "expected": 1}]},
+])
+def test_instruction_projection_keeps_malformed_present_drift_unknown(
+        hostile_drift):
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_epoch": 1, "instr_serial": 2, "instr_policy_revision": 3,
+         "last_seen": 9, "qos_drift": hostile_drift}, False, 10)
+    assert projected["qos_drift_count"] is None
+
+
+def test_instruction_projection_counts_absent_supported_drift_as_zero():
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_epoch": 1, "instr_serial": 2, "instr_policy_revision": 3,
+         "last_seen": 9}, False, 10)
+    assert projected["qos_drift_count"] == 0
 
 
 def test_instruction_rollup_unavailable_sources_are_not_zero_evidence():
@@ -12355,6 +12419,14 @@ def test_instruction_rollup_mixed_context_revocation_and_orphans():
     assert unknown["revoked"] is None
     assert unknown["underlying_state"] == "applied"
     assert unknown["underlying_evidence"] == "agent-asserted"
+
+    # Map insertion order is the O(n) server contract. The browser owns the
+    # display sort, including exact decimal strings above JS's safe integers.
+    ordered = gui_server._instruction_fleet_projection(
+        [{"device_id": "x"}, {"device_id": "y"}],
+        [hb("x", "applied", 1, 1, 9),
+         hb("y", "applied", 1, 2, 7)], {}, set(), 1000)
+    assert list(ordered["fleet_rollup"]["applied"]) == ["9", "7"]
 
 
 @pytest.mark.parametrize("store", [
@@ -12618,7 +12690,7 @@ def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
             "policy-pointer-skew", "policy-instruction-observed",
             "instruction-key-state", "instruction-cert-days",
             "instruction-keylist-age", "instruction-root-ceremony",
-            "instruction-root-quorum"):
+            "instruction-root-quorum", "instruction-key-actions"):
         assert 'id="%s"' % identifier in html
     assert "Server-observed" in html
     assert "Device-authored" in html
@@ -12657,6 +12729,8 @@ renderInstructionPanel({
   instruction_status: {observed_at: 456, instr_stamp_missing: 4,
     pointer_skew: 1},
   instruction_keys: {state: 'signing_refused',
+    enabled: true, certificate_renewal_due: true, signing_refused: true,
+    keylist_resign_due: true,
     certificate_days_to_expiry: -2, keylist_age_days: 136,
     root_ceremony_overdue: 'critical', root_quorum_degraded: true,
     roots_attested_180d: 1, roots_configured: 2}
@@ -12670,6 +12744,9 @@ assert.equal(el('policy-instruction-observed').textContent, 'time:456');
 assert.equal(el('instruction-cert-days').textContent, '-2 days');
 assert.match(el('instruction-root-ceremony').textContent, /critical/);
 assert.match(el('instruction-root-quorum').textContent, /degraded/);
+assert.match(el('instruction-key-actions').textContent, /certificate renewal due/);
+assert.match(el('instruction-key-actions').textContent, /signing refused/);
+assert.match(el('instruction-key-actions').textContent, /key list re-sign due/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
   instruction_status: {observed_at: 500, instr_stamp_missing: null,
@@ -12678,10 +12755,19 @@ assert.equal(el('policy-instr-stamp-missing').textContent, 'unavailable');
 assert.equal(el('policy-pointer-skew').textContent, 'unavailable');
 assert.equal(el('instruction-cert-days').textContent, 'unavailable');
 assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
+assert.equal(el('instruction-key-actions').textContent, 'unavailable');
+assert.match(el('policy-applied-revisions').innerHTML, /unavailable/);
+
+let unknownDrift = instructionCell({instruction: {label: 'unknown',
+  display_state: 'unknown', evidence: 'agent-asserted',
+  report_age_seconds: 1, qos_drift_count: null}});
+assert.match(unknownDrift, /QoS drift unavailable/);
 
 renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, states: {applied: 1}},
   instruction_status: {observed_at: 501, instr_stamp_missing: 0,
     pointer_skew: 0}, instruction_keys: {state: 'ready',
+    enabled: true, certificate_renewal_due: false, signing_refused: false,
+    keylist_resign_due: true,
     certificate_days_to_expiry: 0, keylist_age_days: 100,
     root_ceremony_overdue: 'warn', root_quorum_degraded: false,
     roots_attested_180d: 2, roots_configured: 2}});
@@ -12691,6 +12777,18 @@ assert.equal(el('policy-pointer-skew').textContent, '0 devices');
 assert.equal(el('instruction-cert-days').textContent, '0 days');
 assert.match(el('instruction-root-ceremony').textContent, /warn/);
 assert.match(el('instruction-root-quorum').textContent, /healthy/);
+assert.equal(el('instruction-key-actions').textContent, 'key list re-sign due');
+
+renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
+  instruction_status: {observed_at: 502, instr_stamp_missing: 0,
+    pointer_skew: 0}, instruction_keys: {state: 'phase0', enabled: false,
+    certificate_renewal_due: false, signing_refused: false,
+    keylist_resign_due: false, certificate_days_to_expiry: null,
+    keylist_age_days: null, root_ceremony_overdue: 'unknown',
+    root_quorum_degraded: false, roots_attested_180d: 0,
+    roots_configured: 0}});
+assert.equal(el('instruction-root-quorum').textContent, 'not enabled');
+assert.equal(el('instruction-key-actions').textContent, 'not enabled');
 ''')
 
 

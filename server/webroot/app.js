@@ -2798,6 +2798,8 @@
         && instruction.qos_drift_count >= 0) {
       detail.push(instruction.qos_drift_count + ' QoS drift violation' +
         (instruction.qos_drift_count === 1 ? '' : 's'));
+    } else {
+      detail.push('QoS drift unavailable');
     }
     return '<span class="badge ' + instructionBadgeClass(state) + '">' +
       esc(label) + '</span><div class="muted">' + detail.map(esc).join(' · ') + '</div>';
@@ -2838,7 +2840,9 @@
         : (rollup && Number.isSafeInteger(rollup.issued_revision)
           && rollup.issued_revision >= 0 ? 'r' + rollup.issued_revision : 'unavailable');
     document.getElementById('policy-applied-revisions').innerHTML =
-      instructionMapRows(rollup && rollup.applied, true, 'No accepted identity reported.');
+      instructionMapRows(Number.isSafeInteger(status.pointer_skew)
+        && status.pointer_skew >= 0 && rollup ? rollup.applied : null,
+      true, 'No accepted identity reported.');
     document.getElementById('policy-instruction-states').innerHTML =
       instructionMapRows(rollup && rollup.states, false, 'No inventory devices.');
     document.getElementById('policy-instr-stamp-missing').textContent =
@@ -2854,6 +2858,7 @@
       document.getElementById('instruction-keylist-age').textContent = 'unavailable';
       document.getElementById('instruction-root-ceremony').textContent = 'unknown';
       document.getElementById('instruction-root-quorum').textContent = 'unknown';
+      document.getElementById('instruction-key-actions').textContent = 'unavailable';
       return;
     }
     document.getElementById('instruction-key-state').textContent =
@@ -2869,9 +2874,25 @@
       && Number.isSafeInteger(custody.roots_configured)
       ? ' · ' + custody.roots_attested_180d + '/' + custody.roots_configured +
         ' roots attested in 180 days' : '';
-    document.getElementById('instruction-root-quorum').textContent =
-      custody.root_quorum_degraded === true ? 'degraded' + roots
+    var enabled = custody.enabled;
+    document.getElementById('instruction-root-quorum').textContent = enabled === false
+      ? 'not enabled' : enabled !== true ? 'unknown'
+      : custody.root_quorum_degraded === true ? 'degraded' + roots
       : custody.root_quorum_degraded === false ? 'healthy' + roots : 'unknown';
+    var actionFlags = [
+      ['certificate_renewal_due', 'certificate renewal due'],
+      ['signing_refused', 'signing refused'],
+      ['keylist_resign_due', 'key list re-sign due']
+    ];
+    var actions = actionFlags.filter(function (entry) {
+      return custody[entry[0]] === true;
+    }).map(function (entry) { return entry[1]; });
+    var actionsKnown = actionFlags.every(function (entry) {
+      return typeof custody[entry[0]] === 'boolean';
+    });
+    document.getElementById('instruction-key-actions').textContent = enabled === false
+      ? 'not enabled' : enabled !== true || !actionsKnown
+      ? 'unavailable' : actions.join(' · ') || 'none';
   }
   // ---- End instruction status projection ----
   function roleCapabilityMessage() {
