@@ -6,7 +6,7 @@
 
 setup() {
   export DEVICE_IP=192.0.2.10 CATALOG_TOKEN=t DEVICE_ID=e1 STAGE_HOST=192.0.2.2 DEVICE_SSH_PASS=x
-  INSTALL="$BATS_TEST_DIRNAME/../install.sh"
+  INSTALL="${IOX_RECIPE_ROOT:-$BATS_TEST_DIRNAME/..}/install.sh"
 }
 @test "stale NETWORK_ATTACHMENT without MANAGEMENT_TYPE aborts; a normal env is unaffected" {
   NETWORK_ATTACHMENT=inband run bash "$INSTALL" --dry-run
@@ -228,8 +228,8 @@ GUARD
 iris_ssh_policy() { printf '%s\n' 'forbidden recipe SSH policy' >> "$IOX_DIRECT_LOG"; return 96; }
 iris_ssh_cleanup() { :; }
 GUARD
-  ln -s "$BATS_TEST_DIRNAME/../install.sh" "$STUBDIR/device/iox/install.sh"
-  ln -s "$BATS_TEST_DIRNAME/../uninstall.sh" "$STUBDIR/device/iox/uninstall.sh"
+  ln -s "${IOX_RECIPE_ROOT:-$BATS_TEST_DIRNAME/..}/install.sh" "$STUBDIR/device/iox/install.sh"
+  ln -s "${IOX_RECIPE_ROOT:-$BATS_TEST_DIRNAME/..}/uninstall.sh" "$STUBDIR/device/iox/uninstall.sh"
   ln -s "$BATS_TEST_DIRNAME/../../../server" "$STUBDIR/server"
   python3 - "$STUBDIR/artifacts/iris-arm64.tar" <<'TAR'
 import io,sys,tarfile
@@ -300,6 +300,7 @@ finished=False
 expected_exit=None
 protocol_error=None
 signal_sent=False
+signal_case=scenario.split('_') if scenario.startswith(('group_', 'direct_')) else []
 uploaded=False
 remote_wrapper=False
 remote_certificate=False
@@ -391,6 +392,17 @@ def request(value):
     elif scenario=='second_signal_during_cleanup' and operation=='cleanup':
         os.kill(child.pid,signal.SIGTERM)
         time.sleep(0.05)
+    if signal_case:
+        sender=os.killpg if signal_case[0]=='group' else os.kill
+        number={'term':signal.SIGTERM,'int':signal.SIGINT,'hup':signal.SIGHUP}[signal_case[1]]
+        if not signal_sent:
+            sender(child.pid,number)
+            signal_sent=True
+            time.sleep(0.05)
+        elif operation in ('cleanup','finish'):
+            # Different later signals must not replace the first exit intent.
+            sender(child.pid,signal.SIGHUP if number!=signal.SIGHUP else signal.SIGINT)
+            time.sleep(0.05)
     code=0
     category=None
     detail=''
@@ -432,7 +444,7 @@ def request(value):
             timed_out=True
             framing=False
             returncode=None
-        if scenario=='install_timeout' and counts.get('app_install') and counts[name]>=4:
+        if scenario in ('install_timeout','install_timeout_cleanup_rejected') and counts.get('app_install') and counts[name]>=4:
             code,category,detail=4,'timeout','did not reach DEPLOYED within 2 seconds'
             timed_out=True
             framing=False
@@ -453,9 +465,12 @@ def request(value):
         assert action=='uninstall' or admitted,'application mutation preceded begin_install'
         if name=='app_stop': state='STOPPED'
         if name=='app_deactivate': state='DEPLOYED'
-        if name in ('app_uninstall','remove_app_config'): state=''
+        if name=='remove_app_config' and counts[name]>1 and scenario=='install_timeout_cleanup_rejected':
+            code,category,detail=2,'rejected','repeated app configuration removal rejected by controller order'
+            returncode=None
+        elif name in ('app_uninstall','remove_app_config'): state=''
         if name=='app_install':
-            state='INSTALLING' if scenario=='install_timeout' else 'DEPLOYED'
+            state='INSTALLING' if scenario in ('install_timeout','install_timeout_cleanup_rejected') else 'DEPLOYED'
             stdout="Installing package for 'iris'.\n%IOX: application installation accepted\n"
     elif name=='deployed':
         assert state=='DEPLOYED' and admitted
@@ -497,8 +512,9 @@ def request(value):
             revision+=1
             phase='restored'
             resolved=True
-        if scenario=='copy_failure_cleanup_failure':
+        if scenario in ('copy_failure_cleanup_failure','cleanup_failure'):
             code,category,detail=5,'journal_durability','fixture cleanup durability failure'
+        if scenario=='completion_order': stdout='fixture cleanup acknowledged\n'
     elif name=='finish':
         if action=='install' and admitted and phase=='disabled_confirmed':
             revision+=1
@@ -511,6 +527,7 @@ def request(value):
             remote_certificate=False
             trace.write(json.dumps(dict(event='artifact_cleanup',wrapper=False,certificate=False))+'\n')
             trace.flush()
+        if scenario=='completion_order': stdout='fixture finish acknowledged\n'
         finished=True
     for stream,data in (('stdout',stdout),('stderr',stderr)):
         raw=data.encode('utf-8')
@@ -532,10 +549,12 @@ def request(value):
             result['phase']=None
         if scenario=='malformed_install_phase': result['phase']='restored'
         if scenario=='malformed_uninstall_journal_half': result['revision']=0
+    if signal_case and len(signal_case)==3 and signal_case[2]=='malformed':
+        result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
-    if scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
+    if scenario.endswith('_malformed') or scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
         control.shutdown(socket.SHUT_WR)
         return
     if finished:
@@ -581,7 +600,7 @@ try:
         raise AssertionError('bounded controller fixture deadline expired')
     assert not wire,'partial final request frame'
     if finished: assert child.returncode==expected_exit,'recipe exit differs from acknowledged finish'
-    assert finished or scenario in ('identity_refused','identity_unknown') or scenario.startswith('malformed_'),'recipe exited without acknowledged finish'
+    assert finished or scenario in ('identity_refused','identity_unknown') or scenario.startswith('malformed_') or scenario.endswith('_malformed'),'recipe exited without acknowledged finish'
 except (AssertionError,ValueError,TypeError,OSError) as error:
     protocol_error=str(error)
 finally:
@@ -647,6 +666,13 @@ else:
     elif check=='preserve_primary':
         finish=[row for row in records if row['event']=='finish'][0]
         assert finish['exit_intent']!=0 and finish['expected_exit']==finish['exit_intent']
+    elif check=='signal':
+        expected=int(sys.argv[3])
+        reason=sys.argv[4]
+        assert names[-2:]==['cleanup','finish'],names
+        assert names.count('cleanup')==names.count('finish')==1,names
+        assert requests[-2]['arguments']=={'reason':reason,'exit_intent':expected},requests[-2]
+        assert requests[-1]['arguments']=={'exit_intent':expected},requests[-1]
     elif check=='artifact_clean':
         clean=[row for row in records if row['event']=='artifact_cleanup']
         assert clean and clean[-1]['wrapper'] is False and clean[-1]['certificate'] is False,records
@@ -817,6 +843,7 @@ ASSERTIONS
   _iox_fixture_setup
   run _iox_controller_run install finish_failure
   [ "$status" -eq 5 ]
+  [[ "$output" != *'onboard complete:'* ]]
   _iox_assert_trace finish RUNNING
 }
 
@@ -914,4 +941,98 @@ ASSERTIONS
   [[ "$lower" == *'package.sign'* && "$lower" == *'package.cert'* ]]
   [[ "$lower" == *'presence does not establish'*'validity'* ]]
   [ ! -s "$IOX_DIRECT_LOG" ]
+}
+
+_assert_signal_finalization() {
+  local scope="$1" reason="$2" expected="$3"
+  _iox_fixture_setup
+  run _iox_controller_run install "${scope}_${reason}"
+  [ "$status" -eq "$expected" ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal "$expected" "$reason"
+  [[ "$output" != *'complete:'* ]]
+}
+
+@test "install group TERM preserves first signal through cleanup and finish" {
+  _assert_signal_finalization group term 143
+}
+
+@test "install group INT preserves first signal through cleanup and finish" {
+  _assert_signal_finalization group int 130
+}
+
+@test "install group HUP preserves first signal through cleanup and finish" {
+  _assert_signal_finalization group hup 129
+}
+
+@test "install direct TERM preserves first signal through cleanup and finish" {
+  _assert_signal_finalization direct term 143
+}
+
+@test "install direct INT preserves first signal through cleanup and finish" {
+  _assert_signal_finalization direct int 130
+}
+
+@test "install direct HUP preserves first signal through cleanup and finish" {
+  _assert_signal_finalization direct hup 129
+}
+
+@test "install pending TERM survives rejection of the current response" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_term_malformed
+  [ "$status" -eq 143 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace first_only
+  [[ "$output" != *'complete:'* ]]
+}
+
+@test "install pending INT survives rejection of the current response" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_int_malformed
+  [ "$status" -eq 130 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace first_only
+  [[ "$output" != *'complete:'* ]]
+}
+
+@test "install pending HUP survives rejection of the current response" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_hup_malformed
+  [ "$status" -eq 129 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace first_only
+  [[ "$output" != *'complete:'* ]]
+}
+
+@test "install completion follows acknowledged cleanup and finish" {
+  _iox_fixture_setup
+  run _iox_controller_run install completion_order
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'fixture cleanup acknowledged'*'fixture finish acknowledged'*'onboard complete:'* ]]
+  _iox_assert_trace count cleanup 1
+  _iox_assert_trace count finish 1
+}
+
+@test "install never announces completion after cleanup or finish failure" {
+  local scenario
+  for scenario in cleanup_failure finish_failure; do
+    _iox_fixture_setup
+    run _iox_controller_run install "$scenario"
+    [ "$status" -eq 5 ]
+    [[ "$output" != *'onboard complete:'* ]] || { printf '%s\n' "$output"; return 1; }
+    _iox_assert_trace count cleanup 1
+    _iox_assert_trace count finish 1
+    rm -rf "$STUBDIR"
+  done
+}
+
+@test "install timeout cannot claim rejected partial app configuration removal succeeded" {
+  _iox_fixture_setup
+  run _iox_controller_run install install_timeout_cleanup_rejected
+  [ "$status" -eq 4 ]
+  [[ "$output" == *'did not reach DEPLOYED within 2 seconds'* ]]
+  [[ "$output" == *'repeated app configuration removal rejected'* ]]
+  [[ "$output" != *'Partial app configuration removed'* ]]
+  [[ "$output" != *'onboard complete:'* ]]
+  _iox_assert_trace count remove_app_config 2
+  _iox_assert_trace count cleanup 1
+  _iox_assert_trace count finish 1
+  _iox_assert_trace absent app_activate app_start
+  _iox_assert_trace finish INSTALLING
 }
