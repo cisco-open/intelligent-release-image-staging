@@ -381,7 +381,7 @@ def request(value):
     if signal_case:
         sender=os.killpg if signal_case[0]=='group' else os.kill
         number={'term':signal.SIGTERM,'int':signal.SIGINT,'hup':signal.SIGHUP}[signal_case[1]]
-        if not signal_sent:
+        if not signal_sent and (len(signal_case)<3 or signal_case[2]!='poll' or name=='app_list'):
             sender(child.pid,number)
             signal_sent=True
             time.sleep(0.05)

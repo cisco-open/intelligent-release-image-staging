@@ -395,7 +395,7 @@ def request(value):
     if signal_case:
         sender=os.killpg if signal_case[0]=='group' else os.kill
         number={'term':signal.SIGTERM,'int':signal.SIGINT,'hup':signal.SIGHUP}[signal_case[1]]
-        if not signal_sent:
+        if not signal_sent and (len(signal_case)<3 or signal_case[2]!='poll' or name=='app_list'):
             sender(child.pid,number)
             signal_sent=True
             time.sleep(0.05)
@@ -1035,4 +1035,64 @@ _assert_signal_finalization() {
   _iox_assert_trace count finish 1
   _iox_assert_trace absent app_activate app_start
   _iox_assert_trace finish INSTALLING
+}
+
+@test "install group TERM during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_term_poll
+  [ "$status" -eq 143 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 143 term
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install group INT during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_int_poll
+  [ "$status" -eq 130 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 130 int
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install group HUP during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install group_hup_poll
+  [ "$status" -eq 129 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 129 hup
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install direct TERM during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install direct_term_poll
+  [ "$status" -eq 143 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 143 term
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install direct INT during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install direct_int_poll
+  [ "$status" -eq 130 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 130 int
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install direct HUP during polling proceeds directly to finalization" {
+  _iox_fixture_setup
+  run _iox_controller_run install direct_hup_poll
+  [ "$status" -eq 129 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace signal 129 hup
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" != *'Partial app configuration removed'* ]]
 }
