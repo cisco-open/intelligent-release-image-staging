@@ -258,6 +258,32 @@ def test_generic_device_upsert_with_explicit_null_role_clears(tmp_path):
     assert "d00" not in _policy(auth_path, lkg_path).roles.role_of
 
 
+def test_invalid_generic_upsert_is_rejected_before_relaxing_role(tmp_path):
+    """A bad fleet field must not land a policy-first relaxation.
+
+    Generic upsert deliberately compiles a relaxing role change before the
+    fleet write.  Validate the complete operator input before entering that
+    sequence, so a future/unknown field cannot leave policy relaxed while the
+    inventory write is refused.
+    """
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]})])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    before_fleet = fleet.get_device("d00")
+    before_policy = _policy(auth_path, lkg_path).document
+
+    with pytest.raises(ValueError, match="unknown|field"):
+        manager.upsert_device(
+            {"device_id": "d00", "role": None,
+             "future_policy_bypass": "not allowed"},
+            actor="test")
+
+    assert fleet.get_device("d00") == before_fleet
+    assert _policy(auth_path, lkg_path).document == before_policy
+
+
 def test_mixed_direction_and_incomparable_role_changes_are_stable_422(tmp_path):
     fleet = _fleet(tmp_path, 4)
     auth_path, lkg_path = _write_roles(tmp_path, [
