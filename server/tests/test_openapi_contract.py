@@ -1025,6 +1025,22 @@ def test_compatibility_request_and_response_shapes_are_operation_specific():
             assignment["schema"]["properties"])
         assert set(assignment["examples"]) == {
             "orderedSet", "singularCompatibility", "unassign"}
+        assignment_operation = doc["paths"][
+            prefix + "/devices/{device_id}/assign"]["post"]
+        assert "422" in assignment_operation["responses"]
+        assignment_result = assignment_operation["responses"]["200"][
+            "content"]["application/json"]
+        assert set(assignment_result["schema"]["required"]) == {
+            "ok", "assigned_image_ids", "removed_image_ids"}
+        fleet_operation = doc["paths"][prefix + "/devices"]["post"]
+        fleet_schema = fleet_operation["requestBody"]["content"][
+            "application/json"]["schema"]
+        assert fleet_schema["additionalProperties"] is False
+        assert "os_family" not in fleet_schema["properties"]
+        assert "registered_at" not in fleet_schema["properties"]
+        assert {"iris_vlan", "app_ip", "role", "credential_profile_id"}.issubset(
+            fleet_schema["properties"])
+        assert "422" in fleet_operation["responses"]
         release = doc["paths"][
             prefix + "/images/{image_id}/release-quarantine"]["post"]
         assert release["requestBody"]["content"]["application/json"][
