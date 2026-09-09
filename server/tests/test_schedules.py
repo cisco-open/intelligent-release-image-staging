@@ -156,7 +156,7 @@ def test_compare_and_write_are_locked_per_row(tmp_path):
         results = list(pool.map(lambda _: edit(), range(2)))
     assert sorted(results, key=str) == [2, "conflict"]
     store = schedules.ScheduleStore(tmp_path)
-    store.create("s-other", definition(), actor="cli:iris-schedule", now=NOW)
+    store.create("s-other", definition(), actor="cli:iris-schedule", now=NOW, preview={"revision": 0, "now": NOW, "device_ids": []})
     assert store.patch("s-other", {"state": "paused"}, expected_rev=1)["rev"] == 2
 
 
@@ -280,32 +280,37 @@ def test_claim_checks_live_revision_and_keeps_crash_retry_identity(tmp_path, mon
     slot = schedules.occurrence_slot(row, NOW + 60)
     snapshot = {"revision": 9, "now": NOW + 60, "device_ids": ["edge-2"]}
     with pytest.raises(schedules.ScheduleRevisionConflict):
-        store.claim_occurrence("s-boat", expected_rev=9, slot=slot,
+        store.claim_occurrence("s-boat", expected_rev=9, expected_generation=row["generation"], slot=slot,
                                target_snapshot=snapshot, now=NOW + 60)
     original = store._progress.put
     monkeypatch.setattr(store._progress, "put", lambda *_: (_ for _ in ()).throw(OSError("simulated crash")))
     with pytest.raises(OSError):
-        store.claim_occurrence("s-boat", expected_rev=1, slot=slot,
+        store.claim_occurrence("s-boat", expected_rev=1, expected_generation=row["generation"], slot=slot,
                                target_snapshot=snapshot, now=NOW + 60)
     existing = schedules.OccurrenceStore(tmp_path).list()[0]
     monkeypatch.setattr(store._progress, "put", original)
-    resumed = store.claim_occurrence("s-boat", expected_rev=1, slot=slot,
+    resumed = store.claim_occurrence("s-boat", expected_rev=1, expected_generation=row["generation"], slot=slot,
                                      target_snapshot=dict(snapshot, device_ids=["changed"]), now=NOW + 61)
     assert resumed == existing
     assert store.progress("s-boat")["last_slot"] == slot["scheduled_at"]
     store.reaffirm("s-boat", "console:bob", expected_rev=1)
-    assert store.claim_occurrence("s-boat", expected_rev=2, slot=slot,
+    assert store.claim_occurrence("s-boat", expected_rev=2, expected_generation=row["generation"], slot=slot,
                                   target_snapshot=snapshot, now=NOW + 62) == existing
+
+
+def receipt_occurrence(tmp_path):
+    row = create(schedules.ScheduleStore(tmp_path), when={"kind": "once", "at": NOW, "window_seconds": 7200})
+    return schedules.OccurrenceStore(tmp_path).create(row, schedules.occurrence_slot(row, NOW), row["preview"], now=NOW)["id"]
 
 
 def test_receipt_intent_submission_terminal_are_monotonic_across_restart(tmp_path):
     store = schedules.ReceiptStore(tmp_path)
-    oid = "a" * 32
+    oid = receipt_occurrence(tmp_path)
     intent = store.begin(oid, "edge-1", now=NOW)
     assert intent["status"] == "intent" and intent["completed_at"] is None
     assert store.completed_device_ids(oid) == set()
     submitted = store.record(oid, "edge-1", status="submitted", reason="queued",
-                             expected_status="intent", job_id="job-1", record_id="record-1", now=NOW + 1)
+                             expected_status="intent", expected_rev=intent["rev"], job_id="job-1", record_id="record-1", now=NOW + 1)
     restarted = schedules.ReceiptStore(tmp_path)
     assert restarted.get(oid, "edge-1") == submitted
     assert restarted.begin(oid, "edge-1", now=NOW + 2) == submitted
@@ -326,7 +331,7 @@ def test_delete_recreate_same_name_and_epoch_cannot_reuse_occurrence(tmp_path):
     store = schedules.ScheduleStore(tmp_path)
     first = create(store)
     slot = schedules.occurrence_slot(first, NOW + 60)
-    store.claim_occurrence("s-boat", expected_rev=1, slot=slot,
+    store.claim_occurrence("s-boat", expected_rev=1, expected_generation=first["generation"], slot=slot,
                            target_snapshot=first["preview"], now=NOW + 60)
     store.delete("s-boat", expected_rev=1)
     second = create(store)
@@ -339,10 +344,10 @@ def test_claim_rejects_future_or_obsolete_slot(tmp_path):
     row = create(store)
     slot = schedules.occurrence_slot(row, NOW)
     with pytest.raises(schedules.ScheduleConflict):
-        store.claim_occurrence("s-boat", expected_rev=1, slot=slot, target_snapshot=row["preview"], now=NOW)
+        store.claim_occurrence("s-boat", expected_rev=1, expected_generation=row["generation"], slot=slot, target_snapshot=row["preview"], now=NOW)
     changed = store.patch("s-boat", {"when": {"kind": "once", "at": NOW + 90, "window_seconds": 60}}, expected_rev=1)
     with pytest.raises(schedules.ScheduleConflict):
-        store.claim_occurrence("s-boat", expected_rev=changed["rev"], slot=slot, target_snapshot=row["preview"], now=NOW + 100)
+        store.claim_occurrence("s-boat", expected_rev=changed["rev"], expected_generation=row["generation"], slot=slot, target_snapshot=row["preview"], now=NOW + 100)
 
 
 @pytest.mark.parametrize("metadata", [{"actor": "alice"}, {"actor": "console:alice\n"}, {"now": True}])
@@ -364,3 +369,134 @@ def test_retarget_requires_fresh_server_preview(tmp_path):
     changed = store.patch("s-boat", {"target": target}, expected_rev=1,
                            preview={"revision": 8, "now": NOW + 1, "device_ids": ["edge-3"]})
     assert changed["preview"]["device_ids"] == ["edge-3"]
+
+
+def test_retired_revision_floor_prevents_etag_and_claim_aba(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    old = create(store)
+    slot = schedules.occurrence_slot(old, NOW + 60)
+    store.delete(old["id"], expected_rev=old["rev"])
+    fresh = create(store)
+    assert fresh["rev"] > old["rev"]
+    with pytest.raises(schedules.ScheduleRevisionConflict):
+        store.patch(old["id"], {"state": "paused"}, expected_rev=old["rev"])
+    with pytest.raises(schedules.ScheduleConflict):
+        store.claim_occurrence(old["id"], expected_rev=fresh["rev"], expected_generation=old["generation"],
+                               slot=slot, target_snapshot=old["preview"], now=NOW + 60)
+    with pytest.raises(schedules.ScheduleValidationError):
+        store.claim_occurrence(old["id"], expected_rev="*", expected_generation=fresh["generation"],
+                               slot=slot, target_snapshot=fresh["preview"], now=NOW + 60)
+
+
+def test_delete_crash_after_floor_write_preserves_live_row_and_safe_recreate(tmp_path, monkeypatch):
+    store = schedules.ScheduleStore(tmp_path)
+    row = create(store)
+    write = store._rows._write_shard
+    monkeypatch.setattr(store._rows, "_write_shard", lambda *_: (_ for _ in ()).throw(OSError("crash before delete")))
+    with pytest.raises(OSError):
+        store.delete("s-boat", expected_rev=1)
+    assert store.get("s-boat") == row
+    assert store._retired.get("s-boat") == {"revision": 1}
+    monkeypatch.setattr(store._rows, "_write_shard", write)
+    changed = store.patch("s-boat", {"state": "paused"}, expected_rev=1)
+    store.delete("s-boat", expected_rev=changed["rev"])
+    assert create(schedules.ScheduleStore(tmp_path))["rev"] > changed["rev"]
+
+
+def test_create_requires_explicit_validated_preview_even_for_early(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    with pytest.raises(schedules.ScheduleValidationError):
+        store.create("s-empty", definition(), actor="console:alice", now=NOW)
+    empty = store.create("s-empty", definition(), actor="console:alice", now=NOW,
+                          preview={"revision": 0, "now": NOW, "device_ids": []})
+    assert empty["preview"]["device_ids"] == []
+
+
+@pytest.mark.parametrize("image_id", ["_image", ".image", "-image", "i" * 128])
+def test_catalog_image_id_grammar_is_not_device_grammar(image_id):
+    assert schedules.normalize_definition(definition(payload={"image_ids": [image_id]}))["payload"]["image_ids"] == [image_id]
+
+
+@pytest.mark.parametrize("image_id", ["i" * 129, "a/b", "a b", True])
+def test_invalid_catalog_image_ids_refused(image_id):
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_definition(definition(payload={"image_ids": [image_id]}))
+
+
+def test_reserved_service_id_cannot_be_a_device_target_or_preview():
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_definition(definition(target={"device_ids": ["seeder"]}))
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_snapshot({"revision": 1, "now": NOW, "device_ids": ["seeder"]})
+
+
+def test_receipt_updates_require_cas_and_cannot_replace_ownership(tmp_path):
+    oid = receipt_occurrence(tmp_path)
+    store = schedules.ReceiptStore(tmp_path)
+    intent = store.begin(oid, "edge-1", now=NOW, manual_generation=4, before_image_ids=["_old"])
+    with pytest.raises(schedules.ScheduleConflict):
+        store.record(oid, "edge-1", status="submitted", reason="queued", now=NOW + 1, job_id="job-1")
+    submitted = store.record(oid, "edge-1", status="submitted", reason="queued", now=NOW + 1,
+                             expected_rev=intent["rev"], job_id="job-1", record_id="record-1")
+    with pytest.raises(schedules.ScheduleConflict):
+        store.record(oid, "edge-1", status="running", reason="running", now=NOW + 2,
+                      expected_rev=submitted["rev"], job_id="job-2")
+    successor = store.successor_attempt(oid, "edge-1", expected_rev=submitted["rev"], now=NOW + 3,
+                                         manual_generation=4, predecessor_record_id="record-1")
+    assert successor["attempt"] == 2 and successor["status"] == "intent"
+    assert successor["predecessors"][0]["job_id"] == "job-1"
+    assert successor["predecessors"][0]["record_id"] == "record-1"
+    assert successor["predecessor_record_id"] == "record-1"
+    assert "job_id" not in successor and "record_id" not in successor
+    with pytest.raises(schedules.ScheduleConflict):
+        store.record(oid, "edge-1", status="ok", reason="onboarded", now=NOW + 4, expected_rev=submitted["rev"])
+    bound = store.record(oid, "edge-1", status="submitted", reason="queued", now=NOW + 4,
+                         expected_rev=successor["rev"], job_id="job-2", record_id="record-1")
+    terminal = store.record(oid, "edge-1", status="ok", reason="assigned", now=NOW + 5,
+                            expected_rev=bound["rev"], after_image_ids=["_new"], removed_image_ids=["_old"])
+    assert schedules.ReceiptStore(tmp_path).get(oid, "edge-1") == terminal
+    assert terminal["before_image_ids"] == ["_old"] and terminal["after_image_ids"] == ["_new"]
+    with pytest.raises(schedules.ScheduleConflict):
+        store.successor_attempt(oid, "edge-1", expected_rev=terminal["rev"], now=NOW + 6, manual_generation=4)
+
+
+def test_receipt_rejects_freeform_diagnostics(tmp_path):
+    oid = receipt_occurrence(tmp_path)
+    with pytest.raises(TypeError):
+        schedules.ReceiptStore(tmp_path).record(oid, "edge-1", status="error", reason="failed", now=NOW, detail="arbitrary diagnostic")
+
+
+def test_missed_occurrence_records_no_fabricated_target_and_cannot_dispatch(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    row = create(store)
+    expired = NOW + 60 + 7200
+    slot = schedules.occurrence_slot(row, expired)
+    missed = store.claim_occurrence("s-boat", expected_rev=1, expected_generation=row["generation"],
+                                     slot=slot, target_snapshot=None, now=expired)
+    assert missed["state"] == "missed"
+    assert "target_snapshot" not in missed and "delta" not in missed
+    with pytest.raises(schedules.ScheduleConflict):
+        schedules.OccurrenceStore(tmp_path).transition(missed["id"], "running", now=expired)
+    with pytest.raises(schedules.ScheduleConflict):
+        schedules.ReceiptStore(tmp_path).begin(missed["id"], "edge-1", now=expired)
+
+
+def test_unbound_occurrence_is_only_legal_after_window_expiry(tmp_path):
+    row = create(schedules.ScheduleStore(tmp_path))
+    slot = schedules.occurrence_slot(row, NOW + 60)
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.OccurrenceStore(tmp_path).create(row, slot, None, now=NOW + 60)
+
+
+def test_weekly_prior_window_remains_due_before_fall_back_slot():
+    schedule = weekly("Europe/Stockholm", 6, 3, 0)
+    schedule["when"]["window_seconds"] = 7 * 86400
+    previous = epoch("2026-10-18T01:00:00+00:00")
+    future = epoch("2026-10-25T02:00:00+00:00")
+    now = epoch("2026-10-25T00:30:00+00:00")
+    slot = schedules.occurrence_slot(schedule, now)
+    assert slot["scheduled_at"] == previous and slot["status"] == "due"
+    assert schedules.next_fire(schedule, now) == previous
+    assert schedules.next_fire(schedule, previous + 7 * 86400) == future
+    schedule["created_at"] = previous + 1
+    assert schedules.next_fire(schedule, now) == future
