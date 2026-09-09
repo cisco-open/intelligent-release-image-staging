@@ -527,9 +527,8 @@ def test_scheduled_merge_retries_one_catalog_conflict_without_generation_change(
                                retry_conflict=True, scheduled_context=_scheduled())
         assert result.before_ids == ["b"] and result.after_ids == ["b", "a"]
     else:
-        with pytest.raises(catalog.PolicyConflict):
-            service.apply("sw-1", ["a"], actor="schedule", mode="merge",
-                          retry_conflict=True, scheduled_context=_scheduled())
+        assert service.apply("sw-1", ["a"], actor="schedule", mode="merge",
+                             retry_conflict=True, scheduled_context=_scheduled()).reason == "conflict"
     assert len(calls) == 2
     assert service.capture_schedule_state("sw-1")["manual_generation"] == 0
     assert len(_events(tmp_path)) == 1
@@ -543,8 +542,8 @@ def test_scheduled_assignment_rechecks_quarantine_at_catalog_write(tmp_path, inv
             {"a": _verdict(bulkhash.STATE_MISMATCH)}, source="scheduled", now=1000)
         return original(*args, **kwargs)
     monkeypatch.setattr(service.store, "set_policy", quarantine)
-    with pytest.raises(catalog.QuarantinedImage):
-        service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+    assert service.apply("sw-1", ["a"], actor="schedule",
+                         scheduled_context=_scheduled()).reason == "image_quarantined"
     assert service.store.get_policy("sw-1")["approved_image_ids"] == []
     assert len(_events(tmp_path)) == 1
 
@@ -622,10 +621,11 @@ def test_recurring_claims_remain_until_explicit_acknowledgement(
     monkeypatch.setattr(restarted.store, "set_policy", forbidden)
     assert restarted.apply("sw-1", ["a"], actor="schedule",
                            scheduled_context=_scheduled(occurrence="occ-0")).after_ids == ["a"]
-    assert restarted.acknowledge_schedule_result("ambiguous", "sw-1") is False
-    assert restarted.acknowledge_schedule_result("occ-0", "sw-2") is True
-    assert restarted.acknowledge_schedule_result("occ-0", "sw-1") is True
-    assert restarted.acknowledge_schedule_result("occ-0", "sw-1") is True
+    with pytest.raises(TypeError):
+        restarted.acknowledge_schedule_result("ambiguous", "sw-1")
+    assert restarted.acknowledge_schedule_result("occ-0", "sw-2", terminal_status="ok") is True
+    assert restarted.acknowledge_schedule_result("occ-0", "sw-1", terminal_status="ok") is True
+    assert restarted.acknowledge_schedule_result("occ-0", "sw-1", terminal_status="ok") is True
     with sqlite3.connect(service.authority_path) as conn:
         retained = conn.execute("SELECT occurrence_id, result_json IS NULL FROM claims "
                                "ORDER BY occurrence_id").fetchall()
@@ -642,8 +642,178 @@ def test_acknowledged_recurring_results_do_not_accumulate(tmp_path, inventory):
         occurrence = "occ-%d" % number
         service.apply("sw-1", ["a"], actor="schedule",
                       scheduled_context=_scheduled(occurrence=occurrence))
-        assert service.acknowledge_schedule_result(occurrence, "sw-1") is True
+        assert service.acknowledge_schedule_result(occurrence, "sw-1", terminal_status="ok") is True
     with sqlite3.connect(service.authority_path) as conn:
         assert conn.execute("SELECT count(*) FROM claims").fetchone() == (0,)
     assert service.capture_schedule_state("sw-1")["manual_generation"] == 0
     assert len(_events(tmp_path)) == 10
+
+
+
+@pytest.mark.parametrize("damage", [
+    "DROP TABLE authority", "DROP TABLE claims", "DROP INDEX claims_schedule_device",
+    "ALTER TABLE authority ADD COLUMN unsafe TEXT", "CREATE TABLE unsafe (secret TEXT)",
+    "CREATE INDEX unsafe ON authority (manual_generation)",
+    "PRAGMA user_version=0", "PRAGMA user_version=2",
+    "DROP TABLE authority; CREATE TABLE authority (device_id TEXT, manual_generation INTEGER, manual_pending INTEGER)",
+    "DROP TABLE claims; CREATE TABLE claims (occurrence_id TEXT NOT NULL, device_id TEXT NOT NULL, schedule_id TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT)",
+    "DROP INDEX claims_schedule_device; CREATE INDEX claims_schedule_device ON claims (device_id, schedule_id)",
+    "CREATE TRIGGER unsafe AFTER INSERT ON authority BEGIN DELETE FROM claims; END",
+])
+def test_existing_authority_schema_damage_refuses_without_reinitializing(
+        tmp_path, inventory, monkeypatch, damage):
+    import sqlite3
+    import assignment_service
+    service = _service(tmp_path, inventory)
+    # Authority loss must not reset an operator's generation, and claim loss
+    # must not let an already committed occurrence execute for a second time.
+    service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+    service.apply("sw-1", ["b"], actor="manual")
+    with sqlite3.connect(service.authority_path) as conn:
+        conn.executescript(damage)
+        damaged_schema = conn.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+    def forbidden(*args, **kwargs):
+        pytest.fail("damaged authority allowed a stale schedule/catalog write")
+    monkeypatch.setattr(service.store, "set_policy", forbidden)
+    with pytest.raises(assignment_service.AssignmentAuthorityUnavailable):
+        service.capture_schedule_state("sw-1")
+    with pytest.raises(assignment_service.AssignmentAuthorityUnavailable):
+        service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+    with pytest.raises(assignment_service.AssignmentAuthorityUnavailable):
+        service.apply("sw-1", ["a"], actor="schedule",
+                      scheduled_context=_scheduled(occurrence="stale-generation"))
+    with sqlite3.connect(service.authority_path) as conn:
+        assert conn.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == damaged_schema
+    assert service.store.get_policy("sw-1")["approved_image_ids"] == ["b"]
+
+
+def test_nonempty_unversioned_database_cannot_initialize_authority(tmp_path, inventory):
+    import sqlite3
+    import assignment_service
+    service = _service(tmp_path, inventory)
+    with sqlite3.connect(service.authority_path) as conn:
+        conn.execute("CREATE TABLE other (evidence TEXT)")
+    with pytest.raises(assignment_service.AssignmentAuthorityUnavailable):
+        service.capture_schedule_state("sw-1")
+
+
+def test_terminal_receipt_acknowledgement_reclaims_ambiguous_claim(tmp_path, inventory, monkeypatch):
+    import sqlite3
+    service = _service(tmp_path, inventory)
+    class SimulatedCrash(BaseException):
+        pass
+    def crash(*args, **kwargs):
+        raise SimulatedCrash()
+    monkeypatch.setattr(service.store, "set_policy", crash)
+    with pytest.raises(SimulatedCrash):
+        service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+    restarted = _service(tmp_path, inventory)
+    with sqlite3.connect(service.authority_path) as conn:
+        assert conn.execute("SELECT result_json FROM claims").fetchall() == [(None,)]
+    for status in (None, "running", "submitted", "prepared", True):
+        with pytest.raises(ValueError):
+            restarted.acknowledge_schedule_result("occ-1", "sw-1", terminal_status=status)
+    with sqlite3.connect(service.authority_path) as conn:
+        assert conn.execute("SELECT result_json FROM claims").fetchall() == [(None,)]
+    assert restarted.acknowledge_schedule_result("occ-1", "sw-1", terminal_status="error") is True
+    assert restarted.acknowledge_schedule_result("occ-1", "sw-1", terminal_status="error") is True
+    with sqlite3.connect(service.authority_path) as conn:
+        assert conn.execute("SELECT count(*) FROM claims").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("failure,reason", [
+    ("manual", "manual_override"), ("ambiguous", "conflict"),
+    ("quarantine", "image_quarantined"), ("cap", "assignment_cap_exceeded"),
+    ("missing", "execution_failed"), ("cas", "conflict"),
+])
+def test_scheduled_refusals_replay_persistently_without_write_or_second_audit(
+        tmp_path, inventory, monkeypatch, failure, reason):
+    import sqlite3
+    import assignment_service
+    service = _service(tmp_path, inventory)
+    images, kwargs = ["a"], {}
+    prior_audits = 0
+    if failure == "manual":
+        service.apply("sw-1", ["b"], actor="manual")
+        prior_audits = 1
+    elif failure == "ambiguous":
+        class SimulatedCrash(BaseException):
+            pass
+        original = service.store.set_policy
+        def crash(*args, **kwargs):
+            raise SimulatedCrash()
+        monkeypatch.setattr(service.store, "set_policy", crash)
+        with pytest.raises(SimulatedCrash):
+            service.apply("sw-1", images, actor="schedule", scheduled_context=_scheduled())
+        monkeypatch.setattr(service.store, "set_policy", original)
+    elif failure == "quarantine":
+        service.store.apply_hash_verification(
+            {"a": _verdict(bulkhash.STATE_MISMATCH)}, source="scheduled", now=1000)
+    elif failure == "cap":
+        images = ["a"] * 11
+    elif failure == "missing":
+        images = ["missing"]
+    elif failure == "cas":
+        kwargs["expect_image_ids"] = ["b"]
+    first = service.apply("sw-1", images, actor="schedule", scheduled_context=_scheduled(), **kwargs)
+    assert isinstance(first, assignment_service.ScheduledAssignmentRefusal)
+    assert first.reason == reason
+    with sqlite3.connect(service.authority_path) as conn:
+        saved = json.loads(conn.execute("SELECT result_json FROM claims").fetchone()[0])
+    assert saved == {"schema_version": 1, "kind": "refusal", "reason": reason,
+                     "before_ids": first.before_ids, "after_ids": first.after_ids,
+                     "removed_ids": first.removed_ids}
+    restarted = _service(tmp_path, inventory)
+    def forbidden(*args, **kwargs):
+        pytest.fail("replayed refusal repeated catalog work")
+    monkeypatch.setattr(restarted.store, "set_policy", forbidden)
+    assert restarted.apply("sw-1", images, actor="schedule",
+                           scheduled_context=_scheduled(), **kwargs) == first
+    assert len(_events(tmp_path)) == prior_audits + 1
+
+
+
+@pytest.mark.parametrize("damage", [
+    {"schema_version": True}, {"kind": "unknown"}, {"reason": "arbitrary diagnostic"},
+    {"extra": "field"}, {"before_ids": "a"}, {"removed_ids": [None]},
+])
+def test_durable_result_schema_is_closed(tmp_path, inventory, monkeypatch, damage):
+    import sqlite3
+    import assignment_service
+    service = _service(tmp_path, inventory)
+    service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+    with sqlite3.connect(service.authority_path) as conn:
+        saved = json.loads(conn.execute("SELECT result_json FROM claims").fetchone()[0])
+        saved.update(damage)
+        conn.execute("UPDATE claims SET result_json=?", (json.dumps(saved),))
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed durable result reached catalog write")
+    monkeypatch.setattr(service.store, "set_policy", forbidden)
+    with pytest.raises(assignment_service.AssignmentAuthorityUnavailable):
+        service.apply("sw-1", ["a"], actor="schedule", scheduled_context=_scheduled())
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_crash_after_result_before_audit_replays_without_replacement_audit(
+        tmp_path, inventory, monkeypatch, refused):
+    service = _service(tmp_path, inventory)
+    images = ["a"] * 11 if refused else ["a"]
+    class SimulatedCrash(BaseException):
+        pass
+    def crash(*args, **kwargs):
+        raise SimulatedCrash()
+    monkeypatch.setattr(service, "_audit", crash)
+    with pytest.raises(SimulatedCrash):
+        service.apply("sw-1", images, actor="schedule", scheduled_context=_scheduled())
+    assert not (tmp_path / "audit.jsonl").exists()
+    restarted = _service(tmp_path, inventory)
+    def forbidden(*args, **kwargs):
+        pytest.fail("durable result replay repeated catalog work or audit")
+    monkeypatch.setattr(restarted.store, "set_policy", forbidden)
+    monkeypatch.setattr(restarted, "_audit", forbidden)
+    result = restarted.apply("sw-1", images, actor="schedule", scheduled_context=_scheduled())
+    if refused:
+        assert result.reason == "assignment_cap_exceeded"
+    else:
+        assert result.after_ids == ["a"]
+    assert not (tmp_path / "audit.jsonl").exists()

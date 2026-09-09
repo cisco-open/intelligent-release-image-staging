@@ -93,6 +93,24 @@ def _size(value):
             return "%s %s" % (("%.1f" % number).rstrip("0").rstrip("."), unit)
 
 
+_AUTHORITY_SCHEMA = (
+    ("table", "authority", "authority",
+     "CREATE TABLE authority (device_id TEXT PRIMARY KEY, "
+     "manual_generation INTEGER NOT NULL CHECK(manual_generation >= 0), "
+     "manual_pending INTEGER NOT NULL CHECK(manual_pending IN (0, 1)))"),
+    ("table", "claims", "claims",
+     "CREATE TABLE claims (occurrence_id TEXT NOT NULL, device_id TEXT NOT NULL, "
+     "schedule_id TEXT NOT NULL, request_json TEXT NOT NULL, result_json TEXT, "
+     "PRIMARY KEY (occurrence_id, device_id))"),
+    ("index", "claims_schedule_device", "claims",
+     "CREATE INDEX claims_schedule_device ON claims (schedule_id, device_id)"),
+    ("index", "sqlite_autoindex_authority_1", "authority", None),
+    ("index", "sqlite_autoindex_claims_1", "claims", None),
+)
+_REFUSAL_REASONS = frozenset({"manual_override", "conflict", "image_quarantined",
+                              "assignment_cap_exceeded", "execution_failed"})
+
+
 class AssignmentService:
     def __init__(self, store, fleet, audit_path=None, *, authority_path=None):
         """Use one authority_path under IRIS_STATE for every production caller.
@@ -122,20 +140,26 @@ class AssignmentService:
             try:
                 conn.execute("PRAGMA synchronous=FULL")
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
-                    raise AssignmentAuthorityUnavailable("unsupported assignment authority")
-                conn.execute("CREATE TABLE IF NOT EXISTS authority ("
-                             "device_id TEXT PRIMARY KEY, "
-                             "manual_generation INTEGER NOT NULL CHECK(manual_generation >= 0), "
-                             "manual_pending INTEGER NOT NULL CHECK(manual_pending IN (0, 1)))")
-                conn.execute("CREATE TABLE IF NOT EXISTS claims ("
-                             "occurrence_id TEXT NOT NULL, device_id TEXT NOT NULL, "
-                             "schedule_id TEXT NOT NULL, "
-                             "request_json TEXT NOT NULL, result_json TEXT, "
-                             "PRIMARY KEY (occurrence_id, device_id))")
-                conn.execute("CREATE INDEX IF NOT EXISTS claims_schedule_device "
-                             "ON claims (schedule_id, device_id)")
-                conn.execute("PRAGMA user_version=1")
+                schema = conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_master "
+                                      "ORDER BY name").fetchall()
+                if version == 0 and not schema:
+                    # DDL and version commit together. A versioned database
+                    # with missing tables is lost authority, never a new store.
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        for _, _, _, statement in _AUTHORITY_SCHEMA:
+                            if statement is not None:
+                                conn.execute(statement)
+                        conn.execute("PRAGMA user_version=1")
+                        conn.execute("COMMIT")
+                    except BaseException:
+                        conn.execute("ROLLBACK")
+                        raise
+                elif version != 1 or schema != sorted(_AUTHORITY_SCHEMA, key=lambda row: row[1]):
+                    # Exact schema definitions validate columns, CHECK/primary
+                    # key constraints, and index keys; extra objects (including
+                    # triggers) also refuse rather than modifying evidence.
+                    raise AssignmentAuthorityUnavailable("invalid assignment authority schema")
                 yield conn
             finally:
                 conn.close()
@@ -166,25 +190,63 @@ class AssignmentService:
                 return {"manual_generation": generation,
                         "before_image_ids": self.store.get_policy(device_id)["approved_image_ids"]}
 
-    def acknowledge_schedule_result(self, occurrence_id, device_id):
+    def acknowledge_schedule_result(self, occurrence_id, device_id, *, terminal_status):
         """Release replay evidence only AFTER a durable terminal receipt save.
 
         The runner must never dispatch an acknowledged terminal receipt again.
-        Returns True for a removed/already absent claim, False for an incomplete
-        claim, which remains conservative conflict evidence. No implicit expiry
-        or newer occurrence can remove an unacknowledged result. A retired
-        device's completed claims can still be acknowledged.
+        terminal_status must be the runner's persisted ok/skipped/error status.
+        That terminal receipt supersedes even an ambiguous claim: delete the
+        exact claim, returning True idempotently. No implicit expiry or newer
+        occurrence can remove unacknowledged evidence. Retired devices can
+        still be acknowledged. This internal method trusts the runner's durable
+        receipt write; the status alone is not evidence for an external caller.
         """
         if not all(isinstance(value, str) and value for value in (occurrence_id, device_id)):
             raise ValueError("invalid assignment claim identity")
+        if not isinstance(terminal_status, str) or terminal_status not in {"ok", "skipped", "error"}:
+            raise ValueError("terminal receipt status required")
         if self.fleet is None:
             raise AssignmentAuthorityUnavailable("assignment authority unavailable")
         with membership_guard(self.fleet):
             with self._authority() as conn:
-                conn.execute("DELETE FROM claims WHERE occurrence_id=? AND device_id=? "
-                             "AND result_json IS NOT NULL", (occurrence_id, device_id))
-                return conn.execute("SELECT 1 FROM claims WHERE occurrence_id=? AND device_id=?",
-                                    (occurrence_id, device_id)).fetchone() is None
+                conn.execute("DELETE FROM claims WHERE occurrence_id=? AND device_id=?",
+                             (occurrence_id, device_id))
+                return True
+
+    @staticmethod
+    def _load_result(raw):
+        try:
+            saved = json.loads(raw)
+            if (not isinstance(saved, dict)
+                    or set(saved) != {"schema_version", "kind", "reason", "before_ids", "after_ids", "removed_ids"}
+                    or type(saved["schema_version"]) is not int or saved["schema_version"] != 1):
+                raise ValueError("invalid result schema")
+            ids = {key: saved[key] for key in ("before_ids", "after_ids", "removed_ids")}
+            if not all(isinstance(values, list) and all(isinstance(i, str) and i for i in values)
+                       for values in ids.values()):
+                raise ValueError("invalid result ids")
+            if saved["kind"] == "success" and saved["reason"] is None:
+                return catalog.AssignmentResult(**ids)
+            if (saved["kind"] == "refusal" and isinstance(saved["reason"], str)
+                    and saved["reason"] in _REFUSAL_REASONS
+                    and ids["before_ids"] == ids["after_ids"] and ids["removed_ids"] == []):
+                return ScheduledAssignmentRefusal(reason=saved["reason"], **ids)
+            raise ValueError("invalid result kind")
+        except (TypeError, ValueError) as exc:
+            raise AssignmentAuthorityUnavailable("invalid assignment result") from exc
+
+    @staticmethod
+    def _save_result(conn, context, device_id, result):
+        refusal = isinstance(result, ScheduledAssignmentRefusal)
+        conn.execute("UPDATE claims SET result_json=? WHERE occurrence_id=? AND device_id=?",
+                     (json.dumps({"schema_version": 1,
+                                  "kind": "refusal" if refusal else "success",
+                                  "reason": result.reason if refusal else None,
+                                  "before_ids": result.before_ids,
+                                  "after_ids": result.after_ids,
+                                  "removed_ids": result.removed_ids}),
+                      context.occurrence_id, device_id))
+        return result, False
 
     def _apply_guarded(self, device_id, requested, mode, expect_image_ids,
                        retry_conflict, scheduled_context, before):
@@ -207,27 +269,32 @@ class AssignmentService:
                                      "WHERE occurrence_id=? AND device_id=?",
                                      (context.occurrence_id, device_id)).fetchone()
                 if claim is not None:
-                    if claim[0] != request or claim[1] is None:
-                        return ScheduledAssignmentRefusal("conflict", before, before, []), False
-                    try:
-                        saved = json.loads(claim[1])
-                        if (not isinstance(saved, dict)
-                                or set(saved) != {"before_ids", "after_ids", "removed_ids"}
-                                or not all(isinstance(ids, list) and all(isinstance(i, str) for i in ids)
-                                           for ids in saved.values())):
-                            raise ValueError("invalid result")
-                        return catalog.AssignmentResult(**saved), True
-                    except (TypeError, ValueError) as exc:
-                        raise AssignmentAuthorityUnavailable("invalid assignment result") from exc
-                if generation != context.expected_manual_generation:
-                    return ScheduledAssignmentRefusal("manual_override", before, before, []), False
-                if pending:
-                    return ScheduledAssignmentRefusal("conflict", before, before, []), False
+                    if claim[1] is not None:
+                        saved = self._load_result(claim[1])
+                        if claim[0] != request:
+                            # Invalid reuse of immutable occurrence identity.
+                            # Preserve its original durable result and audit;
+                            # the conflicting response derives from that same
+                            # durable snapshot and cannot mutate the catalog.
+                            return ScheduledAssignmentRefusal(
+                                "conflict", saved.before_ids, saved.before_ids, []), True
+                        return saved, True
+                    # An unfinished claim cannot establish whether catalog
+                    # commit happened. Persist its conservative terminal refusal
+                    # so every later recovery returns it without another audit.
+                    return self._save_result(conn, context, device_id,
+                        ScheduledAssignmentRefusal("conflict", before, before, []))
                 # A result can precede its durable terminal runner receipt.
-                # Newer occurrences must retain that replay evidence until the
-                # runner explicitly acknowledges the receipt after saving it.
+                # Newer occurrences retain that replay evidence until explicit
+                # acknowledgement after the runner saves its terminal receipt.
                 conn.execute("INSERT INTO claims VALUES (?, ?, ?, ?, NULL)",
                              (context.occurrence_id, device_id, context.schedule_id, request))
+                if generation != context.expected_manual_generation:
+                    return self._save_result(conn, context, device_id,
+                        ScheduledAssignmentRefusal("manual_override", before, before, []))
+                if pending:
+                    return self._save_result(conn, context, device_id,
+                        ScheduledAssignmentRefusal("conflict", before, before, []))
             elif conn is not None:
                 conn.execute("UPDATE authority SET manual_pending=1 WHERE device_id=?", (device_id,))
             try:
@@ -247,22 +314,26 @@ class AssignmentService:
                         if not retry_conflict or attempt == 1:
                             raise
                         before[:] = self.store.get_policy(device_id)["approved_image_ids"]
-            except (ValueError, catalog.PolicyConflict, catalog.QuarantinedImage):
+            except (ValueError, catalog.PolicyConflict, catalog.QuarantinedImage) as exc:
                 # These catalog exceptions are known refusals before mutation.
                 # Other failures retain intent, since commit may have happened.
                 if context is not None:
-                    conn.execute("DELETE FROM claims WHERE occurrence_id=? AND device_id=?",
-                                 (context.occurrence_id, device_id))
+                    if isinstance(exc, catalog.PolicyConflict):
+                        reason = "conflict"
+                    elif isinstance(exc, catalog.QuarantinedImage):
+                        reason = "image_quarantined"
+                    elif str(exc) == "at most %d images per device" % catalog.MAX_ASSIGNED_IMAGES:
+                        reason = "assignment_cap_exceeded"
+                    else:
+                        reason = "execution_failed"
+                    return self._save_result(conn, context, device_id,
+                        ScheduledAssignmentRefusal(reason, before, before, []))
                 elif conn is not None:
                     conn.execute("UPDATE authority SET manual_pending=? WHERE device_id=?",
                                  (pending, device_id))
                 raise
             if context is not None:
-                conn.execute("UPDATE claims SET result_json=? WHERE occurrence_id=? AND device_id=?",
-                             (json.dumps({"before_ids": result.before_ids,
-                                          "after_ids": result.after_ids,
-                                          "removed_ids": result.removed_ids}),
-                              context.occurrence_id, device_id))
+                return self._save_result(conn, context, device_id, result)
             elif conn is not None:
                 conn.execute("UPDATE authority SET manual_generation=manual_generation+1, "
                              "manual_pending=0 WHERE device_id=?", (device_id,))
@@ -278,7 +349,9 @@ class AssignmentService:
         API replacement retains its caller-supplied CAS and does not retry.
         The returned before/after/removed IDs come from the successful shard
         callback, never the optimistic pre-read. Audit append is best-effort,
-        separate from the assignment commit, and never retried.
+        separate from the assignment commit, and never retried. A crash after
+        durable result persistence but before audit append can lose that audit;
+        replay returns the persisted result without appending a replacement.
         """
         before = []
         requested = []
@@ -321,10 +394,12 @@ class AssignmentService:
             self._audit(device_id, actor, requested, before, before, [],
                         "assignment failed: " + reason, "fail")
             raise
+        if replayed:
+            return result
         if isinstance(result, ScheduledAssignmentRefusal):
             self._audit(device_id, actor, requested, before, before, [],
                         "assignment failed: " + result.reason, "fail")
-        elif not replayed:
+        else:
             self._audit_success(device_id, actor, result, plural)
         return result
 
