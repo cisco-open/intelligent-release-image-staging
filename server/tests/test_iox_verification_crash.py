@@ -706,6 +706,21 @@ def _concurrent_fence_admission_worker(
         controller.close()
 
 
+def _direct_fence_attempt(controller, board, attempt_id):
+    module = _verification_module()
+    request = _AttrDict(
+        action="uninstall", device_id=_DEVICE, job_id=_JOB,
+        teardown_mode="force_agent_only", record_id=None)
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.attempt_id = attempt_id
+    attempt.board = board
+    attempt.transcript = _Transcript(attempt_id)
+    attempt.supervisor = _AttrDict(
+        pid=os.getpid(), start_ticks=module._supervisor_start(os.getpid()))
+    return attempt
+
+
 def _host_boot_id():
     with open("/proc/sys/kernel/random/boot_id") as stream:
         return stream.read().strip()
@@ -719,14 +734,14 @@ def _board_key(board_identity):
 def _write_fence(tmp_path, state="active", boot_id=None,
                  attempt_id=_OLD_ATTEMPT, device_id=_DEVICE,
                  record_id=None, operation="recover",
-                 teardown_mode="none"):
+                 teardown_mode="none", board_identity=_BOARD):
     transcript = _Transcript(attempt_id)
     iox = _authority_layout(tmp_path, {attempt_id: transcript.bytes()})
     ref = transcript.reference()
     fence = {
         "schema_version": 1,
         "controller_id": _CONTROLLER,
-        "board_identity": _BOARD,
+        "board_identity": board_identity,
         "attempt_id": attempt_id,
         "device_id": device_id,
         "job_id": _JOB,
@@ -744,7 +759,8 @@ def _write_fence(tmp_path, state="active", boot_id=None,
     # ``board-lock-key`` includes the literal ``.lock`` suffix.  The fence is
     # therefore ``<sha256>.lock.json``, beside (not in place of) the stable
     # ``iox/locks/<sha256>.lock`` inode.
-    path = os.path.join(iox, "sessions", _board_key(_BOARD) + ".lock.json")
+    path = os.path.join(
+        iox, "sessions", _board_key(board_identity) + ".lock.json")
     with open(path, "w") as stream:
         json.dump(fence, stream, sort_keys=True, separators=(",", ":"))
     os.chmod(path, 0o600)
@@ -1197,6 +1213,68 @@ def test_supervisor_reap_limits_term_phase_to_five_seconds(
     assert now[0] <= timeout
 
 
+def test_supervisor_reap_at_expiry_only_attempts_immediate_kill(monkeypatch):
+    import signal
+
+    module = _verification_module()
+    signals = []
+
+    class Process(object):
+        pid = 4243
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    process = Process()
+    entries = {"token": {
+        "process": process, "root_started": 1, "known": {}}}
+    monkeypatch.setattr(module, "_supervisor_refresh", lambda unused: None)
+    monkeypatch.setattr(
+        module, "_supervisor_signal",
+        lambda unused_entry, sent: signals.append(sent))
+    reaped, remaining = module._supervisor_reap(entries, ["token"], 0.0)
+    assert reaped is False
+    assert remaining == 1
+    assert signals == [signal.SIGKILL]
+
+
+def test_unreapable_supervisor_tree_uses_only_original_total_budget(
+        monkeypatch):
+    import signal
+
+    module = _verification_module()
+    now = [0.0]
+    signals = []
+
+    class Process(object):
+        pid = 4244
+        returncode = None
+
+        def poll(self):
+            return None
+
+    entries = {"token": {
+        "process": Process(), "root_started": 1, "known": {}}}
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        module.time, "sleep", lambda seconds: now.__setitem__(
+            0, now[0] + seconds))
+    monkeypatch.setattr(module, "_supervisor_refresh", lambda unused: None)
+    monkeypatch.setattr(module, "_supervisor_children", lambda unused: set())
+    monkeypatch.setattr(module, "_supervisor_start", lambda unused: None)
+    monkeypatch.setattr(
+        module, "_supervisor_signal",
+        lambda unused_entry, sent: signals.append((sent, now[0])))
+    reaped, remaining = module._supervisor_reap(entries, ["token"], 7.0)
+    assert reaped is False
+    assert remaining == 1
+    assert signals[0] == (signal.SIGTERM, 0.0)
+    assert signals[1][0] == signal.SIGKILL
+    assert 5.0 <= signals[1][1] <= 5.01
+    assert now[0] == pytest.approx(7.0)
+
+
 def test_truncated_supervisor_packet_closes_all_received_descriptors():
     import socket
     import struct
@@ -1219,7 +1297,31 @@ def test_truncated_supervisor_packet_closes_all_received_descriptors():
         receiver.close()
 
 
-def test_unexpected_supervisor_ancillary_closes_prior_rights():
+@pytest.mark.parametrize("unexpected_first", [False, True])
+def test_unexpected_supervisor_ancillary_closes_all_rights(unexpected_first):
+    import socket
+    import struct
+
+    module = _verification_module()
+    descriptors = [os.open(os.devnull, os.O_RDONLY) for unused in range(2)]
+    rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+               struct.pack("i", descriptor)) for descriptor in descriptors]
+    unexpected = (999, 999, b"unexpected")
+    ancillary = ([unexpected] + rights if unexpected_first else
+                 rights + [unexpected])
+
+    class Peer(object):
+        def recvmsg(self, *unused):
+            return b"{}", ancillary, 0, None
+
+    with pytest.raises(ValueError, match="unexpected supervisor ancillary"):
+        module._supervisor_receive(Peer())
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_empty_supervisor_packet_closes_received_rights():
     import socket
     import struct
 
@@ -1228,13 +1330,10 @@ def test_unexpected_supervisor_ancillary_closes_prior_rights():
 
     class Peer(object):
         def recvmsg(self, *unused):
-            return (b"{}", [
-                (socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                 struct.pack("i", descriptor)),
-                (999, 999, b"unexpected"),
-            ], 0, None)
+            return (b"", [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                            struct.pack("i", descriptor))], 0, None)
 
-    with pytest.raises(ValueError, match="unexpected supervisor ancillary"):
+    with pytest.raises(EOFError, match="supervisor peer closed"):
         module._supervisor_receive(Peer())
     with pytest.raises(OSError):
         os.fstat(descriptor)
@@ -1301,6 +1400,61 @@ def test_post_flock_revalidation_failure_never_leaks_board_lock(
                     os.close(descriptor)
             except (OSError, ValueError):
                 pass
+        controller.close()
+
+
+@pytest.mark.parametrize("path", ["discover", "known"])
+def test_unexpected_flock_error_never_leaks_new_board_lock(
+        tmp_path, monkeypatch, path):
+    import errno
+
+    module = _verification_module()
+    trace = []
+    controller, unused = _controller(
+        tmp_path, _FakeStore(tmp_path, None, trace),
+        _FakeTransport(_Device("enabled"), trace))
+
+    class Supervisor(object):
+        pid = os.getpid()
+        start_ticks = 0
+        def reap_all(self, deadline):
+            return True
+        def release(self, deadline):
+            return True
+        def abandon(self, deadline):
+            return True
+
+    monkeypatch.setattr(module._SupervisorClient, "start",
+                        classmethod(lambda cls, *args: Supervisor()))
+    flocked = []
+
+    def fail_flock(descriptor, unused_operation):
+        flocked.append(descriptor)
+        raise OSError(errno.EIO, "injected flock failure")
+
+    monkeypatch.setattr(module.fcntl, "flock", fail_flock)
+    request = _AttrDict(
+        device_id=_DEVICE, job_id=_JOB, record_id=None,
+        teardown_mode="force_agent_only",
+        target=_AttrDict(host=_HOST, port=22, platform="iox",
+                         model="C9300-48UXM", os_family="xe"))
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.target = request.target
+    attempt.board = _BOARD if path == "known" else None
+    import iox_transport
+    attempt.transcript = iox_transport._TranscriptWriter(
+        str(tmp_path), attempt.attempt_id, _CONTROLLER, created_at=1)
+    try:
+        with pytest.raises((OSError, module._ControllerFailure)):
+            if path == "known":
+                controller._acquire_known_board_lock(attempt)
+            else:
+                controller._discover_and_lock(attempt)
+        assert len(flocked) == 1
+        with pytest.raises(OSError):
+            os.fstat(flocked[0])
+    finally:
         controller.close()
 
 
@@ -1528,6 +1682,89 @@ def test_fence_capacity_is_reserved_across_processes(tmp_path, limits):
         if name.endswith(".lock.json")]
     assert len([fence for fence in fences
                 if fence["state"] == "active"]) == 1
+
+
+@pytest.mark.parametrize("replace_same_board", [False, True])
+def test_total_fence_cap_accounts_for_same_path_replacement(
+        tmp_path, replace_same_board):
+    existing_board = _BOARD if replace_same_board else "OTHER-FENCE-BOARD"
+    old_path, unused = _write_fence(
+        tmp_path, state="reaped", board_identity=existing_board)
+    new_attempt = "a" * 32
+    _authority_layout(
+        tmp_path, {new_attempt: _Transcript(new_attempt).bytes()})
+    store = _FakeStore(tmp_path, existing=True)
+    controller, unused_factory = _controller(
+        tmp_path, store, _FakeTransport(_Device("enabled"), []),
+        test_limits={
+            "session_files": 1, "transcript_files": 4,
+            "ordinary_transcripts": 4, "active_fences": 1,
+        })
+    attempt = _direct_fence_attempt(controller, _BOARD, new_attempt)
+    before = _read_bytes(old_path)
+    try:
+        if replace_same_board:
+            controller._admit_fence(attempt)
+            assert attempt.fence_owned is True
+        else:
+            with pytest.raises(_verification_module()._ControllerFailure) as failed:
+                controller._admit_fence(attempt)
+            assert failed.value.category == "journal_durability"
+            assert attempt.fence_owned is False
+            assert _read_bytes(old_path) == before
+    finally:
+        controller.close()
+
+
+def test_active_fence_cap_rejects_reaped_to_active_replacement(tmp_path):
+    _write_fence(
+        tmp_path, state="active", attempt_id="b" * 32,
+        board_identity="OTHER-ACTIVE-BOARD")
+    target_path, unused = _write_fence(
+        tmp_path, state="reaped", attempt_id="c" * 32,
+        board_identity=_BOARD)
+    new_attempt = "d" * 32
+    _authority_layout(
+        tmp_path, {new_attempt: _Transcript(new_attempt).bytes()})
+    controller, unused_factory = _controller(
+        tmp_path, _FakeStore(tmp_path, existing=True),
+        _FakeTransport(_Device("enabled"), []),
+        test_limits={
+            "session_files": 3, "transcript_files": 5,
+            "ordinary_transcripts": 5, "active_fences": 1,
+        })
+    attempt = _direct_fence_attempt(controller, _BOARD, new_attempt)
+    before = _read_bytes(target_path)
+    try:
+        with pytest.raises(_verification_module()._ControllerFailure) as failed:
+            controller._admit_fence(attempt)
+        assert failed.value.category == "journal_durability"
+        assert attempt.fence_owned is False
+        assert _read_bytes(target_path) == before
+    finally:
+        controller.close()
+
+
+def test_changed_boot_active_fence_replacement_preserves_cap(tmp_path):
+    old_path, unused = _write_fence(
+        tmp_path, state="active", boot_id="00000000-0000-4000-8000-000000000000")
+    new_attempt = "e" * 32
+    _authority_layout(
+        tmp_path, {new_attempt: _Transcript(new_attempt).bytes()})
+    controller, unused_factory = _controller(
+        tmp_path, _FakeStore(tmp_path, existing=True),
+        _FakeTransport(_Device("enabled"), []),
+        test_limits={
+            "session_files": 1, "transcript_files": 4,
+            "ordinary_transcripts": 4, "active_fences": 1,
+        })
+    attempt = _direct_fence_attempt(controller, _BOARD, new_attempt)
+    try:
+        controller._admit_fence(attempt)
+        assert attempt.fence_owned is True
+        assert _read_json(old_path)["attempt_id"] == new_attempt
+    finally:
+        controller.close()
 
 
 def test_crash_results_keep_raw_recipe_recovery_and_custody_fields_distinct(

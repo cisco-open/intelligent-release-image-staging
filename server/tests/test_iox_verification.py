@@ -2047,6 +2047,45 @@ def test_same_record_recovery_is_the_only_allowed_recorded_binding_change(
     assert recovered["unresolved"] is False
 
 
+@pytest.mark.parametrize("drift", ["target", "resources", "journal"])
+def test_same_record_recovery_still_rejects_unrelated_record_drift(
+        tmp_path, drift):
+    journal = _journal(
+        record_id="selected-r1", phase="disable_intent", state="enabled",
+        revision=2, unresolved=True)
+    record = _record(record_id="selected-r1", journal=journal)
+    store = _StatefulStore(
+        tmp_path, records=[record], obligations=[journal])
+    factory = _TransportFactory(verification="enabled")
+    recipe_started = tmp_path / "recipe-started"
+    recipe = _write_recipe_peer(tmp_path, event_path=str(recipe_started))
+
+    def prepare(unused_request, unused_identity):
+        current = store.records["selected-r1"]
+        if drift == "target":
+            current["resolved"]["device_ip"] = "192.0.2.99"
+        elif drift == "resources":
+            current["resources"] = [
+                {"kind": "iox-app", "ownership": "operator-owned"}]
+        else:
+            current["iox_verification"]["revision"] += 1
+        return "selected-r1"
+
+    unused_prepare, preflight, on_output = _callbacks([])
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="recorded",
+                     record_id="selected-r1"),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 2
+    assert not recipe_started.exists()
+
+
 def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
         tmp_path):
     module = _module()
@@ -2147,8 +2186,9 @@ def test_force_on_replacement_board_retires_only_after_acknowledged_success(
         assert store.records["r1"]["iox_verification"] == old_journal
 
 
+@pytest.mark.parametrize("after_replace", [False, True])
 def test_failed_reaped_fence_write_keeps_public_session_active(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, after_replace):
     module = _module()
     original = module._durable_json
     failed = []
@@ -2158,12 +2198,14 @@ def test_failed_reaped_fence_write_keeps_public_session_active(
                 value.get("state") == "reaped" and
                 str(path).endswith(".lock.json")):
             failed.append(str(path))
+            if after_replace:
+                original(path, value, *args, **kwargs)
             raise OSError("injected reaped fence durability failure")
         return original(path, value, *args, **kwargs)
 
     monkeypatch.setattr(module, "_durable_json", fail_reaped)
     recipe = _write_recipe_peer(tmp_path)
-    store = _StatefulStore(tmp_path)
+    store = _StatefulStore(tmp_path, records=[_record(record_id="old-r1")])
     factory = _TransportFactory()
     prepare, preflight, on_output = _callbacks([], record_id=None)
     controller = _controller(
@@ -2181,6 +2223,8 @@ def test_failed_reaped_fence_write_keeps_public_session_active(
     assert result["error_category"] == "journal_durability"
     assert result["iox_session"]["state"] == "active"
     assert result["iox_session"]["mutation_blocked"] is True
+    assert json.loads(open(failed[0]).read())["state"] == "active"
+    assert not [call for call in store.calls if call[0] == "retire_device"]
 
 
 def test_private_recipe_accepts_the_exact_force_null_tuple(tmp_path):
@@ -2552,10 +2596,21 @@ def test_failed_transport_result_allows_no_process_returncode(
 
 def test_no_process_returncode_cannot_describe_a_clean_transport_result():
     module = _module()
-    result = _transport_result(returncode=None)
-    with pytest.raises(module._ControllerFailure) as failed:
-        module.IoxController._validate_transport_result(result)
-    assert failed.value.category == "unsupported_response"
+    invalid = [
+        _transport_result(returncode=None),
+        _transport_result(
+            returncode=None, error_category="cancelled",
+            framing_complete=True),
+    ]
+    for result in invalid:
+        with pytest.raises(module._ControllerFailure) as failed:
+            module.IoxController._validate_transport_result(result)
+        assert failed.value.category == "unsupported_response"
+    killed = _transport_result(
+        returncode=-15, error_category="cancelled", framing_complete=False)
+    module.IoxController._validate_transport_result(killed)
+    assert module._ControllerFailure(
+        killed["error_category"], "transport killed").code == 130
 
 
 def test_authority_scan_refuses_capacity_without_materializing_directory(

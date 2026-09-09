@@ -1273,3 +1273,31 @@ def test_failed_parent_sync_reports_uncertain_committed_write_without_rollback(
     after = open(store.path, "rb").read()
     assert after != before
     assert b'"iox_verification"' in after
+
+
+def test_iox_store_lock_wait_honors_supplied_absolute_deadline(
+        tmp_path, monkeypatch):
+    import errno
+    import fcntl
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    with store._store_lock():
+        pass
+    clock = [0.0]
+    attempts = []
+
+    def blocked(unused_fd, operation):
+        if operation & fcntl.LOCK_NB:
+            attempts.append(clock[0])
+            raise OSError(errno.EAGAIN, "held by another controller")
+
+    monkeypatch.setattr(deployment_records.fcntl, "flock", blocked)
+    monkeypatch.setattr(
+        deployment_records.time, "sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(ValueError, match="store lock timed out"):
+        store.iox_obligations(
+            "BOARD-DEADLINE", deadline=0.025,
+            monotonic_fn=lambda: clock[0])
+    assert attempts == [0.0, 0.01, 0.02]
+    assert clock[0] == 0.025
