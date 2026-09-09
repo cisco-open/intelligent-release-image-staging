@@ -232,6 +232,37 @@ def test_schedule_csv_import_accepts_tracked_comment_preamble(tmp_path):
     assert row["when"]["tz"] == "Europe/Stockholm"
 
 
+def test_schedule_csv_round_trips_target_above_default_field_limit(tmp_path):
+    default_limit = csv.field_size_limit()
+    device_ids = ["edge-%056d" % index for index in range(2100)]
+    definition = _definition()
+    definition["target"] = {"filters": {}, "device_ids": device_ids}
+    definition = schedules.normalize_definition(definition)
+    target_json = json.dumps(
+        definition["target"], sort_keys=True, separators=(",", ":"))
+    assert default_limit < len(target_json) <= default_limit + 4096
+    schedules.ScheduleStore(tmp_path).create(
+        "s-large", definition, actor="cli:iris-schedule", now=NOW,
+        preview={"revision": 0, "now": NOW, "device_ids": []})
+
+    exported = _run(tmp_path, "export")
+    assert exported.returncode == 0, exported.stderr
+    source = tmp_path / "large.csv"
+    source.write_text(exported.stdout, encoding="utf-8")
+    module = _cli_module()
+    assert module._csv_rows(source)[0] == ("s-large", definition)
+    assert csv.field_size_limit() == default_limit
+
+    destination = tmp_path / "large-round-trip-state"
+    destination.mkdir()
+    imported = _run_state(destination, "import", str(source))
+    assert imported.returncode == 0, imported.stderr
+    restored = schedules.ScheduleStore(destination).get("s-large")
+    assert {key: restored[key] for key in schedules.DEFINITION_KEYS
+            if key in restored} == definition
+    assert _run_state(destination, "export").stdout == exported.stdout
+
+
 def test_schedule_csv_prevalidates_references_and_all_target_authorities(
         tmp_path):
     source = tmp_path / "invalid-reference.csv"

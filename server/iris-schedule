@@ -219,7 +219,9 @@ def _json_cell(raw, field):
 
 def _csv_rows(path):
     text = _read_text(path)
+    previous_field_limit = csv.field_size_limit()
     try:
+        csv.field_size_limit(MAX_INPUT_BYTES)
         stream = io.StringIO(text, newline="")
         while True:
             position = stream.tell()
@@ -273,6 +275,8 @@ def _csv_rows(path):
     except csv.Error:
         raise CliInputError("CSV is malformed", "invalid_schedule_csv") \
             from None
+    finally:
+        csv.field_size_limit(previous_field_limit)
     return rows
 
 
