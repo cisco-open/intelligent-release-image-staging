@@ -221,6 +221,15 @@ sixth service or container. New authenticated application paths
 `GET /v1/devices/{device_id}/instruction-keylist` share TCP 8443. There is no
 new listener, port, network path or firewall flow; TCP 9443 is management-only.
 
+The online signing ciphertext is optional for server startup. If
+`$IRIS_CONFIG/instr/signing-key.age` is absent, startup removes stale runtime
+signing-key/certificate copies and continues without an online signer. With no
+other custody material, status is disabled (`state: phase0`); leftover or
+invalid configured custody remains an explicit invalid/unavailable condition,
+not healthy readiness. Existing server services can run without producing new
+signed instructions. A present non-regular/symlink or undecryptable signing-key
+ciphertext instead fails startup closed; it is not treated as absent.
+
 `InstructionPaths` and `StamperPaths` define the following exact locations:
 
 | Base | Files / directories |

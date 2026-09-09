@@ -157,11 +157,14 @@ membership, and device QoS. Device retirement clears peer quarantine along with
 the ordinary ACL, role membership, and device QoS. Peer quarantine controls
 device peer discovery and is separate from catalog image quarantine.
 
-Tracker policy changes discovery on the next announce and does not sever a
-live connection or erase aria2's retained peer list. If isolation cannot wait
-for connections to age naturally, unassign every image from the affected
-device; its current agent removes the torrents on the next tick. This remains a
-staging operation and never installs, activates, reloads, or changes boot state.
+Tracker/quarantine discovery alone does not sever a live connection or erase
+aria2's retained peer list. Applied verified device deny lists may
+cooperatively disconnect matching peers. To request containment, unassign every
+image from the affected device; its agent removes torrents only after the next
+successful due policy poll and successful aria2 policy apply. Signed logical
+cadence and catalog/RPC failures can delay removal, so this is not immediate
+isolation. This remains a staging operation and never installs, activates,
+reloads, or changes boot state.
 
 Before rolling the server back to an older binary, treat peer-policy containment
 and compatibility as a separately reviewed change. Any restricted-role downgrade
@@ -306,13 +309,12 @@ role artifacts and keylist authority must not be restored backwards.
    corresponding root-b command at its site). Record their public fingerprints.
    Complete recovery requires a reviewed maintenance procedure that reconciles
    root configuration, existing keylist/revocation state and sequence before
-   provisioning the new online certificate/keylist. The current CLI cannot
-   migrate an installed keylist to two wholly new roots: certificate import
-   and keylist install first verify the old keylist under the configured roots.
-   Simply replacing `roots.d/` and rerunning those commands will fail. This is
-   an intentional break-glass boundary: no code path claims recovery. Preserve
-   existing revocations and evidence; do not delete state to bypass it. The
-   remaining steps require the reviewed maintenance recovery first.
+   provisioning the new online certificate/keylist. Individual custody commands
+   do not provide supported complete in-place fleet recovery after both roots
+   are lost. This is an intentional break-glass boundary: no code path claims
+   recovery. Preserve existing revocations and evidence; complete the reviewed
+   server-state recovery before rebuilding trust into every artifact and
+   re-onboarding the fleet as described below.
 3. Build fresh Guest Shell bundles, unified OCI, both IOx tars and XR RPM with
    the new public roots and the current pinned aria2c binaries. Typical build
    entry points are `tools/make-agent-bundle.sh --instruction-roots-dir DIR`,
@@ -361,6 +363,7 @@ secret key, an OS image, or a bypass of signature/audience/replay checks. In the
 server shell, materialize it to a controlled private destination:
 
 ```bash
+install -d -m 0700 "$IRIS_RUN/ceremony"
 iris-instruction-bootstrap <device_id> --output "$IRIS_RUN/ceremony/bootstrap.envelope"
 ```
 
@@ -376,11 +379,14 @@ normal instruction body needs redelivery: fresh authenticated refresh/time and
 usable verification trust are still required before the agent can accept it.
 A new-root recovery first needs the new agent/trust package.
 
-On the next ordinary tick, authenticated refresh self-heals current/prior key
-availability and the agent consumes the verified envelope transactionally.
-Retryable delivery/durability failures retain it; rejected evidence never
-replaces working LKG. Observe accepted identity/state after the tick and follow
-the failure table if the device remains pending or unavailable.
+Authenticated refresh can self-heal current/prior key availability. The agent
+consumes a verified envelope transactionally at a successful due policy poll;
+application also requires successful aria2 policy apply. Signed logical cadence
+and catalog/RPC failures can delay this beyond the next mechanical tick.
+Retryable delivery/durability failures retain the envelope; rejected evidence
+never replaces working LKG. Observe accepted identity and application state
+after that successful poll/apply and follow the failure table if the device
+remains pending or unavailable.
 
 ## Guest Shell fleet bundle drop
 

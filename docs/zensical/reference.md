@@ -781,6 +781,11 @@ is narrower than successful authentication:
 | `POST /v1/devices/<id>/telemetry` | Identity-bound | Body: the device telemetry report. Malformed input is a Problem Details 400; a report naming an image outside the device's currently approved set is invalid. 200 `{ok: true}`. |
 | `POST /v1/devices/<id>/token-refresh` | Identity-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response cannot strand the device. Errors use Problem Details; 200 returns `{catalog_token, expires_at, instr_key, instr_key_prev?, announce_token?, rpc_secret?}`. Current/bounded prior instruction keys are private refresh material; optional announce/RPC fields appear only when present, never as empty strings that overwrite working values. |
 
+The instruction and keylist GET routes share one per-device request bucket:
+burst 2, refilling one request every 10 seconds. Both consume that same budget;
+exhaustion returns 429 with a bounded `Retry-After`. This request limiter does
+not authorize an in-tick sleep/retry loop in the agent.
+
 Every POST additionally requires `Content-Length` (a chunked or length-less
 body is refused with 411), rejects a non-numeric or negative
 `Content-Length` with 400, and caps the body at 64 KiB — after gzip

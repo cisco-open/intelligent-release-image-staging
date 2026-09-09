@@ -134,8 +134,9 @@ server-observed and cannot be healed by key rotation.
 
 ## instruction-rate-limit-exceeded
 
-429: the per-device instruction request budget is exhausted. Honor the bounded
-`Retry-After` hint on a later tick; never add an in-tick sleep/retry loop.
+429: the shared per-device instruction/keylist request bucket is exhausted.
+It permits a burst of 2 and refills one request every 10 seconds. Honor the
+bounded `Retry-After` hint on a later tick; never add an in-tick sleep/retry loop.
 
 These fetch failures affect the instruction step only; heartbeat/staging
 continue with verified fallback/defaults when policy apply succeeds. An aria2

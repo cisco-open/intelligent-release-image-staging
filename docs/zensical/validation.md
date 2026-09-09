@@ -117,9 +117,9 @@ Apply the checklist only to the selected supported layout:
 
 | Layout | Phase 1 checks to record |
 | --- | --- |
-| Single-host Compose | Authenticated instructions/keylist GETs on 8443; 9443 management-only; custody/status windows and a current stamp; one device apply, LKG during catalog loss and QoS drift/reassertion observation; all device artifact provenance. |
-| Split-host Compose | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; prove instruction state, age identity, encrypted signing key and runtime plaintext exist only on the server host and are absent from Console mounts. |
-| Single-replica Kubernetes | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; confirm `replicas: 1`, existing `iris-data` PVC at `/data`, runtime tmpfs, and no new Secret, port, Service or NetworkPolicy rule. |
+| Single-host Compose | Authenticated instructions/keylist GETs on 8443; 9443 management-only; custody/status windows and a current stamp; one device apply, LKG during catalog loss and QoS drift/reassertion observation; all device artifact provenance. Confirm server startup without the optional signing key and the explicit absent-key status. Verify that an already running Console serves its UI during server outage; default cold startup requires the healthy server to supply initial browser TLS. |
+| Split-host Compose | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; prove instruction state, age identity, encrypted signing key and runtime plaintext exist only on the server host and are absent from Console mounts. Confirm server startup without the optional signing key, and Console startup with its independent default TLS while the server is unavailable; forwarded APIs report unavailable. |
+| Single-replica Kubernetes | The same 8443/9443, custody, stamp, device apply/LKG/drift and artifact checks; confirm `replicas: 1`, existing `iris-data` PVC at `/data`, runtime tmpfs, and no new Secret, port, Service or NetworkPolicy rule. Confirm server startup without the optional signing key, and Console startup with independently provisioned TLS while the server is unavailable; forwarded APIs report unavailable. |
 | Multi-replica server tier | Not covered and unsupported: instruction production has no cross-pod coordination. A one-replica manifest cannot produce multi-replica evidence. |
 
 For each device platform, probe the actual verifier. Both packaged verifier

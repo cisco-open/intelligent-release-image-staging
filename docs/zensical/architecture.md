@@ -138,10 +138,13 @@ refresh remain exempt from role/QoS restrictions. Device admins can bypass a
 cooperative agent; see the [honest guarantee](security.md#device-administrator-trust-boundary)
 for signed IOx/XR images versus Guest Shell's replaceable trust files.
 
-Tracker policy changes and quarantine stop new peer selection but do not
-terminate an established device-to-device connection or erase retained peers.
-Use [image unassignment](operations.md#role-policy-operations-and-rollback)
-where immediate containment is required. Issue #153 mutual-origin union remains
+Tracker/quarantine discovery alone does not terminate an established
+device-to-device connection or erase retained peers. Applied verified device
+deny lists may cooperatively disconnect matching peers.
+[Image unassignment](operations.md#role-policy-operations-and-rollback) requests
+containment, but removal requires the next successful due policy poll and
+successful aria2 policy apply, subject to signed logical cadence and failures.
+Issue #153 mutual-origin union remains
 preflight-only, pending one full tagged-release dwell and a separately
 authorized activation release with lab/live validation.
 

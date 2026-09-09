@@ -83,16 +83,18 @@ event manager applet IRIS-AGENT authorization bypass
  action 200 cli command "guestshell run bash <fs>guest-share/bootstrap.sh"
 ```
 
-Every 60 seconds it runs `bootstrap.sh` inside Guest Shell, which moves any
-freshly dropped files into its own guest-owned working directory, unpacks a
-new `bundle.tgz` if one arrived (copying its `bootstrap.sh` back over the
-running copy), makes sure `aria2c` is up and serving, and finally runs
-`iris_agent.py --once`.
+Every 60 seconds it runs `bootstrap.sh` inside Guest Shell. Bootstrap collects
+the SHA-256 sidecar before the archive and validates bounded archive/member
+contents and coordinated bootstrap/root evidence before adopting a new
+`bundle.tgz`. Missing, malformed or mismatched evidence refuses adoption and
+preserves the prior runnable bundle; dropping an archive alone is insufficient.
+It then makes sure `aria2c` is up and serving and runs `iris_agent.py --once`.
 
-**Dropping a new `bundle.tgz` on the device is the agent upgrade** for Guest
-Shell and router — the next tick unpacks it and runs the new code. There is no
-separate upgrade command. Re-running the installer script directly has the same
-effect (it mints a new capability and re-copies the bundle). A console
+**A validated bundle plus its SHA-256 sidecar and coordinated bootstrap/root
+evidence is the agent upgrade** for Guest Shell and router. A successful
+bootstrap transaction adopts it; there is no separate upgrade command.
+Re-running the installer script directly delivers the coordinated set (it
+mints a new capability and re-copies bundle and evidence). A console
 re-onboard is not that path: its preflight refuses a device that still carries
 the live agent, so undeploy first and then onboard again. `router-install.sh`
 additionally destroys any pre-existing Guest Shell before re-applying config,
@@ -276,6 +278,27 @@ keys in mode-0600 agent configuration; the LKG key is generated locally. None
 of these keys belongs in platform activation arguments. F3 offline delivery
 carries a ciphertext bootstrap envelope, never a secret key; normal authenticated
 refresh self-heals its key availability. See the [redelivery runbook](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
+### Instruction files on each platform
+
+`instr.paths_for()` uses the configured `stage_dir` to locate device state:
+
+| Platform | Instruction work directory | Public signer/root trust directory |
+| --- | --- | --- |
+| Guest Shell / router | `stage_dir`, normally `/flash/guest-share/iris` | The same replaceable `stage_dir` |
+| IOx | `stage_dir`, derived as `$CAF_APP_PERSISTENT_DIR/iris` (default `/data/iris`; `/iox_data/iris` where CAF supplies that mount) | `/opt/iris/agent` in the image |
+| IOS-XR appmgr | `/hostmount/iris-work`, from `stage_dir=/hostmount`; visible in IOS as `harddisk:iris-work/` | `/opt/iris/agent` in the image |
+
+Each instruction work directory contains `iris-instructions.lkg`,
+`iris-instructions.bootstrap`, `iris-instruction-keylist.current` and
+`iris-instruction-keylist-state.json`. The public trust directory contains
+`iris-signers.allowed_signers` and `iris-root.allowed_signers`. The installer
+may first land the bootstrap envelope in platform application data or at the
+XR mount root; the runtime adopts it into the work-directory path above.
+Accepted identities/replay facts persist in the agent state, normally
+`iris-agent.state` in its work directory. The device-local `lkg_key` and refreshed
+instruction keys are in mode-0600 `iris-agent.conf`, not a public trust file.
+Do not delete these state/key files to force acceptance of an older envelope.
 
 ## Instruction failures and recovery
 
@@ -520,7 +543,8 @@ IOS-XE cleanup protects two files:
 * the file named by the **`BOOT` variable** (`show boot`).
 
 When either read fails, the agent skips deletion, logs
-`RECLAIM-DEFERRED` or `CLEANUP-PENDING`, and retries on the next tick.
+`RECLAIM-DEFERRED` or `CLEANUP-PENDING`, and retries on a later successful
+due staging tick.
 
 !!! warning "Storage capacity"
     Allow room for all resident images plus working space; see

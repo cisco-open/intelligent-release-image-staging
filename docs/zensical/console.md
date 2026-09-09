@@ -316,12 +316,13 @@ documented management API. Use `iris-role` and scalar-only CSV definitions for
 role membership and scalar QoS; tracker-state effective-QoS explanations are
 exposed through the API, while the Console does not edit the nested state map.
 
-Tracker policy changes affect future introductions; quarantine
-does not sever existing connections or remove retained peers. For immediate
-containment, unassign every image from the affected device and let its current
-agent remove those torrents on the next tick. Device-side rate intent is
-cooperative, and a privileged device administrator can alter the device
-environment.
+Tracker/quarantine discovery alone does not sever existing connections or
+remove retained peers. Applied verified device deny lists may cooperatively
+disconnect matching peers. Image unassignment requests containment; torrent
+removal waits for the next successful due policy poll and successful aria2
+policy apply, subject to signed logical cadence and catalog/RPC failures.
+Device-side rate intent is cooperative, and a privileged device administrator
+can alter the device environment.
 
 An `abandoned` deployment record is one that no longer describes a device IRIS manages:
 the device was deleted from the inventory, or a forced teardown stripped the
@@ -336,9 +337,12 @@ source evidence and report age. Raw instruction state, accepted
 `{epoch, instr_serial, policy_revision}`, verification level, pointer skew and
 QoS drift are agent-asserted. Device-authored reports are not independent
 measurements. Durable revocation and receipt age are server-observed: revoked
-wins visually while the underlying agent LKG/state remains visible; stale
-reports show their last state and missing/invalid/future receipt time is unknown.
-The chip's `reason` distinguishes `unknown_key` from `bad_mac` rejection.
+wins visually while the underlying agent LKG/state remains visible. Within a
+supported instruction report, raw `stale_expired` or `allowlist_expired` is
+stale by agent assertion before receipt-age classification, even when age is
+unknown. Other supported reports with missing/invalid/future receipt time display unknown;
+old valid receipt times display stale with the last reported state. The chip's
+`reason` distinguishes `unknown_key` from `bad_mac` rejection.
 
 The separate raw and display state vocabularies, including legacy
 `pre-instructions`, derived `stale`/`rejected`/`unavailable`/`unknown` and durable

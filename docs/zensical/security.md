@@ -214,9 +214,12 @@ or migrating a device that already has an explicit assignment.
 
 The tracker enforces new introductions. It **does not sever existing connections**
 or purge peers that aria2 already knows, and aria2 may reconnect
-to a retained peer without asking the tracker again. The immediate containment
-lever is to unassign every image from the restricted device; the existing agent
-then removes those torrents on its next tick. No role operation installs,
+to a retained peer without asking the tracker again. An applied verified
+device deny list may cooperatively disconnect matching peers. To request
+containment, unassign every image from the restricted device; torrent removal
+requires the next successful due policy poll and successful aria2 policy apply.
+Signed logical cadence and catalog/RPC failures can delay that action; it is
+not an immediate or guaranteed next-tick disconnect. No role operation installs,
 activates, reloads, changes boot variables, or otherwise changes running device
 software.
 

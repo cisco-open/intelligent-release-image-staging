@@ -298,7 +298,9 @@ This requires the running `iris` container by that name; set
 
 Agents poll the catalog, transfer assigned images, verify them, and stage them
 on the device filesystem. Removing an assignment stops that image's torrent
-and clears its working copy, including when the last assignment is removed.
+and clears its working copy after the next successful due policy poll and
+successful aria2 policy apply, including when the last assignment is removed.
+Signed logical cadence and catalog/RPC failures can delay that cleanup.
 IOS-XE keeps the placed root file for reuse. XR removes root files recorded as
 IRIS downloads; operator-adopted files and files with unknown ownership remain.
 See [Unassigned image park](device-agents.md#unassigned-image-park) for storage

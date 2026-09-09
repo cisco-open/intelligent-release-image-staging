@@ -131,8 +131,11 @@ Raw states are `none`, `applied`, `lkg`, `stale_expired`, `allowlist_expired`,
 See [failure actions](device-agents.md#instruction-failures-and-recovery).
 
 Durable `revoked` overrides an agent's LKG claim while retaining the underlying
-state and evidence. A stale report displays stale with its last reported state;
-missing/invalid/future receipt time displays unknown. `pointer_skew` reports
+state and evidence. Within a supported instruction report, raw `stale_expired`
+or `allowlist_expired` remains stale by agent assertion before receipt-age
+classification, even when age is unknown. Other supported reports with
+missing/invalid/future receipt time display unknown; an old valid receipt time
+displays stale with the last reported state. `pointer_skew` reports
 the existing three-observation latch, and `qos_drift_count` is a bounded count
 of agent-reported corrections. `instr_stamp_missing` is a current
 inventory-device count, not a lifetime error total. Applied rollups use accepted
@@ -590,7 +593,7 @@ Condition 3 is latched separately as `iris.transfer.tracker_seeder_at`.
 
 Neither fact is sufficient alone, which is why both are exported. aria2 begins
 announcing `left = 0` the instant the last piece lands, while the agent's
-sha256 of a ~1.2 GB image does not start until its next tick and then runs for
+sha256 of a ~1.2 GB image does not start until its next due staging tick and then runs for
 minutes: publishing on the tracker fact alone would announce "seeding" for
 content nobody has verified. Conversely the device can neither see nor attest
 the tracker fact — it never talks to the tracker; only its aria2 announces. The

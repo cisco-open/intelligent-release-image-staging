@@ -36,7 +36,7 @@ entire transaction:
 
 | Wrapper / initial observation | Owned behavior |
 | --- | --- |
-| Signed | No verification-state change; the platform validates the signature. A signature-marker presence check is not cryptographic validation. |
+| Signed marker present | No verification-state change. Native signature verification depends on platform enforcement being enabled; marker presence alone is not cryptographic validation. |
 | Unsigned / `enabled` | Durably record the initial state and restoration obligation; disable only for installation; restore and read-back before activation/start. |
 | Unsigned / `disabled` | Leave disabled; no unowned enable operation. |
 | Unsigned / `unknown` | Refuse mutation and installation. Obtain readable platform evidence first. |
