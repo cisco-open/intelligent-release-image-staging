@@ -185,6 +185,7 @@ def test_onboard_unknown_device_errors(tmp_path):
 
 def test_onboard_missing_credential_errors(tmp_path):
     fleet = _Fleet({"d1": {"device_id": "d1", "device_ip": "10.0.0.1",
+                           "management_type": "routed",
                            "credential_profile_id": "missing"}})
     creds = _Creds({})
     svc = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -430,7 +431,7 @@ def test_build_env_raises_without_management_type():
                                      run_fn=lambda p, e, on: 0,
                                      mint_fn=lambda d: "TOK")
     with pytest.raises(KeyError, match="management_type"):
-        svc._build_env("d1")
+        svc._build_env("d1", mint=False)
 
 
 # --- resolve_platform ---------------------------------------------------

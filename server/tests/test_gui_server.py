@@ -2736,8 +2736,12 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
+                  "vlan": "666", "svi_ip": "10.0.0.10",
+                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
+                  "vlan": "666", "svi_ip": "10.0.0.10",
+                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -3030,7 +3034,9 @@ def test_plan_refuses_device_with_cached_xr_family(tmp_path):
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "ASR-9906",
-                  "os_family": "xr", "credential_profile_id": "lab"})
+                  "os_family": "xr", "credential_profile_id": "lab", "vlan": "666",
+                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                      "guest_ip": "10.0.0.11"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -3109,7 +3115,9 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_pat
     _app, fleet, _creds, _cat = deps
     try:
         fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
-                      "model": "8201", "credential_profile_id": "lab"})
+                      "model": "8201", "credential_profile_id": "lab", "vlan": "666",
+                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                      "guest_ip": "10.0.0.11"})
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
@@ -3126,20 +3134,7 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_pat
 
 
 def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tmp_path):
-    """gui_server._plan reads management_type off the RAW fleet device
-    (gui_server.py:739), a site the Task 2 eleven-site atomic rename did not
-    cover -- that list was the 'resolved' dict's own writers/readers, not
-    this earlier raw-record read. A fleet.json row still carrying only the
-    retired network_attachment alias (never re-saved since before the
-    rename) is no longer interpreted at all here: it plans exactly like a
-    truly unclassified row -- legacy_routed coerced to 'routed' -- even when
-    the alias claims 'inband' and a stale inband_vlan sits on the row. The
-    stale inband_vlan is echoed back verbatim in the resolved dict (every
-    raw XE field is, regardless of management_type -- pre-existing,
-    unrelated behavior), but the row does NOT plan AS inband: management_type
-    reads 'routed', and the fields that a real inband/routed classification
-    would have populated (iris_vlan/svi_ip) stay empty because nothing in
-    the raw row ever set them."""
+    """A retired alias cannot make incomplete legacy inventory deployable."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -3152,10 +3147,8 @@ def test_plan_ignores_the_network_attachment_alias_and_falls_to_legacy_routed(tm
         ck, _csrf = _auth(host, port)
         status, _, body = _req(host, port, "GET", "/api/devices/d1/plan",
                                headers={"Cookie": ck})
-        assert status == 200, body
-        resolved = json.loads(body)["plan"]["resolved"]
-        assert resolved["management_type"] == "routed"     # not 'inband'
-        assert resolved["iris_vlan"] == "" and resolved["svi_ip"] == ""
+        assert status == 409, body
+        assert json.loads(body)["error"] == "unclassified_management_type"
     finally:
         stop()
 
@@ -3195,12 +3188,7 @@ def test_plan_carries_svi_igp_through_to_the_resolved_record(tmp_path):
 
 
 def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(tmp_path):
-    """Same alias-retirement boundary, the xr-appmgr side: a row whose only
-    hint of xr-host is the retired network_attachment alias, with platform
-    explicitly xr-appmgr, still resolves management_type via the alias-free
-    path (legacy_routed -> 'routed'), so the xr-host<->xr-appmgr mutual gate
-    (gui_server.py:769) fires exactly as it would for any other alias-blind
-    xr-appmgr row: a clean 409, not a silent xr-host plan and not a 500."""
+    """An alias-only XR row is still unclassified and cannot onboard."""
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
@@ -3214,9 +3202,7 @@ def test_plan_refuses_xr_appmgr_platform_on_a_network_attachment_alias_only_row(
         status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
                                headers={"Cookie": ck})
         assert status == 409, body
-        assert json.loads(body)["error"] == (
-            "platform xr-appmgr requires management_type xr-host "
-            "(the two are mutually required)")
+        assert json.loads(body)["error"] == "unclassified_management_type"
     finally:
         stop()
 
@@ -4066,8 +4052,12 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     audit_path = str(tmp_path / "audit.jsonl")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
+                  "vlan": "666", "svi_ip": "10.0.0.10",
+                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
+                  "vlan": "666", "svi_ip": "10.0.0.10",
+                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})

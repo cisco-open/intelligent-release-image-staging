@@ -329,6 +329,64 @@ def _refuse_xr_platform_on_xe(device_id):
                                        if p != _XR_PLATFORM))))
 
 
+def validate_legacy_onboard_target(target, device_id=None):
+    """Return a complete legacy routed target, without I/O or mutation.
+
+    Bare inventory is valid storage but not deployment authority. Historical
+    positional CSVs and their v2 exports use different names for VLAN/app IP;
+    both retain the original SVI mask/gateway defaults. Classified records are
+    validated by their existing management-type paths instead.
+    """
+    if not isinstance(target, dict):
+        raise ValueError("unclassified_management_type")
+    result = dict(target)
+    if result.get("management_type", "legacy_routed") != "legacy_routed":
+        return result
+
+    def text(value):
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            raise ValueError("unclassified_management_type")
+        return str(value).strip()
+
+    def alias(primary, historical):
+        preferred = result.get(primary)
+        old = result.get(historical)
+        if preferred not in (None, "") and old not in (None, ""):
+            if text(preferred) != text(old):
+                raise ValueError("unclassified_management_type")
+        return preferred if preferred not in (None, "") else old
+
+    try:
+        did = text(result.get("device_id", device_id))
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", did) \
+                or did == "seeder" or (device_id is not None and did != device_id):
+            raise ValueError("invalid device id")
+        result["device_id"] = did
+        result["device_ip"] = str(ipaddress.IPv4Address(text(result.get("device_ip"))))
+        vlan = int(text(alias("iris_vlan", "vlan")))
+        if not 1 <= vlan <= 4094:
+            raise ValueError("invalid VLAN")
+        result["iris_vlan"] = str(vlan)
+        result["svi_ip"] = str(ipaddress.IPv4Address(text(result.get("svi_ip"))))
+        result["svi_mask"] = str(ipaddress.IPv4Network(
+            "0.0.0.0/" + text(result.get("svi_mask"))).netmask)
+        result["app_ip"] = str(ipaddress.IPv4Address(text(alias("app_ip", "guest_ip"))))
+        app_mask = result.get("app_mask")
+        if app_mask in (None, ""):
+            app_mask = result["svi_mask"]
+        app_gateway = result.get("app_gateway")
+        if app_gateway in (None, ""):
+            app_gateway = result["svi_ip"]
+        result["app_mask"] = str(ipaddress.IPv4Network(
+            "0.0.0.0/" + text(app_mask)).netmask)
+        result["app_gateway"] = str(ipaddress.IPv4Address(text(app_gateway)))
+    except (ValueError, TypeError):
+        # Stable non-secret admission code; raw operator input is not logged.
+        raise ValueError("unclassified_management_type") from None
+    result["management_type"] = "legacy_routed"
+    return result
+
+
 def resolve_platform(dev, probe=None, os_family=None):
     """Resolve which onboarding platform drives a device.
 
@@ -1246,10 +1304,13 @@ class OnboardService:
             self._workers = []
 
     def _build_env(self, device_id, mint=True, resolved=None, env_extra=None,
-                   resolve_credentials=True):
+                   resolve_credentials=True, onboarding=False):
         dev = self.fleet.get_device(device_id)
         if not dev:
             raise ValueError("unknown device: %s" % device_id)
+        target = resolved if resolved is not None else dev
+        if mint or onboarding:
+            target = validate_legacy_onboard_target(target, device_id)
         cred = None
         if resolve_credentials:
             cred = self.creds.get_secrets(
@@ -1262,7 +1323,6 @@ class OnboardService:
         # the secrets store — pure teardown must not touch it.
         token = self._mint(device_id) if mint else ""
         env = dict(os.environ)
-        target = resolved or dev
         management_type = target["management_type"]
         if management_type == "legacy_routed":
             management_type = "routed"
@@ -1591,6 +1651,14 @@ class OnboardService:
         _JOB_TTL."""
         if action not in ("onboard", "undeploy"):
             raise ValueError("unknown action: %s" % action)
+        if action == "onboard":
+            target = resolved if resolved is not None else self.fleet.get_device(device_id)
+            if target is not None:
+                checked = validate_legacy_onboard_target(target, device_id)
+                if checked.get("management_type") == "legacy_routed":
+                    # Bind the admitted legacy inputs for a queued job; later
+                    # inventory edits cannot change the execution target.
+                    resolved = checked
         defer_iox_prepare = self._submission_uses_iox(device_id, resolved)
         if teardown_mode is None:
             teardown_mode = "none" if action == "onboard" else "recorded"
@@ -1668,7 +1736,8 @@ class OnboardService:
                 dev, env = self._build_env(
                     device_id, mint=False, resolved=j.get("resolved"),
                     env_extra=j.get("env_extra"),
-                    resolve_credentials=not controller_custody)
+                    resolve_credentials=not controller_custody,
+                    onboarding=action == "onboard")
                 platform, script = self._resolve(
                     device_id, dev, env, action,
                     controller_owns_credentials=controller_custody)

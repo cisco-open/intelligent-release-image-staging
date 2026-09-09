@@ -1269,13 +1269,14 @@ class _OnboardSubmissionAdapter(object):
 
     def __init__(self, fleet, creds, record_store, onboard, iox_controller,
                  plan_fn, apply_preflight_fn, owned_resources_fn,
-                 teardown_resolved_fn, audit_path, now_fn):
+                 teardown_resolved_fn, audit_path, now_fn, teardown_plan_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.record_store = record_store
         self.onboard = onboard
         self.iox_controller = iox_controller
         self._plan = plan_fn
+        self._teardown_plan = teardown_plan_fn or plan_fn
         self._apply_preflight = apply_preflight_fn
         self._owned_resources = owned_resources_fn
         self._teardown_resolved = teardown_resolved_fn
@@ -1434,7 +1435,7 @@ class _OnboardSubmissionAdapter(object):
         elif self.record_store is not None:
             if force:
                 try:
-                    degraded_plan = self._plan(device_id, device)
+                    degraded_plan = self._teardown_plan(device_id, device)
                 except ValueError as exc:
                     return reject(409, str(exc))
                 resolved = degraded_plan["resolved"]
@@ -1488,7 +1489,7 @@ class _OnboardSubmissionAdapter(object):
                     return record["record_id"]
         else:
             try:
-                degraded_plan = self._plan(device_id, device)
+                degraded_plan = self._teardown_plan(device_id, device)
             except ValueError as exc:
                 return reject(409, str(exc))
             if require_iox and degraded_plan["resolved"].get(
@@ -2120,8 +2121,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             except Exception:
                 pass
 
-        def _plan(self, device_id, device):
+        def _plan(self, device_id, device, onboarding=True):
             """Resolve immutable, non-secret installer input before token minting."""
+            if onboarding:
+                device = gui_onboard.validate_legacy_onboard_target(device, device_id)
             management_type = device.get("management_type", "legacy_routed")
             if management_type == "legacy_routed":
                 management_type = "routed"
@@ -5616,7 +5619,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         apply_preflight_fn=Handler._apply_preflight,
         owned_resources_fn=Handler._owned_resources,
         teardown_resolved_fn=Handler._router_teardown_resolved,
-        audit_path=audit_path, now_fn=now_fn)
+        audit_path=audit_path, now_fn=now_fn,
+        # Removing an existing agent footprint does not require a complete
+        # network plan for creating a new one. Recorded teardown keeps using
+        # its immutable record; only the established fallback needs this path.
+        teardown_plan_fn=lambda device_id, device: Handler._plan(
+            None, device_id, device, onboarding=False))
     srv = _ConsoleServer((host, port), Handler)
     srv.onboard_submission = submission_adapter
     tls_ctx = None
