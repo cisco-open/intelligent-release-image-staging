@@ -62,30 +62,129 @@ rand_below() {
 mkdir -p "$STAGE" \
   || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
 
-# EEM can fire again while a slow flash transaction is still in progress. An
-# atomic mkdir plus a live PID keeps concurrent ticks out; a process death
-# leaves a stale PID that the next tick can remove before transaction recovery.
+# EEM can fire again while a slow flash transaction is still in progress. Have
+# Python acquire a nonblocking kernel lock, then replace itself with this Bash
+# script while keeping descriptor 9 open. There is no directory/PID publication
+# window, a process death releases the lock, and transaction children inherit
+# it if their parent shell dies while they are still changing the runtime.
 LOCK="$STAGE/.bundle-lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  lock_pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  case "$lock_pid" in
-    ''|*[!0-9]*) lock_pid="" ;;
-  esac
-  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-    exit 0
-  fi
-  rm -f "$LOCK/pid" 2>/dev/null || true
-  rmdir "$LOCK" 2>/dev/null \
-    || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
-  mkdir "$LOCK" 2>/dev/null \
-    || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+if [ "${IRIS_BUNDLE_LOCK_HELD:-}" != 9 ]; then
+  exec python3 - "$0" "$LOCK" "$@" <<'PY'
+import errno
+import fcntl
+import os
+import stat
+import sys
+
+
+def fail():
+    sys.stderr.write(
+        "IRIS-BOOTSTRAP: stage is not writable; "
+        "repair guest-share/iris ownership\n")
+    raise SystemExit(1)
+
+
+def legacy_owner(path):
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        fail()
+    try:
+        if set(os.listdir(path)) != {"pid"}:
+            fail()
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        descriptor = os.open(os.path.join(path, "pid"), flags)
+        try:
+            opened = os.fstat(descriptor)
+            data = os.read(descriptor, 32)
+        finally:
+            os.close(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or len(data) > 31:
+            fail()
+        text = data.decode("ascii")
+        if not text.endswith("\n") or not text[:-1].isdigit():
+            fail()
+        return int(text[:-1])
+    except (OSError, UnicodeError):
+        fail()
+
+
+script = os.path.abspath(sys.argv[1])
+lock_path = sys.argv[2]
+arguments = sys.argv[3:]
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+
+try:
+    lock_descriptor = os.open(lock_path, flags, 0o600)
+except OSError as exc:
+    if exc.errno != errno.EISDIR:
+        fail()
+    # A release made with the preceding mkdir/PID implementation can leave a
+    # directory only if that old shell died. A live numeric owner still wins;
+    # an invalid directory fails closed. rmdir cannot remove a replacement
+    # regular lock file if two recovery attempts race here.
+    owner = legacy_owner(lock_path)
+    try:
+        os.kill(owner, 0)
+    except OSError as owner_error:
+        if owner_error.errno == errno.EPERM:
+            raise SystemExit(0)
+        if owner_error.errno != errno.ESRCH:
+            fail()
+    else:
+        raise SystemExit(0)
+    try:
+        os.unlink(os.path.join(lock_path, "pid"))
+    except OSError as unlink_error:
+        if unlink_error.errno not in (errno.ENOENT, errno.ENOTDIR):
+            fail()
+    try:
+        os.rmdir(lock_path)
+    except OSError as remove_error:
+        if remove_error.errno not in (errno.ENOENT, errno.ENOTDIR):
+            fail()
+    try:
+        lock_descriptor = os.open(lock_path, flags, 0o600)
+    except OSError:
+        fail()
+
+try:
+    opened = os.fstat(lock_descriptor)
+    named = os.stat(lock_path, follow_symlinks=False)
+    if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+            or opened.st_size != 0
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+        fail()
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as lock_error:
+        if lock_error.errno in (errno.EACCES, errno.EAGAIN):
+            raise SystemExit(0)
+        fail()
+    if lock_descriptor != 9:
+        os.dup2(lock_descriptor, 9)
+        os.close(lock_descriptor)
+    os.set_inheritable(9, True)
+    environment = dict(os.environ)
+    environment["IRIS_BUNDLE_LOCK_HELD"] = "9"
+    os.execve("/bin/bash", ["bash", script] + arguments, environment)
+except SystemExit:
+    raise
+except Exception:
+    fail()
+PY
 fi
-printf '%s\n' "$$" > "$LOCK/pid" \
-  || { rmdir "$LOCK" 2>/dev/null || true
-       echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+unset IRIS_BUNDLE_LOCK_HELD
 release_bundle_lock() {
-  rm -f "$LOCK/pid" 2>/dev/null || true
-  rmdir "$LOCK" 2>/dev/null || true
+  exec 9>&-
 }
 trap release_bundle_lock EXIT
 trap 'exit 1' HUP INT TERM
@@ -1169,7 +1268,8 @@ fi
 # was invisible for exactly this reason). Record the failure and continue —
 # the agent tolerates a down RPC and heartbeats stage_error instead.
 if [ -f "$STAGE/guestshell-start.sh" ]; then
-  if bash "$STAGE/guestshell-start.sh"; then
+  # aria2c can daemonize; do not let it inherit the bootstrap transaction lock.
+  if bash "$STAGE/guestshell-start.sh" 9>&-; then
     rm -f "$STAGE/aria2c-launch-failed"
   else
     echo "IRIS-BOOTSTRAP: failed to launch aria2c; continuing so the agent still heartbeats" >&2
