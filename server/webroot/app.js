@@ -184,7 +184,13 @@
   // across a DST boundary is the runner's arithmetic, never the browser's.
   function scheduleNextFireText(row) {
     var slot = row && row.next_fire;
-    if (!slot) return row && row.state !== 'pending' ? row.state : 'no further run';
+    // A paused or completed schedule reports its own state; anything else
+    // with no slot has simply run out of them. An unreadable row says the
+    // latter rather than rendering "undefined" at an operator.
+    if (!slot) {
+      var state = row && row.state;
+      return state && state !== 'pending' ? state : 'no further run';
+    }
     return slot.local_time + ' ' + slot.tz + ' (' + slot.status + ')';
   }
 

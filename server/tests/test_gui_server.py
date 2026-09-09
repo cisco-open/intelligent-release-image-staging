@@ -13859,3 +13859,14 @@ def test_schedule_view_carries_its_own_next_fire_slot(tmp_path):
     assert slot["tz"] == "Europe/Stockholm" and slot["local_time"]
     source = inspect.getsource(gui_server.make_server)
     assert 'view["next_fire"] = schedules.occurrence_slot(' in source
+
+
+def test_schedule_next_run_never_renders_an_unreadable_row_as_undefined():
+    out = _run_schedule_projections(
+        "process.stdout.write(JSON.stringify({"
+        "empty: scheduleNextFireText({}),"
+        "missing: scheduleNextFireText(null),"
+        "done: scheduleNextFireText({state: 'completed', next_fire: null})}));")
+    assert out["empty"] == "no further run"
+    assert out["missing"] == "no further run"
+    assert out["done"] == "completed"
