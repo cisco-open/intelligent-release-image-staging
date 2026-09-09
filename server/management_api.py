@@ -9,6 +9,7 @@ fail-closed semantics are exposed on the versioned ``/internal/v1`` wire
 interface.  The implementation mirrors catalog.py's ThreadingHTTPServer,
 BaseHTTPRequestHandler, and TLS pattern and remains stdlib-only.
 """
+import contextlib
 import email.utils
 import http.cookies
 import copy
@@ -58,6 +59,7 @@ import peer_endpoints
 import peer_policy
 import peer_enforcement
 import role_management
+import schedule_runner
 import secretfs
 import secrets_store
 import schedules
@@ -926,6 +928,20 @@ class ScheduleTargetError(RuntimeError):
         self.code = code
         self.status = status
         super().__init__(message)
+
+
+@contextlib.contextmanager
+def _runner_schedule_role_guard(guard, schedule):
+    """Translate expected role-authority refusals into runner-safe reasons."""
+    if guard is None:
+        raise schedule_runner.ExecutionRefused("role_authority_unavailable")
+    try:
+        with guard(schedule):
+            yield
+    except role_management.RoleManagementError as exc:
+        reason = exc.code if isinstance(exc.code, str) and re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", exc.code) else "role_authority_unavailable"
+        raise schedule_runner.ExecutionRefused(reason) from None
 
 
 def _target_row_assigned_ids(row):
@@ -2057,7 +2073,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
-                 management_previous_token_file=None, iox_controller=None):
+                 management_previous_token_file=None, iox_controller=None,
+                 schedule_wake=None):
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -2093,6 +2110,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     schedule_store = schedules.ScheduleStore(policy_state_dir())
     schedule_occurrence_store = schedules.OccurrenceStore(policy_state_dir())
     schedule_receipt_store = schedules.ReceiptStore(policy_state_dir())
+
+    def wake_schedule_runner():
+        if schedule_wake is not None:
+            try:
+                schedule_wake()
+            except Exception:
+                # The durable mutation already committed. The runner's bounded
+                # idle recheck remains authoritative if an in-process wake
+                # notification fails.
+                pass
 
     def role_coordinator():
         """Build the shared direct-store coordinator for this state owner."""
@@ -3146,6 +3173,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     row, resolved = coordinator.create_schedule(
                         schedule_id, definition, actor=actor, now=int(now_fn()),
                         resolve_target=schedule_target_resolver)
+                    wake_schedule_runner()
                     view = self._schedule_views([row])[0]
                     self._json(201, {
                         "schedule": view,
@@ -3176,6 +3204,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
                 if method == "DELETE" and item_match:
                     schedule_store.delete(schedule_id, expected_rev=expected)
+                    wake_schedule_runner()
                     self._send(204, "application/json", b"",
                                (("ETag", schedules.schedule_etag(before)),))
                     return
@@ -3188,6 +3217,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                             "reaffirm body must be empty")
                     row = schedule_store.reaffirm(
                         schedule_id, actor, expected_rev=expected)
+                    wake_schedule_runner()
                     view = self._schedule_views([row])[0]
                     self._json(200, {"schedule": view},
                                extra_headers=(("ETag", view["etag"]),))
@@ -3209,6 +3239,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._schedule_problem(404, "route-not-found",
                                            "Route not found")
                     return
+                wake_schedule_runner()
                 view = self._schedule_views([row])[0]
                 self._json(200, {
                     "schedule": view,
@@ -6596,6 +6627,8 @@ def main():
     control_server = None
     srv = None
     onboard = None
+    schedule_wake_event = threading.Event()
+    schedule_service = None
     try:
         record_store = deployment_records.DeploymentRecordStore(state_dir)
         record_store.recover_interrupted()
@@ -6649,7 +6682,16 @@ def main():
             certfile=certfile, keyfile=keyfile, audit_path=audit_path,
             record_store=record_store, management_token_file=token_file,
             management_previous_token_file=previous_token_file,
-            iox_controller=iox_controller)
+            iox_controller=iox_controller,
+            schedule_wake=schedule_wake_event.set)
+        schedule_service = schedule_runner.ScheduleRunner(
+            srv.schedule_store, srv.schedule_target_resolver,
+            role_guard=lambda schedule: _runner_schedule_role_guard(
+                srv.schedule_role_guard, schedule),
+            wake_event=schedule_wake_event,
+            error_fn=lambda reason: print(
+                "iris-management: schedule runner pass failed: %s" % reason,
+                file=sys.stderr, flush=True))
         def control_dispatch(request):
             if term_latch.pending:
                 return {"error": "service shutting down"}
@@ -6682,6 +6724,13 @@ def main():
         print("iris-management: controller initialization failed; refusing "
               "to start", file=sys.stderr, flush=True)
         sys.exit(2)
+    # Schedule recovery starts only after deployment records were recovered and
+    # all state-owner adapters were constructed. Importing or calling
+    # make_server() remains inert.
+    schedule_stop = threading.Event()
+    schedule_thread = threading.Thread(
+        target=schedule_service.run, args=(schedule_stop,), daemon=True)
+    schedule_thread.start()
     # Hourly instruction-key custody refresh. This is an in-process daemon
     # thread like the maintenance loops below, never another entrypoint process.
     custody_stop = threading.Event()  # never set; loop dies with this process
@@ -6725,9 +6774,14 @@ def main():
     print("iris-management on %s://%s:%d/internal/v1" %
           (scheme, host, port), flush=True)
     def shutdown_management():
-        for stop in (custody_stop, instruction_stop, ca_stop, bulkhash_stop,
-                     export_stop):
+        for stop in (schedule_stop, custody_stop, instruction_stop, ca_stop,
+                     bulkhash_stop, export_stop):
             stop.set()
+        schedule_service.stop()
+        schedule_thread.join(timeout=10)
+        if schedule_thread.is_alive():
+            print("iris-management: schedule runner did not stop within 10s",
+                  file=sys.stderr, flush=True)
         try:
             control_server.close()
         finally:

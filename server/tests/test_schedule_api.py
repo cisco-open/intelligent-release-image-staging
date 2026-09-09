@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 """Schedule HTTP, target-resolution, route, and role-integrity contracts."""
+import contextlib
 import http.client
+import inspect
 import json
 import os
 import threading
@@ -17,6 +19,7 @@ import gui_fleet
 import management_api
 import peer_policy
 import role_management
+import schedule_runner
 import schedules
 
 
@@ -84,10 +87,12 @@ def schedule_api(tmp_path, monkeypatch):
                             {"restricted": True}, "test", NOW)
     peer_policy.define_role(str(auth_path), str(lkg_path), "fiber",
                             {"restricted": True}, "test", NOW)
+    schedule_wakes = []
     server = management_api.make_server(
         "127.0.0.1", 0, app, fleet=fleet, catalog=cat,
         onboard=_Onboard(), record_store=_Records(), now_fn=lambda: NOW,
-        certfile=None)
+        certfile=None, schedule_wake=lambda: schedule_wakes.append("wake"))
+    server._test_schedule_wakes = schedule_wakes
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     login_status, login_headers, login_body = _request(
@@ -233,6 +238,36 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     assert deleted_headers["ETag"] == affirmed_headers["ETag"]
     assert _request(server, "GET", "/api/schedules/s-boat",
                     headers={"Cookie": bob["Cookie"]})[0] == 404
+    assert server._test_schedule_wakes == ["wake"] * 5
+
+
+def test_schedule_runner_role_guard_translates_only_expected_refusals():
+    @contextlib.contextmanager
+    def refused(_schedule):
+        raise role_management.RoleManagementError(
+            "missing", code="role_not_found", status=422)
+        yield
+
+    with pytest.raises(schedule_runner.ExecutionRefused) as exc:
+        with management_api._runner_schedule_role_guard(refused, _definition()):
+            pass
+    assert exc.value.reason == "role_not_found"
+    with pytest.raises(schedule_runner.ExecutionRefused) as absent:
+        with management_api._runner_schedule_role_guard(None, _definition()):
+            pass
+    assert absent.value.reason == "role_authority_unavailable"
+
+
+def test_schedule_daemon_lifecycle_is_ordered_after_deployment_recovery():
+    source = inspect.getsource(management_api.main)
+    assert source.index("record_store.recover_interrupted()") < \
+        source.index("schedule_runner.ScheduleRunner(") < \
+        source.index("schedule_thread.start()")
+    assert "schedule_wake=schedule_wake_event.set" in source
+    shutdown = source.split("def shutdown_management():", 1)[1]
+    assert shutdown.index("schedule_service.stop()") < \
+        shutdown.index("schedule_thread.join(timeout=10)") < \
+        shutdown.index("onboard.shutdown()")
 
 
 def test_callback_disappearance_is_precondition_failure(schedule_api,
