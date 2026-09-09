@@ -539,6 +539,33 @@ def _schedule_target_facts_schema():
                              "quarantined_ids": _schedule_ids_schema()})
 
 
+def _schedule_wave_schema():
+    """The wave gate's own view of a PRECEDING occurrence."""
+    count = _schedule_integer(0, schedules.MAX_TARGETS)
+    properties = {
+        "schedule_id": _schedule_id_schema(),
+        "occurrence_id": {"oneOf": [
+            {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+            {"type": "null"}]},
+        "total": count,
+    }
+    properties.update({field: count for field in schedules.WAVE_COUNTS})
+    properties["gate"] = {"type": "string",
+                          "enum": sorted(schedules.WAVE_GATES)}
+    properties["observed_at"] = _schedule_integer(0, schedules.MAX_EPOCH)
+    schema = _schedule_object(properties)
+    schema["description"] = (
+        "Wave-gate evaluation of the preceding schedule's own occurrence: an "
+        "operational signal about when work is admitted, never an authority "
+        "over what it may do. staged, errored and missing each count part of "
+        "that occurrence's bound target and never exceed its total; the "
+        "remainder is still in flight. Missing counts a device that produced "
+        "no evidence at all, which is deliberately not the same as errored. "
+        "A gate with no preceding occurrence yet reports a null occurrence id "
+        "and zero counts, which is a hold rather than an all-clear.")
+    return schema
+
+
 def _schedule_receipt_schema(*, predecessor=False):
     epoch = _schedule_integer(0, schedules.MAX_EPOCH)
     reason = {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"}
@@ -561,6 +588,7 @@ def _schedule_receipt_schema(*, predecessor=False):
             "schedule_rev": _schedule_integer(1),
         })
     required = list(properties)
+    properties["wave"] = _schedule_wave_schema()
     properties.update({field: _schedule_id_schema() for field in (
         "job_id", "record_id", "predecessor_record_id")})
     properties["manual_generation"] = _schedule_integer()
@@ -617,7 +645,8 @@ def _schedule_occurrence_schema():
                                     "removed": _schedule_integer(0, schedules.MAX_TARGETS)}),
         "annotations": _schedule_object({
             "all_targets_quarantined": _schedule_integer(
-                1, schedules.MAX_TARGETS)}, ()),
+                1, schedules.MAX_TARGETS),
+            "wave": _schedule_wave_schema()}, ()),
     }
     required = tuple(key for key in properties
                      if key not in ("target_snapshot", "delta", "annotations"))

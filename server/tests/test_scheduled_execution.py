@@ -1195,3 +1195,188 @@ def test_terminal_acknowledgement_retries_after_receipt_save(tmp_path):
     assert executor.acks == 2
     assert schedules.OccurrenceStore(tmp_path).get(
         occurrence["id"])["state"] == "completed"
+
+
+# ---- Task 24: wave counts ------------------------------------------------
+# The counts answer one question about a PRECEDING occurrence: how much of it
+# actually landed. They are read from evidence that is allowed to be absent,
+# so every classification below has to say what it does when the evidence is
+# simply not there.
+
+_WAVE_SLOT = {"scheduled_at": NOW, "window_end": NOW + 300, "status": "due",
+              "resolution": "normal", "tz": "UTC",
+              "local_time": "2026-09-08 00:00", "next_at": None}
+
+
+def _preceding(tmp_path, *, ids, kind="assign", image_ids=("image-a",),
+               outcomes=None):
+    """Create a real preceding occurrence with its per-device evidence."""
+    store = schedules.ScheduleStore(tmp_path)
+    definition = _definition(kind=kind, device_ids=list(ids),
+                             **({"image_ids": list(image_ids)}
+                                if kind == "assign" else {}))
+    row = store.create("first", definition, actor="console:test", now=NOW - 1,
+                       preview={"revision": 1, "now": NOW - 1,
+                                "device_ids": list(ids)})
+    occurrences = schedules.OccurrenceStore(tmp_path)
+    occurrence = occurrences.create(
+        row, dict(_WAVE_SLOT),
+        {"revision": 1, "now": NOW, "device_ids": list(ids)}, now=NOW)
+    evidence = schedules.ReceiptStore(tmp_path)
+    for device_id, (status, reason) in (outcomes or {}).items():
+        evidence.record(occurrence["id"], device_id, status=status,
+                        reason=reason, now=NOW)
+    return store, occurrence
+
+
+def _gated(tmp_path, store, *, ids, **overrides):
+    after = {"schedule_id": "first", "condition": "min_staged_ratio",
+             "min_staged_ratio": .9, "max_errored_ratio": .1,
+             "max_missing_ratio": .05, "deadline_seconds": 60}
+    after.update(overrides)
+    definition = dict(_definition(device_ids=list(ids)), after=after)
+    return store.create("second", definition, actor="console:test",
+                        now=NOW - 1,
+                        preview={"revision": 1, "now": NOW - 1,
+                                 "device_ids": list(ids)})
+
+
+def _wave_executor(tmp_path, store, images, fleet, *, heartbeats,
+                   swarm=None, clock=None):
+    return management_api._ScheduledExecutor(
+        schedule_store=store,
+        occurrence_store=schedules.OccurrenceStore(tmp_path),
+        receipt_store=schedules.ReceiptStore(tmp_path),
+        role_guard=_role_guard(_Policy()),
+        role_policy_snapshot=_Policy,
+        fleet=fleet, secrets_path=str(tmp_path / "secrets.json"),
+        assignment_writer=None, submission=None, onboard=None,
+        record_store=None, now_fn=clock or _Clock(), catalog=images,
+        heartbeat_fn=lambda: heartbeats,
+        swarm_fn=(lambda: swarm) if swarm is not None else None)
+
+
+def _wave_fixture(tmp_path, *, heartbeats, ids=("edge-1", "edge-2"),
+                  kind="assign", outcomes=None, swarm=None, **overrides):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    images = catalog.CatalogStore(str(tmp_path))
+    images.save_image(_image("image-a"))
+    for device_id in ids:
+        fleet.upsert({"device_id": device_id, "device_ip": "192.0.2.1"})
+    store, occurrence = _preceding(tmp_path, ids=ids, kind=kind,
+                                   outcomes=outcomes)
+    gated = _gated(tmp_path, store, ids=ids, **overrides)
+    executor = _wave_executor(tmp_path, store, images, fleet,
+                              heartbeats=heartbeats, swarm=swarm)
+    return executor, gated, occurrence
+
+
+def _staged(device_id, image_ids=("image-a",), **extra):
+    row = {"device_id": device_id, "last_seen": NOW,
+           "staged_image_ids": list(image_ids), "errored_image_ids": [],
+           "stage_state": "ready"}
+    row.update(extra)
+    return row
+
+
+def _gate_occurrence(executor, gated):
+    occurrences = executor.occurrences
+    return occurrences.create(
+        gated, dict(_WAVE_SLOT, scheduled_at=NOW + 1,
+                    window_end=NOW + 301),
+        {"revision": 1, "now": NOW + 1,
+         "device_ids": gated["preview"]["device_ids"]}, now=NOW + 1)
+
+
+def test_wave_counts_read_staging_without_demanding_corroboration(tmp_path):
+    executor, gated, preceding = _wave_fixture(
+        tmp_path, heartbeats=[_staged("edge-1"),
+                              dict(_staged("edge-2"), staged_image_ids=[],
+                                   stage_state="downloading")])
+    occurrence = _gate_occurrence(executor, gated)
+
+    # No tracker row for either device: the registry is in-memory and empty
+    # for one prune horizon after a restart, so silence there says nothing.
+    assert executor.wave_counts(gated, occurrence) == {
+        "schedule_id": "first", "occurrence_id": preceding["id"],
+        "total": 2, "staged": 1, "errored": 0, "missing": 0}
+
+
+def test_wave_counts_let_the_tracker_contradict_a_staged_claim(tmp_path):
+    swarm = {"images": [{"info_hash": "ef" * 20, "peers": [
+        {"device_id": "edge-1",
+         "tracker": {"left": 4096, "principal_type": "device"}}]}]}
+    executor, gated, preceding = _wave_fixture(
+        tmp_path, heartbeats=[_staged("edge-1"), _staged("edge-2")],
+        swarm=swarm)
+    occurrence = _gate_occurrence(executor, gated)
+    result = executor.wave_counts(gated, occurrence)
+    assert (result["staged"], result["errored"], result["missing"]) == \
+        (1, 0, 0)
+
+    swarm["images"][0]["peers"][0]["tracker"]["left"] = 0
+    assert executor.wave_counts(gated, occurrence)["staged"] == 2
+
+
+def test_wave_counts_separate_a_dark_device_from_a_failed_one(tmp_path):
+    executor, gated, preceding = _wave_fixture(
+        tmp_path, ids=("edge-1", "edge-2", "edge-3", "edge-4"),
+        outcomes={"edge-4": ("skipped", "vanished")},
+        heartbeats=[
+            dict(_staged("edge-1"), staged_image_ids=[],
+                 errored_image_ids=["image-a"], stage_state="error"),
+            dict(_staged("edge-2"), last_seen=NOW - 601,
+                 staged_image_ids=[], stage_state="downloading"),
+            dict(_staged("edge-3"), staged_image_ids=[],
+                 stage_state="downloading"),
+            _staged("edge-4")])
+    occurrence = _gate_occurrence(executor, gated)
+    result = executor.wave_counts(gated, occurrence)
+    # edge-3 is still downloading: neither staged, failed, nor dark.
+    assert (result["total"], result["staged"], result["errored"],
+            result["missing"]) == (4, 1, 1, 1)
+
+
+def test_wave_counts_treat_an_unheard_device_as_missing(tmp_path):
+    executor, gated, preceding = _wave_fixture(
+        tmp_path, heartbeats=[_staged("edge-1")])
+    occurrence = _gate_occurrence(executor, gated)
+    result = executor.wave_counts(gated, occurrence)
+    assert (result["staged"], result["missing"]) == (1, 1)
+
+
+def test_wave_counts_use_the_onboarding_outcome_for_an_onboard_wave(tmp_path):
+    executor, gated, preceding = _wave_fixture(
+        tmp_path, kind="onboard",
+        outcomes={"edge-1": ("ok", "onboarded"), "edge-2": ("error", "failed")},
+        heartbeats=[_staged("edge-1"), _staged("edge-2")])
+    occurrence = _gate_occurrence(executor, gated)
+    result = executor.wave_counts(gated, occurrence)
+    assert (result["staged"], result["errored"]) == (1, 1)
+
+
+def test_wave_counts_report_no_preceding_occurrence_rather_than_zero(tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    store = schedules.ScheduleStore(tmp_path)
+    gated = _gated(tmp_path, store, ids=["edge-1"])
+    executor = _wave_executor(tmp_path, store, images, fleet, heartbeats=[])
+    occurrence = _gate_occurrence(executor, gated)
+    assert executor.wave_counts(gated, occurrence) == {
+        "schedule_id": "first", "occurrence_id": None, "total": 0,
+        "staged": 0, "errored": 0, "missing": 0}
+
+
+def test_wave_counts_refuse_rather_than_guess_without_heartbeats(tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    images = catalog.CatalogStore(str(tmp_path))
+    images.save_image(_image("image-a"))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    store, _ = _preceding(tmp_path, ids=["edge-1"])
+    gated = _gated(tmp_path, store, ids=["edge-1"])
+    executor = _wave_executor(tmp_path, store, images, fleet, heartbeats=None)
+    occurrence = _gate_occurrence(executor, gated)
+    with pytest.raises(schedule_runner.ExecutionRefused) as raised:
+        executor.wave_counts(gated, occurrence)
+    assert raised.value.reason == "staging_evidence_unavailable"

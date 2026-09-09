@@ -33,6 +33,16 @@ succeeded immediately before the process lost its result.
 The runner owns persistence/timing; Task23 owns actual assignment/onboarding,
 recovery provenance, policy checks, and bounded admission. Task24 owns gate math.
 No executor or gate is treated as success merely because it is unavailable.
+
+A schedule may carry an `after` wave gate. The executor then also supplies
+wave_counts(schedule, occurrence) -> {schedule_id, occurrence_id, total,
+staged, errored, missing} for the preceding schedule's own occurrence. The
+gate is re-evaluated at every wake inside the window until it opens, and it
+is an operational signal, not a security boundary: it decides only WHEN work
+is admitted, never what that work may do, and every per-device authority
+check still runs afterwards. It admits work and never retracts it, absent
+corroboration is never read as a refusal, and an unopened gate ends its
+occurrence stalled at deadline_seconds rather than waiting silently.
 """
 import contextlib
 import copy
@@ -73,11 +83,33 @@ class UnavailableExecutor:
         # Existing evidence could belong to work admitted by an earlier build.
         return {"status": "deferred", "reason": "executor_unavailable"}
 
+    def wave_counts(self, schedule, occurrence):
+        raise ExecutionRefused("executor_unavailable")
+
     def cancel_queued(self, occurrence_id, job_ids):
         return None
 
     def acknowledge(self, receipt):
         return None
+
+
+def _wave_open(after, counts):
+    """Whether a preceding occurrence's counts satisfy the operator's gate.
+
+    Ratios are compared by multiplying the threshold out, so no count is
+    rounded into or out of a decision. A preceding occurrence that bound an
+    empty target has nothing left to wait for; one that does not exist yet
+    reports no occurrence id and holds, because absent evidence is not
+    evidence of staging.
+    """
+    if counts["occurrence_id"] is None:
+        return False
+    total = counts["total"]
+    if not total:
+        return True
+    return (counts["staged"] >= after["min_staged_ratio"] * total
+            and counts["errored"] <= after["max_errored_ratio"] * total
+            and counts["missing"] <= after["max_missing_ratio"] * total)
 
 
 @contextlib.contextmanager
@@ -92,8 +124,8 @@ class ScheduleRunner:
     def __init__(self, store, resolve_target, *, executor=None, role_guard=None,
                  now_fn=time.time, wake_event=None, idle_recheck=30,
                  poll_interval=1, max_claims=32, max_dispatches=100,
-                 error_fn=None):
-        for value in (idle_recheck, poll_interval):
+                 error_fn=None, wave_recheck=15):
+        for value in (idle_recheck, poll_interval, wave_recheck):
             if type(value) not in (int, float) or not 0 < value <= 300:
                 raise ValueError("runner intervals must be positive and bounded")
         for value in (max_claims, max_dispatches):
@@ -109,6 +141,11 @@ class ScheduleRunner:
         self.wake_event = wake_event if wake_event is not None else threading.Event()
         self.idle_recheck = idle_recheck
         self.poll_interval = poll_interval
+        # A held gate keeps its occurrence active, so the runner wakes on the
+        # poll interval. Reading the whole heartbeat authority and the swarm
+        # once per second for the length of a maintenance window would cost
+        # far more than it could learn: devices report on their own cadence.
+        self.wave_recheck = wave_recheck
         self.max_claims = max_claims
         self.max_dispatches = max_dispatches
         self.error_fn = error_fn
@@ -120,6 +157,7 @@ class ScheduleRunner:
         self._validated = set()
         self._facts = {}
         self._retry_at = {}
+        self._wave_at = {}
         self._pending_acknowledgements = set()
         self._position = {}
         self._stop = threading.Event()
@@ -284,6 +322,71 @@ class ScheduleRunner:
             self._facts[claimed["id"]] = dict(facts, **claimed["target_snapshot"])
         return claimed
 
+    def _wave(self, occurrence):
+        """Evaluate an after-gate at this wake, or None once work is admitted.
+
+        Any durable evidence for the occurrence is the latch: the gate has
+        already opened for it, and a later regression in the preceding
+        occurrence must not retract work this one has begun. The latch is the
+        stored evidence itself, so it survives a restart mid-window.
+        """
+        oid = occurrence["id"]
+        if self.receipts.list(oid, limit=1)["total"]:
+            return None
+        after = occurrence["schedule"]["after"]
+        now = self._now()
+        expired = now >= occurrence["scheduled_at"] + after["deadline_seconds"]
+        # A throttled wake is necessarily still held: the latch above returns
+        # early once anything has been admitted. The deadline is never
+        # throttled, so the counts that stall an occurrence are freshly read.
+        if not expired and self._wave_at.get(oid, 0) > now:
+            return {"gate": "held", "counts": None, "expired": False}
+        self._wave_at[oid] = now + self.wave_recheck
+        counter = getattr(self.executor, "wave_counts", None)
+        if not callable(counter):
+            return {"gate": "unavailable", "counts": None, "expired": expired}
+        try:
+            counted = counter(copy.deepcopy(occurrence["schedule"]),
+                              copy.deepcopy(occurrence))
+        except ExecutionRefused:
+            # Evidence loss delays a wave; it must not hold one past its
+            # deadline, and it may never be reported as an all-clear.
+            if not expired:
+                raise
+            stored = ((self.occurrences.get(oid) or {}).get("annotations") or {}).get("wave")
+            return {"gate": "held", "expired": True,
+                    "counts": stored or self._wave_record(occurrence, {
+                        "schedule_id": after["schedule_id"],
+                        "occurrence_id": None, "total": 0, "staged": 0,
+                        "errored": 0, "missing": 0})}
+        counts = self._wave_record(occurrence, counted)
+        if _wave_open(after, counts):
+            counts["gate"] = "open"
+        self.occurrences.annotate_wave(oid, counts, now=self._now())
+        return {"gate": counts["gate"], "counts": counts, "expired": expired}
+
+    def _wave_record(self, occurrence, counted):
+        if not isinstance(counted, dict) or set(counted) != {
+                "schedule_id", "occurrence_id", "total"} | set(schedules.WAVE_COUNTS):
+            raise ValueError("invalid wave gate counts")
+        if counted["schedule_id"] != occurrence["schedule"]["after"]["schedule_id"]:
+            raise ValueError("wave counts name another schedule")
+        return schedules.normalize_wave(
+            dict(counted, gate="held", observed_at=self._now()))
+
+    def _wave_held(self, occurrence):
+        """True when a gated occurrence is ending without its gate opening.
+
+        An occurrence whose window closed before the gate could even be read
+        is held too: nothing admitted its work, and reporting that as a
+        completed wave would claim an ordering that never happened.
+        """
+        if "after" not in occurrence["schedule"]:
+            return False
+        row = self.occurrences.get(occurrence["id"]) or {}
+        wave = (row.get("annotations") or {}).get("wave")
+        return wave is None or wave["gate"] != "open"
+
     def _closed_reason(self, occurrence):
         if self._stopping():
             return "runner_stopping"
@@ -364,9 +467,10 @@ class ScheduleRunner:
         self._pending_acknowledgements.discard(key)
         return True
 
-    def _finish_unsubmitted(self, occurrence, did, prior, reason, status="skipped"):
+    def _finish_unsubmitted(self, occurrence, did, prior, reason, status="skipped", wave=None):
         saved = self.receipts.record(occurrence["id"], did, status=status,
-            reason=reason, now=self._now(), expected_rev=prior["rev"] if prior else None)
+            reason=reason, now=self._now(), expected_rev=prior["rev"] if prior else None,
+            wave=wave)
         self._acknowledge(saved)
         return saved
 
@@ -450,10 +554,19 @@ class ScheduleRunner:
         complete = self.receipts.completed_device_ids(oid)
         closed = self._admission_reason(occurrence)
         refusal = None
+        wave = None
         if closed is None and (len(complete) < len(targets) or not targets):
-            if "after" in occurrence["schedule"]:
-                refusal = {"status":"skipped", "reason":"gate_unavailable"}
-            elif oid not in self._validated:
+            if targets and "after" in occurrence["schedule"]:
+                gate = self._wave(occurrence)
+                if gate is not None and gate["gate"] != "open":
+                    if gate["gate"] == "unavailable":
+                        refusal = {"status":"skipped", "reason":"gate_unavailable"}
+                    elif not gate["expired"]:
+                        return  # held: re-evaluated at the next wake
+                    else:
+                        refusal = {"status":"skipped", "reason":"wave_deadline"}
+                        wave = gate["counts"]
+            if refusal is None and oid not in self._validated:
                 validation_snapshot = copy.deepcopy(
                     self._facts.get(oid, occurrence["target_snapshot"]))
                 validation_snapshot["occurrence_id"] = oid
@@ -495,7 +608,8 @@ class ScheduleRunner:
                 if prior is not None:
                     self._poll(occurrence, did, prior, refusal["reason"])
                 else:
-                    self._finish_unsubmitted(occurrence, did, None, refusal["reason"], refusal["status"])
+                    self._finish_unsubmitted(occurrence, did, None, refusal["reason"],
+                                             refusal["status"], wave=wave)
                 continue
             if self._remaining <= 0 or self._retry_at.get((oid,did), 0) > self._now():
                 continue
@@ -525,7 +639,8 @@ class ScheduleRunner:
                 result = self.receipts.get(oid, did)
                 reasons.add(result["reason"])
                 statuses.add(result["status"])
-            state = ("stalled" if "gate_unavailable" in reasons else
+            state = ("stalled" if reasons & {"gate_unavailable", "wave_deadline"}
+                     or self._wave_held(occurrence) else
                      "failed" if "error" in statuses or "executor_unavailable" in reasons else
                      "cancelled" if "schedule_changed" in reasons else "completed")
             self.occurrences.transition(oid, state, now=self._now(), expected_state="running")
@@ -533,5 +648,6 @@ class ScheduleRunner:
             self._validated.discard(oid)
             self._facts.pop(oid, None)
             self._position.pop(oid, None)
+            self._wave_at.pop(oid, None)
             for did in targets:
                 self._retry_at.pop((oid, did), None)

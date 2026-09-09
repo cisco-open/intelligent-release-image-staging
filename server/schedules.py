@@ -155,6 +155,46 @@ def normalize_snapshot(value):
             "device_ids": _ids(value["device_ids"])}
 
 
+WAVE_GATES = frozenset(("open", "held"))
+WAVE_COUNTS = ("staged", "errored", "missing")
+
+
+def _wave_counts(wave):
+    return {key: value for key, value in wave.items() if key != "observed_at"}
+
+
+def normalize_wave(value):
+    """Return a detached wave-gate evaluation of a preceding occurrence.
+
+    The counts are an operational signal, never an authority: they are read
+    from evidence that is allowed to be absent, so a preceding occurrence
+    that does not exist yet reports no counts at all rather than a zeroed
+    all-clear. staged/errored/missing partition only the part of the
+    preceding target that has produced evidence; the remainder is still in
+    flight and is deliberately not named here.
+    """
+    keys = {"schedule_id", "occurrence_id", "total", "gate",
+            "observed_at"} | set(WAVE_COUNTS)
+    _object(value, keys, "wave gate", keys)
+    _identifier(value["schedule_id"], "preceding schedule id")
+    if value["occurrence_id"] is not None:
+        _hex(value["occurrence_id"], "preceding occurrence id")
+    total = _integer(value["total"], "wave total", maximum=MAX_TARGETS)
+    if value["occurrence_id"] is None and total:
+        raise ScheduleValidationError("wave counts need a preceding occurrence")
+    counts = {field: _integer(value[field], "wave " + field, maximum=total)
+              for field in WAVE_COUNTS}
+    if sum(counts.values()) > total:
+        raise ScheduleValidationError("wave counts exceed the preceding target")
+    if value["gate"] not in WAVE_GATES:
+        raise ScheduleValidationError("invalid wave gate state")
+    return dict(counts, schedule_id=value["schedule_id"],
+                occurrence_id=value["occurrence_id"], total=total,
+                gate=value["gate"],
+                observed_at=_integer(value["observed_at"], "wave observed_at",
+                                     maximum=MAX_EPOCH))
+
+
 def normalize_definition(value):
     """Return a detached, fully defaulted, closed operator definition.
 
@@ -551,11 +591,14 @@ def _validate_occurrence(key, row):
     _integer(row["updated_at"], "occurrence updated_at", row["created_at"], MAX_EPOCH)
     if "annotations" in row:
         annotations = row["annotations"]
-        _object(annotations, {"all_targets_quarantined"},
+        _object(annotations, {"all_targets_quarantined", "wave"},
                 "occurrence annotations")
         if "all_targets_quarantined" in annotations:
             _integer(annotations["all_targets_quarantined"],
                      "all_targets_quarantined", 1, MAX_TARGETS)
+        if "wave" in annotations:
+            if normalize_wave(annotations["wave"]) != annotations["wave"]:
+                raise ScheduleValidationError("wave gate is not normalized")
     if row["state"] == "missed":
         if ("target_snapshot" in row or "delta" in row or row["created_at"] < row["window_end"]
                 or row["slot"]["status"] != "missed"):
@@ -662,6 +705,42 @@ class OccurrenceStore:
 
         return self._rows.update(identifier, mutate)
 
+    def annotate_wave(self, identifier, wave, *, now):
+        """Replace the latest wave-gate evaluation for a gated occurrence.
+
+        Unlike the write-once quarantine fact, this is re-evaluated at each
+        wake while the gate holds, so the annotation is replaced rather than
+        pinned. Only a CHANGE is written, and observed_at therefore records
+        when this exact count set was first seen rather than the last wake --
+        a held gate that nothing has moved must not rewrite durable state once
+        per second for the length of a maintenance window. It only ever moves
+        towards an open gate: once work has been admitted the runner stops
+        evaluating, and nothing may rewrite that history into a refusal.
+        """
+        _hex(identifier, "occurrence id")
+        wave = normalize_wave(wave)
+        _integer(now, "now", maximum=MAX_EPOCH)
+
+        def mutate(old):
+            if old is None:
+                raise ScheduleNotFound("no such occurrence")
+            if old["state"] == "missed":
+                raise ScheduleConflict("missed occurrence has no bound target")
+            annotations = dict(old.get("annotations") or {})
+            existing = annotations.get("wave")
+            if existing is not None and _wave_counts(existing) == _wave_counts(wave):
+                return old
+            if existing is not None and existing["gate"] == "open" \
+                    and wave["gate"] != "open":
+                raise ScheduleConflict("an opened wave gate cannot close")
+            annotations["wave"] = wave
+            row = dict(copy.deepcopy(old), annotations=annotations,
+                       updated_at=max(now, old["updated_at"]))
+            _validate_occurrence(identifier, row)
+            return row
+
+        return self._rows.update(identifier, mutate)
+
     def recover_interrupted(self, *, now):
         recovered = []
         for row in self.list():
@@ -696,7 +775,7 @@ _RECEIPT_REQUIRED = {"occurrence_id", "device_id", "rev", "attempt", "attempt_st
 _RECEIPT_OPTIONAL = {"job_id", "record_id", "predecessor_record_id", "manual_generation",
                      "fleet_registered_at", "fleet_registration_id",
                      "before_image_ids",
-                     "after_image_ids", "removed_image_ids"}
+                     "after_image_ids", "removed_image_ids", "wave"}
 _UNSET = object()
 
 
@@ -738,6 +817,8 @@ def _validate_receipt(key, row, *, history=True):
     for field in ("before_image_ids", "after_image_ids", "removed_image_ids"):
         if field in row:
             _ids(row[field], "image_ids", maximum=10)
+    if "wave" in row and normalize_wave(row["wave"]) != row["wave"]:
+        raise ScheduleValidationError("wave gate is not normalized")
     if {"after_image_ids", "removed_image_ids"} & set(row) and row["status"] not in TERMINAL_RECEIPT_STATES:
         raise ScheduleValidationError("assignment outcomes require a terminal receipt")
     if {"before_image_ids", "after_image_ids", "removed_image_ids"} <= set(row):
@@ -805,7 +886,8 @@ class ReceiptStore:
                expected_status=None, expected_rev=None, job_id=None, record_id=None,
                predecessor_record_id=None, manual_generation=None, before_image_ids=None,
                after_image_ids=None, removed_image_ids=None,
-               fleet_registered_at=_UNSET, fleet_registration_id=None):
+               fleet_registered_at=_UNSET, fleet_registration_id=None,
+               wave=None):
         self._admit(identifier, device_id)
         _integer(now, "now", maximum=MAX_EPOCH)
         if not isinstance(status, str) or status not in RECEIPT_STATES:
@@ -818,7 +900,9 @@ class ReceiptStore:
             "job_id": job_id, "record_id": record_id, "predecessor_record_id": predecessor_record_id,
             "manual_generation": manual_generation, "before_image_ids": before_image_ids,
             "after_image_ids": after_image_ids, "removed_image_ids": removed_image_ids,
-            "fleet_registration_id": fleet_registration_id}.items() if value is not None}
+            "fleet_registration_id": fleet_registration_id,
+            "wave": None if wave is None else normalize_wave(wave)}.items()
+            if value is not None}
         if fleet_registered_at is not _UNSET:
             supplied["fleet_registered_at"] = fleet_registered_at
         def mutate(old):

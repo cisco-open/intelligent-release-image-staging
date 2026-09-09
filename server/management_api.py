@@ -963,6 +963,71 @@ def _target_row_has_staged(row, image_id):
             and row.get("current_image_id") == image_id)
 
 
+def wave_swarm_contradictions(document, info_hashes):
+    """Map device ids seen in *info_hashes* to whether the tracker agrees
+    their download finished.
+
+    False means the tracker still sees bytes outstanding for one of those
+    torrents; True means it saw the device complete every torrent it appears
+    in. A device the tracker has not seen at all is simply absent from the
+    map: the registry is in-memory and empty for one prune horizon after a
+    restart, so its silence is not a claim about that device.
+    """
+    out = {}
+    images = document.get("images") if isinstance(document, dict) else None
+    for image in images if isinstance(images, list) else ():
+        if not isinstance(image, dict) or image.get("info_hash") not in info_hashes:
+            continue
+        peers = image.get("peers")
+        for peer in peers if isinstance(peers, list) else ():
+            if not isinstance(peer, dict):
+                continue
+            device_id = peer.get("device_id")
+            state = peer.get("tracker")
+            if not isinstance(device_id, str) or not isinstance(state, dict):
+                continue
+            left = state.get("left")
+            if type(left) is int and left > 0:
+                out[device_id] = False
+            else:
+                out.setdefault(device_id, True)
+    return out
+
+
+def wave_device_state(kind, heartbeat, image_ids, outcome, corroborated, *,
+                      now):
+    """Classify one preceding-wave target from the evidence that exists.
+
+    Returns "staged", "errored", "missing" or "in_flight". Missing is
+    deliberately not errored: a powered-off or slow-cadence device produces
+    no evidence at all, and counting that as a failure would either raise an
+    alarm nobody can act on or let one dark device hold a wave chain open
+    forever. Corroboration may contradict a staged claim but can never
+    create one, and its absence is never read as "not staged".
+    """
+    if outcome == "error":
+        return "errored"
+    if heartbeat is None:
+        return "missing"
+    if kind == "onboard":
+        # An onboarding wave stages nothing itself; its own outcome is the
+        # only honest completion evidence for the device.
+        if outcome == "ok":
+            return "staged"
+    else:
+        if any(image_id in (heartbeat.get("errored_image_ids") or ())
+               for image_id in image_ids):
+            return "errored"
+        if image_ids and corroborated is not False and all(
+                _target_row_has_staged(heartbeat, image_id)
+                for image_id in image_ids):
+            return "staged"
+    if outcome == "skipped" or not heartbeat.get("last_seen") \
+            or _target_is_offline(heartbeat, now):
+        return "missing"
+    return "in_flight"
+
+
 def _target_status_key(row):
     onboard_finished_at = row.get("onboard_finished_at")
     last_seen = row.get("last_seen")
@@ -2081,7 +2146,8 @@ class _ScheduledExecutor(object):
     def __init__(self, *, schedule_store, occurrence_store, receipt_store,
                  role_guard, role_policy_snapshot, fleet, secrets_path,
                  assignment_writer, submission, onboard, record_store,
-                 now_fn=time.time):
+                 now_fn=time.time, catalog=None, heartbeat_fn=None,
+                 swarm_fn=None):
         self.schedule_store = schedule_store
         self.occurrences = occurrence_store
         self.receipts = receipt_store
@@ -2094,6 +2160,11 @@ class _ScheduledExecutor(object):
         self.onboard = onboard
         self.record_store = record_store
         self._now = now_fn
+        # Wave-gate evidence only. The heartbeat authority is required to
+        # count staging at all; the swarm view is optional corroboration.
+        self.catalog = catalog
+        self.heartbeat_fn = heartbeat_fn
+        self.swarm_fn = swarm_fn
         self.local_validator = schedule_validation.LocalScheduleValidator(
             fleet=fleet,
             plan_fn=(submission._plan if submission is not None
@@ -2124,6 +2195,84 @@ class _ScheduledExecutor(object):
         if set(device_ids) <= quarantined:
             self.occurrences.annotate_all_targets_quarantined(
                 occurrence_id, len(device_ids), now=int(self._now()))
+
+    def _preceding_occurrence(self, schedule_id, not_after):
+        """The preceding schedule's newest occurrence at or before this slot.
+
+        Missed slots never bound a target and never ran, so they carry no
+        evidence and are skipped rather than counted as an empty success.
+        """
+        rows = [row for row in self.occurrences.list(schedule_id)
+                if row["state"] != "missed" and row["scheduled_at"] <= not_after]
+        return rows[-1] if rows else None
+
+    def _wave_heartbeats(self):
+        rows = self.heartbeat_fn() if callable(self.heartbeat_fn) else None
+        if not isinstance(rows, list):
+            raise schedule_runner.ExecutionRefused(
+                "staging_evidence_unavailable")
+        return {row.get("device_id"): row for row in rows
+                if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+
+    def _wave_corroboration(self, image_ids):
+        """The tracker's own view of the wave's torrents, when it has one.
+
+        Every failure here is silence, not a verdict: an unreadable catalog
+        entry, an unreachable tracker or an unparsable document all mean the
+        gate simply has nothing to corroborate with.
+        """
+        if not image_ids or not callable(self.swarm_fn) or self.catalog is None:
+            return {}
+        wanted = set()
+        try:
+            for image_id in image_ids:
+                entry = self.catalog.get_image(image_id)
+                info_hash = (entry or {}).get("info_hash_hex")
+                if info_hash:
+                    wanted.add(info_hash)
+            if not wanted:
+                return {}
+            document = self.swarm_fn()
+            if isinstance(document, (bytes, bytearray, str)):
+                document = json.loads(document)
+        except (OSError, TypeError, ValueError, RecursionError, OverflowError):
+            return {}
+        return wave_swarm_contradictions(document, wanted)
+
+    def wave_counts(self, schedule, occurrence):
+        """Count how much of a gate's preceding occurrence actually landed.
+
+        This is an operational signal, not a security boundary. It reads the
+        heartbeat authority the Devices table already reads and, where the
+        tracker can corroborate it, the swarm's own view of the same
+        torrents. Without the heartbeat authority it refuses instead of
+        guessing; without the tracker it still counts, because absent
+        corroboration is not evidence against staging.
+        """
+        after = schedule["after"]
+        counts = {"schedule_id": after["schedule_id"], "occurrence_id": None,
+                  "total": 0, "staged": 0, "errored": 0, "missing": 0}
+        preceding = self._preceding_occurrence(
+            after["schedule_id"], occurrence["scheduled_at"])
+        if preceding is None:
+            return counts
+        targets = preceding["target_snapshot"]["device_ids"]
+        counts["occurrence_id"] = preceding["id"]
+        counts["total"] = len(targets)
+        kind = preceding["schedule"]["kind"]
+        image_ids = list(preceding["schedule"]["payload"].get("image_ids") or ())
+        heartbeats = self._wave_heartbeats()
+        corroborated = self._wave_corroboration(image_ids)
+        now = int(self._now())
+        for device_id in targets:
+            outcome = self.receipts.get(preceding["id"], device_id)
+            state = wave_device_state(
+                kind, heartbeats.get(device_id), image_ids,
+                (outcome or {}).get("status"), corroborated.get(device_id),
+                now=now)
+            if state in schedules.WAVE_COUNTS:
+                counts[state] += 1
+        return counts
 
     def validate(self, schedule, snapshot, phase):
         """Validate local blast radius and artifacts without device I/O."""
@@ -7148,7 +7297,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         fleet=fleet, secrets_path=getattr(app, "secrets_path", None),
         assignment_writer=assignment_writer,
         submission=submission_adapter, onboard=onboard,
-        record_store=record_store, now_fn=now_fn)
+        record_store=record_store, now_fn=now_fn, catalog=catalog,
+        heartbeat_fn=instruction_heartbeat_snapshot,
+        swarm_fn=lambda: (swarm_fetch or _default_swarm_fetch)())
     srv = _ConsoleServer((host, port), Handler)
     srv.onboard_submission = submission_adapter
     # Inert runner construction seams. They are the exact instances used by

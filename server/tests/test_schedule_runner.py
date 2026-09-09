@@ -628,3 +628,287 @@ def test_poll_retry_delay_is_honored_without_delaying_window_cancellation(setup,
     runner.run_once()
     assert len(executor.polled) == 4
     assert occurrence(store)["state"] == "completed"
+
+
+# ---- Task 24: deployment waves -------------------------------------------
+# The gate is an operational signal about a PRECEDING occurrence, never an
+# authority over this one: it decides when to admit work, never what that work
+# is allowed to do. Every assertion below is written from that side.
+
+PRECEDING = "b" * 32
+
+
+def gate(**overrides):
+    after = {"schedule_id": "s-before", "condition": "min_staged_ratio",
+             "min_staged_ratio": .9, "max_errored_ratio": .1,
+             "max_missing_ratio": .05, "deadline_seconds": 60}
+    after.update(overrides)
+    return after
+
+
+def counts(total=10, staged=0, errored=0, missing=0, occurrence_id=PRECEDING,
+           schedule_id="s-before"):
+    return {"schedule_id": schedule_id, "occurrence_id": occurrence_id,
+            "total": total, "staged": staged, "errored": errored,
+            "missing": missing}
+
+
+class WaveExecutor(Executor):
+    """An executor that can also answer the gate's count question."""
+    def __init__(self, counted=None):
+        super().__init__()
+        self.counted = counted if counted is not None else counts()
+        self.asked = []
+        self.refuse = None
+
+    def wave_counts(self, schedule, occurrence):
+        assert occurrence["schedule_id"] == schedule["id"]
+        self.asked.append(occurrence["id"])
+        if self.refuse:
+            raise schedule_runner.ExecutionRefused(self.refuse)
+        return dict(self.counted)
+
+
+@pytest.fixture
+def wave_setup(setup):
+    store, clock, _, reads, runner = setup
+    executor = WaveExecutor()
+    runner.executor = executor
+    runner.wave_recheck = 1
+    return store, clock, executor, reads, runner
+
+
+def annotated(store, identifier="s-main"):
+    return (occurrence(store, identifier).get("annotations") or {}).get("wave")
+
+
+def test_wave_gate_is_documented_as_an_operational_signal():
+    assert "not a security boundary" in schedule_runner.__doc__
+
+
+def test_wave_gate_holds_inside_the_window_until_the_counts_arrive(wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(), window=300)
+    executor.counted = counts(staged=5)
+
+    runner.run_once()
+    assert not executor.dispatched and not receipts(store, occurrence(store))
+    assert occurrence(store)["state"] == "running"
+    assert annotated(store) == dict(counts(staged=5), gate="held",
+                                    observed_at=NOW)
+
+    executor.counted = counts(staged=9)
+    clock.now += 1
+    runner.run_once()
+    assert len(executor.dispatched) == 2
+    assert annotated(store)["gate"] == "open"
+    assert occurrence(store)["state"] == "completed"
+    assert executor.asked == [occurrence(store)["id"]] * 2
+
+
+def test_wave_gate_counts_missing_apart_from_errored(wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(max_errored_ratio=0, max_missing_ratio=.1),
+           window=300)
+    # One dark device is not one failed device: folding the two together
+    # would refuse this wave on evidence nobody produced.
+    executor.counted = counts(staged=9, missing=1)
+    runner.run_once()
+    assert len(executor.dispatched) == 2
+    assert annotated(store) == dict(counts(staged=9, missing=1), gate="open",
+                                    observed_at=NOW)
+
+    store.delete("s-main", expected_rev=store.get("s-main")["rev"])
+    create(store, "s-other", after=gate(max_errored_ratio=0,
+                                        max_missing_ratio=.1), window=300)
+    executor.counted = counts(staged=9, errored=1)
+    clock.now += 1
+    runner.run_once()
+    assert annotated(store, "s-other")["gate"] == "held"
+    assert not receipts(store, occurrence(store, "s-other"))
+
+
+def test_wave_deadline_stalls_the_occurrence_with_its_counts(wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(deadline_seconds=30), window=300)
+    executor.counted = counts(staged=1, errored=2, missing=3)
+    runner.run_once()
+    assert occurrence(store)["state"] == "running"
+
+    clock.now = NOW + 30
+    runner.run_once()
+    assert not executor.dispatched
+    evidence = receipts(store, occurrence(store))
+    assert {row["status"] for row in evidence} == {"skipped"}
+    assert {row["reason"] for row in evidence} == {"wave_deadline"}
+    assert all(row["wave"] == dict(counts(staged=1, errored=2, missing=3),
+                                   gate="held", observed_at=NOW + 30)
+               for row in evidence)
+    assert occurrence(store)["state"] == "stalled"
+
+
+def test_wave_gate_never_retracts_work_it_already_admitted(wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(), window=300)
+    executor.counted = counts(staged=10)
+    executor.results["edge-1"] = {"status": "submitted", "reason": "queued",
+                                  "job_id": "job-edge-1"}
+    runner.run_once()
+    assert len(executor.asked) == 1 and len(executor.dispatched) == 2
+
+    executor.counted = counts(staged=0, errored=10)
+    executor.poll_results["edge-1"] = {"status": "ok", "reason": "assigned"}
+    clock.now += 1
+    runner.run_once()
+    assert executor.asked == [occurrence(store)["id"]]
+    assert occurrence(store)["state"] == "completed"
+
+
+def test_wave_gate_held_at_window_close_stalls_rather_than_completes(
+        wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(deadline_seconds=600), window=10)
+    executor.counted = counts(staged=1)
+    runner.run_once()
+    clock.now = NOW + 10
+    runner.run_once()
+    assert not executor.dispatched
+    assert {row["reason"] for row in receipts(store, occurrence(store))} == \
+        {"window_closed"}
+    assert occurrence(store)["state"] == "stalled"
+
+
+def test_wave_gate_evidence_loss_retries_and_still_honors_the_deadline(
+        wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(deadline_seconds=30), window=300)
+    executor.counted = counts(staged=1)
+    runner.run_once()
+    executor.refuse = "staging_evidence_unavailable"
+    clock.now += 1
+    runner.run_once()
+    assert runner.last_error == "staging_evidence_unavailable"
+    assert not receipts(store, occurrence(store))
+    assert occurrence(store)["state"] == "running"
+
+    clock.now = NOW + 30
+    runner.run_once()
+    evidence = receipts(store, occurrence(store))
+    assert {row["reason"] for row in evidence} == {"wave_deadline"}
+    # The last durable counts are reported, never a fabricated all-clear.
+    assert all(row["wave"] == dict(counts(staged=1), gate="held",
+                                   observed_at=NOW) for row in evidence)
+    assert occurrence(store)["state"] == "stalled"
+
+
+def test_wave_gate_without_a_preceding_occurrence_is_not_an_all_clear(
+        wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(min_staged_ratio=0, deadline_seconds=30),
+           window=300)
+    executor.counted = counts(total=0, occurrence_id=None)
+    runner.run_once()
+    assert not executor.dispatched
+    assert annotated(store)["gate"] == "held"
+
+    # An empty preceding target set HAS run and has nothing left to wait for.
+    executor.counted = counts(total=0)
+    clock.now += 1
+    runner.run_once()
+    assert len(executor.dispatched) == 2
+
+
+def test_wave_gate_rejects_counts_it_cannot_trust(wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(), window=300)
+    executor.counted = counts(total=1, staged=2)
+    assert runner.run_once() > 0
+    assert runner.last_error == "schedule_runner_error"
+    assert not executor.dispatched and not receipts(store, occurrence(store))
+
+
+class ChainExecutor(WaveExecutor):
+    """Counts a preceding occurrence from its own durable evidence."""
+    def __init__(self, store):
+        super().__init__()
+        self.occurrences = schedules.OccurrenceStore(store.state_dir)
+        self.evidence = schedules.ReceiptStore(store.state_dir)
+
+    def wave_counts(self, schedule, occurrence):
+        preceding = schedule["after"]["schedule_id"]
+        rows = [row for row in self.occurrences.list(preceding)
+                if row["state"] != "missed"
+                and row["scheduled_at"] <= occurrence["scheduled_at"]]
+        if not rows:
+            return counts(total=0, occurrence_id=None, schedule_id=preceding)
+        latest = rows[-1]
+        targets = latest["target_snapshot"]["device_ids"]
+        done = [self.evidence.get(latest["id"], did) for did in targets]
+        return counts(total=len(targets), schedule_id=preceding,
+                      occurrence_id=latest["id"],
+                      staged=sum(1 for row in done
+                                 if row and row["status"] == "ok"),
+                      errored=sum(1 for row in done
+                                  if row and row["status"] == "error"))
+
+
+def test_wave_chain_orders_core_before_distribution_before_access(setup):
+    store, clock, _, reads, runner = setup
+    executor = ChainExecutor(store)
+    runner.executor = executor
+    runner.wave_recheck = 1
+    create(store, "s-core", at=NOW, window=300)
+    create(store, "s-dist", at=NOW + 1, window=300,
+           after=gate(schedule_id="s-core", deadline_seconds=200))
+    create(store, "s-access", at=NOW + 2, window=300,
+           after=gate(schedule_id="s-dist", deadline_seconds=200))
+    executor.results["edge-1"] = {"status": "submitted", "reason": "queued",
+                                  "job_id": "job-edge-1"}
+
+    runner.run_once()
+    clock.now = NOW + 2
+    runner.run_once()
+    assert occurrence(store, "s-core")["state"] == "running"
+    assert annotated(store, "s-dist")["gate"] == "held"
+    assert annotated(store, "s-access")["gate"] == "held"
+    assert not receipts(store, occurrence(store, "s-dist"))
+    assert not receipts(store, occurrence(store, "s-access"))
+
+    executor.poll_results["edge-1"] = {"status": "ok", "reason": "assigned"}
+    for step in range(5):
+        clock.now = NOW + 3 + step
+        runner.run_once()
+    assert [occurrence(store, name)["state"]
+            for name in ("s-core", "s-dist", "s-access")] == ["completed"] * 3
+    assert annotated(store, "s-dist")["gate"] == "open"
+    assert annotated(store, "s-access")["gate"] == "open"
+
+
+def test_wave_gate_rereads_on_its_own_cadence_not_every_wake(setup):
+    store, clock, _, reads, runner = setup
+    executor = WaveExecutor()
+    runner.executor = executor
+    create(store, after=gate(deadline_seconds=30), window=300)
+    executor.counted = counts(staged=1)
+
+    for offset in range(6):
+        clock.now = NOW + offset
+        runner.run_once()
+    # Six wakes, one read: the heartbeat authority and the swarm are whole
+    # fleet reads, and devices report on a cadence of their own.
+    assert len(executor.asked) == 1
+    assert occurrence(store)["state"] == "running"
+
+    clock.now = NOW + runner.wave_recheck
+    runner.run_once()
+    assert len(executor.asked) == 2
+
+    # The deadline is never throttled: the counts that stall an occurrence
+    # are read at the moment they are recorded.
+    executor.counted = counts(staged=4)
+    clock.now = NOW + 30
+    runner.run_once()
+    assert len(executor.asked) == 3
+    assert occurrence(store)["state"] == "stalled"
+    assert all(row["wave"]["staged"] == 4
+               for row in receipts(store, occurrence(store)))

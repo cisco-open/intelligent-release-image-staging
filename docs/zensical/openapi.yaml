@@ -79963,6 +79963,70 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 20000
+              },
+              "wave": {
+                "type": "object",
+                "properties": {
+                  "schedule_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+                  },
+                  "occurrence_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20000
+                  },
+                  "staged": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20000
+                  },
+                  "errored": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20000
+                  },
+                  "missing": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20000
+                  },
+                  "gate": {
+                    "type": "string",
+                    "enum": [
+                      "held",
+                      "open"
+                    ]
+                  },
+                  "observed_at": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 253370764799
+                  }
+                },
+                "required": [
+                  "schedule_id",
+                  "occurrence_id",
+                  "total",
+                  "staged",
+                  "errored",
+                  "missing",
+                  "gate",
+                  "observed_at"
+                ],
+                "additionalProperties": false,
+                "description": "Wave-gate evaluation of the preceding schedule's own occurrence: an operational signal about when work is admitted, never an authority over what it may do. staged, errored and missing each count part of that occurrence's bound target and never exceed its total; the remainder is still in flight. Missing counts a device that produced no evidence at all, which is deliberately not the same as errored. A gate with no preceding occurrence yet reports a null occurrence id and zero counts, which is a hold rather than an all-clear."
               }
             },
             "required": [],
@@ -80171,6 +80235,70 @@
                   },
                   "maxItems": 16
                 },
+                "wave": {
+                  "type": "object",
+                  "properties": {
+                    "schedule_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+                    },
+                    "occurrence_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20000
+                    },
+                    "staged": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20000
+                    },
+                    "errored": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20000
+                    },
+                    "missing": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20000
+                    },
+                    "gate": {
+                      "type": "string",
+                      "enum": [
+                        "held",
+                        "open"
+                      ]
+                    },
+                    "observed_at": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 253370764799
+                    }
+                  },
+                  "required": [
+                    "schedule_id",
+                    "occurrence_id",
+                    "total",
+                    "staged",
+                    "errored",
+                    "missing",
+                    "gate",
+                    "observed_at"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Wave-gate evaluation of the preceding schedule's own occurrence: an operational signal about when work is admitted, never an authority over what it may do. staged, errored and missing each count part of that occurrence's bound target and never exceed its total; the remainder is still in flight. Missing counts a device that produced no evidence at all, which is deliberately not the same as errored. A gate with no preceding occurrence yet reports a null occurrence id and zero counts, which is a hold rather than an all-clear."
+                },
                 "job_id": {
                   "type": "string",
                   "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
@@ -80328,6 +80456,70 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 9223372036854775807
+          },
+          "wave": {
+            "type": "object",
+            "properties": {
+              "schedule_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+              },
+              "occurrence_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "staged": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "errored": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "missing": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "gate": {
+                "type": "string",
+                "enum": [
+                  "held",
+                  "open"
+                ]
+              },
+              "observed_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              }
+            },
+            "required": [
+              "schedule_id",
+              "occurrence_id",
+              "total",
+              "staged",
+              "errored",
+              "missing",
+              "gate",
+              "observed_at"
+            ],
+            "additionalProperties": false,
+            "description": "Wave-gate evaluation of the preceding schedule's own occurrence: an operational signal about when work is admitted, never an authority over what it may do. staged, errored and missing each count part of that occurrence's bound target and never exceed its total; the remainder is still in flight. Missing counts a device that produced no evidence at all, which is deliberately not the same as errored. A gate with no preceding occurrence yet reports a null occurrence id and zero counts, which is a hold rather than an all-clear."
           },
           "job_id": {
             "type": "string",
