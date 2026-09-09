@@ -1988,6 +1988,36 @@ def test_successful_predecessor_recovery_does_not_bind_force_recipe_to_record(
     assert result["iox_verification"] is None
 
 
+def test_successful_predecessor_recovery_restores_recorded_uninstall_binding(
+        tmp_path):
+    predecessor = _journal(
+        record_id="old-r1", phase="disable_intent", state="enabled",
+        revision=2, unresolved=True)
+    records = [
+        _record(record_id="old-r1", journal=predecessor),
+        _record(record_id="selected-r2"),
+    ]
+    store = _StatefulStore(
+        tmp_path, records=records, obligations=[predecessor])
+    factory = _TransportFactory(verification="enabled")
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    prepare, preflight, on_output = _callbacks(
+        [], record_id="selected-r2")
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="recorded",
+                     record_id="selected-r2"),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 0
+    assert result["record_id"] == "selected-r2"
+    assert result["iox_verification"] is None
+
+
 def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
         tmp_path):
     module = _module()
