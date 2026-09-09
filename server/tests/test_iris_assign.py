@@ -347,6 +347,8 @@ def test_manual_generation_persists_and_accepted_noop_advances(tmp_path, invento
     assert service.capture_schedule_state("sw-1") == {
         "manual_generation": 0,
         "fleet_registered_at": inventory.get_device("sw-1")["registered_at"],
+        "fleet_registration_id": inventory.get_device("sw-1")[
+            "registration_id"],
         "before_image_ids": []}
     service.apply("sw-1", ["a"], actor="cli:test")
     row = service.store.read_policy_row_snapshot("sw-1")
@@ -356,6 +358,8 @@ def test_manual_generation_persists_and_accepted_noop_advances(tmp_path, invento
     assert restarted.capture_schedule_state("sw-1") == {
         "manual_generation": 2,
         "fleet_registered_at": inventory.get_device("sw-1")["registered_at"],
+        "fleet_registration_id": inventory.get_device("sw-1")[
+            "registration_id"],
         "before_image_ids": ["a"]}
     assert len(_events(tmp_path)) == 2
 

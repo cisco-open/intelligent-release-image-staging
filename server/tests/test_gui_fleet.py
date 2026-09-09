@@ -895,10 +895,12 @@ def test_registered_at_is_stamped_once_at_creation(tmp_path):
     fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
     created = fs.upsert(dict(_ROUTED))
     assert created["registered_at"] == 1000
+    registration_id = created["registration_id"]
 
     clock[0] = 2000
     edited = fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
     assert edited["registered_at"] == 1000, "an edit re-registered the device"
+    assert edited["registration_id"] == registration_id
     assert fs.get_device("d1")["registered_at"] == 1000
 
 
@@ -908,12 +910,13 @@ def test_readding_a_deleted_device_registers_it_afresh(tmp_path):
     counting as its own history, and the new stamp is what draws that line."""
     clock = [1000]
     fs = gui_fleet.FleetStore(str(tmp_path), now_fn=lambda: clock[0])
-    fs.upsert(dict(_ROUTED))
+    original = fs.upsert(dict(_ROUTED))
     assert fs.delete("d1") is True
 
     clock[0] = 5000
     readded = fs.upsert(dict(_ROUTED))
     assert readded["registered_at"] == 5000
+    assert readded["registration_id"] != original["registration_id"]
 
 
 def test_csv_reimport_keeps_the_registration_stamp(tmp_path):
@@ -981,17 +984,39 @@ def test_legacy_unstamped_device_stays_unstamped_on_update(tmp_path):
     with open(shard) as stream:
         data = json.load(stream)
     data["d1"].pop("registered_at")
+    data["d1"].pop("registration_id")
     with open(shard, "w") as stream:
         json.dump(data, stream)
 
     clock[0] = 9000
-    assert fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})[
-        "registered_at"] is None
+    updated = fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+    assert updated["registered_at"] is None
+    assert len(updated["registration_id"]) == 32
 
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ",".join(str(_ROUTED.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
     fs.import_csv(header + "\n" + row + "\n")
     assert fs.get_device("d1")["registered_at"] is None
+    assert fs.get_device("d1")["registration_id"] == updated[
+        "registration_id"]
+
+
+def test_legacy_device_can_gain_a_durable_registration_id(tmp_path):
+    fs = _fs(tmp_path)
+    created = fs.upsert(dict(_ROUTED))
+    shard = _shard_path(fs, "d1")
+    with open(shard) as stream:
+        data = json.load(stream)
+    data["d1"].pop("registration_id")
+    with open(shard, "w") as stream:
+        json.dump(data, stream)
+
+    identified = fs.ensure_registration_id("d1")
+
+    assert identified["registered_at"] == created["registered_at"]
+    assert len(identified["registration_id"]) == 32
+    assert fs.ensure_registration_id("d1")["registration_id"] == identified[
+        "registration_id"]
 
 
 def test_invalid_registration_stamp_is_rejected(tmp_path):
@@ -1149,7 +1174,7 @@ def test_fleet_field_sets_are_explicit_and_legacy_aliases_are_not_public():
         "role", "platform", "credential_profile_id",
     })
     assert gui_fleet.SERVER_OWNED_FIELDS == frozenset({
-        "schema_version", "registered_at", "os_family",
+        "schema_version", "registered_at", "registration_id", "os_family",
     })
     assert gui_fleet.INTERNAL_OBSERVATION_FIELDS == frozenset({
         "model", "os_family",
@@ -1216,6 +1241,7 @@ def test_operator_ingress_bounds_unstructured_scalar_fields(tmp_path):
 @pytest.mark.parametrize("field,value", [
     ("schema_version", 2),
     ("registered_at", 1),
+    ("registration_id", "0" * 32),
     ("os_family", "xr"),
 ])
 def test_public_upsert_rejects_server_owned_fields(tmp_path, field, value):

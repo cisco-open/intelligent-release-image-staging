@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import json
 import math
 import os
+import re
 import sqlite3
 
 import audit
@@ -50,6 +51,7 @@ class ScheduledAssignmentContext:
     fleet_registered_at: object = None
     commit_guard: object = None
     require_existing_authority: bool = False
+    fleet_registration_id: object = None
 
     def __post_init__(self):
         for value in (self.schedule_id, self.occurrence_id):
@@ -68,6 +70,11 @@ class ScheduledAssignmentContext:
                 and (type(self.fleet_registered_at) is not int
                      or self.fleet_registered_at < 0)):
             raise ValueError("invalid fleet registration stamp")
+        if (self.fleet_registration_id is not None
+                and (not isinstance(self.fleet_registration_id, str)
+                     or not re.fullmatch(r"[0-9a-f]{32}",
+                                         self.fleet_registration_id))):
+            raise ValueError("invalid fleet registration id")
 
 
 @dataclass(frozen=True)
@@ -201,12 +208,17 @@ class AssignmentService:
             device = self.fleet.get_device(device_id)
             if device is None:
                 raise MissingFleetDevice("no such fleet device")
+            ensure_registration_id = getattr(
+                self.fleet, "ensure_registration_id", None)
+            if callable(ensure_registration_id):
+                device = ensure_registration_id(device_id)
             with self._authority() as conn:
                 generation, pending = self._generation(conn, device_id)
                 if pending:
                     raise AssignmentAuthorityUnavailable("manual assignment outcome uncertain")
                 return {"manual_generation": generation,
                         "fleet_registered_at": device.get("registered_at"),
+                        "fleet_registration_id": device.get("registration_id"),
                         "before_image_ids": self.store.get_policy(device_id)["approved_image_ids"]}
 
     def acknowledge_schedule_result(self, occurrence_id, device_id, *, terminal_status):
@@ -270,7 +282,7 @@ class AssignmentService:
     @staticmethod
     def _schedule_request(context, device_id, requested, mode,
                           expect_image_ids, retry_conflict):
-        return json.dumps({"schema_version": 1,
+        request = {"schema_version": 1,
             "schedule_id": context.schedule_id,
             "schedule_rev": context.schedule_rev,
             "occurrence_id": context.occurrence_id,
@@ -279,7 +291,12 @@ class AssignmentService:
             "manual_generation": context.expected_manual_generation,
             "mode": mode, "image_ids": requested,
             "expect_image_ids": expect_image_ids,
-            "retry_conflict": retry_conflict}, sort_keys=True)
+            "retry_conflict": retry_conflict}
+        # Omit this additive field for legacy receipts so their already-saved
+        # request_json remains byte-for-byte replayable.
+        if context.fleet_registration_id is not None:
+            request["fleet_registration_id"] = context.fleet_registration_id
+        return json.dumps(request, sort_keys=True)
 
     def reconcile_schedule_result(self, device_id, image_ids, *, mode,
                                   expect_image_ids, retry_conflict,

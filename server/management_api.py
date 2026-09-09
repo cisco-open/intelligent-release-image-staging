@@ -2179,7 +2179,8 @@ class _ScheduledExecutor(object):
 
     def _check_live(self, schedule, occurrence, device_id, attempt,
                     policy, revoked, expected_plan=None,
-                    expected_registered_at=_UNBOUND):
+                    expected_registered_at=_UNBOUND,
+                    expected_registration_id=_UNBOUND):
         now = int(self._now())
         if now < occurrence["scheduled_at"]:
             raise schedule_runner.ExecutionRefused("window_not_open")
@@ -2206,7 +2207,11 @@ class _ScheduledExecutor(object):
             raise schedule_runner.ExecutionRefused("vanished")
         if "device:" + device_id in revoked:
             raise schedule_runner.ExecutionRefused("device_revoked")
-        if (expected_registered_at is not self._UNBOUND
+        if (expected_registration_id is not self._UNBOUND
+                and device.get("registration_id") != expected_registration_id):
+            raise schedule_runner.ExecutionRefused("conflict")
+        if (expected_registration_id is self._UNBOUND
+                and expected_registered_at is not self._UNBOUND
                 and device.get("registered_at") != expected_registered_at):
             raise schedule_runner.ExecutionRefused("conflict")
         if expected_plan is not None:
@@ -2257,15 +2262,16 @@ class _ScheduledExecutor(object):
             return _ScheduledExecutor._terminal(
                 result.reason, error=result.reason == "execution_failed",
                 after_image_ids=result.after_ids,
-                removed_image_ids=sorted(
-                    set(before) - set(result.after_ids)))
+                removed_image_ids=[image_id for image_id in before
+                                   if image_id not in result.after_ids])
         return {
             "status": "ok",
             "reason": ("unchanged" if result.before_ids == result.after_ids
                        else "assigned"),
-            "before_image_ids": result.before_ids,
             "after_image_ids": result.after_ids,
-            "removed_image_ids": result.removed_ids,
+            "removed_image_ids": [
+                image_id for image_id in prior.get("before_image_ids", ())
+                if image_id not in result.after_ids],
             **({"notes": ["peer_quarantined"]}
                if peer_quarantined else {}),
         }
@@ -2286,6 +2292,8 @@ class _ScheduledExecutor(object):
             return {"status": "prepared", "reason": "assignment_prepared",
                     "manual_generation": captured["manual_generation"],
                     "fleet_registered_at": captured["fleet_registered_at"],
+                    "fleet_registration_id": captured[
+                        "fleet_registration_id"],
                     "before_image_ids": captured["before_image_ids"],
                     **({"notes": ["peer_quarantined"]}
                        if peer_quarantined else {})}
@@ -2301,7 +2309,9 @@ class _ScheduledExecutor(object):
                         schedule, occurrence, device_id, prior["attempt"],
                         policy_holder.get("policy"), revoked,
                         expected_registered_at=prior.get(
-                            "fleet_registered_at"))
+                            "fleet_registered_at"),
+                        expected_registration_id=prior.get(
+                            "fleet_registration_id", self._UNBOUND))
                     yield
             except schedule_runner.ExecutionRefused:
                 raise
@@ -2311,6 +2321,7 @@ class _ScheduledExecutor(object):
             occurrence_id=occurrence["id"],
             expected_manual_generation=prior["manual_generation"],
             fleet_registered_at=prior.get("fleet_registered_at"),
+            fleet_registration_id=prior.get("fleet_registration_id"),
             commit_guard=commit_guard,
             require_existing_authority=True)
         try:
@@ -2655,6 +2666,7 @@ class _ScheduledExecutor(object):
                 occurrence_id=occurrence["id"],
                 expected_manual_generation=receipt["manual_generation"],
                 fleet_registered_at=receipt.get("fleet_registered_at"),
+                fleet_registration_id=receipt.get("fleet_registration_id"),
                 require_existing_authority=True)
             try:
                 result = self.assignment_writer.reconcile_schedule_result(

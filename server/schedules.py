@@ -694,7 +694,8 @@ def list_schedule_occurrences(state_dir, schedule_id, *,
 _RECEIPT_REQUIRED = {"occurrence_id", "device_id", "rev", "attempt", "attempt_started_at",
                      "predecessors", "status", "reason", "created_at", "updated_at", "completed_at", "notes"}
 _RECEIPT_OPTIONAL = {"job_id", "record_id", "predecessor_record_id", "manual_generation",
-                     "fleet_registered_at", "before_image_ids",
+                     "fleet_registered_at", "fleet_registration_id",
+                     "before_image_ids",
                      "after_image_ids", "removed_image_ids"}
 _UNSET = object()
 
@@ -732,6 +733,8 @@ def _validate_receipt(key, row, *, history=True):
             and row["fleet_registered_at"] is not None):
         _integer(row["fleet_registered_at"], "fleet_registered_at",
                  maximum=MAX_EPOCH)
+    if "fleet_registration_id" in row:
+        _hex(row["fleet_registration_id"], "fleet_registration_id")
     for field in ("before_image_ids", "after_image_ids", "removed_image_ids"):
         if field in row:
             _ids(row[field], "image_ids", maximum=10)
@@ -802,7 +805,7 @@ class ReceiptStore:
                expected_status=None, expected_rev=None, job_id=None, record_id=None,
                predecessor_record_id=None, manual_generation=None, before_image_ids=None,
                after_image_ids=None, removed_image_ids=None,
-               fleet_registered_at=_UNSET):
+               fleet_registered_at=_UNSET, fleet_registration_id=None):
         self._admit(identifier, device_id)
         _integer(now, "now", maximum=MAX_EPOCH)
         if not isinstance(status, str) or status not in RECEIPT_STATES:
@@ -814,7 +817,8 @@ class ReceiptStore:
         supplied = {key: value for key, value in {
             "job_id": job_id, "record_id": record_id, "predecessor_record_id": predecessor_record_id,
             "manual_generation": manual_generation, "before_image_ids": before_image_ids,
-            "after_image_ids": after_image_ids, "removed_image_ids": removed_image_ids}.items() if value is not None}
+            "after_image_ids": after_image_ids, "removed_image_ids": removed_image_ids,
+            "fleet_registration_id": fleet_registration_id}.items() if value is not None}
         if fleet_registered_at is not _UNSET:
             supplied["fleet_registered_at"] = fleet_registered_at
         def mutate(old):
@@ -834,6 +838,7 @@ class ReceiptStore:
             if old is not None:
                 for field in ("job_id", "record_id", "predecessor_record_id",
                               "manual_generation", "fleet_registered_at",
+                              "fleet_registration_id",
                               "before_image_ids"):
                     if field in old and field in supplied and old[field] != supplied[field]:
                         raise ScheduleConflict("receipt attempt ownership is immutable")
@@ -880,6 +885,8 @@ class ReceiptStore:
                 row["predecessor_record_id"] = predecessor
             if "fleet_registered_at" in old:
                 row["fleet_registered_at"] = old["fleet_registered_at"]
+            if "fleet_registration_id" in old:
+                row["fleet_registration_id"] = old["fleet_registration_id"]
             before = before_image_ids if before_image_ids is not None else old.get("before_image_ids")
             if before is not None:
                 row["before_image_ids"] = copy.deepcopy(before)

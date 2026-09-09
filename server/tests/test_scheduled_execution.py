@@ -159,6 +159,69 @@ def test_assignment_runs_once_records_quarantine_and_reclaims_claim(tmp_path):
     assert len(events) == 1
 
 
+def test_due_assignment_intents_keep_their_own_baselines(tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    images = catalog.CatalogStore(str(tmp_path))
+    for image_id in ("image-a", "image-b"):
+        images.save_image(_image(image_id))
+    authority = tmp_path / "assignment-authority.sqlite3"
+    writer = assignment_service.AssignmentService(
+        images, fleet, str(tmp_path / "audit.jsonl"),
+        authority_path=str(authority))
+    store = schedules.ScheduleStore(tmp_path)
+    for schedule_id, image_id in (("first", "image-a"),
+                                  ("second", "image-b")):
+        store.create(
+            schedule_id,
+            _definition(device_ids=["edge-1"], image_ids=[image_id]),
+            actor="console:test", now=NOW - 1,
+            preview={"revision": 1, "now": NOW - 1,
+                     "device_ids": ["edge-1"]})
+    clock, policy, errors = _Clock(), _Policy(), []
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=writer,
+        clock=clock)
+    runner = schedule_runner.ScheduleRunner(
+        store,
+        lambda _row: {"revision": 2, "now": clock.now,
+                      "device_ids": ["edge-1"], "missing_os_family": 0,
+                      "role_drift": 0, "quarantined_ids": []},
+        executor=executor, role_guard=_role_guard(policy), now_fn=clock,
+        poll_interval=.01, error_fn=errors.append)
+
+    runner.run_once()
+    occurrence_store = schedules.OccurrenceStore(tmp_path)
+    receipt_store = schedules.ReceiptStore(tmp_path)
+    occurrences = occurrence_store.list()
+    assert len(occurrences) == 2
+    assert [receipt_store.get(row["id"], "edge-1")["before_image_ids"]
+            for row in occurrences] == [[], []]
+
+    clock.now += 1
+    runner.run_once()
+    runner.run_once()
+
+    occurrences = occurrence_store.list()
+    assert {row["state"] for row in occurrences} == {"completed"}
+    receipts = [receipt_store.get(row["id"], "edge-1")
+                for row in occurrences]
+    assert [row["status"] for row in receipts] == ["ok", "ok"]
+    assert [row["before_image_ids"] for row in receipts] == [[], []]
+    assert [row["removed_image_ids"] for row in receipts] == [[], []]
+    assert set(images.get_policy("edge-1")["approved_image_ids"]) == {
+        "image-a", "image-b"}
+    assert runner.last_error is None and errors == []
+    with sqlite3.connect(authority) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+    audit_events = [json.loads(line) for line in
+                    (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert len(audit_events) == 2
+    assert any(('before_ids=["image-a"]' in event["detail"] or
+                'before_ids=["image-b"]' in event["detail"])
+               for event in audit_events)
+
+
 def test_manual_assignment_generation_wins_after_prepared_intent(tmp_path):
     fleet = gui_fleet.FleetStore(str(tmp_path))
     fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
@@ -415,15 +478,19 @@ def test_assignment_refuses_device_id_reused_after_preparation(tmp_path):
         clock=clock)
     runner = _run_schedule(store, executor, policy, clock, ["edge-1"])
     first_stamp = fleet.get_device("edge-1")["registered_at"]
+    first_registration_id = fleet.get_device("edge-1")["registration_id"]
     fleet.delete("edge-1")
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.99"})
+    replacement = fleet.get_device("edge-1")
+    assert replacement["registered_at"] == first_stamp
+    assert replacement["registration_id"] != first_registration_id
     clock.now += 1
-    fleet.upsert(original)
-    assert fleet.get_device("edge-1")["registered_at"] != first_stamp
     runner.run_once()
     occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
     receipt = schedules.ReceiptStore(tmp_path).get(
         occurrence["id"], "edge-1")
     assert receipt["status"] == "skipped" and receipt["reason"] == "conflict"
+    assert receipt["fleet_registration_id"] == first_registration_id
     assert images.get_policy("edge-1")["approved_image_ids"] == []
 
 
@@ -510,6 +577,11 @@ def test_assignment_crash_replays_durable_result_and_frozen_quarantine_note(
     with pytest.raises(SimulatedCrash):
         runner.run_once()
     assert images.get_policy("edge-1")["approved_image_ids"] == ["image-a"]
+    with sqlite3.connect(authority) as connection:
+        request = json.loads(connection.execute(
+            "SELECT request_json FROM claims").fetchone()[0])
+    assert request["fleet_registration_id"] == fleet.get_device(
+        "edge-1")["registration_id"]
     policy.document["quarantined_devices"] = {}
     clock.now = NOW + 300
     restarted_executor = _base_executor(

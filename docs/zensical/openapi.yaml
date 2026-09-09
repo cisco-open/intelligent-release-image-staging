@@ -13377,7 +13377,7 @@
                   "management_type"
                 ],
                 "additionalProperties": false,
-                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at and os_family fields are rejected with 422."
+                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at, registration_id and os_family fields are rejected with 422."
               },
               "example": {
                 "device_id": "edge-01",
@@ -42192,7 +42192,7 @@
                   "management_type"
                 ],
                 "additionalProperties": false,
-                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at and os_family fields are rejected with 422."
+                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at, registration_id and os_family fields are rejected with 422."
               },
               "example": {
                 "device_id": "edge-01",
@@ -80200,6 +80200,10 @@
                     }
                   ]
                 },
+                "fleet_registration_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+                },
                 "before_image_ids": {
                   "type": "array",
                   "uniqueItems": true,
@@ -80353,6 +80357,10 @@
                 "type": "null"
               }
             ]
+          },
+          "fleet_registration_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
           },
           "before_image_ids": {
             "type": "array",

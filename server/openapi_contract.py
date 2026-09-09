@@ -566,6 +566,8 @@ def _schedule_receipt_schema(*, predecessor=False):
     properties["manual_generation"] = _schedule_integer()
     properties["fleet_registered_at"] = {
         "oneOf": [epoch, {"type": "null"}]}
+    properties["fleet_registration_id"] = {
+        "type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"}
     properties.update({field: _schedule_ids_schema(images=True) for field in (
         "before_image_ids", "after_image_ids", "removed_image_ids")})
     schema = _schedule_object(properties, required)
@@ -1743,7 +1745,8 @@ def _request_body(route):
     if suffix == "/devices":
         # Fleet JSON input is a closed operator-owned schema. Historical
         # vlan/guest_ip aliases remain CSV compatibility fields only, while
-        # schema_version, registered_at and os_family are server-owned.
+        # schema_version, registered_at, registration_id and os_family are
+        # server-owned.
         writable = (
             "device_id", "device_ip", "management_type", "iris_vlan",
             "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
@@ -1762,7 +1765,8 @@ def _request_body(route):
         schema["additionalProperties"] = False
         schema["description"] = (
             "Closed operator-owned fleet record. Unknown fields and the "
-            "server-owned schema_version, registered_at and os_family fields "
+            "server-owned schema_version, registered_at, registration_id and "
+            "os_family fields "
             "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
         return {"required": required_body, "content": {

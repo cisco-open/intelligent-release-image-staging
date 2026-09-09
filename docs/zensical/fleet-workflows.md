@@ -71,9 +71,11 @@ ownership rules.
 Console/API inventory writes accept only the named operator fields in this
 schema (plus `credential_profile_id`). Unknown names are rejected instead of
 being stored for a future component to interpret. `schema_version`,
-`registered_at`, and the observed `os_family` are maintained by the server and
-cannot be supplied in a JSON request. Older `vlan`/`guest_ip` headers remain a
-CSV import compatibility path; they are not public JSON aliases.
+`registered_at`, the unique `registration_id`, and the observed `os_family` are
+maintained by the server and cannot be supplied in a JSON request. The
+registration ID distinguishes devices deleted and re-added within the same
+second. Older `vlan`/`guest_ip` headers remain a CSV import compatibility path;
+they are not public JSON aliases.
 
 An old CSV row can remain in inventory before its management type is
 classified. IRIS onboards it only when the complete historical routed tuple is

@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 
 import gui_onboard
 import fleet_authority
@@ -83,7 +84,8 @@ OPERATOR_WRITABLE_FIELDS = frozenset((
     "ios_ssh_host", "model", "vpg_number", "nat_interface", "svi_igp",
     "role", "platform", "credential_profile_id",
 ))
-SERVER_OWNED_FIELDS = frozenset(("schema_version", "registered_at", "os_family"))
+SERVER_OWNED_FIELDS = frozenset((
+    "schema_version", "registered_at", "registration_id", "os_family"))
 INTERNAL_OBSERVATION_FIELDS = frozenset(("model", "os_family"))
 _LEGACY_CSV_ALIASES = frozenset(("vlan", "guest_ip"))
 STORED_FIELDS = OPERATOR_WRITABLE_FIELDS | SERVER_OWNED_FIELDS | _LEGACY_CSV_ALIASES
@@ -109,12 +111,14 @@ _FIELD_MAX_LENGTH = {
     "vlan": 16,
     "guest_ip": 64,
     "os_family": 16,
+    "registration_id": 32,
 }
 _MAX_STORED_ROW_BYTES = 4096
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$")
 _INTERFACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,63}$")
 _ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+_REGISTRATION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _C8K_RE = re.compile(r"^C8[0-9]{3}", re.IGNORECASE)
 _ROUTER_TYPES = frozenset(("router-routed", "router-nat"))
 
@@ -193,6 +197,11 @@ def _validate_stored_fields(record):
     registered = record.get("registered_at")
     if registered is not None and type(registered) is not int:
         raise ValueError("registered_at must be an integer or null")
+    registration_id = record.get("registration_id")
+    if (registration_id is not None
+            and (not isinstance(registration_id, str)
+                 or not _REGISTRATION_ID_RE.fullmatch(registration_id))):
+        raise ValueError("registration_id must be a 32-character lowercase hex id or null")
     family = record.get("os_family")
     if family not in (None, "", "xe", "xr"):
         raise ValueError("os_family must be xe or xr")
@@ -673,6 +682,7 @@ class FleetStore:
             raise ValueError("management_type must be routed, inband, router-routed, "
                              "router-nat, xr-host, or legacy_routed")
         normalized["registered_at"] = self._registration_stamp(previous)
+        normalized["registration_id"] = self._registration_id(previous)
         _check_stored_row_size(normalized)
         return normalized
 
@@ -695,6 +705,44 @@ class FleetStore:
             return int(prior) if prior is not None else None
         except (TypeError, ValueError):
             raise ValueError("registered_at must be an integer or null")
+
+    @staticmethod
+    def _registration_id(previous):
+        """Return one durable identity for this registration incarnation."""
+        if previous is None or previous.get("registration_id") is None:
+            return uuid.uuid4().hex
+        value = previous["registration_id"]
+        if not isinstance(value, str) or not _REGISTRATION_ID_RE.fullmatch(value):
+            raise ValueError(
+                "registration_id must be a 32-character lowercase hex id or null")
+        return value
+
+    @_membership_mutation
+    def ensure_registration_id(self, device_id):
+        """Durably identify a legacy row before binding scheduled work."""
+        did = _text(device_id)
+        current = self.get_device(did)
+        if current is None:
+            raise ValueError("no such device")
+        _validate_stored_fields(current)
+        if current.get("registration_id") is not None:
+            return current
+        self._ensure_revision_readable()
+        registration_id = uuid.uuid4().hex
+
+        def merge(previous):
+            if previous is None:
+                raise ValueError("no such device")
+            _validate_stored_fields(previous)
+            if previous.get("registration_id") is not None:
+                return previous
+            row = dict(previous, registration_id=registration_id)
+            _check_stored_row_size(row)
+            return row
+
+        identified = self._devices.update(did, merge)
+        self._bump_revision()
+        return identified
 
     def list_devices(self):
         return list(self._devices.snapshot().values())
@@ -1058,6 +1106,7 @@ class FleetStore:
             _validate_stored_fields(previous)
         record = dict(source)
         registered_at = self._registration_stamp(previous)
+        registration_id = self._registration_id(previous)
         family = previous.get("os_family") if isinstance(previous, dict) else None
         if family:
             record["os_family"] = family
@@ -1070,6 +1119,7 @@ class FleetStore:
             record["role"] = prior_role
         record = validate_record(record, allow_legacy=True)
         record["registered_at"] = registered_at
+        record["registration_id"] = registration_id
         _check_stored_row_size(record)
         return record
 

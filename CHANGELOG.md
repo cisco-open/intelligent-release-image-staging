@@ -12,6 +12,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Keep concurrent scheduled assignment receipts bound to their prepared policy
+  baseline, and distinguish device registrations created within the same
+  second before applying staged-image assignments.
 - Reject unknown, nested, and server-owned fleet fields before any inventory or
   role-policy write; trusted model and OS observations use a bounded internal
   update path, while historical CSV imports remain compatible (issue #171).

@@ -46,7 +46,8 @@ import schedules
 
 _ACTIVE = frozenset(("pending", "running", "interrupted"))
 _METADATA = frozenset(("job_id", "record_id", "predecessor_record_id",
-    "manual_generation", "fleet_registered_at", "before_image_ids",
+    "manual_generation", "fleet_registered_at", "fleet_registration_id",
+    "before_image_ids",
     "after_image_ids", "removed_image_ids", "notes"))
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
