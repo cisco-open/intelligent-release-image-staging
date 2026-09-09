@@ -4119,3 +4119,18 @@ def test_task14_heartbeat_uses_authoritative_attestation_sanitizer():
         "stage_error", "target_fs", "model", "telemetry_enabled",
         "telemetry_stream_enabled", "staged_image_ids", "errored_image_ids",
         "swarm_ip", *expected}
+
+
+def test_assignment_result_and_unchanged_cas_are_decided_inside_policy_callback(tmp_path):
+    store = catalog.CatalogStore(str(tmp_path))
+    first = store.set_policy("d1", approved_image_ids=["a", "b"])
+    assert first.before_ids == []
+    assert first.after_ids == ["a", "b"]
+    result = store.set_policy("d1", approved_image_ids=["b"],
+                              expect_image_ids=["a", "b"], skip_unchanged=True)
+    assert result.before_ids == ["a", "b"]
+    assert result.after_ids == ["b"]
+    assert result.removed_ids == ["a"]
+    with pytest.raises(catalog.PolicyConflict):
+        store.set_policy("d1", approved_image_ids=["b"],
+                         expect_image_ids=["a", "b"], skip_unchanged=True)

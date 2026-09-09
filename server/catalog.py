@@ -13,6 +13,7 @@ IRIS_CATALOG_ALLOW_PLAINTEXT=1 opts in explicitly -- every route answers
 device bearer tokens. Stdlib only."""
 import gzip
 from collections import OrderedDict
+from dataclasses import dataclass
 import copy
 import hashlib
 import io
@@ -871,6 +872,15 @@ def _normalize_policy(rec):
             "approved_image_ids": ids}
 
 
+@dataclass(frozen=True)
+class AssignmentResult:
+    """Ordered assignment IDs captured inside the successful policy update."""
+
+    before_ids: list
+    after_ids: list
+    removed_ids: list
+
+
 class PolicyConflict(Exception):
     """A conditional set_policy() whose expectation no longer held.
 
@@ -1116,7 +1126,8 @@ class CatalogStore:
         return secrets_store.store_lock(self.catalog_path + ".assign")
 
     def set_policy(self, device_id, approved_image_id=None,
-                   approved_image_ids=None, expect_image_ids=None):
+                   approved_image_ids=None, expect_image_ids=None,
+                   skip_unchanged=False):
         """Approve an ordered set of images (max MAX_ASSIGNED_IMAGES) for a
         device. Approval is the whole policy: IRIS stages and verifies, and
         never installs, activates or reloads, so there is nothing further to
@@ -1154,7 +1165,12 @@ class CatalogStore:
         was already assigned. This is the sole mint site for both ids; see
         the comment at the write below for why the merge is load-bearing.
         A refused write -- PolicyConflict or QuarantinedImage -- mints
-        nothing, because both checks run before any plan is computed."""
+        nothing, because both checks run before any plan is computed.
+
+        Returns AssignmentResult from the successful shard transaction.
+        Application callers may set skip_unchanged=True to leave an identical
+        row untouched, including legacy rows without plans. The default keeps
+        the established low-level bootstrap/plan-repair behavior."""
         if approved_image_id is not None and approved_image_ids is not None:
             raise ValueError(
                 "pass approved_image_id or approved_image_ids, not both")
@@ -1188,11 +1204,18 @@ class CatalogStore:
             # image_policy_lock's job (held above), so narrowing this lock from
             # the whole fleet's policy document to one device's shard loses
             # nothing.
+            outcome = None
+
             def write_row(prev):
+                nonlocal outcome
+                current = _normalize_policy(prev)["approved_image_ids"]
                 if expect_image_ids is not None:
-                    current = _normalize_policy(prev)["approved_image_ids"]
                     if [str(i) for i in expect_image_ids] != current:
                         raise PolicyConflict(current)
+                outcome = AssignmentResult(list(current), list(ids),
+                                           [iid for iid in current if iid not in ids])
+                if skip_unchanged and current == ids:
+                    return None
                 # --- transfer plans: minted here, and ONLY here ---
                 # A plan is the server's durable name for one intended
                 # transfer of one image to one device: a plan_id, the
@@ -1271,6 +1294,7 @@ class CatalogStore:
                 return result
 
             self._policies.update(device_id, write_row)
+            return outcome
 
     def get_policy(self, device_id):
         """The device's approvals, normalised: every historical row shape
