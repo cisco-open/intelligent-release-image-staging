@@ -389,6 +389,18 @@ install_prior_agent() {
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
 }
 
+@test "a FIFO bundle is rejected promptly instead of blocking the EEM tick" {
+  install_prior_agent
+  mkfifo "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+
+  run timeout 3 env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
 @test "a hash-matching archive with a symlink is rejected before extraction" {
   install_prior_agent
   cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
@@ -432,16 +444,14 @@ install_prior_agent() {
 
 @test "an incomplete promotion is rolled back before anything launches" {
   TX="$STAGE/.bundle-transaction"
-  mkdir -p "$TX/prior/files/agent" "$TX/prior/files" \
-    "$TX/prior/absent/agent"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent"
   printf 'open(r"%s/recovered-agent-invoked", "w").write("ran")\n' "$TMP" \
     > "$TX/prior/files/agent/iris_agent.py"
   cp "$STAGE/guestshell-start.sh" "$TX/prior/files/guestshell-start.sh"
-  while IFS= read -r name; do
-    case "$name" in agent/iris_agent.py|guestshell-start.sh) continue ;; esac
-    mkdir -p "$(dirname "$TX/prior/absent/$name")"
+  for name in aria2c bootstrap.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
     : > "$TX/prior/absent/$name"
-  done < <(bundle_file_list)
+  done
   printf 'promoting\n' > "$TX/phase"
   mkdir -p "$STAGE/agent"
   printf 'open(r"%s/partial-agent-invoked", "w").write("ran")\n' "$TMP" \
@@ -470,6 +480,84 @@ install_prior_agent() {
   [ "$status" -ne 0 ]
   [ ! -e "$TMP/untrusted-agent-invoked" ]
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle transaction recovery failed"* ]]
+}
+
+@test "a prior footprint with both saved bytes and an absence marker hard-stops" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files" "$TX/prior/absent" "$STAGE/agent"
+  for name in agent aria2c bootstrap.sh guestshell-start.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
+    : > "$TX/prior/absent/$name"
+  done
+  printf 'saved but also marked absent\n' > "$TX/prior/files/aria2c"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/ambiguous-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TMP/ambiguous-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle transaction recovery failed"* ]]
+}
+
+@test "a commit failure cannot replace an EEM bootstrap that had no staged prior" {
+  install_prior_agent
+  rm -f "$STAGE/bootstrap.sh"
+  printf 'original EEM bootstrap\n' > "$SRC/bootstrap.sh"
+  cp "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  real_python="$(command -v python3)"
+  cat > "$BIN/python3" <<'PYTHON'
+#!/usr/bin/env bash
+if [ "${1:-}" = - ] && [ "${2:-}" = commit ]; then
+  exit 1
+fi
+exec "$REAL_PYTHON" "$@"
+PYTHON
+  chmod +x "$BIN/python3"
+
+  run env PATH="$BIN:$PATH" REAL_PYTHON="$real_python" SRC="$SRC" \
+      STAGE="$STAGE" bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+}
+
+@test "a failed EEM sibling rename leaves committed runtime for recovery" {
+  install_prior_agent
+  printf 'original EEM bootstrap\n' > "$SRC/bootstrap.sh"
+  cp "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  real_cp="$(command -v cp)"
+  cat > "$BIN/cp" <<'COPY'
+#!/usr/bin/env bash
+case "${*: -1}" in
+  */bootstrap.sh.new) exit 1 ;;
+esac
+exec "$REAL_CP" "$@"
+COPY
+  chmod +x "$BIN/cp"
+
+  run env PATH="$BIN:$PATH" REAL_CP="$real_cp" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STAGE/.bundle-transaction/phase")" = committed ]
+  cmp -s "$SRC/bootstrap.sh" "$TMP/original-eem-bootstrap"
+  [ ! -e "$TMP/new-agent-invoked" ]
+
+  rm -f "$BIN/cp"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
+  [ -f "$TMP/new-agent-invoked" ]
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE_TREE/bootstrap.sh"
 }
 
 @test "a bad initial bundle fails after one fixed diagnostic" {
