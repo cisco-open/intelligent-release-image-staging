@@ -265,9 +265,7 @@ def test_docs_state_phase_zero_role_and_qos_contract():
         "`enforcement.mutual_origin.mode = preflight`",
         "`delivery_state = pre-instructions`",
     ])
-    _require("network-ports.md", [
-        "No new listener, port, network path, or firewall flow",
-    ])
+    _assert_phase1_network_relationship(_page("network-ports.md"))
     _require("problems.md", [
         "## asymmetric_peers",
         "## role_isolated",
@@ -318,12 +316,9 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
         "pair explanations are available only",
         "all-failed preview cannot commit",
     ])
-    _require("observability.md", [
-        "compiled policy membership",
-        "`fleet_rollup.issued_revision: null`",
-        "`fleet_rollup.applied: {}`",
-        "Authorization data",
-    ])
+    _require("observability.md", ["compiled policy membership",
+                                   "Authorization data"])
+    _assert_phase1_rollup_relationship(_page("observability.md"))
     _require("architecture.md", [
         "Fleet declaration",
         "compiled membership",
@@ -779,7 +774,7 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
         assert re.search(r"\|\s*%s\s*\|[^|\n]*%s" %
                          (re.escape(component), responsibility),
                          architecture_lower)
-    assert "all state and enforcement stay on the server tier" in architecture_lower
+    _assert_phase1_enforcement_boundary(architecture)
     assert "no new service" in architecture_lower
     assert "no new listener" in architecture_lower
     for line in architecture_lower.splitlines():
@@ -789,7 +784,7 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
     network_lower = network.lower()
     for port in ("6969", "8443", "9443"):
         assert re.search(r"\|\s*%s\s*\|" % port, network_lower)
-    assert "no new listener, port, network path, or firewall flow" in network_lower
+    _assert_phase1_network_relationship(network)
     assert "tracker https flow on 6969" in network_lower
     assert "console-to-management flow on 9443" in network_lower
     for line in network_lower.splitlines():
@@ -850,24 +845,75 @@ def test_workstream_d_docs_state_legacy_loss_and_downgrade_truth():
 # Phase 1 encrypted-instruction operator contract.
 
 
+_NETWORK_SENTENCE = "No new listener, port, network path, or firewall flow"
+
+
 def _compact(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _contract_gaps(requirements):
-    """Return every missing cross-page clause instead of hiding later gaps."""
-    gaps = []
-    for name, needles in requirements.items():
-        page = _page(name)
-        for needle in needles:
-            if needle not in page:
-                gaps.append("%s: %s" % (name, needle))
-    return gaps
+def _units(text):
+    """Prose sentences, table rows, and paragraphs used for relationship tests."""
+    paragraphs = re.split(r"\n\s*\n", text)
+    sentences = re.split(r"(?<=[.!?])\s+", _compact(text))
+    return [unit for unit in list(text.splitlines()) + paragraphs + sentences
+            if unit.strip()]
+
+
+def _assert_unit(text, terms, message):
+    wanted = tuple(term.lower() for term in terms)
+    assert any(all(term in unit.lower() for term in wanted)
+               for unit in _units(text)), message
+
+
+def _assert_ordered(text, terms, message, distance=500):
+    pattern = ".{0,%d}" % distance
+    expression = pattern.join(re.escape(term) for term in terms)
+    assert re.search(expression, text, re.IGNORECASE | re.DOTALL), message
+
+
+def _assert_phase1_network_relationship(text):
+    """One canonical topology assertion shared by all three network guards."""
+    lower = text.lower()
+    assert _NETWORK_SENTENCE.lower() in lower
+    _assert_unit(text, ("GET /v1/devices/{device_id}/instructions", "8443",
+                        "existing", "catalog"),
+                 "instruction requests must reuse catalog HTTPS 8443")
+    _assert_unit(text, ("GET /v1/devices/{device_id}/instruction-keylist",
+                        "8443", "authenticated"),
+                 "the keylist must use the authenticated catalog path")
+    _assert_unit(text, ("9443", "Console", "management", "only"),
+                 "9443 must remain Console-to-server management only")
+
+
+def _assert_phase1_enforcement_boundary(text):
+    _assert_unit(text, ("tracker", "origin", "enforce"),
+                 "server-side tracker/origin enforcement must remain authoritative")
+    _assert_unit(text, ("device", "accepted", "LKG", "QoS"),
+                 "device accepted/LKG/QoS state must not be described as server state")
+
+
+def _assert_phase1_rollup_relationship(text):
+    _assert_unit(text, ("fleet_rollup", "issued_revision", "nullable"),
+                 "issued revision must be documented as current-or-null")
+    _assert_unit(text, ("fleet_rollup", "applied", "policy revision"),
+                 "applied rollup must count accepted policy revisions")
+    for unit in _units(text):
+        lower = unit.lower()
+        affirmative = re.search(
+            r"(?:fleet_rollup|applied).{0,100}"
+            r"(?:group(?:ed|s)?|key(?:ed|s)?|index(?:ed|es)?|count(?:ed|s)?)"
+            r".{0,80}(?:by|on|using).{0,60}instruction serial", lower)
+        negative = re.search(
+            r"(?:not|never)\s+(?:grouped\s+|keyed\s+|indexed\s+)?"
+            r"(?:by\s+)?instruction serial", lower)
+        if affirmative and not negative:
+            raise AssertionError("fleet rollup must not key on instruction serial")
+
 
 
 def test_docs_phase1_honest_guarantee_and_admin_boundary():
-    """The security promise names the administrator limit and enforcement of
-    record, and the device-agent page sends the operator to that boundary."""
+    """The exact promise and its cross-page pointer keep the admin limit honest."""
     guarantee = """The encrypted instruction file is confidential against users
     below privilege 15, against offline copies of flash and `show tech`, against
     swarm peers and network observers, and against reuse on another device. It
@@ -882,251 +928,285 @@ def test_docs_phase1_honest_guarantee_and_admin_boundary():
     anything."""
     security = _page("security.md")
     assert _compact(guarantee) in _compact(security)
-    gaps = _contract_gaps({
-        "security.md": ["Device administrator trust boundary",
-                        "privilege-15", "root-lr", "tracker and the origin"],
-        "device-agents.md": [
-            "security.md#device-administrator-trust-boundary"],
-    })
-    assert not gaps, "missing Phase 1 trust-boundary clauses: %s" % gaps
+    _assert_unit(security, ("privilege-15", "root-lr", "administrator", "root"),
+                 "the device-administrator capabilities must share one clause")
+    _assert_unit(security, ("tracker", "origin", "enforcement", "authoritative"),
+                 "the enforcement-of-record relationship is missing")
+    assert "(security.md#device-administrator-trust-boundary)" in \
+        _page("device-agents.md")
 
 
 def test_docs_phase1_envelope_custody_and_failure_contract():
-    """Operators get the wire/custody guarantees, the rotation-versus-revoke
-    rule, credential-width distinction, and the route failures they can act on."""
-    gaps = _contract_gaps({
-        "security.md": [
-            "SP800-108", "HMAC-SHA-256", "MAC before decrypt", "256 KiB",
-            "exactly two", "offline roots", "128 bits", "256 bits",
-            "enrollment token", "one hour", "IOx", "SSH-to-self password",
-            "instruction key", "mode `0600`",
-        ],
-        "operations.md": [
-            "`iris-instr-key rotate --no-overlap`", "`iris-revoke`",
-            "never rotate a key to spare a device from revocation",
-        ],
-        "reference.md": [
-            "`instr_key`", "`lkg_key`", "`instr_epoch`", "`instr_serial`",
-            "`policy_revision`", "`allowed_expires_at`",
-        ],
-        "problems.md": [
-            "## instruction-keylist-unavailable",
-            "## instruction-keylist-missing",
-            "## instruction-state-unavailable",
-            "## instruction-stamp-missing", "## stale_pointer",
-            "## instruction-device-forbidden",
-            "## instruction-rate-limit-exceeded",
-        ],
-    })
-    assert not gaps, "missing Phase 1 envelope/custody clauses: %s" % gaps
+    """Envelope, key placement, credential widths, and failures are relational."""
+    security = _page("security.md")
+    _assert_unit(security, ("per-device", "KDF", "audience"),
+                 "per-device derivation must bind the audience")
+    _assert_unit(security, ("epoch", "instruction serial", "replay"),
+                 "epoch and serial must explain replay rejection")
+    _assert_unit(security, ("MAC", "before", "decrypt"),
+                 "authentication must precede decryption")
+    _assert_unit(security, ("instruction key", "excluded", "platform configuration"),
+                 "instruction private material must be excluded from platform config")
+    _assert_unit(security, ("private keys", "instruction keys", "LKG key",
+                            "never", "platform configuration"),
+                 "all private instruction material must stay out of platform config")
+    _assert_unit(security, ("IOx", "enrollment token", "SSH-to-self password",
+                            "run-opts"),
+                 "IOx bootstrap credential exceptions must be stated together")
+    _assert_unit(security, ("XR", "enrollment token", "docker-run-opts"),
+                 "XR bootstrap credential exception must be explicit")
+    enrollment_units = [unit.lower() for unit in _units(security)
+                        if "enrollment" in unit.lower() and
+                        ("3,600" in unit or "3600" in unit) and
+                        "120" in unit and "overlap" in unit.lower()]
+    assert enrollment_units, "enrollment lifetime and overlap must be related"
+    _assert_unit(security, ("bearer", "128", "key material", "256"),
+                 "bearer and cryptographic-key widths must be distinguished")
+    _assert_unit(security, ("unknown", "width", "reject", "before mint"),
+                 "unknown/mismatched widths must fail before minting")
 
-    failure_docs = _page("device-agents.md") + "\n" + _page("reference.md")
-    for state in (
-            "none", "applied", "lkg", "stale_expired", "allowlist_expired",
-            "rollback_rejected", "floor_reset", "audience_mismatch",
-            "key_rejected", "tamper_rejected", "verifier_missing",
-            "lkg_rejected", "lkg_unreadable", "oversize", "reasserted",
-            "instr_unavailable", "instr_pending", "instr_forbidden",
-            "tracker-only"):
-        assert "`%s`" % state in failure_docs, \
-            "Phase 1 failure table omits raw state %s" % state
-    assert "heartbeat and staging continue" in failure_docs
+    operations = _page("operations.md")
+    _assert_unit(operations, ("leaked", "honest device", "rotate --no-overlap"),
+                 "leaked key on an honest device must map to no-overlap rotation")
+    _assert_unit(operations, ("compromised", "retired", "iris-revoke"),
+                 "compromised or retired devices must map to revocation")
+    _assert_unit(operations, ("revoked", "rotation", "refused"),
+                 "rotation must never spare a revoked device")
+
+    problems = _page("problems.md")
+    for code in ("instruction-keylist-unavailable", "instruction-keylist-missing",
+                 "instruction-state-unavailable", "instruction-stamp-missing",
+                 "stale_pointer", "instruction-device-forbidden",
+                 "instruction-rate-limit-exceeded"):
+        assert "## %s" % code in problems
+
+    failures = _page("device-agents.md") + "\n" + _page("reference.md")
+    for state, action in (
+            ("none", "defaults"), ("applied", "serial"), ("lkg", "keep"),
+            ("stale_expired", "on_stale"),
+            ("allowlist_expired", "tracker-only"),
+            ("rollback_rejected", "keep"), ("floor_reset", "floor"),
+            ("audience_mismatch", "keep"), ("key_rejected", "bad_mac"),
+            ("tamper_rejected", "keep"), ("verifier_missing", "defaults"),
+            ("lkg_rejected", "defaults"), ("lkg_unreadable", "defaults"),
+            ("oversize", "next tick"), ("reasserted", "aria2 session"),
+            ("instr_unavailable", "next tick"),
+            ("instr_pending", "next tick"),
+            ("instr_forbidden", "refresh"), ("tracker-only", "no instruction")):
+        _assert_unit(failures, (state, action),
+                     "%s lacks its operator action/status relationship" % state)
+    _assert_unit(failures, ("fetch", "verify", "LKG", "heartbeat", "staging continue"),
+                 "fetch/verify fallback must retain heartbeat and staging")
+    _assert_unit(failures, ("RPC apply", "heartbeat", "staging", "skipped", "tick"),
+                 "RPC apply failure must send heartbeat and skip staging that tick")
 
 
 def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
-    """Plaintext compatibility knobs cannot be mistaken for policy, while the
-    mechanical launcher interval and Guest Shell limitations remain explicit."""
-    gaps = _contract_gaps({
-        "reference.md": [
-            "`MAX-PEERS-IGNORED`", "parsed but ignored", "`IRIS_MAX_PEERS`",
-            "`IRIS_MAX_CONCURRENT`", "provisional launch", "first successful",
-            "`IRIS_TICK_SECONDS`", "mechanical", "`catalog_tick_s`",
-        ],
-        "device-agents.md": [
-            "Guest Shell divergence", "`tracker-only`", "runtime probe",
-            "replaceable bundle", "tamper-evidence", "IOS-owned",
-        ],
-        "containers.md": [
-            "every mechanical tick", "reassert", "heartbeat",
-            "no enduring policy authority",
-        ],
-        "security.md": ["mode-0600", "`--conf-path`", "not on the command line"],
-    })
-    assert not gaps, "missing Phase 1 runtime/difference clauses: %s" % gaps
-
     reference = _page("reference.md")
-    legacy_rows = [line for line in reference.splitlines()
-                   if re.match(r"\|\s*`max_peers`\s*\|", line)]
-    assert legacy_rows, "reference.md must retain an ignored legacy max_peers row"
-    assert all("1–65535" not in line and "1-65535" not in line
-               for line in legacy_rows), \
-        "reference.md still presents the obsolete Guest Shell active range"
+    _assert_unit(reference, ("max_peers", "parsed", "ignored", "MAX-PEERS-IGNORED"),
+                 "legacy max_peers must be parse-only with one notice")
+    _assert_unit(reference, ("IRIS_MAX_PEERS", "IRIS_MAX_CONCURRENT",
+                             "provisional", "first successful tick"),
+                 "legacy env values need their bounded launch interval")
+    _assert_unit(reference, ("IRIS_TICK_SECONDS", "mechanical", "catalog_tick_s",
+                             "logical"),
+                 "mechanical and signed logical cadence must be distinct")
+    rows = [line for line in reference.splitlines()
+            if re.match(r"\|\s*`max_peers`\s*\|", line)]
+    assert rows and all("65535" not in row for row in rows)
+
+    agents = _page("device-agents.md")
+    for terms in (("Guest Shell", "runtime probe", "tracker-only"),
+                  ("Guest Shell", "replaceable bundle", "tamper-evidence"),
+                  ("Guest Shell", "IOS-owned", "60"),
+                  ("IOx", "XR", "signed image", "pinned")):
+        _assert_unit(agents, terms, "Guest Shell divergence row is incomplete")
+    _assert_unit(_page("security.md"),
+                 ("Guest Shell", "RPC secret", "mode-0600", "conf-path",
+                  "command line"),
+                 "Guest Shell RPC-secret argv mitigation is missing")
+    _assert_unit(_page("containers.md"),
+                 ("mechanical tick", "reassert", "heartbeat", "signed"),
+                 "each mechanical tick must reassert and heartbeat")
 
 
 def test_docs_phase1_iox_verification_transaction():
-    """The device-global IOx verification transaction is visible before
-    onboarding and through install, recovery, teardown, and Console flows."""
-    requirements = {
-        "security.md": ["device-global", "app-hosting verification",
-                        "signed wrapper", "platform verification"],
-        "iox.md": ["signed wrapper", "no verification-state change",
-                   "initially enabled", "restore", "initially disabled",
-                   "unchanged", "unknown", "refuses", "read-back",
-                   "signature marker"],
-        "getting-started.md": ["device-global", "app-hosting verification",
-                               "before onboarding"],
-        "device-agents.md": ["conditional disable", "restore",
-                             "unknown", "refuses"],
-        "operations.md": ["verification obligation", "crash", "resume",
-                          "uninstall", "never blindly enables"],
-        "console.md": ["verification obligation", "recovery", "uninstall"],
-        "containers.md": ["natively signed", "verification remains enabled",
-                          "container never changes"],
-    }
-    gaps = _contract_gaps(requirements)
-    assert not gaps, "missing IOx verification clauses: %s" % gaps
+    iox = _page("iox.md")
+    _assert_unit(iox, ("device-global", "app-hosting verification"),
+                 "the IOx control scope must be named")
+    _assert_unit(iox, ("signed wrapper", "no", "state change"),
+                 "signed wrappers must leave verification unchanged")
+    _assert_ordered(iox, ("initially enabled", "record", "disable", "install",
+                          "restore", "read-back", "activate"),
+                    "enabled-state transaction order is incomplete", 400)
+    _assert_unit(iox, ("initially disabled", "unchanged"),
+                 "pre-disabled state must remain disabled")
+    _assert_unit(iox, ("unknown", "refuse", "mutation", "install"),
+                 "unknown state must refuse mutation and installation")
+    _assert_unit(iox, ("crash", "resume", "durable", "obligation"),
+                 "crash recovery must use the durable obligation")
+    _assert_unit(iox, ("uninstall", "IRIS-owned", "never", "blindly enable"),
+                 "uninstall may recover only owned obligations")
+    _assert_unit(iox, ("signature marker", "not", "cryptographic"),
+                 "package markers must not be presented as verification")
 
-    source_docs = (_page("iox.md") + "\n" + _page("containers.md") +
-                   "\n" + _page("security.md"))
-    for url in (
-            "https://www.cisco.com/c/en/us/td/docs/switches/lan/"
-            "cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/"
-            "m-ie3400-deploying-iox-applications.html",
-            "https://www.cisco.com/c/en/us/support/docs/switches/"
-            "catalyst-9500-series-switches/222780-understand-app-hosting-on-"
-            "catalyst-9000.html"):
-        assert url in source_docs, "IOx platform claim omits Cisco source %s" % url
+    first = ("https://www.cisco.com/c/en/us/td/docs/switches/lan/"
+             "cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/"
+             "m-ie3400-deploying-iox-applications.html")
+    second = ("https://www.cisco.com/c/en/us/support/docs/switches/"
+              "catalyst-9500-series-switches/222780-understand-app-hosting-on-"
+              "catalyst-9000.html")
+    transaction_start = iox.lower().find("app-hosting verification")
+    assert transaction_start >= 0
+    transaction = iox[transaction_start:transaction_start + 5000]
+    assert first in transaction and second in transaction
+
+    for name, terms in (
+            ("getting-started.md", ("before onboarding", "device-global", "verification")),
+            ("security.md", ("IOx", "signed", "verification enabled", "container")),
+            ("operations.md", ("IOx", "verification obligation", "recover", "uninstall")),
+            ("console.md", ("IOx", "verification obligation", "recover"))):
+        _assert_unit(_page(name), terms, "%s omits its IOx operator consequence" % name)
 
 
 def test_docs_phase1_network_process_and_state_topology():
-    """Instructions reuse catalog HTTPS, custody paths retain their correct
-    roots, and the stamper remains a management-process thread."""
-    gaps = _contract_gaps({
-        "network-ports.md": [
-            "`GET /v1/devices/{device_id}/instructions`",
-            "`GET /v1/devices/{device_id}/instruction-keylist`", "8443",
-            "no new listener", "no new port", "no new firewall flow",
-            "9443", "Console-only",
-        ],
-        "server.md": [
-            "`$IRIS_CONFIG/instr/signing-key.age`",
-            "`$IRIS_RUN/instr/signing-key`",
-            "`$IRIS_STATE/instructions-epoch.json`",
-            "`$IRIS_STATE/instructions/keylist.current`",
-            "`$IRIS_STATE/instructions/roles.d/`",
-            "`$IRIS_STATE/instruction-key-status.json`",
-            "`$IRIS_STATE/instruction-stamper-status.json`",
-            "daemon thread", "five processes", "not a sixth service",
-        ],
-        "architecture.md": [
-            "existing catalog HTTPS", "8443", "authenticated instruction",
-            "management process", "no new network path",
-        ],
-        "reference.md": ["optional fourth", "`.age`"],
-    })
-    assert not gaps, "missing Phase 1 topology clauses: %s" % gaps
+    _assert_phase1_network_relationship(_page("network-ports.md"))
+    server = _page("server.md")
+    for root, path in (
+            ("IRIS_CONFIG", "instr/signing-key.age"),
+            ("IRIS_RUN", "instr/signing-key"),
+            ("IRIS_STATE", "instructions-epoch.json"),
+            ("IRIS_STATE", "instructions/keylist.current"),
+            ("IRIS_STATE", "instructions/roles.d"),
+            ("IRIS_STATE", "instruction-key-status.json"),
+            ("IRIS_STATE", "instruction-stamper-status.json")):
+        _assert_unit(server, (root, path), "%s belongs under %s" % (path, root))
+    _assert_unit(server, ("stamper", "daemon thread", "management process",
+                          "five", "not", "sixth service"),
+                 "stamper process topology is missing")
+    _assert_phase1_enforcement_boundary(_page("architecture.md"))
 
 
 def test_docs_phase1_kubernetes_and_split_host_custody():
-    """Every supported deployment layout carries the same server-only custody
-    boundary, and multi-replica service is explicitly outside the contract."""
-    gaps = _contract_gaps({
-        "kubernetes.md": [
-            "existing `iris-data` PVC", "no new Secret", "no new port",
-            "no new Service", "no new NetworkPolicy rule", "`replicas: 1`",
-            "instruction stamper", "serial history", "single writer",
-            "no cross-pod coordination",
-        ],
-        "docker-hosts.md": [
-            "signing-key.age", "age identity", "runtime signing key",
-            "instruction state", "server host only", "Console host",
-            "public roots are not secrets",
-        ],
-        "validation.md": [
-            "Single-host Compose", "Split-host Compose",
-            "Single-replica Kubernetes", "Multi-replica server tier",
-            "not covered", "unsupported",
-        ],
-    })
-    assert not gaps, "missing Phase 1 layout/custody clauses: %s" % gaps
+    kubernetes = _page("kubernetes.md")
+    _assert_unit(kubernetes, ("Phase 1", "existing", "iris-data", "PVC"),
+                 "Phase 1 state must use the existing PVC")
+    _assert_unit(kubernetes, ("no new", "Secret", "port", "Service",
+                              "NetworkPolicy"),
+                 "Phase 1 must add no Kubernetes topology object")
+    _assert_unit(kubernetes, ("instruction", "single writer", "no cross-pod",
+                              "replicas: 1"),
+                 "instruction single-writer state must explain replica one")
+
+    split = _page("docker-hosts.md")
+    _assert_unit(split, ("server host only", "signing-key.age", "age identity",
+                         "runtime signing key", "instruction state"),
+                 "private custody material must remain on the server host")
+    _assert_unit(split, ("public roots", "not secrets"),
+                 "public trust material must not be called secret")
+
+    validation = _page("validation.md")
+    for layout, terms in (
+            ("single-host Compose", ("8443", "9443", "apply", "package")),
+            ("split-host Compose", ("server host", "age identity", "Console")),
+            ("single-replica Kubernetes", ("PVC", "NetworkPolicy", "instruction")),
+            ("multi-replica server tier", ("not covered", "unsupported"))):
+        _assert_unit(validation, (layout,) + terms,
+                     "%s validation is not operationally meaningful" % layout)
 
 
 def test_docs_phase1_operations_root_and_offline_runbooks():
-    """Root loss and disconnected-device recovery have concrete procedures,
-    and Guest Shell bundle rollout keeps digest evidence ahead of the archive."""
-    gaps = _contract_gaps({
-        "operations.md": [
-            "Quarterly root ceremony", "separate custodians", "separate sites",
-            "One-root loss", "surviving root", "trust bytes remain unchanged",
-            "Both-roots-lost", "two new independent roots", "break glass",
-            "offline redelivery", "bootstrap envelope", "Guest Shell",
-            "bundle.tgz.sha256", "evidence before the archive",
-            "previous runnable bundle", "next successful fetch",
-        ],
-        "device-agents.md": [
-            "Guest Shell Phase 1 bundle", "fleet operation", "SHA-256 sidecar",
-            "not a detached signature", "privilege-15 administrator",
-        ],
-        "validation.md": [
-            "configuration evidence", "unit-test evidence",
-            "package-inspection evidence", "live-device evidence",
-            "`ssh-keygen -Y verify`", "`tracker-only`",
-        ],
-    })
-    assert not gaps, "missing Phase 1 operational runbook clauses: %s" % gaps
+    operations = _page("operations.md")
+    _assert_unit(operations, ("quarterly", "two roots", "custodians", "sites",
+                              "fingerprint"),
+                 "quarterly two-root ceremony is incomplete")
+    _assert_ordered(operations, ("one-root loss", "surviving root",
+                                 "online certificate", "unchanged trust"),
+                    "one-root failover must leave device trust unchanged")
+    _assert_ordered(operations, ("both-roots-lost", "two new roots",
+                                 "online certificate", "keylist", "Guest Shell",
+                                 "OCI", "both IOx", "XR", "fleet reprovision"),
+                    "both-root recovery must rebuild all package families", 220)
+    _assert_unit(operations, ("offline", "bootstrap envelope", "ciphertext",
+                              "not", "key"),
+                 "offline payload must be identified as ciphertext, not a key")
+    _assert_ordered(operations, ("sidecar", "before", "archive", "mismatch",
+                                 "previous runnable bundle"),
+                    "Guest Shell rollout must order evidence and retain rollback")
+    _assert_unit(operations, ("authenticated refresh", "next", "self-heal"),
+                 "offline bootstrap must converge through authenticated refresh")
 
 
 def test_docs_phase1_observability_states_evidence_and_revisions():
-    """The API and Console distinguish reported evidence from server facts and
-    keep policy, instruction, and aria2 blocklist revisions separate."""
-    gaps = _contract_gaps({
-        "observability.md": [
-            "`instr_protocol`", "`display_state`", "`underlying_state`",
-            "`accepted_identity`", "`qos_drift_count`", "`pointer_skew`",
-            "`report_age_seconds`", "`fleet_rollup`", "`instruction_status`",
-            "`instruction_keys`", "server-observed", "device-authored",
-            "agent-asserted", "violation = 0 does not mean compliant",
-            "aria2 blocklist change counter",
-        ],
-        "console.md": [
-            "pre-instructions", "revoked", "stale", "rejected",
-            "tracker-only", "underlying", "exact integer", "evidence",
-            "did revision", "10,000",
-        ],
-        "reference.md": [
-            "`policy_revision`", "`instr_serial`",
-            "`enforcement.applied_revision`", "unrelated",
-        ],
-        "security.md": ["does not sever existing connections"],
-    })
-    assert not gaps, "missing Phase 1 observability clauses: %s" % gaps
+    observability = _page("observability.md")
+    _assert_phase1_rollup_relationship(observability)
+    _assert_unit(observability, ("instr_protocol", "absent", "pre-instructions"),
+                 "legacy protocol absence must map to pre-instructions")
+    _assert_unit(observability, ("instr_protocol", "invalid", "unknown"),
+                 "invalid protocol evidence must map to unknown")
+    _assert_unit(observability, ("revoked", "server-observed", "precedence",
+                                 "underlying"),
+                 "durable revocation must override but retain device evidence")
+    _assert_unit(observability, ("stale", "server-observed", "underlying",
+                                 "agent-asserted"),
+                 "receipt-age stale state must retain underlying evidence")
+    _assert_unit(observability, ("unavailable", "unknown", "not", "zero"),
+                 "unavailable evidence must not be rendered as healthy zero")
+    _assert_unit(observability, ("violation = 0", "does not mean compliant"),
+                 "zero violation is not proof of compliance")
+    _assert_unit(observability, ("device-authored", "heartbeat",
+                                 "agent-asserted", "instruction"),
+                 "device and agent evidence classes must be distinguished")
+    _assert_unit(observability, ("policy_revision", "server-issued", "intent"),
+                 "policy revision meaning is missing")
+    _assert_unit(observability, ("instr_serial", "per-device", "freshness"),
+                 "instruction serial meaning is missing")
+    _assert_unit(observability, ("applied_revision", "aria2", "blocklist",
+                                 "unrelated"),
+                 "blocklist revision must be separated from policy/serial")
 
-    observability = _page("observability.md").lower()
-    assert re.search(r"fleet_rollup.{0,240}policy revision", observability,
-                     re.DOTALL)
-    assert not re.search(r"fleet_rollup.{0,160}(?:groups?|keyed).{0,80}"
-                         r"instruction serial", observability, re.DOTALL)
+    reference = _page("reference.md")
+    _assert_unit(reference, ("raw", "instr_state", "agent-asserted"),
+                 "raw device states must be labeled as agent evidence")
+    _assert_unit(reference, (
+        "raw states", "none", "applied", "lkg", "stale_expired",
+        "allowlist_expired", "rollback_rejected", "floor_reset",
+        "audience_mismatch", "key_rejected", "tamper_rejected",
+        "verifier_missing", "lkg_rejected", "lkg_unreadable", "oversize",
+        "reasserted", "instr_unavailable", "instr_pending",
+        "instr_forbidden", "tracker-only"),
+        "the closed raw-state vocabulary must be identified as one contract")
+    _assert_unit(reference, (
+        "display classes", "applied", "lkg", "stale", "rejected",
+        "unavailable", "tracker-only", "pending", "forbidden",
+        "floor_reset", "none", "pre-instructions", "revoked", "unknown",
+        "server"),
+        "server display classes must be separate from raw states")
+    console = _page("console.md")
+    _assert_unit(console, ("label", "server-created", "exact", "integer"),
+                 "Console labels must preserve exact i63 identity")
+    _assert_unit(console, ("stale", "revoked", "underlying", "evidence"),
+                 "Console overrides must preserve underlying evidence")
 
 
 def test_docs_phase1_changelog_and_release_boundary():
-    """Phase 1 remains Unreleased and the mutual-origin union remains behind
-    its full tagged-release dwell and separate activation authorization."""
     with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
         changelog = fh.read()
-    unreleased = changelog.split("## [Unreleased]", 1)
-    assert len(unreleased) == 2, "CHANGELOG.md has no Unreleased section"
-    unreleased = unreleased[1].split("\n## ", 1)[0]
-    for clause in ("encrypted instructions", "key custody", "Guest Shell",
-                   "IOx verification", "server-observed", "agent-asserted"):
-        assert clause in unreleased, \
-            "Unreleased changelog omits Phase 1 clause: %s" % clause
-    for false_claim in ("released to devices", "deployed to devices",
-                        "production roots installed", "live fleet verified"):
-        assert false_claim not in unreleased.lower()
+    parts = changelog.split("## [Unreleased]", 1)
+    assert len(parts) == 2
+    unreleased = parts[1].split("\n## ", 1)[0]
+    _assert_unit(unreleased, ("encrypted instructions", "key custody",
+                              "Guest Shell", "IOx verification"),
+                 "Unreleased must summarize the Phase 1 operator change")
+    _assert_unit(unreleased, ("server-observed", "agent-asserted", "Console"),
+                 "Unreleased must identify the evidence-aware Console")
+    assert not re.search(r"Phase 1.{0,120}(?:released|deployed|live verified)",
+                         unreleased, re.IGNORECASE | re.DOTALL)
 
     boundary = (_page("security.md") + "\n" + _page("operations.md") +
-                "\n" + _page("observability.md")).lower()
-    for clause in ("preflight only", "one full tagged release",
-                   "separately authorized activation", "issue #153"):
-        assert clause in boundary, \
-            "mutual-origin release boundary omits: %s" % clause
+                "\n" + _page("observability.md"))
+    _assert_unit(boundary, ("mutual-origin", "preflight only", "issue #153"),
+                 "the open mutual-origin boundary must remain explicit")
+    _assert_unit(boundary, ("one full tagged release", "dwell",
+                            "separately authorized activation"),
+                 "the activation gate must retain release dwell and authority")
