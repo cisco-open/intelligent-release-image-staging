@@ -118,17 +118,24 @@ unset f
 bundle_transaction() {
   python3 - "$@" <<'PY'
 import hashlib
+import gzip
 import os
 import re
 import shutil
 import stat
 import sys
 import tarfile
+import tempfile
+import zlib
 
 MAX_ARCHIVE = 32 * 1024 * 1024
 MAX_MEMBER = 16 * 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
 MAX_MEMBERS = 64
+# Include tar headers, per-member block padding, end markers, and ordinary tar
+# record padding without allowing gzip metadata or concatenated streams to
+# expand without a hard ceiling before tarfile sees them.
+MAX_EXPANDED = MAX_TOTAL + 2 * 1024 * 1024
 AGENT_FILES = (
     "agent_config.py", "catalog_client.py", "cli_ssh.py",
     "flash_target.py", "flashcheck.py", "instr.py", "iris_agent.py",
@@ -317,6 +324,168 @@ def checked_digest(bundle_path, digest_path):
     return bundle_stream, bundle_identity
 
 
+def tar_number(field):
+    # Reject GNU/base-256 numbers and every non-canonical octal form. The
+    # production packer emits ordinary octal fields on every supported host.
+    if not field or field[0] & 0x80:
+        raise BundleError("invalid-archive")
+    index = 0
+    while index < len(field) and field[index:index + 1] == b" ":
+        index += 1
+    start = index
+    while index < len(field) and field[index:index + 1] in b"01234567":
+        index += 1
+    if index == start or any(byte not in (0, 32)
+                             for byte in bytearray(field[index:])):
+        raise BundleError("invalid-archive")
+    return int(field[start:index], 8)
+
+
+def tar_text(field):
+    terminator = field.find(b"\0")
+    if terminator < 0:
+        raw = field
+    else:
+        if field[terminator + 1:].strip(b"\0"):
+            raise BundleError("invalid-archive")
+        raw = field[:terminator]
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise BundleError("invalid-archive")
+    if value.encode("utf-8") != raw:
+        raise BundleError("invalid-archive")
+    return value
+
+
+def read_exact(stream, size):
+    result = bytearray()
+    while len(result) < size:
+        chunk = stream.read(size - len(result))
+        if not chunk:
+            break
+        result.extend(chunk)
+    return bytes(result)
+
+
+def scan_tar(stream, expanded_size):
+    raw_members = []
+    seen = set()
+    total = 0
+    cursor = 0
+    zero_blocks = 0
+    stream.seek(0)
+    while cursor < expanded_size:
+        header = read_exact(stream, 512)
+        if len(header) != 512:
+            raise BundleError("invalid-archive")
+        cursor += 512
+        if header == b"\0" * 512:
+            zero_blocks += 1
+            if zero_blocks == 2:
+                trailer = stream.read()
+                if len(trailer) % 512 or any(byte != 0
+                                             for byte in bytearray(trailer)):
+                    raise BundleError("invalid-archive")
+                break
+            continue
+        if zero_blocks or len(raw_members) >= MAX_MEMBERS:
+            raise BundleError("invalid-archive")
+
+        magic = header[257:263]
+        version = header[263:265]
+        if magic == b"ustar\0" and version == b"00":
+            prefix = tar_text(header[345:500])
+        elif magic == b"ustar " and version == b" \0":
+            # GNU format uses this area for extensions. Plain short-name
+            # archives from the production packer leave it empty.
+            if header[345:500] != b"\0" * 155:
+                raise BundleError("invalid-archive")
+            prefix = ""
+        elif header[257:512] == b"\0" * 255:
+            prefix = ""
+        else:
+            raise BundleError("invalid-archive")
+
+        for start, end in ((100, 108), (108, 116), (116, 124),
+                           (124, 136), (136, 148), (148, 156)):
+            tar_number(header[start:end])
+        stored_checksum = tar_number(header[148:156])
+        checksum = sum(bytearray(header[:148] + b" " * 8 + header[156:]))
+        if checksum != stored_checksum:
+            raise BundleError("invalid-archive")
+
+        typeflag = header[156:157]
+        if typeflag not in (b"\0", b"0", b"5") \
+                or header[157:257] != b"\0" * 100:
+            # This rejects PAX/GNU extension records, sparse files, links,
+            # devices, and FIFOs before Python's archive parser runs.
+            raise BundleError("invalid-archive")
+        size = tar_number(header[124:136])
+        directory = typeflag == b"5"
+        if directory and size:
+            raise BundleError("invalid-archive")
+        if size > MAX_MEMBER:
+            raise BundleError("invalid-archive")
+
+        name = tar_text(header[0:100])
+        if prefix:
+            name = prefix + "/" + name
+        if directory and name.endswith("/"):
+            name = name[:-1]
+        elif not directory and name.endswith("/"):
+            raise BundleError("invalid-archive")
+        parts = name.split("/")
+        if (not name or name.startswith("/") or "\\" in name
+                or any(part in ("", ".", "..") for part in parts)
+                or any(ord(char) < 32 or ord(char) == 127 for char in name)
+                or name in seen):
+            raise BundleError("invalid-archive")
+        seen.add(name)
+
+        total += size
+        if total > MAX_TOTAL:
+            raise BundleError("invalid-archive")
+        data_offset = cursor
+        padded = ((size + 511) // 512) * 512
+        if cursor + padded > expanded_size:
+            raise BundleError("invalid-archive")
+        raw_members.append((name, directory, size, data_offset))
+        stream.seek(padded, os.SEEK_CUR)
+        cursor += padded
+    if zero_blocks < 2:
+        raise BundleError("invalid-archive")
+    return raw_members
+
+
+def bounded_tar_stream(stream, bundle_identity, directory):
+    expanded = tempfile.TemporaryFile(prefix=".bundle-expanded-", dir=directory)
+    expanded_size = 0
+    try:
+        try:
+            with gzip.GzipFile(fileobj=stream, mode="rb") as compressed:
+                while True:
+                    remaining = MAX_EXPANDED - expanded_size
+                    chunk = compressed.read(min(1024 * 1024, remaining + 1))
+                    if not chunk:
+                        break
+                    expanded_size += len(chunk)
+                    if expanded_size > MAX_EXPANDED:
+                        raise BundleError("invalid-archive")
+                    expanded.write(chunk)
+        except (OSError, EOFError, zlib.error):
+            raise BundleError("invalid-archive")
+        if stream_identity(stream) != bundle_identity:
+            raise BundleError("invalid-archive")
+        expanded.flush()
+        raw_members = scan_tar(expanded, expanded_size)
+        expanded.seek(0)
+        return expanded, raw_members
+    except Exception:
+        expanded.close()
+        raise
+
+
 def inspect_and_extract(bundle_path, digest_path, new_dir):
     stream, bundle_identity = checked_digest(bundle_path, digest_path)
     expected = set(ARCHIVE_FILES)
@@ -324,79 +493,98 @@ def inspect_and_extract(bundle_path, digest_path, new_dir):
     total = 0
     try:
         with stream:
-            try:
-                archive = tarfile.open(fileobj=stream, mode="r:gz")
-            except (tarfile.TarError, EOFError, OSError):
-                raise BundleError("invalid-archive")
-            with archive:
-                members = []
-                for member in archive:
-                    members.append(member)
-                    if len(members) > MAX_MEMBERS:
-                        raise BundleError("invalid-archive")
-                for member in members:
-                    name = member.name
-                    parts = name.split("/")
-                    if (not name or name.startswith("/") or "\\" in name
-                            or any(part in ("", ".", "..") for part in parts)):
-                        raise BundleError("invalid-archive")
-                    if name in seen:
-                        raise BundleError("invalid-archive")
-                    seen.add(name)
-                    if name == "agent":
-                        if not member.isdir():
-                            raise BundleError("invalid-archive")
-                        continue
-                    if name not in expected or not member.isreg() \
-                            or getattr(member, "sparse", None):
-                        raise BundleError("invalid-archive")
-                    if member.size < 0 or member.size > MAX_MEMBER:
-                        raise BundleError("invalid-archive")
-                    total += member.size
-                    if total > MAX_TOTAL:
-                        raise BundleError("invalid-archive")
-                if seen != expected | {"agent"}:
+            expanded, raw_members = bounded_tar_stream(
+                stream, bundle_identity, os.path.dirname(new_dir))
+            with expanded:
+                try:
+                    archive = tarfile.open(fileobj=expanded, mode="r:")
+                except (tarfile.TarError, EOFError, OSError):
                     raise BundleError("invalid-archive")
+                with archive:
+                    members = []
+                    for member in archive:
+                        members.append(member)
+                        if len(members) > MAX_MEMBERS:
+                            raise BundleError("invalid-archive")
+                    if len(members) != len(raw_members):
+                        raise BundleError("invalid-archive")
+                    for member, raw_member in zip(members, raw_members):
+                        normalized = (member.name[:-1]
+                                      if member.isdir()
+                                      and member.name.endswith("/")
+                                      else member.name)
+                        if (normalized, member.isdir(), member.size,
+                                member.offset_data) != raw_member:
+                            raise BundleError("invalid-archive")
+                    for member in members:
+                        name = (member.name[:-1]
+                                if member.isdir() and member.name.endswith("/")
+                                else member.name)
+                        parts = name.split("/")
+                        if (not name or name.startswith("/") or "\\" in name
+                                or any(part in ("", ".", "..")
+                                       for part in parts)):
+                            raise BundleError("invalid-archive")
+                        if name in seen:
+                            raise BundleError("invalid-archive")
+                        seen.add(name)
+                        if name == "agent":
+                            if not member.isdir():
+                                raise BundleError("invalid-archive")
+                            continue
+                        if name not in expected or not member.isreg() \
+                                or getattr(member, "sparse", None):
+                            raise BundleError("invalid-archive")
+                        if member.size < 0 or member.size > MAX_MEMBER:
+                            raise BundleError("invalid-archive")
+                        total += member.size
+                        if total > MAX_TOTAL:
+                            raise BundleError("invalid-archive")
+                    if seen != expected | {"agent"}:
+                        raise BundleError("invalid-archive")
 
-                os.mkdir(new_dir, 0o700)
-                os.mkdir(os.path.join(new_dir, "agent"), 0o700)
-                by_name = dict((member.name, member) for member in members)
-                for name in ARCHIVE_FILES:
-                    member = by_name[name]
-                    source = archive.extractfile(member)
-                    if source is None:
-                        raise BundleError("invalid-archive")
-                    destination = os.path.join(new_dir, *name.split("/"))
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                    if hasattr(os, "O_NOFOLLOW"):
-                        flags |= os.O_NOFOLLOW
-                    executable = name in (
-                        "aria2c", "bootstrap.sh", "guestshell-start.sh",
-                        "rotate-logs.sh", "agent/peer-transfer-hook.sh",
-                    )
-                    out_fd = os.open(destination, flags,
-                                     0o700 if executable else 0o600)
-                    copied = 0
-                    try:
-                        with os.fdopen(out_fd, "wb") as target:
-                            while True:
-                                chunk = source.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                copied += len(chunk)
-                                if copied > member.size or copied > MAX_MEMBER:
-                                    raise BundleError("invalid-archive")
-                                target.write(chunk)
-                            target.flush()
-                            os.fsync(target.fileno())
-                    finally:
-                        source.close()
-                    if copied != member.size:
-                        raise BundleError("invalid-archive")
-                fsync_dir(os.path.join(new_dir, "agent"))
-                fsync_dir(new_dir)
-            if stream_identity(stream) != bundle_identity:
-                raise BundleError("invalid-archive")
+                    os.mkdir(new_dir, 0o700)
+                    os.mkdir(os.path.join(new_dir, "agent"), 0o700)
+                    by_name = dict(((member.name[:-1]
+                                     if member.isdir()
+                                     and member.name.endswith("/")
+                                     else member.name), member)
+                                   for member in members)
+                    for name in ARCHIVE_FILES:
+                        member = by_name[name]
+                        source = archive.extractfile(member)
+                        if source is None:
+                            raise BundleError("invalid-archive")
+                        destination = os.path.join(new_dir, *name.split("/"))
+                        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                        if hasattr(os, "O_NOFOLLOW"):
+                            flags |= os.O_NOFOLLOW
+                        executable = name in (
+                            "aria2c", "bootstrap.sh", "guestshell-start.sh",
+                            "rotate-logs.sh", "agent/peer-transfer-hook.sh",
+                        )
+                        out_fd = os.open(destination, flags,
+                                         0o700 if executable else 0o600)
+                        copied = 0
+                        try:
+                            with os.fdopen(out_fd, "wb") as target:
+                                while True:
+                                    chunk = source.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    copied += len(chunk)
+                                    if copied > member.size \
+                                            or copied > MAX_MEMBER:
+                                        raise BundleError("invalid-archive")
+                                    target.write(chunk)
+                                target.flush()
+                                os.fsync(target.fileno())
+                        finally:
+                            source.close()
+                        if copied != member.size:
+                            raise BundleError("invalid-archive")
+                    fsync_dir(os.path.join(new_dir, "agent"))
+                    fsync_dir(new_dir)
     except BundleError:
         raise
     except (OSError, tarfile.TarError, EOFError):
@@ -433,39 +621,196 @@ def validate_prior(prior):
                 raise BundleError("transaction-invalid")
 
 
+def validate_capture_prior(prior):
+    files = os.path.join(prior, "files")
+    absent = os.path.join(prior, "absent")
+    if not os.path.isdir(prior) or os.path.islink(prior) \
+            or set(os.listdir(prior)) != {"files", "absent"} \
+            or not os.path.isdir(files) or os.path.islink(files) \
+            or not os.path.isdir(absent) or os.path.islink(absent):
+        raise BundleError("transaction-invalid")
+    allowed = set(TOP_LEVEL)
+    try:
+        saved_names = set(os.listdir(files))
+        absent_names = set(os.listdir(absent))
+    except OSError:
+        raise BundleError("transaction-invalid")
+    if not saved_names.issubset(allowed) \
+            or not absent_names.issubset(allowed) \
+            or saved_names & absent_names:
+        raise BundleError("transaction-invalid")
+    for name in absent_names:
+        try:
+            marker_info = os.lstat(os.path.join(absent, name))
+        except OSError:
+            raise BundleError("transaction-invalid")
+        if not stat.S_ISREG(marker_info.st_mode) or marker_info.st_size != 0:
+            raise BundleError("transaction-invalid")
+
+
+def copy_snapshot(source, destination):
+    try:
+        before = os.lstat(source)
+    except OSError:
+        raise BundleError("transaction-invalid")
+    if stat.S_ISLNK(before.st_mode):
+        try:
+            target = os.readlink(source)
+            os.symlink(target, destination)
+            after = os.lstat(source)
+        except OSError:
+            raise BundleError("transaction-invalid")
+        if (before.st_dev, before.st_ino, before.st_mode,
+                before.st_mtime_ns, before.st_ctime_ns) != \
+                (after.st_dev, after.st_ino, after.st_mode,
+                 after.st_mtime_ns, after.st_ctime_ns):
+            raise BundleError("transaction-invalid")
+        return
+    if stat.S_ISREG(before.st_mode):
+        source_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            source_flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            source_flags |= os.O_NONBLOCK
+        source_fd = None
+        destination_fd = None
+        try:
+            source_fd = os.open(source, source_flags)
+            opened = os.fstat(source_fd)
+            if not stat.S_ISREG(opened.st_mode) \
+                    or (opened.st_dev, opened.st_ino) != \
+                    (before.st_dev, before.st_ino):
+                raise BundleError("transaction-invalid")
+            destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                destination_flags |= os.O_NOFOLLOW
+            destination_fd = os.open(destination, destination_flags, 0o600)
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_fd, view)
+                    if written <= 0:
+                        raise BundleError("transaction-invalid")
+                    view = view[written:]
+            after = os.fstat(source_fd)
+            if (opened.st_dev, opened.st_ino, opened.st_size,
+                    opened.st_mtime_ns, opened.st_ctime_ns) != \
+                    (after.st_dev, after.st_ino, after.st_size,
+                     after.st_mtime_ns, after.st_ctime_ns):
+                raise BundleError("transaction-invalid")
+            os.fchmod(destination_fd, stat.S_IMODE(opened.st_mode))
+            os.fsync(destination_fd)
+        except BundleError:
+            raise
+        except OSError:
+            raise BundleError("transaction-invalid")
+        finally:
+            if destination_fd is not None:
+                os.close(destination_fd)
+            if source_fd is not None:
+                os.close(source_fd)
+        return
+    if stat.S_ISDIR(before.st_mode):
+        try:
+            os.mkdir(destination, 0o700)
+            for name in sorted(os.listdir(source)):
+                if name in ("", ".", "..") or "/" in name:
+                    raise BundleError("transaction-invalid")
+                copy_snapshot(os.path.join(source, name),
+                              os.path.join(destination, name))
+            os.chmod(destination, stat.S_IMODE(before.st_mode))
+            fsync_dir(destination)
+            after = os.lstat(source)
+        except BundleError:
+            raise
+        except OSError:
+            raise BundleError("transaction-invalid")
+        if (before.st_dev, before.st_ino, before.st_mode,
+                before.st_mtime_ns, before.st_ctime_ns) != \
+                (after.st_dev, after.st_ino, after.st_mode,
+                 after.st_mtime_ns, after.st_ctime_ns):
+            raise BundleError("transaction-invalid")
+        return
+    raise BundleError("transaction-invalid")
+
+
+def prepare_restore(tx, files):
+    restore = os.path.join(tx, "restore")
+    remove_path(restore)
+    os.mkdir(restore, 0o700)
+    for name in TOP_LEVEL:
+        saved = os.path.join(files, name)
+        if lexists(saved):
+            copy_snapshot(saved, os.path.join(restore, name))
+    fsync_dir(restore)
+    fsync_dir(tx)
+    return restore
+
+
+def complete_rollback(stage, tx):
+    completed = os.path.join(stage, ".bundle-rollback-complete")
+    remove_path(completed)
+    fsync_dir(stage)
+    os.replace(tx, completed)
+    fsync_dir(stage)
+    remove_path(completed)
+    fsync_dir(stage)
+
+
 def rollback(stage, tx):
     prior = os.path.join(tx, "prior")
     validate_prior(prior)
     files = os.path.join(prior, "files")
-    for name in TOP_LEVEL:
-        remove_path(os.path.join(stage, name))
+    restore = prepare_restore(tx, files)
     for name in TOP_LEVEL:
         saved = os.path.join(files, name)
+        live = os.path.join(stage, name)
+        remove_path(live)
         if lexists(saved):
-            os.replace(saved, os.path.join(stage, name))
+            restored = os.path.join(restore, name)
+            if not lexists(restored):
+                raise BundleError("transaction-invalid")
+            os.replace(restored, live)
     fsync_dir(stage)
-    remove_path(tx)
-    fsync_dir(stage)
+    complete_rollback(stage, tx)
 
 
 def rollback_capture(stage, tx):
     # No new runtime path is installed before phase=promoting. Restore any
-    # old path already moved during an interrupted capture, then discard.
-    files = os.path.join(tx, "prior", "files")
-    if os.path.isdir(files) and not os.path.islink(files):
-        for name in TOP_LEVEL:
-            saved = os.path.join(files, name)
-            live = os.path.join(stage, name)
-            if lexists(saved):
-                if lexists(live):
-                    raise BundleError("transaction-invalid")
-                os.replace(saved, live)
-    remove_path(tx)
+    # old path already moved during an interrupted capture. Rebuild every
+    # restore from the immutable captured bytes so another interruption can
+    # retry without consuming the only copy.
+    prior = os.path.join(tx, "prior")
+    validate_capture_prior(prior)
+    files = os.path.join(prior, "files")
+    restore = prepare_restore(tx, files)
+    for name in TOP_LEVEL:
+        saved = os.path.join(files, name)
+        marker = os.path.join(prior, "absent", name)
+        live = os.path.join(stage, name)
+        if lexists(saved):
+            remove_path(live)
+            os.replace(os.path.join(restore, name), live)
+        elif lexists(marker):
+            remove_path(live)
     fsync_dir(stage)
+    complete_rollback(stage, tx)
+
+
+def discard_preparing(stage, tx):
+    # Capture has not begun, so no live runtime path has moved yet.
+    complete_rollback(stage, tx)
 
 
 def recover(stage):
     tx = os.path.join(stage, ".bundle-transaction")
+    completed = os.path.join(stage, ".bundle-rollback-complete")
+    if lexists(completed):
+        remove_path(completed)
+        fsync_dir(stage)
     if not lexists(tx):
         print("none")
         return
@@ -479,8 +824,12 @@ def recover(stage):
         rollback(stage, tx)
         print("rolled-back")
         return
-    if phase in ("preparing", "capturing"):
+    if phase == "capturing":
         rollback_capture(stage, tx)
+        print("rolled-back")
+        return
+    if phase == "preparing":
+        discard_preparing(stage, tx)
         print("rolled-back")
         return
     raise BundleError("transaction-invalid")
@@ -544,8 +893,12 @@ def install(stage, bundle_path, digest_path, signer_path):
         try:
             if phase == "promoting":
                 rollback(stage, tx)
-            elif lexists(tx):
+            elif phase == "capturing":
                 rollback_capture(stage, tx)
+            elif phase == "preparing":
+                discard_preparing(stage, tx)
+            elif lexists(tx):
+                raise BundleError("transaction-invalid")
         except Exception:
             raise BundleError("rollback-failed")
         raise original
