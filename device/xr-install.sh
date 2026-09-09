@@ -38,6 +38,7 @@
 #   APPID=iris  SOURCE_NAME=iris-xr
 #   IRIS_ARTIFACTS_DIR=<repo>/artifacts  XR_RPM_FILE=$IRIS_ARTIFACTS_DIR/iris-xr.rpm
 #   IRIS_CRT_FILE=$IRIS_ARTIFACTS_DIR/iris-catalog.pem (public server cert)
+#   IRIS_INSTRUCTION_BOOTSTRAP_FILE=<controller-owned private envelope snapshot>
 #   XR_MIN_FREE_BYTES=2147483648 (2 GiB headroom floor on harddisk: -- raise
 #     it for a larger assigned image set; one proven full image is 1.8GB)
 #   IRIS_TELEMETRY=on  IRIS_TELEMETRY_STREAM=off
@@ -69,6 +70,10 @@ DRY=0; [ "${1:-}" = "--dry-run" ] && DRY=1
 IRIS_ARTIFACTS_DIR="${IRIS_ARTIFACTS_DIR:-$(cd "$HERE/.." && pwd)/artifacts}"
 XR_RPM_FILE="${XR_RPM_FILE:-$IRIS_ARTIFACTS_DIR/iris-xr.rpm}"
 CATALOG_CA_FILE="${IRIS_CATALOG_CA_FILE:-${IRIS_CRT_FILE:-$IRIS_ARTIFACTS_DIR/iris-catalog.pem}}"
+INSTRUCTION_BOOTSTRAP_FILE="${IRIS_INSTRUCTION_BOOTSTRAP_FILE:-}"
+unset IRIS_INSTRUCTION_BOOTSTRAP_FILE
+INSTRUCTION_SNAPSHOT_DIR=""
+INSTRUCTION_SNAPSHOT_FILE=""
 # One proven full image is 1.8GB (agentinfo/xr-support/LAB-RESULTS-2026-08-27.md
 # section 1.4); 2 GiB is a same-order-of-magnitude floor for a single image.
 # Raise it explicitly for a multi-image assignment.
@@ -192,6 +197,80 @@ validate_public_cert() {
   }
 }
 
+cleanup_instruction_snapshot() {
+  if [ -n "$INSTRUCTION_SNAPSHOT_DIR" ]; then
+    rm -rf -- "$INSTRUCTION_SNAPSHOT_DIR"
+    INSTRUCTION_SNAPSHOT_DIR=""
+    INSTRUCTION_SNAPSHOT_FILE=""
+  fi
+}
+trap cleanup_instruction_snapshot EXIT
+
+snapshot_instruction_bootstrap() {
+  [ -n "$INSTRUCTION_BOOTSTRAP_FILE" ] || return 1
+  case "$INSTRUCTION_BOOTSTRAP_FILE" in /*) ;; *) return 1 ;; esac
+  case "$INSTRUCTION_BOOTSTRAP_FILE" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  INSTRUCTION_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/iris-xr-instructions.XXXXXX")" \
+    || return 1
+  chmod 700 "$INSTRUCTION_SNAPSHOT_DIR" || return 1
+  INSTRUCTION_SNAPSHOT_FILE="$INSTRUCTION_SNAPSHOT_DIR/bootstrap.envelope"
+  export IRIS_XR_INSTRUCTION_SOURCE="$INSTRUCTION_BOOTSTRAP_FILE"
+  export IRIS_XR_INSTRUCTION_DEST="$INSTRUCTION_SNAPSHOT_FILE"
+  _instruction_snapshot_rc=0
+  python3 - <<'PY' >/dev/null 2>&1 || _instruction_snapshot_rc=$?
+import os
+import stat
+
+source_path = os.environ["IRIS_XR_INSTRUCTION_SOURCE"]
+destination = os.environ["IRIS_XR_INSTRUCTION_DEST"]
+flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+source = os.open(source_path, flags)
+target = -1
+try:
+    before = os.fstat(source)
+    if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or
+            before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600 or
+            not 1 <= before.st_size <= 256 * 1024):
+        raise ValueError("unsafe source")
+    target = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600)
+    remaining = 256 * 1024 + 1
+    total = 0
+    while remaining:
+        chunk = os.read(source, min(65536, remaining))
+        if not chunk:
+            break
+        total += len(chunk)
+        remaining -= len(chunk)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(target, view)
+            view = view[written:]
+    after = os.fstat(source)
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (total != before.st_size or total > 256 * 1024 or
+            any(getattr(before, field) != getattr(after, field)
+                for field in fields)):
+        raise ValueError("source changed")
+    os.fsync(target)
+    installed = os.fstat(target)
+    if (not stat.S_ISREG(installed.st_mode) or
+            stat.S_IMODE(installed.st_mode) != 0o600 or
+            installed.st_size != total):
+        raise ValueError("unsafe snapshot")
+finally:
+    os.close(source)
+    if target >= 0:
+        os.close(target)
+PY
+  unset IRIS_XR_INSTRUCTION_SOURCE IRIS_XR_INSTRUCTION_DEST
+  [ "$_instruction_snapshot_rc" -eq 0 ]
+}
+
 if [ "$DRY" -eq 0 ]; then
   : "${DEVICE_USER:?set DEVICE_USER}"; : "${DEVICE_PASS:?set DEVICE_PASS}"
   [[ "$DEVICE_USER" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] \
@@ -201,6 +280,11 @@ if [ "$DRY" -eq 0 ]; then
     exit 1
   }
   validate_public_cert "$CATALOG_CA_FILE" || exit 1
+  if ! snapshot_instruction_bootstrap; then
+    cleanup_instruction_snapshot
+    echo "ERROR: instruction bootstrap snapshot is invalid" >&2
+    exit 1
+  fi
 fi
 
 # docker-run-opts: the exact hardware-proven base ("-td --net=host -v
@@ -253,9 +337,10 @@ if [ "$DRY" -eq 1 ]; then
   echo "[1/5] check IOS-XR and harddisk: free space (minimum $XR_MIN_FREE_BYTES bytes)"
   echo "show version"
   echo "dir harddisk: | include bytes free"
-  echo "[2/5] upload package and certificate to harddisk:"
+  echo "[2/5] upload package, certificate, and bootstrap to harddisk:"
   printf 'scp -O %s <user>@%s:/harddisk:/%s.rpm\n' "$XR_RPM_FILE" "$DEVICE_IP" "$SOURCE_NAME"
   printf 'scp -O <public-certificate> <user>@%s:/harddisk:/iris-catalog.pem\n' "$DEVICE_IP"
+  printf 'scp -O <instruction-envelope> <user>@%s:/harddisk:/iris-instructions.bootstrap\n' "$DEVICE_IP"
   echo "[3/5] register package"
   echo "appmgr package install rpm /harddisk:/$SOURCE_NAME.rpm"
   echo "show appmgr source-table"
@@ -321,7 +406,7 @@ if [ "$FREE_BYTES" -lt "$XR_MIN_FREE_BYTES" ]; then
   exit 1
 fi
 
-echo "[2/5] upload package and certificate"
+echo "[2/5] upload package, certificate, and bootstrap"
 # The router's identity is verified with the same policy the transport uses
 # (lab/iris-ssh-policy.sh), so the scp cannot hand the admin password to a
 # host merely answering at the address.
@@ -335,9 +420,15 @@ if [ "$scp_rc" -eq 0 ]; then
   SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
         "$CATALOG_CA_FILE" "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-catalog.pem" || scp_rc=$?
 fi
+if [ "$scp_rc" -eq 0 ]; then
+  SSHPASS="$DEVICE_PASS" sshpass -e scp -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+        "$INSTRUCTION_SNAPSHOT_FILE" \
+        "${DEVICE_USER}@${DEVICE_IP}:/harddisk:/iris-instructions.bootstrap" \
+        || scp_rc=$?
+fi
 iris_ssh_cleanup
 if [ "$scp_rc" -ne 0 ]; then
-  echo "ERROR: scp of the XR package/catalog certificate to $DEVICE_IP:harddisk: failed" >&2
+  echo "ERROR: XR package/catalog/bootstrap upload failed" >&2
   exit 1
 fi
 

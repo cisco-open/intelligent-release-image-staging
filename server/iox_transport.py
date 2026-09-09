@@ -36,6 +36,7 @@ import time
 WRAPPER_MAX_BYTES = 256 * 1024 * 1024
 WRAPPER_COPY_CHUNK_BYTES = 1024 * 1024
 WRAPPER_COPY_MAX_SECONDS = 120
+INSTRUCTION_MAX_BYTES = 256 * 1024
 
 ARCHIVE_MAX_MEMBERS = 4096
 ARCHIVE_MAX_NAME_BYTES = 4096
@@ -91,7 +92,8 @@ _PURPOSES = frozenset((
     "app_install", "app_activate", "copy_certificate", "app_start", "save",
     "remove_wrapper", "remove_certificate", "cleanup_config", "cleanup_files",
     "cleanup_config_probe", "cleanup_stage_probe", "upload_wrapper",
-    "upload_certificate", "identity_discovery", "identity_revalidation",
+    "upload_certificate", "upload_instructions", "copy_instructions",
+    "remove_instructions", "identity_discovery", "identity_revalidation",
     "preflight", "verification_read", "verification_disable",
     "verification_enable", "recipe_output",
 ))
@@ -310,6 +312,9 @@ def _valid_remote_path(value, purpose):
     basename = components[-1]
     if purpose == "upload_wrapper":
         return re.fullmatch(r"iris-[0-9a-f]{32}\.tar", basename) is not None
+    if purpose == "upload_instructions":
+        return re.fullmatch(
+            r"iris-instructions-[0-9a-f]{32}\.envelope", basename) is not None
     return purpose == "upload_certificate" and basename == "iris-ca.pem"
 
 
@@ -541,7 +546,9 @@ class _TranscriptWriter(object):
                     not _is_int(record["started_at"])):
                 raise IoxTransportError("rejected", "invalid command start")
             expected_kind = (
-                "scp" if purpose in ("upload_wrapper", "upload_certificate")
+                "scp" if purpose in (
+                    "upload_wrapper", "upload_certificate",
+                    "upload_instructions")
                 else "recipe_output" if purpose == "recipe_output" else "ssh")
             if record["kind"] != expected_kind:
                 raise IoxTransportError("rejected", "command kind and purpose disagree")
@@ -2383,8 +2390,11 @@ class IoxTransport(object):
                     not _valid_remote_path(remote_path, purpose)):
                 raise IoxTransportError("unsupported_syntax", "invalid upload binding")
             source = os.fstat(snapshot_fd)
+            source_limit = (INSTRUCTION_MAX_BYTES if
+                            purpose == "upload_instructions" else
+                            WRAPPER_MAX_BYTES)
             if (not stat.S_ISREG(source.st_mode) or source.st_size < 1 or
-                    source.st_size > WRAPPER_MAX_BYTES):
+                    source.st_size > source_limit):
                 raise IoxTransportError(
                     "unsupported_syntax", "upload source is not a bounded regular file")
             self.transcript.append(context, restoration=restoration)

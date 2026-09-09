@@ -389,6 +389,134 @@ fi
 
 mkdir -p "$STAGE_DIR" "$WORK_DIR" "$(dirname "$CONF")" "$(dirname "$STATE")"
 
+# Import the transport-owned bootstrap ciphertext into the agent's persistent
+# work directory before the first tick.  The two source names are platform
+# facts: no environment value or run option can redirect them.  The agent later
+# verifies the envelope and promotes accepted policy through its own LKG
+# transaction; transport bytes never enter the LKG path here.
+import_instruction_bootstrap() {
+  _source="$1"
+  _destination="$2"
+  [ -n "$_source" ] || return 0
+  export IRIS_BOOTSTRAP_IMPORT_SOURCE="$_source"
+  export IRIS_BOOTSTRAP_IMPORT_DESTINATION="$_destination"
+  _import_rc=0
+  python3 - <<'PY' >/dev/null 2>&1 || _import_rc=$?
+import os
+import stat
+import tempfile
+
+source_path = os.environ["IRIS_BOOTSTRAP_IMPORT_SOURCE"]
+destination = os.environ["IRIS_BOOTSTRAP_IMPORT_DESTINATION"]
+try:
+    named_before = os.lstat(source_path)
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISLNK(named_before.st_mode) or not stat.S_ISREG(named_before.st_mode):
+    raise SystemExit(2)
+if os.path.abspath(source_path) == os.path.abspath(destination):
+    raise SystemExit(2)
+
+flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+source = -1
+temporary = -1
+temporary_path = None
+try:
+    source = os.open(source_path, flags)
+    before = os.fstat(source)
+    if (not stat.S_ISREG(before.st_mode) or
+            (before.st_dev, before.st_ino) !=
+            (named_before.st_dev, named_before.st_ino) or
+            not 1 <= before.st_size <= 256 * 1024):
+        raise ValueError("invalid source")
+    directory = os.path.dirname(destination)
+    temporary, temporary_path = tempfile.mkstemp(
+        prefix=".iris-instructions-bootstrap.", dir=directory)
+    os.fchmod(temporary, 0o600)
+    total = 0
+    while True:
+        chunk = os.read(source, min(65536, 256 * 1024 + 1 - total))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 256 * 1024:
+            raise ValueError("oversize source")
+        view = memoryview(chunk)
+        while view:
+            written = os.write(temporary, view)
+            view = view[written:]
+    after = os.fstat(source)
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink",
+              "st_size", "st_mtime_ns", "st_ctime_ns")
+    named_after = os.lstat(source_path)
+    if (total != before.st_size or
+            any(getattr(before, field) != getattr(after, field)
+                for field in fields) or
+            (named_after.st_dev, named_after.st_ino) !=
+            (before.st_dev, before.st_ino) or
+            stat.S_ISLNK(named_after.st_mode)):
+        raise ValueError("source changed")
+    os.fsync(temporary)
+    installed = os.fstat(temporary)
+    if (not stat.S_ISREG(installed.st_mode) or
+            stat.S_IMODE(installed.st_mode) != 0o600 or
+            installed.st_size != total):
+        raise ValueError("invalid temporary")
+    os.close(temporary)
+    temporary = -1
+    os.replace(temporary_path, destination)
+    temporary_path = None
+    directory_fd = os.open(
+        directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+        getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    final_source = os.lstat(source_path)
+    if ((final_source.st_dev, final_source.st_ino) !=
+            (before.st_dev, before.st_ino) or
+            stat.S_ISLNK(final_source.st_mode)):
+        raise ValueError("source changed after import")
+    os.unlink(source_path)
+    source_directory = os.path.dirname(source_path)
+    source_directory_fd = os.open(
+        source_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+        getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(source_directory_fd)
+    finally:
+        os.close(source_directory_fd)
+except Exception:
+    raise SystemExit(2)
+finally:
+    if source >= 0:
+        os.close(source)
+    if temporary >= 0:
+        os.close(temporary)
+    if temporary_path is not None:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+PY
+  unset IRIS_BOOTSTRAP_IMPORT_SOURCE IRIS_BOOTSTRAP_IMPORT_DESTINATION
+  [ "$_import_rc" -eq 0 ] || fatal "instruction bootstrap candidate is invalid"
+}
+
+if [ "$DEVICE_PLATFORM" = iox ]; then
+  _instruction_source=""
+  if [ -n "${CAF_APP_APPDATA_DIR:-}" ]; then
+    _instruction_source="$CAF_APP_APPDATA_DIR/iris-instructions.bootstrap"
+  fi
+else
+  _instruction_source="$STAGE_DIR/iris-instructions.bootstrap"
+fi
+import_instruction_bootstrap \
+  "$_instruction_source" "$WORK_DIR/iris-instructions.bootstrap"
+unset _instruction_source
+
 # --- 1. config: use a dropped conf if present, else synthesize from env ---------
 # A conf dropped onto persistent storage wins, and the agent rewrites it in
 # place on token refresh. On first boot, secrets arrive through runtime env;

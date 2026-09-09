@@ -910,6 +910,7 @@ def _controller(tmp_path, store, factory, clock=None, **config):
 def _install_operations():
     return [
         ("upload_wrapper", {}),
+        ("upload_certificate", {}),
         ("begin_install", {}),
         ("command", {"name": "app_stop"}),
         ("command", {"name": "app_deactivate"}),
@@ -920,7 +921,9 @@ def _install_operations():
         ("deployed", {}),
         ("command", {"name": "app_activate"}),
         ("stage_instructions", {}),
-        ("upload_certificate", {}),
+        ("command", {"name": "copy_certificate"}),
+        ("command", {"name": "remove_certificate"}),
+        ("command", {"name": "remove_wrapper"}),
         ("command", {"name": "app_start"}),
         ("command", {"name": "save"}),
         ("finish", {"exit_intent": 0}),
@@ -1462,9 +1465,18 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
             command_position("copy_instructions") <
             command_position("remove_instructions") <
             command_position("app_start"))
-    public = json.dumps({"result": result, "store_calls": store.calls},
-                        sort_keys=True, default=str).encode("utf-8")
+    public = json.dumps({
+        "result": result,
+        "store_calls": [call for call in store.calls if call[0] != "upload"],
+        "records": store.records,
+    }, sort_keys=True, default=str).encode("utf-8")
     assert payload not in public
+    remote_name = instruction_upload[1].encode("ascii")
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            persisted = path.read_bytes()
+            assert payload not in persisted
+            assert remote_name not in persisted
     assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
 
 
@@ -1503,19 +1515,26 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
     assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
 
 
-def test_instruction_copy_failure_removes_only_transaction_source_and_never_starts(
-        tmp_path):
+@pytest.mark.parametrize("failure_purpose", [
+    "upload_instructions", "copy_instructions", "remove_instructions",
+])
+def test_instruction_stage_failure_removes_only_transaction_source_and_never_starts(
+        tmp_path, failure_purpose):
     factory = _TransportFactory(
-        command_outcomes={"copy_instructions": ["transport"]})
+        command_outcomes={failure_purpose: ["transport"]})
     result, store, timeline, unused_wrapper = _run_scripted_install(
         tmp_path, factory)
     assert result["result_code"] == 4
     assert result["error_category"] == "transport"
-    assert _command_calls(factory, "remove_instructions")
+    removals = _command_calls(factory, "remove_instructions")
+    assert removals
+    if failure_purpose == "remove_instructions":
+        assert len(removals) == 2
     assert _command_calls(factory, "app_start") == []
     rendered = b"\n".join(call[2] for call in timeline
                            if call[0] == "command")
-    assert b"iris-instructions.bootstrap" in rendered
+    if failure_purpose != "upload_instructions":
+        assert b"iris-instructions.bootstrap" in rendered
     assert b"delete /force flash:iris-instructions-" in rendered
     assert b"delete /force iris-instructions.bootstrap" not in rendered
     assert store.records["new-r1"]["iox_verification"]["unresolved"] is False
@@ -1759,12 +1778,16 @@ def test_controller_uses_exact_identity_upload_and_application_deadlines(
 
     uploads = [call for call in factory.calls if call[0] == "upload"]
     assert [call[4] for call in uploads] == [
-        "upload_wrapper", "upload_certificate"]
+        "upload_wrapper", "upload_certificate", "upload_instructions"]
     combined_upload_deadline = min(
         uploads[0][5] + 1800, ordinary_deadline)
     assert combined_upload_deadline < ordinary_deadline
-    assert [call[3] for call in uploads] == [
+    assert [call[3] for call in uploads[:2]] == [
         combined_upload_deadline, combined_upload_deadline]
+    instruction_upload = uploads[2]
+    assert instruction_upload[3] == min(
+        instruction_upload[5] + 300, ordinary_deadline)
+    assert instruction_upload[3] != combined_upload_deadline
 
 
 @pytest.mark.parametrize("session_seconds,expected_wait,code,category", [

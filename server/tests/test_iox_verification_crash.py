@@ -653,6 +653,11 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
     module = _verification_module()
     if not os.path.exists(os.path.join(str(tmp_path), "iox", "authority.json")):
         _authority_layout(tmp_path)
+    certificate = os.path.join(str(tmp_path), "catalog-ca.pem")
+    if not os.path.exists(certificate):
+        with open(certificate, "wb") as stream:
+            stream.write(b"fixture catalog certificate\n")
+        os.chmod(certificate, 0o600)
     config = _AttrDict({
         "state_dir": str(tmp_path),
         "controller_id": _CONTROLLER,
@@ -662,6 +667,7 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
         "application_id": "iris",
         "instruction_bootstrap_materializer": lambda _device_id:
             b"fixture-instruction-envelope",
+        "catalog_certificate_path": certificate,
     })
     config.update(overrides)
     if test_limits is not None:
@@ -1833,9 +1839,14 @@ def receive():
     size=struct.unpack("!I",exact(4))[0]
     assert 1<=size<=65536
     return json.loads(exact(size).decode("utf-8"))
-for operation,arguments in [("upload_wrapper",{}),("begin_install",{}),
+for operation,arguments in [("upload_wrapper",{}),("upload_certificate",{}),
+    ("begin_install",{}),
     ("command",{"name":"app_stop"}),("command",{"name":"app_install"}),
-    ("deployed",{}),("finish",{"exit_intent":0})]:
+    ("deployed",{}),("command",{"name":"app_activate"}),
+    ("stage_instructions",{}),("command",{"name":"copy_certificate"}),
+    ("command",{"name":"remove_certificate"}),
+    ("command",{"name":"remove_wrapper"}),("command",{"name":"app_start"}),
+    ("command",{"name":"save"}),("finish",{"exit_intent":0})]:
     ready=receive()
     assert ready["type"]=="ready"
     request=dict((key,ready[key]) for key in ("version","attempt_id","action",
@@ -2084,7 +2095,9 @@ def test_authority_initialization_durability_failure_prevents_every_device_comma
         calls.append(config)
         pytest.fail("authority failure crossed into transport")
     config = _AttrDict(state_dir=str(tmp_path), controller_id=_CONTROLLER,
-                      session_seconds=7200, restoration_reserve_seconds=180)
+                      session_seconds=7200, restoration_reserve_seconds=180,
+                      instruction_bootstrap_materializer=lambda _device_id:
+                          b"fixture-instruction-envelope")
     controller = None
     try:
         try:

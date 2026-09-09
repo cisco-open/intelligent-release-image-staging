@@ -59,6 +59,8 @@ _TRANSCRIPT_FILE_BYTES = 1024 * 1024
 _SUPERVISOR_PACKET_BYTES = 64 * 1024
 _SUPERVISOR_MAX_FDS = 16
 _SUPERVISOR_REAP_SECONDS = 10.0
+_INSTRUCTION_MAX_BYTES = 256 * 1024
+_INSTRUCTION_UPLOAD_SECONDS = 300
 
 _RESULT_CODES = {
     "identity_mismatch": 2, "board_busy": 2,
@@ -89,8 +91,9 @@ _COMMANDS = frozenset((
     "iox_status", "app_list", "routing_prereq", "storage_prereq", "clock",
     "prepare_iox_scp", "configure_network", "mkdir_share", "app_stop",
     "app_deactivate", "app_uninstall", "remove_app_config", "configure_app",
-    "app_install", "app_activate", "copy_certificate", "app_start", "save",
-    "remove_wrapper", "remove_certificate", "cleanup_config", "cleanup_files",
+    "app_install", "app_activate", "copy_instructions", "remove_instructions",
+    "copy_certificate", "app_start", "save", "remove_wrapper",
+    "remove_certificate", "cleanup_config", "cleanup_files",
     "cleanup_config_probe", "cleanup_stage_probe"))
 
 _TARGET_KEYS = frozenset((
@@ -331,6 +334,122 @@ def _open_public_certificate(path, validate_x509=True):
     except Exception:
         os.close(descriptor)
         raise
+
+
+class _InstructionSnapshot(object):
+    """One private, unlinked, read-only bootstrap ciphertext snapshot."""
+
+    def __init__(self, descriptor, digest):
+        self.fd = descriptor
+        self.sha256 = digest
+        self._closed = False
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            os.close(self.fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, unused_type, unused_value, unused_traceback):
+        self.close()
+
+
+def _instruction_metadata(value):
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+            value.st_nlink, value.st_size,
+            getattr(value, "st_mtime_ns", int(value.st_mtime * 1000000000)),
+            getattr(value, "st_ctime_ns", int(value.st_ctime * 1000000000)))
+
+
+def _admit_instruction_bootstrap(value, snapshot_dir, deadline, cancel,
+                                 monotonic_fn):
+    """Copy callback output into controller-owned private inode custody."""
+    source_fd = -1
+    source_initial = None
+    temporary = None
+    result_fd = -1
+    try:
+        if callable(cancel) and cancel():
+            raise ValueError("cancelled")
+        if monotonic_fn() >= deadline:
+            raise ValueError("deadline")
+        if isinstance(value, bytes):
+            body = value
+        elif isinstance(value, str):
+            if (not os.path.isabs(value) or
+                    any(ord(character) < 32 for character in value)):
+                raise ValueError("path")
+            flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                     getattr(os, "O_NOFOLLOW", 0) |
+                     getattr(os, "O_NONBLOCK", 0))
+            source_fd = os.open(value, flags)
+            source_initial = os.fstat(source_fd)
+            if (not stat.S_ISREG(source_initial.st_mode) or
+                    source_initial.st_uid != os.geteuid() or
+                    source_initial.st_nlink != 1 or
+                    stat.S_IMODE(source_initial.st_mode) != 0o600 or
+                    not 1 <= source_initial.st_size <=
+                    _INSTRUCTION_MAX_BYTES):
+                raise ValueError("source")
+            chunks = []
+            remaining = _INSTRUCTION_MAX_BYTES + 1
+            while remaining:
+                if callable(cancel) and cancel():
+                    raise ValueError("cancelled")
+                if monotonic_fn() >= deadline:
+                    raise ValueError("deadline")
+                chunk = os.read(source_fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            body = b"".join(chunks)
+            source_final = os.fstat(source_fd)
+            if (_instruction_metadata(source_initial) !=
+                    _instruction_metadata(source_final) or
+                    len(body) != source_initial.st_size):
+                raise ValueError("changed")
+        else:
+            raise ValueError("type")
+        if not 1 <= len(body) <= _INSTRUCTION_MAX_BYTES:
+            raise ValueError("size")
+        temporary = tempfile.TemporaryFile(mode="w+b", dir=snapshot_dir)
+        os.fchmod(temporary.fileno(), 0o600)
+        temporary.write(body)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        held = os.fstat(temporary.fileno())
+        if (not stat.S_ISREG(held.st_mode) or held.st_uid != os.geteuid() or
+                stat.S_IMODE(held.st_mode) != 0o600 or
+                held.st_size != len(body)):
+            raise ValueError("snapshot")
+        result_fd = os.open(
+            "/proc/self/fd/%d" % temporary.fileno(),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        reopened = os.fstat(result_fd)
+        if ((reopened.st_dev, reopened.st_ino) !=
+                (held.st_dev, held.st_ino) or
+                reopened.st_size != held.st_size):
+            raise ValueError("snapshot")
+        temporary.close()
+        temporary = None
+        os.lseek(result_fd, 0, os.SEEK_SET)
+        snapshot = _InstructionSnapshot(
+            result_fd, hashlib.sha256(body).hexdigest())
+        result_fd = -1
+        return snapshot
+    except Exception:
+        raise _ControllerFailure(
+            "rejected", "IOx install controller failed", 2)
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if temporary is not None:
+            temporary.close()
+        if result_fd >= 0:
+            os.close(result_fd)
 
 
 def _service_job_context(cancel, default_device, default_credential=None):
@@ -1681,6 +1800,8 @@ class _Attempt(object):
         self.recipe_returncode = None
         self.snapshot = None
         self.upload_deadline = None
+        self.instruction_snapshot = None
+        self.instruction_upload_deadline = None
         self.credentials = {}
         self.notice = ""
         self.target = copy.deepcopy(_get(request, "target", {})) if request is not None else {}
@@ -1822,6 +1943,9 @@ class IoxController(object):
             os.close(descriptor)
         if self._strict_target and catalog_url is None:
             raise ValueError("IOx catalog URL is required")
+        if not callable(self.config.get(
+                "instruction_bootstrap_materializer")):
+            raise ValueError("IOx instruction bootstrap materializer is required")
         for key, default in (("install_timeout", 300),
                              ("activate_timeout", 300),
                              ("start_timeout", 300),
@@ -3540,12 +3664,6 @@ class IoxController(object):
                     min(self._monotonic() + 120, attempt.session_deadline),
                     attempt.is_cancelled, monotonic_fn=self._monotonic) as snapshot:
                 attempt.snapshot = snapshot
-                record_id = prepare(request, copy.deepcopy(attempt.identity))
-                if (not isinstance(record_id, str) or
-                        not _RECORD_ID.fullmatch(record_id)):
-                    raise ValueError("prepare returned invalid record_id")
-                attempt.record_id = record_id
-                self._fence_barrier(attempt, record_id=record_id)
                 minter = self.config.get("enrollment_token_minter")
                 if callable(minter):
                     token = minter(_get(request, "device_id"))
@@ -3554,24 +3672,48 @@ class IoxController(object):
                                 r"[A-Za-z0-9._~+/-]+=*", token) is None):
                         raise ValueError("invalid enrollment token")
                     self._bind_catalog_token(attempt, token)
-                observation, result, unused = self._verification_read(attempt)
-                binding = {"wrapper_sha256": snapshot.sha256,
-                           "package_sign_present": snapshot.package_sign_present,
-                           "package_cert_present": snapshot.package_cert_present}
                 try:
-                    attempt.journal = self._store_call(
-                        "iox_begin", (
-                            record_id, self.controller_id, attempt.board,
-                            binding, observation,
-                            _get(result, "transcript_ref")),
-                        attempt=attempt, mutation=True)
-                except _ControllerFailure:
-                    raise
+                    instruction_value = self.config[
+                        "instruction_bootstrap_materializer"](
+                            _get(request, "device_id"))
                 except Exception:
                     raise _ControllerFailure(
-                        "journal_durability",
-                        "IOx journal creation failed", 5)
-                return self._run_recipe(attempt, "install", on_output)
+                        "rejected", "IOx install controller failed", 2)
+                with _admit_instruction_bootstrap(
+                        instruction_value, self.snapshot_dir,
+                        min(self._monotonic() + 120,
+                            attempt.session_deadline),
+                        attempt.is_cancelled,
+                        self._monotonic) as instruction_snapshot:
+                    attempt.instruction_snapshot = instruction_snapshot
+                    record_id = prepare(
+                        request, copy.deepcopy(attempt.identity))
+                    if (not isinstance(record_id, str) or
+                            not _RECORD_ID.fullmatch(record_id)):
+                        raise ValueError("prepare returned invalid record_id")
+                    attempt.record_id = record_id
+                    self._fence_barrier(attempt, record_id=record_id)
+                    observation, result, unused = self._verification_read(
+                        attempt)
+                    binding = {"wrapper_sha256": snapshot.sha256,
+                               "package_sign_present":
+                                   snapshot.package_sign_present,
+                               "package_cert_present":
+                                   snapshot.package_cert_present}
+                    try:
+                        attempt.journal = self._store_call(
+                            "iox_begin", (
+                                record_id, self.controller_id, attempt.board,
+                                binding, observation,
+                                _get(result, "transcript_ref")),
+                            attempt=attempt, mutation=True)
+                    except _ControllerFailure:
+                        raise
+                    except Exception:
+                        raise _ControllerFailure(
+                            "journal_durability",
+                            "IOx journal creation failed", 5)
+                    return self._run_recipe(attempt, "install", on_output)
         except _ControllerFailure as exc:
             if attempt is None:
                 dummy = _Attempt(self, "install", request, cancel)
@@ -3890,6 +4032,11 @@ class IoxController(object):
                 "unsupported_syntax", "invalid IOS wrapper filename", 2)
         wrapper_pattern = re.escape(wrapper_name)
         certificate = package_fs + "iris-ca.pem"
+        instruction_source = (package_fs + "iris-instructions-" +
+                              transaction + ".envelope"
+                              if transaction else None)
+        instruction_name = ("iris-instructions-" + transaction +
+                            ".envelope" if transaction else None)
         stage_dir = target_fs + "guest-share/iris"
         cleanup_common = [
             "no app-hosting appid %s" % appid,
@@ -4004,6 +4151,13 @@ class IoxController(object):
         elif name == "copy_certificate":
             lines = ["app-hosting data appid %s copy %s iris-catalog.pem" %
                      (appid, certificate)]
+        elif name == "copy_instructions":
+            if instruction_source is None:
+                raise _ControllerFailure(
+                    "unsupported_syntax", "missing instruction transaction", 2)
+            lines = [
+                "app-hosting data appid %s copy %s "
+                "iris-instructions.bootstrap" % (appid, instruction_source)]
         elif name == "save":
             if (_get(attempt.request, "teardown_mode") ==
                     "force_agent_only"):
@@ -4017,6 +4171,13 @@ class IoxController(object):
         elif name == "remove_certificate":
             lines = ["delete /force %s" % certificate,
                      "dir %s | include iris-ca.pem" % package_fs]
+        elif name == "remove_instructions":
+            if instruction_source is None:
+                raise _ControllerFailure(
+                    "unsupported_syntax", "missing instruction transaction", 2)
+            lines = ["delete /force %s" % instruction_source,
+                     "dir %s | include %s" %
+                     (package_fs, re.escape(instruction_name))]
         elif name == "cleanup_config":
             lines = ["configure terminal"] + cleanup_common
             if (mode == "inband" or
@@ -4034,6 +4195,8 @@ class IoxController(object):
                      "delete /force %siris-catalog.pem" % package_fs]
             if wrapper:
                 lines.insert(0, "delete /force %s" % wrapper)
+            if instruction_source:
+                lines.insert(0, "delete /force %s" % instruction_source)
             if share_ios:
                 lines.extend([
                     "delete /force %s/iris-staged.bin" % share_ios,
@@ -4050,10 +4213,13 @@ class IoxController(object):
             lines = ["show app-hosting list",
                      "show running-config | include %s" % include]
         elif name == "cleanup_stage_probe":
-            lines = [
-                "dir %s | include %s|iris-ca\\.pem|iris-catalog\\.pem" %
-                (package_fs, wrapper_pattern),
-                "dir %s" % stage_dir]
+            stage_patterns = [wrapper_pattern]
+            if instruction_name:
+                stage_patterns.append(re.escape(instruction_name))
+            stage_patterns.extend(["iris-ca\\.pem", "iris-catalog\\.pem"])
+            lines = ["dir %s | include %s" %
+                     (package_fs, "|".join(stage_patterns)),
+                     "dir %s" % stage_dir]
             if share_ios:
                 lines.append(
                     "dir %s | include iris-staged.bin|iris-probe.txt|iris" %
@@ -4072,10 +4238,17 @@ class IoxController(object):
         config = getattr(attempt.transport, "_iris_config", None) or getattr(attempt.transport, "config", None)
         if config is not None:
             config["command_contexts"][context["command_id"]] = context
-        if attempt.upload_deadline is None:
-            attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+        if purpose == "upload_instructions":
+            if attempt.instruction_upload_deadline is None:
+                attempt.instruction_upload_deadline = attempt.deadline(
+                    _INSTRUCTION_UPLOAD_SECONDS, ordinary=True)
+            upload_deadline = attempt.instruction_upload_deadline
+        else:
+            if attempt.upload_deadline is None:
+                attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+            upload_deadline = attempt.upload_deadline
         result = attempt.transport.upload(descriptor, remote,
-                                          attempt.upload_deadline)
+                                          upload_deadline)
         self._validate_transport_result(result)
         self._adopt_synthetic_result(
             attempt, result, context, attempt.transport)
@@ -4281,7 +4454,7 @@ class IoxController(object):
                 "remove_app_config": 4, "configure_network": 5,
                 "mkdir_share": 6, "configure_app": 7, "app_install": 8,
                 "deployed": 9, "app_activate": 10,
-                "upload_certificate": 11, "copy_certificate": 12,
+                "stage_instructions": 11, "copy_certificate": 12,
                 "remove_certificate": 13, "remove_wrapper": 14,
                 "app_start": 15, "save": 16,
             }
@@ -4310,8 +4483,8 @@ class IoxController(object):
             required = {
                 1: 0, 2: 1, 3: 2, 4: 3,
                 5: 4, 6: 4, 7: 4, 8: 1, 9: 8,
-                10: 9, 11: 10, 12: 10, 13: 12, 14: 13,
-                15: 10, 16: 15,
+                10: 9, 11: 10, 12: 11, 13: 12, 14: 13,
+                15: 14, 16: 15,
             }[rank]
             if current < required or rank < current:
                 raise _ControllerFailure("rejected", "out-of-order install step", 4)
@@ -4322,20 +4495,17 @@ class IoxController(object):
                         "timeout", "application install deadline elapsed", 4)
             if rank == 7 and current not in (4, 5, 6):
                 raise _ControllerFailure("rejected", "out-of-order app config", 4)
-            if rank == 11 and "upload_certificate" in seen:
-                raise _ControllerFailure("rejected", "replayed certificate upload", 4)
+            if name == "stage_instructions" and arguments != {}:
+                raise _ControllerFailure(
+                    "rejected", "invalid instruction staging request", 4)
             if (rank in (12, 13, 14, 15) and
                     "upload_certificate" not in protocol["completed"]):
                 raise _ControllerFailure("rejected", "certificate was not uploaded", 4)
-            if rank == 15 and current not in (10, 11, 14):
+            if rank == 15 and current != 14:
                 raise _ControllerFailure(
                     "rejected", "incomplete certificate cleanup", 4)
             seen.add(name)
             protocol["rank"] = max(current, rank)
-            if name == "deployed":
-                # The frozen minimal recipe intentionally stops after the
-                # controller has proved DEPLOYED and restored verification.
-                protocol["terminal_ready"] = True
             if name in ("app_stop", "app_activate", "app_start"):
                 phase_rank = {"app_stop": 8, "app_activate": 10,
                               "app_start": 15}[name]
@@ -4433,8 +4603,76 @@ class IoxController(object):
                         _get(result, "error_category") or "rejected",
                         "IOx transient cleanup could not be verified", 4)
                 completed.add(removal)
+            if (protocol.get("instruction_source_attempted") and
+                    not protocol.get("instruction_source_removed")):
+                result, unused = self._command(
+                    attempt, "remove_instructions",
+                    self._render_command(attempt, "remove_instructions"), 45)
+                basename = ("iris-instructions-%s.envelope" %
+                            attempt.journal["transaction_id"])
+                if (not self._transport_ok(result) or
+                        _get(result, "error_category") or
+                        re.search(br"(?mi)^.*%s.*$" %
+                                  re.escape(basename.encode("ascii")),
+                                  _get(result, "stdout", b""))):
+                    raise _ControllerFailure(
+                        _get(result, "error_category") or "rejected",
+                        "IOx transient cleanup could not be verified", 4)
+                protocol["instruction_source_removed"] = True
         finally:
             attempt.safety_recovery = previous
+
+    def _stage_instructions(self, attempt, protocol):
+        snapshot = attempt.instruction_snapshot
+        if snapshot is None:
+            raise _ControllerFailure(
+                "authority_mismatch", "instruction snapshot custody missing", 5)
+        package_fs = attempt.target.get("package_fs", "flash:")
+        remote = (package_fs + "iris-instructions-" +
+                  attempt.journal["transaction_id"] + ".envelope")
+        protocol["instruction_source_attempted"] = True
+        primary = None
+        cleanup_failure = None
+        try:
+            self._upload(
+                attempt, snapshot.fd, "upload_instructions", remote)
+            result, unused = self._command(
+                attempt, "copy_instructions",
+                self._render_command(attempt, "copy_instructions"),
+                45, ordinary=True)
+            if (not self._transport_ok(result) or
+                    _get(result, "error_category")):
+                raise _ControllerFailure(
+                    _get(result, "error_category") or "rejected",
+                    "IOx instruction copy failed", 4)
+        except _ControllerFailure as exc:
+            primary = exc
+        previous = attempt.safety_recovery
+        attempt.safety_recovery = True
+        try:
+            result, unused = self._command(
+                attempt, "remove_instructions",
+                self._render_command(attempt, "remove_instructions"), 45)
+            basename = ("iris-instructions-%s.envelope" %
+                        attempt.journal["transaction_id"])
+            if (not self._transport_ok(result) or
+                    _get(result, "error_category") or
+                    re.search(br"(?mi)^.*%s.*$" %
+                              re.escape(basename.encode("ascii")),
+                              _get(result, "stdout", b""))):
+                cleanup_failure = _ControllerFailure(
+                    _get(result, "error_category") or "rejected",
+                    "IOx instruction cleanup could not be verified", 4)
+            else:
+                protocol["instruction_source_removed"] = True
+        except _ControllerFailure as exc:
+            cleanup_failure = exc
+        finally:
+            attempt.safety_recovery = previous
+        if primary is not None:
+            raise primary
+        if cleanup_failure is not None:
+            raise cleanup_failure
 
     def _run_recipe(self, attempt, action, on_output):
         # Cancellation observed after board-scoped revalidation wins over any
@@ -4467,7 +4705,9 @@ class IoxController(object):
                     "rank": 0, "begun": False,
                     "iox_polls": 0, "polls": {}, "cleanup": False,
                     "finished": False, "terminal_ready": False,
-                    "phase_deadlines": {}, "scp_prepared": False}
+                    "phase_deadlines": {}, "scp_prepared": False,
+                    "instruction_source_attempted": False,
+                    "instruction_source_removed": False}
         try:
             while True:
                 attempt.check()
@@ -4557,6 +4797,9 @@ class IoxController(object):
                         if code:
                             attempt.recovery_code = code
                             raise _ControllerFailure("readback_unknown", "verification restoration failed", code)
+                    elif (operation == "stage_instructions" and
+                          arguments == {} and action == "install"):
+                        self._stage_instructions(attempt, protocol)
                     elif operation == "command" and isinstance(arguments, dict) and set(arguments) == {"name"}:
                         name = arguments["name"]
                         if action == "uninstall" and name not in _UNINSTALL_COMMANDS:

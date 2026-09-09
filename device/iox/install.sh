@@ -179,7 +179,8 @@ def valid_result(value, sequence, attempt, operation, ready, previous_phase):
             value["recipe_returncode"] is None and nullable_code(value["recovery_code"]))
     if not valid:
         return False
-    control = operation in ("begin_install", "deployed", "cleanup", "finish")
+    control = operation in (
+        "begin_install", "deployed", "stage_instructions", "cleanup", "finish")
     if control and value["returncode"] is not None:
         return False
     if value["ok"]:
@@ -197,7 +198,8 @@ def valid_result(value, sequence, attempt, operation, ready, previous_phase):
             return False
         prior = previous_phase or "observed"
         if value["ok"]:
-            if operation in ("command", "upload_wrapper", "upload_certificate"):
+            if operation in ("command", "upload_wrapper", "upload_certificate",
+                             "stage_instructions"):
                 if value["revision"] != expected_revision or value["phase"] != prior:
                     return False
             elif operation == "begin_install":
@@ -231,7 +233,7 @@ try:
     if len(binding) != 11 or not call:
         raise ValueError("binding")
     operation = call[0]
-    if action not in ("install", "uninstall") or operation not in ("command", "upload_wrapper", "upload_certificate", "begin_install", "deployed", "cleanup", "finish"):
+    if action not in ("install", "uninstall") or operation not in ("command", "upload_wrapper", "upload_certificate", "begin_install", "deployed", "stage_instructions", "cleanup", "finish"):
         raise ValueError("operation")
     peer = socket.socket(fileno=os.dup(fd))
     if peer.family != socket.AF_UNIX or peer.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
@@ -508,6 +510,7 @@ PY
       [ "$state" = ACTIVATED ] && break
       [ "$i" -lt 24 ] || return 4
     done
+    request_plain stage_instructions || return $?
     request_plain command copy_certificate || return $?
     request_plain command remove_certificate || return $?
     request_plain command remove_wrapper || return $?
