@@ -3667,7 +3667,6 @@
   // advisory, and inventing "no schedule" from a failed fetch would be worse
   // than saying nothing at all.
   var SCHEDULES = [];
-  var schedulesReadOk = false;
   var schedPanel = document.getElementById('sched-panel');
   var schedStatus = document.getElementById('sched-status');
   var schedRefreshGeneration = 0;
@@ -3679,7 +3678,6 @@
       var body = await response.json();
       if (!body || !Array.isArray(body.schedules)) return;
       SCHEDULES = body.schedules;
-      schedulesReadOk = true;
     } catch (e) {
       if (e && e.name === 'AbortError') throw e;
     }
@@ -3701,13 +3699,22 @@
   }
 
   async function reaffirmSchedule(row) {
-    var response = await fetch(
-      '/api/v1/schedules/' + encodeURIComponent(row.id) + '/reaffirm', {
-        method: 'POST',
-        headers: csrfHdr({ 'Content-Type': 'application/json',
-                           'If-Match': row.etag }),
-        body: '{}'
-      });
+    var response;
+    try {
+      response = await fetch(
+        '/api/v1/schedules/' + encodeURIComponent(row.id) + '/reaffirm', {
+          method: 'POST',
+          headers: csrfHdr({ 'Content-Type': 'application/json',
+                             'If-Match': row.etag }),
+          body: '{}'
+        });
+    } catch (e) {
+      // The request may or may not have been applied. Say that, rather than
+      // reporting a failure the operator would re-attempt blindly.
+      schedStatus.textContent = 'Re-affirming ' + row.id +
+        ' did not complete; refresh to see whether it was applied.';
+      return renderSchedules();
+    }
     if (response.status === 412) {
       schedStatus.textContent = 'Schedule ' + row.id +
         ' changed elsewhere; nothing was re-affirmed. Refresh and retry.';
@@ -3746,7 +3753,6 @@
     var body = await response.json();
     if (mine !== schedRefreshGeneration) return;
     SCHEDULES = body.schedules || [];
-    schedulesReadOk = true;
     var latest = {};
     for (var i = 0; i < SCHEDULES.length && i < SCHED_HISTORY_ROWS; i++) {
       try {
