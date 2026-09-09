@@ -12100,6 +12100,75 @@ def test_device_type_filters_have_server_and_client_preview_parity():
         gui_server.make_server)
 
 
+def test_failed_target_preview_cannot_be_replayed_from_selection_cache():
+    import subprocess
+
+    js = _webroot("app.js")
+    refresh = "async function refreshDevices() {" + js.split(
+        "async function refreshDevices() {", 1)[1].split(
+            "\n\n  // Populate the credential filter", 1)[0]
+    select_all = "async function selectAllMatchingDevices() {" + js.split(
+        "async function selectAllMatchingDevices() {", 1)[1].split(
+            "\n  // Every selected-action shares one lock", 1)[0]
+    script = r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    textContent: '', innerHTML: '', checked: true, indeterminate: true,
+    disabled: false
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el};
+class AbortController {
+  constructor() { this.signal = {}; }
+  abort() {}
+}
+var devicesRefreshGeneration = 0, devicesRefreshController = null;
+var LAST_DEVICES = [{device_id: 'stale-row'}], LAST_DEV_NOW = 77;
+var devTotal = 1, devOffset = 0, DEV_PAGE_SIZE = 200;
+var SELECTED = {'keep-selected': true};
+var peerPolicyReadOk = true, peerPolicy = {}, devStatus = el('dev-status');
+var selectAllMatchingBusy = false;
+function applyPendingDevFilter() {}
+function devicesPageQuery() { return ''; }
+function deviceFilterState() { return {}; }
+function deviceFilterQuery() { return ''; }
+function renderPeerPolicyPanel() {}
+var pagerTotal = null;
+function updateDevPager(total) { pagerTotal = total; }
+var replayed = null;
+function renderDevices(devices) { replayed = devices.slice(); }
+async function fetch(url) {
+  if (url.startsWith('/api/v1/devices?')) {
+    return {ok: false, status: 503, json: async () => ({})};
+  }
+  if (url === '/api/v1/onboard/jobs') {
+    return {ok: true, status: 200, json: async () => ({jobs: []})};
+  }
+  return {ok: true, status: 200, json: async () => ({})};
+}
+''' + refresh + '\n' + select_all + r'''
+(async () => {
+  await refreshDevices();
+  assert.deepEqual(LAST_DEVICES, []);
+  assert.equal(LAST_DEV_NOW, 0);
+  assert.match(el('dev-rows').innerHTML, /preview unavailable/i);
+  assert.equal(el('dev-count').textContent, 'Results unavailable');
+  assert.equal(pagerTotal, 0);
+  assert.equal(el('mark-all').checked, false);
+  assert.equal(el('mark-all').indeterminate, false);
+  await selectAllMatchingDevices();
+  assert.deepEqual(replayed, []);
+  assert.deepEqual(SELECTED, {'keep-selected': true});
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        ["node", "-"], input=script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_resolved_type_filter_fails_visible_on_unreadable_record_state(tmp_path):
     calls = []
 

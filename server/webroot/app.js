@@ -1286,6 +1286,8 @@
     if (!dr.ok) {
       devStatus.textContent = 'Device target preview unavailable (' + dr.status +
         ').';
+      LAST_DEVICES = [];
+      LAST_DEV_NOW = 0;
       document.getElementById('dev-rows').innerHTML =
         '<tr><td colspan="13" class="muted">Device target preview unavailable.</td></tr>';
       document.getElementById('dev-count').textContent = 'Results unavailable';
