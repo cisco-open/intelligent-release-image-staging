@@ -551,10 +551,12 @@ def request(value):
         if scenario=='malformed_uninstall_journal_half': result['revision']=0
     if signal_case and len(signal_case)==3 and signal_case[2]=='malformed':
         result['unexpected']='fixture-login-secret'
+    malformed_app_list=scenario=='malformed_app_list' and name=='app_list' and counts[name]==1
+    if malformed_app_list: result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_key': result['unexpected']='fixture-login-secret'
     if scenario=='malformed_response_status': result['recipe_returncode']=0
     send(result)
-    if scenario.endswith('_malformed') or scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
+    if malformed_app_list or scenario.endswith('_malformed') or scenario.startswith(('malformed_response','malformed_success','malformed_install_','malformed_uninstall_')):
         control.shutdown(socket.SHUT_WR)
         return
     if finished:
@@ -819,7 +821,7 @@ ASSERTIONS
   [ "$status" -eq 4 ]
   _iox_assert_trace count remove_app_config 1
   [[ "$output" == *'did not reach DEPLOYED within 2 seconds'* ]]
-  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" == *'onboarding aborted.'* ]]
   [[ "$output" != *'Partial app configuration removed'* ]]
   _iox_assert_trace absent app_activate app_start
   _iox_assert_trace finish INSTALLING
@@ -1031,7 +1033,7 @@ _assert_signal_finalization() {
   [ "$status" -eq 4 ]
   _iox_assert_trace count remove_app_config 1
   [[ "$output" == *'did not reach DEPLOYED within 2 seconds'* ]]
-  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" == *'onboarding aborted.'* ]]
   [[ "$output" != *'repeated app configuration removal rejected'* ]]
   [[ "$output" != *'Partial app configuration removed'* ]]
   [[ "$output" != *'onboard complete:'* ]]
@@ -1106,7 +1108,7 @@ _assert_signal_finalization() {
   run _iox_controller_run install install_poll_exhaustion
   [ "$status" -eq 4 ]
   _iox_assert_trace count remove_app_config 1
-  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" == *'onboarding aborted.'* ]]
   [[ "$output" != *'Partial app configuration removed'* ]]
   [[ "$output" != *'onboard complete:'* ]]
   _iox_assert_trace count app_list 24
@@ -1114,4 +1116,19 @@ _assert_signal_finalization() {
   _iox_assert_trace count finish 1
   _iox_assert_trace absent app_activate app_start
   _iox_assert_trace finish INSTALLING
+}
+
+@test "malformed first app-list response preserves protocol failure without promising cleanup" {
+  _iox_fixture_setup
+  run _iox_controller_run install malformed_app_list
+  [ "$status" -eq 200 ] || { printf '%s\n' "$output"; return 1; }
+  _iox_assert_trace count app_list 1
+  _iox_assert_trace count remove_app_config 1
+  _iox_assert_trace count cleanup 0
+  _iox_assert_trace count finish 0
+  _iox_assert_trace absent deployed app_activate app_start
+  [[ "$output" == *'invalid private IOx controller protocol'* ]]
+  [[ "$output" != *'controller cleanup follows'* ]] || { printf '%s\n' "$output"; return 1; }
+  [[ "$output" == *'Application deployment did not complete; onboarding aborted.'* ]]
+  [[ "$output" != *'onboard complete:'* ]]
 }
