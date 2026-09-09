@@ -51,6 +51,14 @@ def _definition():
                      "window_seconds": 3600}}
 
 
+def _onboard_definition(max_devices):
+    return {"kind": "onboard",
+            "target": {"filters": {}, "device_ids": []},
+            "payload": {"max_devices": max_devices},
+            "when": {"kind": "once", "at": NOW + 60,
+                     "window_seconds": 3600}}
+
+
 def test_schedule_cli_is_executable_spdx_and_docker_installs_dependencies():
     assert os.path.isfile(CLI) and os.access(CLI, os.X_OK)
     text = open(CLI, encoding="utf-8").read()
@@ -145,6 +153,96 @@ def test_schedule_cli_default_cas_is_numeric_and_force_is_wildcard(
                         "--force"]) == 0
     capsys.readouterr()
     assert expected == [1, "*"]
+
+
+def test_schedule_cli_delete_uses_role_coordinator(
+        tmp_path, monkeypatch, capsys):
+    module = _cli_module()
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path))
+    monkeypatch.setenv("IRIS_SCHEDULE_NOW", str(NOW))
+    schedules.ScheduleStore(tmp_path).create(
+        "s-one", _definition(), actor="cli:iris-schedule", now=NOW,
+        preview={"revision": 0, "now": NOW, "device_ids": []})
+    calls = []
+
+    def coordinated_delete(coordinator, schedule_id, *, expected_rev):
+        calls.append((schedule_id, expected_rev))
+        return coordinator.schedule_store.delete(
+            schedule_id, expected_rev=expected_rev)
+
+    monkeypatch.setattr(
+        module.role_management.RoleCoordinator, "delete_schedule",
+        coordinated_delete, raising=False)
+    assert module.main(["delete", "s-one"]) == 0
+    capsys.readouterr()
+    assert calls == [("s-one", 1)]
+    assert schedules.ScheduleStore(tmp_path).get("s-one") is None
+
+
+def test_schedule_cli_validates_create_put_patch_and_import_before_mutation(
+        tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    for index in (1, 2):
+        fleet.upsert({"device_id": "edge-%d" % index,
+                      "device_ip": "192.0.2.%d" % index})
+
+    invalid_path = tmp_path / "invalid-onboard.json"
+    invalid_path.write_text(json.dumps(_onboard_definition(1)),
+                            encoding="utf-8")
+    refused = _run(
+        tmp_path, "create", "s-refused", "--file", str(invalid_path))
+    assert refused.returncode == 2
+    assert json.loads(refused.stderr)["error"]["code"] == "invalid_schedule"
+    assert "max_devices_exceeded" in refused.stderr
+    assert schedules.ScheduleStore(tmp_path).get("s-refused") is None
+
+    valid_path = tmp_path / "valid-onboard.json"
+    valid_path.write_text(json.dumps(_onboard_definition(2)), encoding="utf-8")
+    created = _run(
+        tmp_path, "create", "s-onboard", "--file", str(valid_path))
+    assert created.returncode == 0, created.stderr
+    before = schedules.ScheduleStore(tmp_path).get("s-onboard")
+
+    refused_put = _run(
+        tmp_path, "put", "s-onboard", "--file", str(invalid_path))
+    assert refused_put.returncode == 2
+    assert "max_devices_exceeded" in refused_put.stderr
+    assert schedules.ScheduleStore(tmp_path).get("s-onboard") == before
+
+    patch_path = tmp_path / "invalid-payload.json"
+    patch_path.write_text('{"payload":{"max_devices":1}}', encoding="utf-8")
+    refused_patch = _run(
+        tmp_path, "patch", "s-onboard", "--file", str(patch_path))
+    assert refused_patch.returncode == 2
+    assert "max_devices_exceeded" in refused_patch.stderr
+    assert schedules.ScheduleStore(tmp_path).get("s-onboard") == before
+
+    destination = tmp_path / "import-state"
+    destination.mkdir()
+    import_fleet = gui_fleet.FleetStore(str(destination))
+    for index in (1, 2):
+        import_fleet.upsert({"device_id": "edge-%d" % index,
+                             "device_ip": "192.0.2.%d" % index})
+    source = tmp_path / "validation.csv"
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=(
+        "id", "kind", "target", "payload", "when", "after", "state"))
+    writer.writeheader()
+    for schedule_id, definition in (
+            ("s-assign", _definition()),
+            ("s-onboard", _onboard_definition(1))):
+        normalized = schedules.normalize_definition(definition)
+        writer.writerow({
+            "id": schedule_id, "kind": normalized["kind"],
+            "target": json.dumps(normalized["target"]),
+            "payload": json.dumps(normalized["payload"]),
+            "when": json.dumps(normalized["when"]), "after": "",
+            "state": normalized["state"]})
+    source.write_text(out.getvalue(), encoding="utf-8")
+    refused_import = _run_state(destination, "import", str(source))
+    assert refused_import.returncode == 2
+    assert "max_devices_exceeded" in refused_import.stderr
+    assert schedules.ScheduleStore(destination).list() == []
 
 
 def test_schedule_cli_status_target_refuses_create_and_retarget(tmp_path):
