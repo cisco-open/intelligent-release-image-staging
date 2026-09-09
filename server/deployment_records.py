@@ -908,7 +908,7 @@ class DeploymentRecordStore:
         obligations = 0
         obligation_boards = set()
         journals = []
-        predecessors = set()
+        claimed_predecessors = set()
         for record_key, record in records.items():
             if not isinstance(record_key, str):
                 raise ValueError("deployment record key must be text")
@@ -923,14 +923,14 @@ class DeploymentRecordStore:
             if "predecessor_record_id" in record:
                 predecessor_id = record["predecessor_record_id"]
                 predecessor = records.get(predecessor_id)
-                predecessor_states = ({"abandoned", "unknown"}
-                                      if record.get("state") == "removed"
-                                      else {"abandoned"})
+                historical = record.get("state") == "removed"
                 if (not isinstance(predecessor, dict) or predecessor_id == record_id or
-                        predecessor_id in predecessors or
+                        (not historical and
+                         predecessor_id in claimed_predecessors) or
                         predecessor.get("device_id") != record["device_id"] or
                         predecessor.get("schedule_provenance") != record["schedule_provenance"] or
-                        predecessor.get("state") not in predecessor_states or
+                        (not historical and
+                         predecessor.get("state") != "abandoned") or
                         "recovery" not in predecessor):
                     raise ValueError("invalid scheduled record predecessor lineage")
                 journal = predecessor.get("iox_verification")
@@ -939,7 +939,12 @@ class DeploymentRecordStore:
                         journal.get("unresolved") is not False or
                         journal.get("instruction_cleanup_pending", False)):
                     raise ValueError("record predecessor has outstanding IOx recovery")
-                predecessors.add(predecessor_id)
+                # A removed successor retains a pinned audit link, but no
+                # longer owns or constrains the restored predecessor. Multiple
+                # retired attempts may therefore name it; at most one live
+                # successor may claim it as current lineage authority.
+                if not historical:
+                    claimed_predecessors.add(predecessor_id)
             if "iox_verification" in record:
                 journal = record["iox_verification"]
                 if record.get("adopted") is True:

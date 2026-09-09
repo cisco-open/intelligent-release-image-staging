@@ -1618,6 +1618,42 @@ def test_retiring_untouched_iox_successor_restores_predecessor_authority(
     assert predecessor["iox_verification"] == terminal
     assert store.recoverable_for_device("edge-01", strict=True)[
         "record_id"] == "old"
+    applying = store.transition("old", "applying")
+    assert applying["state"] == "applying"
+    assert store.get(successor_id, strict=True)[
+        "predecessor_record_id"] == "old"
+
+
+def test_restored_iox_predecessor_can_create_another_successor(tmp_path):
+    ref, observation = _iox_transcript(tmp_path, state="disabled")
+    store = deployment_records.DeploymentRecordStore(
+        str(tmp_path), now_fn=lambda: 100)
+    store.create(_record(
+        record_id="old", controller_id=_IOX_CONTROLLER,
+        schedule_provenance=_provenance(), resolved={"platform": "iox"}))
+    journal = store.iox_begin(
+        "old", _IOX_CONTROLLER, _IOX_BOARD, _iox_wrapper(), observation, ref)
+    store.recover_interrupted()
+    store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    first = _scheduled(
+        store, record_id="first", resume_record_id="old",
+        controller_id=_IOX_CONTROLLER, resolved={"platform": "iox"})
+    store.retire_planned(first["record"]["record_id"])
+
+    second = _scheduled(
+        store, record_id="second", resume_record_id="old",
+        controller_id=_IOX_CONTROLLER, resolved={"platform": "iox"})
+
+    assert second["status"] == "created"
+    assert second["predecessor_record_id"] == "old"
+    assert store.get("old", strict=True)["state"] == "abandoned"
+    assert store.get("first", strict=True)["state"] == "removed"
+    assert store.get("first", strict=True)["predecessor_record_id"] == "old"
+    assert store.get("second", strict=True)["predecessor_record_id"] == "old"
 
 
 @pytest.mark.parametrize("extra", [
