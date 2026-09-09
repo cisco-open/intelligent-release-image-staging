@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import catalog
+import gui_app
 import gui_fleet
 import management_api
 
@@ -21,13 +22,14 @@ PLATFORMS = ("guestshell", "iox", "router", "xr-appmgr")
 
 
 @pytest.fixture
-def handler_factory(monkeypatch):
+def handler_factory(monkeypatch, tmp_path):
     # Exercise the real handler closure and stores without opening a socket.
     monkeypatch.setattr(management_api, "_ConsoleServer", lambda address, handler:
                         SimpleNamespace(RequestHandlerClass=handler))
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
 
     def make(**kwargs):
-        server = management_api.make_server("127.0.0.1", 0, None,
+        server = management_api.make_server("127.0.0.1", 0, app,
                                              now_fn=lambda: 1000, **kwargs)
         return object.__new__(server.RequestHandlerClass)
 
