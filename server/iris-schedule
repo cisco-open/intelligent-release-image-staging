@@ -220,7 +220,17 @@ def _json_cell(raw, field):
 def _csv_rows(path):
     text = _read_text(path)
     try:
-        reader = csv.DictReader(io.StringIO(text, newline=""))
+        stream = io.StringIO(text, newline="")
+        while True:
+            position = stream.tell()
+            line = stream.readline()
+            if line == "":
+                break
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            stream.seek(position)
+            break
+        reader = csv.DictReader(stream)
         if tuple(reader.fieldnames or ()) != CSV_FIELDS:
             raise CliInputError(
                 "CSV header must be exactly %s" % ",".join(CSV_FIELDS),

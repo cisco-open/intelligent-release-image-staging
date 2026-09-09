@@ -12,11 +12,14 @@ import subprocess
 import sys
 
 import gui_fleet
+import peer_policy
 import schedules
 
 
 SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(SERVER_DIR, "iris-schedule")
+SCHEDULE_TEMPLATE = os.path.join(
+    os.path.dirname(SERVER_DIR), "fleet", "schedules.csv.example")
 NOW = 1_788_883_200
 
 
@@ -212,6 +215,21 @@ def test_schedule_csv_prevalidation_round_trip_and_partial_report(tmp_path):
     refused = _run(tmp_path, "import", str(invalid))
     assert refused.returncode != 0
     assert schedules.ScheduleStore(tmp_path).list() == before
+
+
+def test_schedule_csv_import_accepts_tracked_comment_preamble(tmp_path):
+    peer_policy.define_role(
+        str(tmp_path / "peer-policy.json"),
+        str(tmp_path / "peer-policy.lkg.json"), "boat",
+        {"restricted": True}, "test", NOW)
+    imported = _run(tmp_path, "import", SCHEDULE_TEMPLATE)
+    assert imported.returncode == 0, imported.stderr
+    report = json.loads(imported.stdout)
+    assert [(row["id"], row["status"]) for row in report["results"]] == [
+        ("s-boat", "applied")]
+    row = schedules.ScheduleStore(tmp_path).get("s-boat")
+    assert row["target"]["filters"] == {"role": "boat"}
+    assert row["when"]["tz"] == "Europe/Stockholm"
 
 
 def test_schedule_csv_prevalidates_references_and_all_target_authorities(
