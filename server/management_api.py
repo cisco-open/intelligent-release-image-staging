@@ -1774,6 +1774,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 RecursionError, OverflowError):
             return None
 
+    def instruction_heartbeat_for_device(device_id):
+        """Read one heartbeat shard without turning evidence loss into 5xx."""
+        if catalog is None:
+            return {}, False
+        reader = getattr(catalog, "get_device", None)
+        if not callable(reader):
+            return {}, False
+        try:
+            heartbeat = reader(device_id)
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return {}, False
+        if heartbeat is None:
+            return {}, True
+        if not isinstance(heartbeat, dict):
+            return {}, False
+        return heartbeat, True
+
     def instruction_raw_policy_snapshot(unavailable_ok=True):
         if catalog is None:
             return None
@@ -4005,7 +4023,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         constraint_source="pinned-aria2-client")
                     qos["catalog_tick_s"].update(offline_horizon_s=_HEARTBEAT_FRESH,
                                                 heartbeat_always=True)
-                    result.update(device_id=did, qos=qos, delivery_state="pre-instructions")
+                    heartbeat, heartbeat_available = \
+                        instruction_heartbeat_for_device(did)
+                    revoked_principals = instruction_revocation_snapshot()
+                    revocation_available = isinstance(
+                        revoked_principals, (set, frozenset))
+                    revoked = ("device:%s" % did in revoked_principals
+                               if revocation_available else None)
+                    instruction = _instruction_device_projection(
+                        heartbeat, revoked, now_fn(),
+                        heartbeat_available=heartbeat_available)
+                    result.update(
+                        device_id=did, qos=qos,
+                        delivery_state="pre-instructions",
+                        instruction=instruction)
                     if query:
                         tracker_state = query["tracker_state"][0]
                         tracker_qos = peer_policy.explain_tracker_qos(

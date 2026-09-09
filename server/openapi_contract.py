@@ -1336,7 +1336,8 @@ def _json_success_example(route):
             "role_drift": {"count": 0, "device_ids": [], "truncated": False}},
         "/devices/{device_id}/effective-qos": {"revision": 4, "degraded": False,
             "fail_closed": False, "device_id": "edge-01",
-            "delivery_state": "pre-instructions", "qos": _qos_example()},
+            "delivery_state": "pre-instructions", "qos": _qos_example(),
+            "instruction": _instruction_device_example()},
         "/peer-policy/explain": {"revision": 4, "degraded": False,
             "fail_closed": False, "a": _explain_side("edge-01"),
             "b": _explain_side("edge-02"), "mutual": True},
@@ -2043,10 +2044,21 @@ def _success(route):
         for row in schema["properties"]["qos"]["properties"].values():
             row["required"] = [key for key in row["required"] if key != "derived_from"]
         schema["properties"].update({
+            "delivery_state": {
+                "type": "string", "const": "pre-instructions",
+                "deprecated": True,
+                "description": (
+                    "Legacy Phase 0 compatibility sentinel. Always "
+                    "pre-instructions; use instruction for current delivery "
+                    "and application status."),
+            },
+            "instruction": _instruction_device_schema(),
             "tracker_state": {
                 "type": "string", "enum": ["seeder", "leecher"]},
             "tracker_qos": _tracker_qos_explanation_schema(),
         })
+        if "instruction" not in schema["required"]:
+            schema["required"].append("instruction")
         schema["dependentRequired"] = {
             "tracker_state": ["tracker_qos"],
             "tracker_qos": ["tracker_state"],

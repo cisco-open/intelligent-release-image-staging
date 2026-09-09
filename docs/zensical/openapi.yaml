@@ -5000,7 +5000,10 @@
                       "type": "string"
                     },
                     "delivery_state": {
-                      "type": "string"
+                      "type": "string",
+                      "const": "pre-instructions",
+                      "deprecated": true,
+                      "description": "Legacy Phase 0 compatibility sentinel. Always pre-instructions; use instruction for current delivery and application status."
                     },
                     "qos": {
                       "title": "ConsoleDevicesDeviceIdEffectiveQosResponseQos",
@@ -5597,6 +5600,200 @@
                       ],
                       "additionalProperties": true
                     },
+                    "instruction": {
+                      "type": "object",
+                      "properties": {
+                        "display_state": {
+                          "type": "string",
+                          "enum": [
+                            "applied",
+                            "lkg",
+                            "stale",
+                            "rejected",
+                            "tracker-only",
+                            "pre-instructions",
+                            "unknown",
+                            "unavailable",
+                            "pending",
+                            "forbidden",
+                            "floor_reset",
+                            "none",
+                            "revoked"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "evidence": {
+                          "type": "string",
+                          "enum": [
+                            "agent-asserted",
+                            "server-observed"
+                          ]
+                        },
+                        "underlying_state": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "allowlist_expired",
+                            "applied",
+                            "audience_mismatch",
+                            "floor_reset",
+                            "instr_forbidden",
+                            "instr_pending",
+                            "instr_unavailable",
+                            "key_rejected",
+                            "lkg",
+                            "lkg_rejected",
+                            "lkg_unreadable",
+                            "none",
+                            "oversize",
+                            "reasserted",
+                            "rollback_rejected",
+                            "stale_expired",
+                            "tamper_rejected",
+                            "tracker-only",
+                            "verifier_missing",
+                            null
+                          ]
+                        },
+                        "underlying_label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "underlying_evidence": {
+                          "type": "string",
+                          "const": "agent-asserted"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "bad_mac",
+                            "unknown_key",
+                            null
+                          ]
+                        },
+                        "reported_instr_serial": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "accepted_identity": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "required": [
+                                "epoch",
+                                "instr_serial",
+                                "policy_revision"
+                              ],
+                              "additionalProperties": false,
+                              "properties": {
+                                "epoch": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                },
+                                "instr_serial": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                },
+                                "policy_revision": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Complete accepted-envelope identity asserted by the agent. Null means no complete accepted identity was reported."
+                        },
+                        "verify_level": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "sig",
+                            "none",
+                            null
+                          ]
+                        },
+                        "pointer_skew": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "qos_drift_count": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 49
+                        },
+                        "report_age_seconds": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "report_stale": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "revoked": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "revocation_evidence": {
+                          "type": "string",
+                          "const": "server-observed"
+                        }
+                      },
+                      "required": [
+                        "display_state",
+                        "label",
+                        "evidence",
+                        "underlying_state",
+                        "underlying_label",
+                        "underlying_evidence",
+                        "reason",
+                        "reported_instr_serial",
+                        "accepted_identity",
+                        "verify_level",
+                        "pointer_skew",
+                        "qos_drift_count",
+                        "report_age_seconds",
+                        "report_stale",
+                        "revoked",
+                        "revocation_evidence"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
+                    },
                     "tracker_state": {
                       "type": "string",
                       "enum": [
@@ -5708,7 +5905,8 @@
                     "fail_closed",
                     "device_id",
                     "delivery_state",
-                    "qos"
+                    "qos",
+                    "instruction"
                   ],
                   "additionalProperties": true,
                   "dependentRequired": {
@@ -6030,6 +6228,28 @@
                       "value": 55,
                       "source": "builtin"
                     }
+                  },
+                  "instruction": {
+                    "display_state": "applied",
+                    "label": "applied r9223372036854775807",
+                    "evidence": "agent-asserted",
+                    "underlying_state": "applied",
+                    "underlying_label": "applied r9223372036854775807",
+                    "underlying_evidence": "agent-asserted",
+                    "reason": null,
+                    "reported_instr_serial": 9223372036854775807,
+                    "accepted_identity": {
+                      "epoch": 11,
+                      "instr_serial": 9223372036854775807,
+                      "policy_revision": 7
+                    },
+                    "verify_level": "sig",
+                    "pointer_skew": false,
+                    "qos_drift_count": 0,
+                    "report_age_seconds": 3,
+                    "report_stale": false,
+                    "revoked": false,
+                    "revocation_evidence": "server-observed"
                   },
                   "tracker_state": "seeder",
                   "tracker_qos": {
@@ -34215,7 +34435,10 @@
                       "type": "string"
                     },
                     "delivery_state": {
-                      "type": "string"
+                      "type": "string",
+                      "const": "pre-instructions",
+                      "deprecated": true,
+                      "description": "Legacy Phase 0 compatibility sentinel. Always pre-instructions; use instruction for current delivery and application status."
                     },
                     "qos": {
                       "title": "ManagementDevicesDeviceIdEffectiveQosResponseQos",
@@ -34812,6 +35035,200 @@
                       ],
                       "additionalProperties": true
                     },
+                    "instruction": {
+                      "type": "object",
+                      "properties": {
+                        "display_state": {
+                          "type": "string",
+                          "enum": [
+                            "applied",
+                            "lkg",
+                            "stale",
+                            "rejected",
+                            "tracker-only",
+                            "pre-instructions",
+                            "unknown",
+                            "unavailable",
+                            "pending",
+                            "forbidden",
+                            "floor_reset",
+                            "none",
+                            "revoked"
+                          ]
+                        },
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "evidence": {
+                          "type": "string",
+                          "enum": [
+                            "agent-asserted",
+                            "server-observed"
+                          ]
+                        },
+                        "underlying_state": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "allowlist_expired",
+                            "applied",
+                            "audience_mismatch",
+                            "floor_reset",
+                            "instr_forbidden",
+                            "instr_pending",
+                            "instr_unavailable",
+                            "key_rejected",
+                            "lkg",
+                            "lkg_rejected",
+                            "lkg_unreadable",
+                            "none",
+                            "oversize",
+                            "reasserted",
+                            "rollback_rejected",
+                            "stale_expired",
+                            "tamper_rejected",
+                            "tracker-only",
+                            "verifier_missing",
+                            null
+                          ]
+                        },
+                        "underlying_label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 96
+                        },
+                        "underlying_evidence": {
+                          "type": "string",
+                          "const": "agent-asserted"
+                        },
+                        "reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "bad_mac",
+                            "unknown_key",
+                            null
+                          ]
+                        },
+                        "reported_instr_serial": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "accepted_identity": {
+                          "oneOf": [
+                            {
+                              "type": "object",
+                              "required": [
+                                "epoch",
+                                "instr_serial",
+                                "policy_revision"
+                              ],
+                              "additionalProperties": false,
+                              "properties": {
+                                "epoch": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                },
+                                "instr_serial": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                },
+                                "policy_revision": {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "maximum": 9223372036854775807
+                                }
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Complete accepted-envelope identity asserted by the agent. Null means no complete accepted identity was reported."
+                        },
+                        "verify_level": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "enum": [
+                            "sig",
+                            "none",
+                            null
+                          ]
+                        },
+                        "pointer_skew": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "qos_drift_count": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 49
+                        },
+                        "report_age_seconds": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "report_stale": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "revoked": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "revocation_evidence": {
+                          "type": "string",
+                          "const": "server-observed"
+                        }
+                      },
+                      "required": [
+                        "display_state",
+                        "label",
+                        "evidence",
+                        "underlying_state",
+                        "underlying_label",
+                        "underlying_evidence",
+                        "reason",
+                        "reported_instr_serial",
+                        "accepted_identity",
+                        "verify_level",
+                        "pointer_skew",
+                        "qos_drift_count",
+                        "report_age_seconds",
+                        "report_stale",
+                        "revoked",
+                        "revocation_evidence"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
+                    },
                     "tracker_state": {
                       "type": "string",
                       "enum": [
@@ -34923,7 +35340,8 @@
                     "fail_closed",
                     "device_id",
                     "delivery_state",
-                    "qos"
+                    "qos",
+                    "instruction"
                   ],
                   "additionalProperties": true,
                   "dependentRequired": {
@@ -35245,6 +35663,28 @@
                       "value": 55,
                       "source": "builtin"
                     }
+                  },
+                  "instruction": {
+                    "display_state": "applied",
+                    "label": "applied r9223372036854775807",
+                    "evidence": "agent-asserted",
+                    "underlying_state": "applied",
+                    "underlying_label": "applied r9223372036854775807",
+                    "underlying_evidence": "agent-asserted",
+                    "reason": null,
+                    "reported_instr_serial": 9223372036854775807,
+                    "accepted_identity": {
+                      "epoch": 11,
+                      "instr_serial": 9223372036854775807,
+                      "policy_revision": 7
+                    },
+                    "verify_level": "sig",
+                    "pointer_skew": false,
+                    "qos_drift_count": 0,
+                    "report_age_seconds": 3,
+                    "report_stale": false,
+                    "revoked": false,
+                    "revocation_evidence": "server-observed"
                   },
                   "tracker_state": "seeder",
                   "tracker_qos": {
