@@ -185,6 +185,22 @@ def fsync_dir(path):
         pass
 
 
+def open_created(path, flags, mode):
+    previous_umask = os.umask(0)
+    try:
+        return os.open(path, flags, mode)
+    finally:
+        os.umask(previous_umask)
+
+
+def mkdir_mode(path, mode):
+    previous_umask = os.umask(0)
+    try:
+        os.mkdir(path, mode)
+    finally:
+        os.umask(previous_umask)
+
+
 def write_phase(tx, value):
     tmp = os.path.join(tx, ".phase-%d" % os.getpid())
     with open(tmp, "wb") as stream:
@@ -283,7 +299,7 @@ def files_equal_regular(first, second, max_bytes):
             right.close()
 
 
-def checked_digest(bundle_path, digest_path):
+def checked_digest(bundle_path, digest_path, directory):
     try:
         digest_stream, digest_identity = open_regular(digest_path, 65)
         with digest_stream:
@@ -302,26 +318,36 @@ def checked_digest(bundle_path, digest_path):
     if bundle_identity[2] == 0:
         bundle_stream.close()
         raise BundleError("invalid-archive")
-    actual = hashlib.sha256()
-    copied = 0
-    while True:
-        chunk = bundle_stream.read(1024 * 1024)
-        if not chunk:
-            break
-        copied += len(chunk)
-        if copied > MAX_ARCHIVE:
-            bundle_stream.close()
-            raise BundleError("invalid-archive")
-        actual.update(chunk)
-    if copied != bundle_identity[2] \
-            or stream_identity(bundle_stream) != bundle_identity:
+    try:
+        snapshot = tempfile.TemporaryFile(
+            prefix=".bundle-compressed-", dir=directory)
+    except OSError:
         bundle_stream.close()
         raise BundleError("invalid-archive")
-    if actual.hexdigest().encode("ascii") != raw[:64]:
+    actual = hashlib.sha256()
+    copied = 0
+    try:
+        while copied < bundle_identity[2]:
+            chunk = bundle_stream.read(
+                min(1024 * 1024, bundle_identity[2] - copied))
+            if not chunk:
+                raise BundleError("invalid-archive")
+            copied += len(chunk)
+            actual.update(chunk)
+            snapshot.write(chunk)
+        if bundle_stream.read(1) \
+                or stream_identity(bundle_stream) != bundle_identity:
+            raise BundleError("invalid-archive")
+        if actual.hexdigest().encode("ascii") != raw[:64]:
+            raise BundleError("digest-mismatch")
+        snapshot.flush()
+        snapshot.seek(0)
+    except Exception:
+        snapshot.close()
+        raise
+    finally:
         bundle_stream.close()
-        raise BundleError("digest-mismatch")
-    bundle_stream.seek(0)
-    return bundle_stream, bundle_identity
+    return snapshot
 
 
 def tar_number(field):
@@ -458,7 +484,7 @@ def scan_tar(stream, expanded_size):
     return raw_members
 
 
-def bounded_tar_stream(stream, bundle_identity, directory):
+def bounded_tar_stream(stream, directory):
     expanded = tempfile.TemporaryFile(prefix=".bundle-expanded-", dir=directory)
     expanded_size = 0
     try:
@@ -475,8 +501,6 @@ def bounded_tar_stream(stream, bundle_identity, directory):
                     expanded.write(chunk)
         except (OSError, EOFError, zlib.error):
             raise BundleError("invalid-archive")
-        if stream_identity(stream) != bundle_identity:
-            raise BundleError("invalid-archive")
         expanded.flush()
         raw_members = scan_tar(expanded, expanded_size)
         expanded.seek(0)
@@ -487,14 +511,15 @@ def bounded_tar_stream(stream, bundle_identity, directory):
 
 
 def inspect_and_extract(bundle_path, digest_path, new_dir):
-    stream, bundle_identity = checked_digest(bundle_path, digest_path)
+    stream = checked_digest(
+        bundle_path, digest_path, os.path.dirname(new_dir))
     expected = set(ARCHIVE_FILES)
     seen = set()
     total = 0
     try:
         with stream:
             expanded, raw_members = bounded_tar_stream(
-                stream, bundle_identity, os.path.dirname(new_dir))
+                stream, os.path.dirname(new_dir))
             with expanded:
                 try:
                     archive = tarfile.open(fileobj=expanded, mode="r:")
@@ -684,7 +709,8 @@ def copy_snapshot(source, destination):
             destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 destination_flags |= os.O_NOFOLLOW
-            destination_fd = os.open(destination, destination_flags, 0o600)
+            destination_fd = open_created(
+                destination, destination_flags, stat.S_IMODE(opened.st_mode))
             while True:
                 chunk = os.read(source_fd, 1024 * 1024)
                 if not chunk:
@@ -701,7 +727,6 @@ def copy_snapshot(source, destination):
                     (after.st_dev, after.st_ino, after.st_size,
                      after.st_mtime_ns, after.st_ctime_ns):
                 raise BundleError("transaction-invalid")
-            os.fchmod(destination_fd, stat.S_IMODE(opened.st_mode))
             os.fsync(destination_fd)
         except BundleError:
             raise
@@ -715,13 +740,12 @@ def copy_snapshot(source, destination):
         return
     if stat.S_ISDIR(before.st_mode):
         try:
-            os.mkdir(destination, 0o700)
+            mkdir_mode(destination, stat.S_IMODE(before.st_mode))
             for name in sorted(os.listdir(source)):
                 if name in ("", ".", "..") or "/" in name:
                     raise BundleError("transaction-invalid")
                 copy_snapshot(os.path.join(source, name),
                               os.path.join(destination, name))
-            os.chmod(destination, stat.S_IMODE(before.st_mode))
             fsync_dir(destination)
             after = os.lstat(source)
         except BundleError:
