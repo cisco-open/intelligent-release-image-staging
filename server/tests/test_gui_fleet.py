@@ -317,8 +317,10 @@ def test_validate_record_accepts_the_xr_platform_on_xr_hardware(tmp_path):
                            platform="xr-appmgr"))
     assert saved["platform"] == "xr-appmgr"
     # and with no model recorded yet, where only the classified family knows
+    fs.upsert({"device_id": "xr-nomodel", "device_ip": "10.0.0.9"})
+    fs.update_observation("xr-nomodel", os_family="xr")
     saved = fs.upsert(dict(_XRHOST, device_id="xr-nomodel", model="",
-                           platform="xr-appmgr", os_family="xr"))
+                           platform="xr-appmgr"))
     assert saved["platform"] == "xr-appmgr"
 
 
@@ -340,9 +342,10 @@ def test_validate_record_refuses_the_xr_platform_on_a_non_8000_xr_family_device(
     appmgr recipe until the model shape is one this v1 agent actually
     supports."""
     fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, device_id="asr9k", model="ASR-9906", platform=""))
+    fs.update_observation("asr9k", os_family="xr")
     with pytest.raises(ValueError, match="IOS-XR"):
-        fs.upsert(dict(_ROUTED, device_id="asr9k", model="ASR-9906",
-                       platform="xr-appmgr", os_family="xr"))
+        fs.upsert({"device_id": "asr9k", "platform": "xr-appmgr"})
 
 
 def test_validate_record_xr_os_family_refuses_explicit_platform():
@@ -942,8 +945,9 @@ def test_csv_reimport_keeps_a_cached_os_family(tmp_path):
     os_family field surviving the round trip, not about resolving
     guestshell/iox/router."""
     fs = _fs(tmp_path)
-    seed = dict(_ROUTED, os_family="xr", platform="")
+    seed = dict(_ROUTED, platform="")
     fs.upsert(seed)
+    fs.update_observation("d1", os_family="xr")
     header = ",".join(gui_fleet.CSV_V2_COLS)
     row = ",".join(str(seed.get(c, "")) for c in gui_fleet.CSV_V2_COLS)
 
@@ -1131,6 +1135,211 @@ def test_csv_parse_preview_is_pure(tmp_path):
     assert parsed["records"][0]["role"] == "boat"
     assert fs.snapshot() == before
     assert [row["device_id"] for row in fs.list_devices()] == ["d1"]
+
+
+# ---------------------------------------------------------------------------
+# Closed fleet fields and trusted observations (issue #171)
+# ---------------------------------------------------------------------------
+
+def test_fleet_field_sets_are_explicit_and_legacy_aliases_are_not_public():
+    assert gui_fleet.OPERATOR_WRITABLE_FIELDS == frozenset({
+        "device_id", "device_ip", "management_type", "iris_vlan", "svi_ip",
+        "svi_mask", "app_ip", "app_mask", "app_gateway", "inband_vlan",
+        "ios_ssh_host", "model", "vpg_number", "nat_interface", "svi_igp",
+        "role", "platform", "credential_profile_id",
+    })
+    assert gui_fleet.SERVER_OWNED_FIELDS == frozenset({
+        "schema_version", "registered_at", "os_family",
+    })
+    assert gui_fleet.INTERNAL_OBSERVATION_FIELDS == frozenset({
+        "model", "os_family",
+    })
+    assert gui_fleet.STORED_FIELDS == (
+        gui_fleet.OPERATOR_WRITABLE_FIELDS
+        | gui_fleet.SERVER_OWNED_FIELDS
+        | frozenset({"vlan", "guest_ip"})
+    )
+    assert not {"vlan", "guest_ip"} & gui_fleet.OPERATOR_WRITABLE_FIELDS
+
+
+@pytest.mark.parametrize("ingress", ["full", "partial", "legacy"])
+def test_operator_ingress_rejects_unknown_future_fields_without_writing(
+        tmp_path, ingress):
+    fs = _fs(tmp_path)
+    if ingress == "partial":
+        fs.upsert(dict(_ROUTED))
+        record = {"device_id": "d1", "future_policy": "allow"}
+    elif ingress == "legacy":
+        record = {"device_id": "legacy1", "device_ip": "192.0.2.20",
+                  "future_policy": "allow"}
+    else:
+        record = dict(_ROUTED, future_policy="allow")
+    before = fs.snapshot()
+
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match=r"unknown fleet field.*future_policy"):
+        fs.upsert(record)
+
+    assert fs.snapshot() == before
+
+
+@pytest.mark.parametrize("value", [{"name": "lab"}, ["lab"], True])
+@pytest.mark.parametrize("ingress", ["full", "partial", "legacy"])
+def test_operator_ingress_rejects_nested_and_boolean_values(
+        tmp_path, ingress, value):
+    fs = _fs(tmp_path)
+    if ingress == "partial":
+        fs.upsert(dict(_ROUTED))
+        record = {"device_id": "d1", "credential_profile_id": value}
+    elif ingress == "legacy":
+        record = {"device_id": "legacy1", "device_ip": "192.0.2.20",
+                  "credential_profile_id": value}
+    else:
+        record = dict(_ROUTED, credential_profile_id=value)
+    before = fs.snapshot()
+
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="credential_profile_id must be a scalar string"):
+        fs.upsert(record)
+
+    assert fs.snapshot() == before
+
+
+def test_operator_ingress_bounds_unstructured_scalar_fields(tmp_path):
+    fs = _fs(tmp_path)
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="credential_profile_id.*128"):
+        fs.upsert(dict(_ROUTED, credential_profile_id="p" * 129))
+    assert fs.list_devices() == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", 2),
+    ("registered_at", 1),
+    ("os_family", "xr"),
+])
+def test_public_upsert_rejects_server_owned_fields(tmp_path, field, value):
+    fs = _fs(tmp_path)
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match=r"server-owned fleet field.*%s" % field):
+        fs.upsert(dict(_ROUTED, **{field: value}))
+    assert fs.list_devices() == []
+
+
+def test_validate_operator_upsert_is_pure_and_preserves_role_clear(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED, role="boat"))
+    before = fs.snapshot()
+
+    preview = fs.validate_operator_upsert({"device_id": "d1", "role": ""})
+
+    assert "role" not in preview
+    assert fs.snapshot() == before
+    with pytest.raises(gui_fleet.FleetFieldError,
+                       match="unknown fleet field.*future_policy"):
+        fs.validate_operator_upsert(
+            {"device_id": "d1", "role": "", "future_policy": "allow"})
+    assert fs.snapshot() == before
+
+
+def test_trusted_observation_write_is_named_bounded_and_existing_only(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_XRHOST))
+
+    saved = fs.update_observation("xr1", model="8201-SYS", os_family="xr")
+
+    assert saved["model"] == "8201"
+    assert saved["os_family"] == "xr"
+    with pytest.raises(ValueError, match="os_family"):
+        fs.update_observation("xr1", os_family=True)
+    with pytest.raises(ValueError, match="no such device"):
+        fs.update_observation("missing", os_family="xe")
+
+
+@pytest.mark.parametrize("tamper", [
+    {"future_policy": "allow"},
+    {"credential_profile_id": {"name": "lab"}},
+])
+def test_import_parsed_csv_revalidates_all_rows_before_grouped_writes(
+        tmp_path, tamper):
+    fs = _fs(tmp_path)
+    header = ",".join(gui_fleet.CSV_V2_COLS)
+    rows = []
+    for device_id, device_ip in (("d1", "10.0.0.1"),
+                                 ("other", "10.0.0.5")):
+        row = dict(_ROUTED, device_id=device_id, device_ip=device_ip)
+        rows.append(",".join(str(row.get(col, ""))
+                             for col in gui_fleet.CSV_V2_COLS))
+    parsed = fs.parse_csv(header + "\n" + "\n".join(rows) + "\n")
+    parsed["records"][1].update(tamper)
+
+    with pytest.raises(ValueError):
+        fs.import_parsed_csv(parsed)
+
+    assert fs.list_devices() == []
+
+
+def test_legacy_alias_csv_and_current_projection_roundtrip_portably(tmp_path):
+    fs = _fs(tmp_path)
+    legacy = ("device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model\n"
+              "old,192.0.2.20,666,192.0.2.21,255.255.255.252,"
+              "192.0.2.22,C9300-48UXM\n")
+    fs.import_csv(legacy)
+    stored = fs.get_device("old")
+    assert stored["vlan"] == "666" and stored["guest_ip"] == "192.0.2.22"
+
+    fresh = gui_fleet.FleetStore(str(tmp_path / "fresh"))
+    fresh.import_csv(fs.export_csv())
+    portable = fresh.get_device("old")
+    assert portable["management_type"] == "legacy_routed"
+    assert portable["iris_vlan"] == "666"
+    assert portable["app_ip"] == "192.0.2.22"
+
+
+def test_current_csv_boundary_is_portable_and_retains_local_only_fields(tmp_path):
+    source = gui_fleet.FleetStore(str(tmp_path / "source"), now_fn=lambda: 1000)
+    source.upsert(dict(_ROUTED, role="boat", credential_profile_id="lab"))
+    source.update_observation("d1", os_family="xe")
+    before = source.get_device("d1")
+    exported = source.export_csv()
+
+    fresh = gui_fleet.FleetStore(str(tmp_path / "fresh"), now_fn=lambda: 9000)
+    fresh.import_csv(exported)
+    portable = fresh.get_device("d1")
+    assert {field: portable.get(field, "") for field in gui_fleet.CSV_V2_COLS} == {
+        field: before.get(field, "") for field in gui_fleet.CSV_V2_COLS}
+    assert portable["registered_at"] == 9000
+    assert "credential_profile_id" not in portable
+    assert "os_family" not in portable
+
+    source.import_csv(exported)
+    retained = source.get_device("d1")
+    assert retained["registered_at"] == 1000
+    assert retained["credential_profile_id"] == "lab"
+    assert retained["os_family"] == "xe"
+
+
+def test_existing_unknown_stored_fields_refuse_edits_without_erasure(tmp_path):
+    fs = _fs(tmp_path)
+    fs.upsert(dict(_ROUTED))
+    shard = _shard_path(fs, "d1")
+    with open(shard) as stream:
+        data = json.load(stream)
+    data["d1"]["future_policy"] = "repair-me"
+    with open(shard, "w") as stream:
+        json.dump(data, stream, sort_keys=True)
+    with open(shard) as stream:
+        before = stream.read()
+
+    with pytest.raises(ValueError, match=r"unknown stored fleet field.*future_policy"):
+        fs.upsert({"device_id": "d1", "model": "C9300-48UXM"})
+
+    with open(shard) as stream:
+        assert stream.read() == before
+    with pytest.raises(ValueError, match=r"unknown stored fleet field.*future_policy"):
+        fs.import_csv(fs.export_csv())
+    with open(shard) as stream:
+        assert stream.read() == before
 
 
 def test_corrupt_device_shard_fails_closed_and_is_left_intact(tmp_path):
