@@ -466,6 +466,40 @@ PYTHON
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
 }
 
+@test "archive parsing uses only the immutable bytes that were hashed" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+
+  hook="$TMP/grow-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import gzip
+import os
+
+_real_gzip_file = gzip.GzipFile
+_grown = False
+
+
+def _grow_after_hash(*args, **kwargs):
+    global _grown
+    if not _grown:
+        _grown = True
+        with open(os.environ["IRIS_GROW_BUNDLE"], "ab") as stream:
+            stream.write(b"not-an-authenticated-gzip-member")
+    return _real_gzip_file(*args, **kwargs)
+
+
+gzip.GzipFile = _grow_after_hash
+PYTHON
+  run env PYTHONPATH="$hook" IRIS_GROW_BUNDLE="$STAGE/bundle.tgz" \
+      PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/new-agent-invoked" ]
+  [[ "$output" != *"bundle rejected"* ]]
+}
+
 @test "a standalone signer that differs from the verified bundle cannot change live trust" {
   install_prior_agent
   pack_valid_bundle "$SRC/bundle.tgz"
@@ -659,6 +693,40 @@ PYTHON
   [ ! -e "$STAGE/.bundle-transaction" ]
   [ ! -e "$STAGE/.bundle-rollback-complete" ]
   [ "$(cat "$STAGE/aria2c")" = "prior aria2c" ]
+}
+
+@test "rollback does not require denied guest-share chmod operations" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/absent" "$STAGE/agent"
+  printf 'open(r"%s/chmod-prior-agent", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  for name in aria2c bootstrap.sh guestshell-start.sh rotate-logs.sh \
+      iris-signers.allowed_signers iris-root.allowed_signers; do
+    : > "$TX/prior/absent/$name"
+  done
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/chmod-partial-agent", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  hook="$TMP/chmod-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+
+
+def _deny(*args, **kwargs):
+    raise PermissionError("guest-share metadata changes are denied")
+
+
+os.chmod = _deny
+os.fchmod = _deny
+PYTHON
+  run env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/chmod-prior-agent" ]
+  [ ! -e "$TMP/chmod-partial-agent" ]
+  [ ! -e "$STAGE/.bundle-transaction" ]
 }
 
 @test "a bad initial bundle fails after one fixed diagnostic" {
