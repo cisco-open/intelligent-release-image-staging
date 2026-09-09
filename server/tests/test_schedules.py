@@ -258,6 +258,27 @@ def test_occurrences_and_per_device_receipts_survive_restart_and_read_caps(tmp_p
     assert occurrences.latest_slot(row) == slot["scheduled_at"]
 
 
+def test_schedule_wide_receipt_page_is_deterministic_and_globally_capped(tmp_path):
+    row = create(schedules.ScheduleStore(tmp_path))
+    occurrences = schedules.OccurrenceStore(tmp_path)
+    receipts = schedules.ReceiptStore(tmp_path)
+    for index, device_id in enumerate(("edge-1", "edge-2")):
+        slot = schedules.occurrence_slot(row, NOW + 60)
+        slot = dict(slot, scheduled_at=slot["scheduled_at"] + index,
+                    window_end=slot["window_end"] + index,
+                    local_time=slot["local_time"] + str(index))
+        occurrence = occurrences.create(
+            row, slot, {"revision": 8 + index, "now": NOW + 60 + index,
+                        "device_ids": [device_id]}, now=NOW + 60 + index)
+        receipts.record(occurrence["id"], device_id, status="ok",
+                        reason="assigned", now=NOW + 61 + index)
+    page = schedules.list_schedule_receipts(tmp_path, "s-boat", limit=1)
+    assert page["total"] == 2 and page["truncated"] is True
+    assert page["offset"] == 0 and page["schedule_id"] == "s-boat"
+    assert [(row["scheduled_at"], row["device_id"])
+            for row in page["receipts"]] == [(NOW + 60, "edge-1")]
+
+
 def test_early_binding_retains_preview_and_definition_edits_do_not_replay_slot(tmp_path):
     store = schedules.ScheduleStore(tmp_path)
     row = create(store, target={"device_ids": ["edge-1"], "bind": "early"})
