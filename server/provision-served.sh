@@ -45,6 +45,8 @@ path, artifacts, state, reason = sys.argv[1:]
 record = {"format": "iris-served-bundle-v1", "state": state, "reason": reason}
 if state == "ok":
     contents = {}
+    embedded = {}
+    identities = {}
     for name in ("iris-agent.tgz", "iris-agent.tgz.sha256", "bootstrap.sh",
                  "iris-signers.pem"):
         target = os.path.join(artifacts, name)
@@ -61,6 +63,8 @@ if state == "ok":
                 raise SystemExit("served bundle digest sidecar is invalid")
             if name == "iris-signers.pem" and opened.st_size > 128 * 1024:
                 raise SystemExit("served signer trust is too large")
+            identity = (opened.st_dev, opened.st_ino, opened.st_size,
+                        opened.st_mtime_ns, opened.st_ctime_ns)
             data = bytearray()
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
@@ -69,31 +73,50 @@ if state == "ok":
                     if len(data) + len(chunk) > limit:
                         raise SystemExit("served publication grew while being read")
                     data.extend(chunk)
+            if name == "iris-agent.tgz":
+                handle.seek(0)
+                with tarfile.open(fileobj=handle, mode="r:gz") as archive:
+                    archive_members = archive.getmembers()
+                    if len(archive_members) > 1024:
+                        raise SystemExit("served bundle contains too many members")
+                    for trust_name in (
+                            "iris-signers.allowed_signers",
+                            "iris-root.allowed_signers"):
+                        members = [member for member in archive_members
+                                   if member.name == trust_name]
+                        if len(members) != 1 or not members[0].isfile() \
+                                or not 0 < members[0].size <= 128 * 1024:
+                            raise SystemExit(
+                                "served bundle trust member is invalid")
+                        member_handle = archive.extractfile(members[0])
+                        trust_data = member_handle.read(128 * 1024 + 1) \
+                            if member_handle is not None else b""
+                        if not trust_data \
+                                or len(trust_data) != members[0].size:
+                            raise SystemExit(
+                                "served bundle trust member is invalid")
+                        embedded[trust_name] = trust_data
+                        record[trust_name] = hashlib.sha256(
+                            trust_data).hexdigest()
+            after = os.fstat(handle.fileno())
+            if (after.st_dev, after.st_ino, after.st_size,
+                after.st_mtime_ns, after.st_ctime_ns) != identity:
+                raise SystemExit("served publication changed while being read")
         record[name] = digest.hexdigest()
         contents[name] = bytes(data)
+        identities[name] = identity
     bundle_digest = record["iris-agent.tgz"]
     sidecar = contents["iris-agent.tgz.sha256"]
     if len(sidecar) != 65 or sidecar != (bundle_digest + "\n").encode("ascii"):
         raise SystemExit("served bundle digest sidecar is invalid")
-    with tarfile.open(os.path.join(artifacts, "iris-agent.tgz"), "r:gz") as archive:
-        archive_members = archive.getmembers()
-        if len(archive_members) > 1024:
-            raise SystemExit("served bundle contains too many members")
-        for name in ("iris-signers.allowed_signers",
-                     "iris-root.allowed_signers"):
-            members = [member for member in archive_members
-                       if member.name == name]
-            if len(members) != 1 or not members[0].isfile() \
-                    or not 0 < members[0].size <= 128 * 1024:
-                raise SystemExit("served bundle trust member is invalid")
-            handle = archive.extractfile(members[0])
-            data = handle.read(128 * 1024 + 1) if handle is not None else b""
-            if not data or len(data) != members[0].size:
-                raise SystemExit("served bundle trust member is invalid")
-            record[name] = hashlib.sha256(data).hexdigest()
-            if name == "iris-signers.allowed_signers" \
-                    and data != contents["iris-signers.pem"]:
-                raise SystemExit("public and bundled signer trust differ")
+    if embedded["iris-signers.allowed_signers"] != \
+            contents["iris-signers.pem"]:
+        raise SystemExit("public and bundled signer trust differ")
+    for name, identity in identities.items():
+        current = os.lstat(os.path.join(artifacts, name))
+        if (current.st_dev, current.st_ino, current.st_size,
+            current.st_mtime_ns, current.st_ctime_ns) != identity:
+            raise SystemExit("served publication changed during readiness")
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
 try:

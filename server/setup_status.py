@@ -233,6 +233,8 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                          detail="The latest Guest Shell bundle provisioning did not succeed; inspect server startup logs.")
             return entry
         contents = {}
+        embedded = {}
+        identities = {}
         for name in ("iris-agent.tgz", "iris-agent.tgz.sha256",
                      "bootstrap.sh", "iris-signers.pem"):
             expected = record.get(name)
@@ -254,6 +256,8 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                     return entry
                 if name == "iris-signers.pem" and info.st_size > 128 * 1024:
                     return entry
+                identity = (info.st_dev, info.st_ino, info.st_size,
+                            info.st_mtime_ns, info.st_ctime_ns)
                 digest = hashlib.sha256()
                 data = bytearray()
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -269,10 +273,52 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
                         data.extend(chunk)
                 if name == "iris-agent.tgz":
                     entry["built_at"] = int(info.st_mtime)
-            if digest.hexdigest() != expected:
-                entry.update(state="stale", reason="served-bundle-changed",
-                             detail="A served bundle publication input changed after verified provisioning.")
-                return entry
+                if digest.hexdigest() != expected:
+                    entry.update(
+                        state="stale", reason="served-bundle-changed",
+                        detail="A served bundle publication input changed after verified provisioning.")
+                    return entry
+                if name == "iris-agent.tgz":
+                    handle.seek(0)
+                    with tarfile.open(fileobj=handle, mode="r:gz") as archive:
+                        members = archive.getmembers()
+                        if len(members) > 1024:
+                            return entry
+                        for trust_name in (
+                                "iris-signers.allowed_signers",
+                                "iris-root.allowed_signers"):
+                            matches = [member for member in members
+                                       if member.name == trust_name]
+                            if len(matches) != 1 or not matches[0].isfile() \
+                                    or not 0 < matches[0].size <= 128 * 1024:
+                                return entry
+                            member_handle = archive.extractfile(matches[0])
+                            trust_data = member_handle.read(128 * 1024 + 1) \
+                                if member_handle is not None else b""
+                            if not trust_data \
+                                    or len(trust_data) != matches[0].size:
+                                return entry
+                            embedded[trust_name] = trust_data
+                            trust_expected = record.get(trust_name)
+                            if not isinstance(trust_expected, str) \
+                                    or not _HEX_SHA256.fullmatch(
+                                        trust_expected):
+                                return entry
+                            if hashlib.sha256(trust_data).hexdigest() != \
+                                    trust_expected:
+                                entry.update(
+                                    state="stale",
+                                    reason="served-bundle-changed",
+                                    detail="Embedded device instruction trust changed after verified provisioning.")
+                                return entry
+                after = os.fstat(handle.fileno())
+                if (after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns) != identity:
+                    entry.update(
+                        state="stale", reason="served-bundle-changed",
+                        detail="A served bundle publication input changed while it was verified.")
+                    return entry
+            identities[name] = identity
             contents[name] = bytes(data)
         bundle_digest = record["iris-agent.tgz"]
         if contents["iris-agent.tgz.sha256"] != \
@@ -280,37 +326,19 @@ def served_bundle_readiness(artifacts_dir, status_path, startup_state=None):
             entry.update(state="stale", reason="served-bundle-changed",
                          detail="The served bundle digest sidecar is not the exact digest of the bundle.")
             return entry
-        embedded = {}
-        with tarfile.open(os.path.join(artifacts_dir, "iris-agent.tgz"),
-                          "r:gz") as archive:
-            members = archive.getmembers()
-            if len(members) > 1024:
-                return entry
-            for name in ("iris-signers.allowed_signers",
-                         "iris-root.allowed_signers"):
-                matches = [member for member in members
-                           if member.name == name]
-                if len(matches) != 1 or not matches[0].isfile() \
-                        or not 0 < matches[0].size <= 128 * 1024:
-                    return entry
-                handle = archive.extractfile(matches[0])
-                data = handle.read(128 * 1024 + 1) if handle is not None else b""
-                if not data or len(data) != matches[0].size:
-                    return entry
-                embedded[name] = data
-                expected = record.get(name)
-                if not isinstance(expected, str) \
-                        or not _HEX_SHA256.fullmatch(expected):
-                    return entry
-                if hashlib.sha256(data).hexdigest() != expected:
-                    entry.update(state="stale", reason="served-bundle-changed",
-                                 detail="Embedded device instruction trust changed after verified provisioning.")
-                    return entry
         if embedded["iris-signers.allowed_signers"] != \
                 contents["iris-signers.pem"]:
             entry.update(state="stale", reason="served-bundle-changed",
                          detail="Public and bundled instruction signer trust do not match.")
             return entry
+        for name, identity in identities.items():
+            current = os.lstat(os.path.join(artifacts_dir, name))
+            if (current.st_dev, current.st_ino, current.st_size,
+                current.st_mtime_ns, current.st_ctime_ns) != identity:
+                entry.update(
+                    state="stale", reason="served-bundle-changed",
+                    detail="A served bundle publication input changed while readiness was checked.")
+                return entry
     except (OSError, ValueError, UnicodeError, tarfile.TarError):
         return entry
     entry.update(state="ok", reason="ready",
