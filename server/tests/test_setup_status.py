@@ -177,6 +177,40 @@ def test_served_bundle_readiness_bounds_digest_sidecar_before_read(tmp_path):
     assert item["state"] == "stale"
 
 
+def test_served_bundle_readiness_cannot_parse_a_replaced_bundle(tmp_path,
+                                                               monkeypatch):
+    artifacts, status, _ = _write_served_bundle_fixture(tmp_path)
+    bundle = artifacts / "iris-agent.tgz"
+    replacement = tmp_path / "replacement.tgz"
+    members = {
+        "iris-signers.allowed_signers": b"ca trust\n",
+        "iris-root.allowed_signers": b"root trust\n",
+        "agent/iris_agent.py": b"substituted agent bytes\n",
+    }
+    with tarfile.open(replacement, "w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+    real_open = setup_status.tarfile.open
+    swapped = []
+
+    def swap_before_parse(*args, **kwargs):
+        if not swapped:
+            os.replace(str(replacement), str(bundle))
+            swapped.append(True)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(setup_status.tarfile, "open", swap_before_parse)
+    item = setup_status.served_bundle_readiness(
+        str(artifacts), str(status), startup_state="ok")
+    assert swapped
+    assert item["state"] == "stale"
+    assert hashlib.sha256(bundle.read_bytes()).hexdigest() != \
+        json.loads(status.read_text())["iris-agent.tgz"]
+
+
 def test_package_readiness_absent_and_empty_are_not_ok(tmp_path):
     missing = _readiness(tmp_path / "iris-arm64.tar")
     assert missing["state"] == "absent" and missing["reason"] == "absent"
