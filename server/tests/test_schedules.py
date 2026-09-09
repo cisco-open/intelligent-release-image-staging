@@ -460,6 +460,35 @@ def test_receipt_updates_require_cas_and_cannot_replace_ownership(tmp_path):
         store.successor_attempt(oid, "edge-1", expected_rev=terminal["rev"], now=NOW + 6, manual_generation=4)
 
 
+def test_receipt_intent_updates_persist_retry_evidence_with_cas(tmp_path):
+    oid = receipt_occurrence(tmp_path)
+    store = schedules.ReceiptStore(tmp_path)
+    intent = store.begin(oid, "edge-1", now=NOW)
+
+    # Repeated begin remains create-if-absent and cannot silently reset state.
+    assert store.begin(oid, "edge-1", now=NOW + 1) == intent
+
+    deferred = store.record(
+        oid,
+        "edge-1",
+        status="intent",
+        reason="capacity_deferred",
+        now=NOW + 2,
+        expected_rev=intent["rev"],
+    )
+    assert deferred["rev"] == intent["rev"] + 1
+    assert deferred["reason"] == "capacity_deferred"
+    with pytest.raises(schedules.ScheduleConflict):
+        store.record(
+            oid,
+            "edge-1",
+            status="intent",
+            reason="stale_retry",
+            now=NOW + 3,
+            expected_rev=intent["rev"],
+        )
+
+
 def test_receipt_rejects_freeform_diagnostics(tmp_path):
     oid = receipt_occurrence(tmp_path)
     with pytest.raises(TypeError):

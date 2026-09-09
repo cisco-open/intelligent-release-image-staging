@@ -758,8 +758,10 @@ class ReceiptStore:
         def mutate(old):
             if old is not None and old["status"] in TERMINAL_RECEIPT_STATES:
                 return old
-            if old is not None and status == "intent":
+            if old is not None and status == "intent" and expected_rev is None:
                 # begin is create-if-absent, never an implicit attempt reset.
+                # A caller holding the current revision may still persist
+                # deferred/retry evidence without changing attempt ownership.
                 return old
             if old is not None and (expected_rev is None or old["rev"] != expected_rev):
                 raise ScheduleConflict("receipt revision is required and must match")
