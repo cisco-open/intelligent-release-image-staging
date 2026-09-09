@@ -164,6 +164,47 @@ install_prior_agent() {
   [[ "$output" == *"existing iris-agent.conf is unsafe or has an invalid lkg_key"* ]]
 }
 
+@test "malformed incoming LKG key cannot replace an established configuration" {
+  key=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  printf 'device_id = old\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  printf 'device_id = replacement\nlkg_key = UPPERCASE-OR-BROKEN\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -ne 0 ]
+  cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  [ -f "$SRC/iris-agent.conf" ]
+  [[ "$output" == *"incoming iris-agent.conf is unsafe or invalid"* ]]
+}
+
+@test "unsafe incoming config types fail promptly without replacing local config" {
+  key=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  printf 'device_id = old\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+
+  for shape in symlink fifo oversize; do
+    rm -f "$SRC/iris-agent.conf"
+    case "$shape" in
+      symlink) ln -s /etc/passwd "$SRC/iris-agent.conf" ;;
+      fifo) mkfifo "$SRC/iris-agent.conf" ;;
+      oversize) head -c 65537 /dev/zero > "$SRC/iris-agent.conf" ;;
+    esac
+
+    run timeout 3 env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+        bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+    [ -e "$SRC/iris-agent.conf" ] || [ -L "$SRC/iris-agent.conf" ]
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Persisted aria2c launch overrides from iris-agent.conf (issue #122):
 # guestshell-start.sh only reads its own live process environment, refreshed
