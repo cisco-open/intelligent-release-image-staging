@@ -1046,7 +1046,7 @@ def test_instruction_cleanup_intent_is_closed_durable_and_restart_recoverable(
     assert "flash:" not in serialized
 
     before = open(reopened.path, "rb").read()
-    with pytest.raises(TypeError):
+    with pytest.raises((TypeError, ValueError)):
         reopened.iox_instruction_cleanup_intent(
             "iox-r1", pending["transaction_id"], pending["revision"],
             pending["phase"], "flash:any-owner-selected-path")

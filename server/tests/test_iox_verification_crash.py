@@ -612,10 +612,10 @@ class _FakeTransport(object):
         context = max(contexts, key=lambda value: value["command_id"])
         command_id = context["command_id"]
         self.transcript.append(dict(context))
-        self.trace.append(("upload", remote_path))
         if (context["purpose"] == "upload_instructions" and
                 hasattr(self.device, "instruction_source")):
             self.device.instruction_source = True
+        self.trace.append(("upload", remote_path))
         self.transcript.append({
             "schema_version": 1, "type": "command_end", "command_id": command_id,
             "finished_at": 100, "returncode": 0, "timed_out": False,

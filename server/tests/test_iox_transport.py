@@ -1504,6 +1504,29 @@ def test_instruction_upload_discards_ciphertext_and_remote_diagnostics(
     peer.assert_reaped()
 
 
+@pytest.mark.parametrize("purpose,commands", [
+    ("remove_wrapper", [
+        "delete /force flash:iris-%s.tar" % ("d" * 32),
+        "dir flash: | include iris-%s\\.tar" % ("d" * 32),
+    ]),
+    ("remove_certificate", [
+        "delete /force flash:iris-ca.pem",
+        "dir flash: | include iris-ca.pem",
+    ]),
+])
+def test_transient_removal_rejects_residue_from_authenticated_directory_payload(
+        tmp_path, peer_factory, purpose, commands):
+    residue = commands[0].split(":", 1)[1]
+    peer = peer_factory(commands=commands, payload=["", residue + "\n"])
+    transport, unused = _transport(tmp_path, peer, purpose=purpose)
+
+    result = _command(transport, "\n".join(commands).encode("ascii"))
+
+    assert _value(result, "error_category") == "rejected"
+    assert _value(result, "framing_complete") is False
+    peer.assert_reaped()
+
+
 @pytest.mark.parametrize("hang", ["login", "command"])
 def test_phase_timeout_covers_dialogue_and_reaps_before_return(tmp_path, peer_factory, hang):
     peer = peer_factory(hang=hang)

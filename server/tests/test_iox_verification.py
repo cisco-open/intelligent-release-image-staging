@@ -14,6 +14,7 @@ import importlib
 import io
 import json
 import os
+from pathlib import Path
 import stat
 import sys
 
@@ -626,6 +627,40 @@ class _StatefulStore(object):
             value["unresolved"] = True
         return copy.deepcopy(value)
 
+    def iox_instruction_cleanup_intent(
+            self, record_id, transaction_id, expected_revision,
+            expected_phase):
+        self.calls.append(("iox_instruction_cleanup_intent", record_id,
+                           transaction_id, expected_revision, expected_phase))
+        value = self.records[record_id]["iox_verification"]
+        if value["transaction_id"] != transaction_id:
+            raise ValueError("transaction mismatch")
+        if (value["revision"] != expected_revision or
+                value["phase"] != expected_phase or
+                value.get("instruction_cleanup_pending")):
+            raise ValueError("stale cleanup CAS")
+        value["instruction_cleanup_pending"] = True
+        value["revision"] += 1
+        value["updated_at"] += 1
+        return copy.deepcopy(value)
+
+    def iox_instruction_cleanup_complete(
+            self, record_id, transaction_id, expected_revision,
+            expected_phase):
+        self.calls.append(("iox_instruction_cleanup_complete", record_id,
+                           transaction_id, expected_revision, expected_phase))
+        value = self.records[record_id]["iox_verification"]
+        if value["transaction_id"] != transaction_id:
+            raise ValueError("transaction mismatch")
+        if (value["revision"] != expected_revision or
+                value["phase"] != expected_phase or
+                value.get("instruction_cleanup_pending") is not True):
+            raise ValueError("stale cleanup CAS")
+        value.pop("instruction_cleanup_pending")
+        value["revision"] += 1
+        value["updated_at"] += 1
+        return copy.deepcopy(value)
+
     def transition(self, record_id, state, evidence=None):
         self.calls.append(("transition", record_id, state, evidence))
         self.records[record_id]["state"] = state
@@ -932,13 +967,15 @@ def _install_operations():
 
 def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
                           cleanup_on_error=True, authority=None,
-                          prepare_hook=None, prefix_chunks=(), cancel=None):
+                          prepare_hook=None, prefix_chunks=(), cancel=None,
+                          recipe_argv=None):
     timeline = factory.calls
     store = _StatefulStore(tmp_path, calls=timeline)
     wrapper_path = _write_wrapper(tmp_path, markers)
-    recipe = _write_recipe_peer(
+    recipe = (_write_recipe_peer(
         tmp_path, operations=_install_operations(),
         cleanup_on_error=cleanup_on_error, prefix_chunks=prefix_chunks)
+        if recipe_argv is None else None)
 
     def preflight(request, identity):
         timeline.append(("preflight", request, identity))
@@ -955,7 +992,9 @@ def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
         return "new-r1"
 
     config = dict(authority or {})
-    config["recipe_argv_by_action"] = {"install": ["/bin/bash", recipe]}
+    config["recipe_argv_by_action"] = {
+        "install": (["/bin/bash", recipe] if recipe_argv is None else
+                    list(recipe_argv))}
     controller = _controller(
         tmp_path, store, factory, clock=clock, **config)
     try:
@@ -1341,6 +1380,55 @@ def test_runtime_credentials_are_resolved_without_raw_request_and_bootstrap_mint
     assert store.records["old-r1"]["iox_verification"]["phase"] == "restored"
 
 
+def test_predecessor_instruction_cleanup_uses_persisted_filesystem_not_retry_plan(
+        tmp_path):
+    predecessor_journal = _journal(
+        record_id="old-r1", phase="unchanged", state="disabled",
+        revision=2, unresolved=False)
+    predecessor_journal["instruction_cleanup_pending"] = True
+    predecessor = _record(
+        record_id="old-r1", journal=predecessor_journal)
+    predecessor["resolved"].update({
+        "package_fs": "flash:", "target_fs": "sdflash:",
+        "model": "IE-3400-8T2S", "os_family": "xe",
+        "device_ip": "192.0.2.10", "device_identity": _BOARD,
+    })
+    store = _StatefulStore(
+        tmp_path, records=[predecessor], obligations=[predecessor_journal])
+    factory = _TransportFactory(verification="disabled")
+    wrapper_path = _write_unsigned_wrapper(tmp_path)
+    recipe = _write_recipe_peer(
+        tmp_path, operations=_install_operations(), cleanup_on_error=True)
+
+    def prepare(request, identity):
+        record = _record(record_id="new-r1")
+        record["state"] = "planned"
+        store.records["new-r1"] = record
+        return "new-r1"
+
+    target = _Bag(
+        host="192.0.2.10", port=22, platform="iox",
+        model="IE-3400-8T2S", os_family="xe", package_fs="sdflash:")
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"install": ["/bin/bash", recipe]})
+    try:
+        result = controller.run_install(
+            _request(wrapper_path=wrapper_path, target=target), prepare,
+            lambda *_args: _Bag(
+                device_identity=_BOARD, model="IE-3400-8T2S",
+                os_family="xe", platform="iox"),
+            lambda *_args: None, _Cancel())
+    finally:
+        controller.close()
+
+    assert result["result_code"] == 0
+    removals = _command_calls(factory, "remove_instructions")
+    assert len(removals) == 2
+    assert b"delete /force flash:iris-instructions-" in removals[0][2]
+    assert b"delete /force sdflash:iris-instructions-" in removals[1][2]
+
+
 def test_install_orders_upload_ownership_and_restoration_before_activation(tmp_path):
     timeline = []
     store = _StatefulStore(tmp_path, calls=timeline)
@@ -1478,6 +1566,28 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
             assert payload not in persisted
             assert remote_name not in persisted
     assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
+
+
+def test_production_bash_recipe_accepts_exact_two_revision_instruction_commit(
+        tmp_path):
+    factory = _TransportFactory()
+    recipe = (Path(__file__).resolve().parents[2] /
+              "device" / "iox" / "install.sh")
+
+    result, store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, recipe_argv=["/bin/bash", str(recipe)])
+
+    assert result["result_code"] == 0
+    assert result["returncode"] == 0
+    intent = [call for call in store.calls
+              if call[0] == "iox_instruction_cleanup_intent"]
+    complete = [call for call in store.calls
+                if call[0] == "iox_instruction_cleanup_complete"]
+    assert len(intent) == len(complete) == 1
+    assert complete[0][3] == intent[0][3] + 1
+    assert "instruction_cleanup_pending" not in store.records[
+        "new-r1"]["iox_verification"]
+    assert _command_calls(factory, "app_start")
 
 
 @pytest.mark.parametrize("outcome", ["raises", "empty", "oversize"])
@@ -2267,6 +2377,31 @@ def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
     first = rendered.splitlines()[0]
     assert first == (
         r"dir flash: | include iris\-arm64\.tar|iris-ca\.pem|iris-catalog\.pem")
+
+
+@pytest.mark.parametrize("name", ["cleanup_files", "cleanup_stage_probe"])
+def test_generic_cleanup_commands_do_not_repeat_private_instruction_source(
+        tmp_path, name):
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    request = _request(
+        action="uninstall", teardown_mode="recorded", record_id="new-r1")
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.target = {
+        "package_fs": "flash:", "target_fs": "sdflash:",
+        "pkg": "iris-arm64.tar", "management_type": "routed",
+    }
+    attempt.journal = _journal(
+        record_id="new-r1", phase="unchanged", state="disabled",
+        revision=2, unresolved=False)
+    try:
+        rendered = controller._render_command(attempt, name)
+    finally:
+        controller.close()
+
+    assert "iris-instructions-" not in rendered.decode("ascii").replace("\\", "")
 
 
 @pytest.mark.parametrize("exit_intent,expected_code,expect_retirement", [

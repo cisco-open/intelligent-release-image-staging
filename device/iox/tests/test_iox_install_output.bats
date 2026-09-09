@@ -765,6 +765,10 @@ requests = [row["request"] for row in rows if row.get("event") == "request"]
 stage = [row for row in requests if row["operation"] == "stage_instructions"]
 assert len(stage) == 1
 assert stage[0]["arguments"] == {}
+following = requests[requests.index(stage[0]) + 1]
+assert following["operation"] == "command"
+assert following["arguments"] == {"name": "copy_certificate"}
+assert following["expected_revision"] == stage[0]["expected_revision"] + 2
 serialized = json.dumps(stage[0], sort_keys=True)
 for forbidden in ("envelope", "bootstrap", "ciphertext", "/tmp/", "instruction key"):
     assert forbidden not in serialized
