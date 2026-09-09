@@ -2183,6 +2183,7 @@ class IoxTransport(object):
         stderr = _NormalizedCapture(self._secret_values, capture_limit)
         child = None
         payload_spans = []
+        framed_payloads = []
         observed_state = "unknown" if purpose == "verification_read" else None
         transition = "other" if purpose in ("verification_disable", "verification_enable") else None
         category = None
@@ -2233,6 +2234,7 @@ class IoxTransport(object):
                         answer = b"yes"
                     payload, span, prompt_kind = dialogue.command_step(
                         line, expected, question=question, answer=answer)
+                    framed_payloads.append(payload)
                     payload_spans.append({"offset": span[0], "length": span[1]})
                     payload_error = _classify_ios_error(payload)
                     if payload_error is not None and semantic_error is None:
@@ -2255,6 +2257,17 @@ class IoxTransport(object):
                             payload != b"[OK]\n" and payload_error is None):
                         raise IoxTransportError("unsupported_response", "save response was not exact")
                 dialogue.finish_process()
+                if purpose in ("remove_wrapper", "remove_certificate",
+                               "remove_instructions"):
+                    if (len(executable) != 2 or len(framed_payloads) != 2 or
+                            framed_payloads[-1] != b""):
+                        semantic_error = semantic_error or "rejected"
+                    else:
+                        # The closed final directory probe proves the selected
+                        # transient is absent.  That is authoritative when a
+                        # replayed delete reports that the file was already
+                        # missing after a crash before the completion CAS.
+                        semantic_error = None
                 framing = semantic_error is None
                 category = category or semantic_error
             finally:
@@ -2310,6 +2323,18 @@ class IoxTransport(object):
         if stdout.invalid_control or stdout.invalid_utf8 or stderr.invalid_control or stderr.invalid_utf8:
             category = category or "unsupported_response"
             framing = False
+
+        # Instruction envelopes and their transaction-derived remote names are
+        # private controller custody.  The dialogue above authenticates and
+        # classifies each command payload before both captures are discarded;
+        # neither command echoes, ciphertext, remote diagnostics, nor directory
+        # residue may cross into a transcript or caller-visible result.
+        if purpose in ("copy_instructions", "remove_instructions"):
+            stdout = _NormalizedCapture((), capture_limit)
+            stderr = _NormalizedCapture((), capture_limit)
+            stdout.finish()
+            stderr.finish()
+            payload_spans = []
 
         # A failed pre-spawn validation has no command_start to close.
         if command_id in getattr(self.transcript, "_commands", {}):
@@ -2433,6 +2458,14 @@ class IoxTransport(object):
             if child is not None:
                 if not self._stop_child(child, deadline):
                     category = "descendant_unreaped"
+            stdout.finish()
+            stderr.finish()
+        if purpose == "upload_instructions":
+            # SCP diagnostics can repeat its argv or even source bytes.  The
+            # bounded status is sufficient for this private upload; raw streams
+            # must not enter durable or recipe-visible evidence.
+            stdout = _NormalizedCapture((), _CAPTURE_BYTES)
+            stderr = _NormalizedCapture((), _CAPTURE_BYTES)
             stdout.finish()
             stderr.finish()
         if command_id in getattr(self.transcript, "_commands", {}):

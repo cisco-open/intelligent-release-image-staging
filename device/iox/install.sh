@@ -198,9 +198,12 @@ def valid_result(value, sequence, attempt, operation, ready, previous_phase):
             return False
         prior = previous_phase or "observed"
         if value["ok"]:
-            if operation in ("command", "upload_wrapper", "upload_certificate",
-                             "stage_instructions"):
+            if operation in ("command", "upload_wrapper", "upload_certificate"):
                 if value["revision"] != expected_revision or value["phase"] != prior:
+                    return False
+            elif operation == "stage_instructions":
+                if (value["revision"] != expected_revision + 2 or
+                        value["phase"] != prior):
                     return False
             elif operation == "begin_install":
                 if (value["revision"] <= expected_revision or

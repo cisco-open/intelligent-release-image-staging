@@ -117,6 +117,7 @@ _IOX_JOURNAL_KEYS = frozenset((
     "pre_disable_observation", "disable_confirmation", "restore_observation",
     "error", "transcript_refs",
 ))
+_IOX_JOURNAL_OPTIONAL_KEYS = frozenset(("instruction_cleanup_pending",))
 _OBSERVATION_KEYS = frozenset((
     "state", "observed_at", "command_id", "transcript_id", "stdout_offset",
     "stdout_length", "stderr_offset", "stderr_length", "returncode",
@@ -485,7 +486,10 @@ def _validate_command_ref(value, name):
 
 
 def _validate_journal_shape(journal, containing_record_id):
-    _closed_object(journal, _IOX_JOURNAL_KEYS, "iox_verification journal")
+    if (not isinstance(journal, dict) or
+            not _IOX_JOURNAL_KEYS.issubset(journal) or
+            set(journal) - _IOX_JOURNAL_KEYS - _IOX_JOURNAL_OPTIONAL_KEYS):
+        raise ValueError("iox_verification journal has unknown or missing fields")
     if len(_canonical_json(journal)) > _IOX_JOURNAL_MAX_BYTES:
         raise ValueError("iox_verification journal exceeds size limit")
     if type(journal["schema_version"]) is not int or journal["schema_version"] != 1:
@@ -514,6 +518,12 @@ def _validate_journal_shape(journal, containing_record_id):
     _boolean(journal["unresolved"], "IOx unresolved")
     if journal["unresolved"] != (phase in _IOX_UNRESOLVED_PHASES):
         raise ValueError("inconsistent derived IOx unresolved state")
+    if ("instruction_cleanup_pending" in journal and
+            journal["instruction_cleanup_pending"] is not True):
+        raise ValueError("noncanonical IOx instruction cleanup obligation")
+    if (journal.get("instruction_cleanup_pending") and
+            phase not in _IOX_TERMINAL_PHASES):
+        raise ValueError("IOx instruction cleanup requires a terminal phase")
     for key in ("created_at", "updated_at"):
         _integer(journal[key], "IOx " + key)
     for key in ("observed_at", "terminal_at"):
@@ -823,8 +833,8 @@ class DeploymentRecordStore:
         records = data["records"]
         if len(records) > _STORE_MAX_RECORDS:
             raise ValueError("deployment record count exceeds limit")
-        unresolved = 0
-        unresolved_boards = set()
+        obligations = 0
+        obligation_boards = set()
         journals = []
         for record_key, record in records.items():
             if not isinstance(record_key, str):
@@ -843,13 +853,14 @@ class DeploymentRecordStore:
                     raise ValueError("adopted record carries IOx authority")
                 _validate_journal_shape(journal, record_id)
                 journals.append(journal)
-                if journal["unresolved"]:
-                    unresolved += 1
-                    if unresolved > _IOX_MAX_UNRESOLVED:
-                        raise ValueError("unresolved IOx journal capacity exceeded")
-                    if journal["board_identity"] in unresolved_boards:
+                if (journal["unresolved"] or
+                        journal.get("instruction_cleanup_pending", False)):
+                    obligations += 1
+                    if obligations > _IOX_MAX_UNRESOLVED:
+                        raise ValueError("IOx journal obligation capacity exceeded")
+                    if journal["board_identity"] in obligation_boards:
                         raise ValueError("conflicting IOx board obligation")
-                    unresolved_boards.add(journal["board_identity"])
+                    obligation_boards.add(journal["board_identity"])
         for journal in journals:
             self._validate_journal_transcripts(journal)
         return journals
@@ -1359,7 +1370,9 @@ class DeploymentRecordStore:
                 raise ValueError("IOx board identity mismatch")
             for other in data["records"].values():
                 journal = other.get("iox_verification")
-                if (journal is not None and journal["unresolved"] and
+                if (journal is not None and
+                        (journal["unresolved"] or journal.get(
+                            "instruction_cleanup_pending", False)) and
                         journal["board_identity"] == board_identity):
                     raise ValueError("conflicting IOx board obligation")
             timestamp = int(self._now())
@@ -1650,6 +1663,69 @@ class DeploymentRecordStore:
             _atomic_write_json(self.path, candidate_data)
             return copy.deepcopy(candidate)
 
+    def _iox_instruction_cleanup_update(
+            self, record_id, transaction_id, expected_revision,
+            expected_phase, pending, deadline=None, monotonic_fn=None):
+        """CAS one path-free, transaction-derived instruction obligation."""
+        _matching_string(record_id, _RECORD_ID, "IOx record_id")
+        _matching_string(transaction_id, _LOWER_HEX_32,
+                         "IOx transaction_id")
+        _integer(expected_revision, "expected IOx revision")
+        if expected_phase not in _IOX_TERMINAL_PHASES:
+            raise ValueError(
+                "instruction cleanup requires a terminal IOx phase")
+        if type(pending) is not bool:
+            raise ValueError("invalid instruction cleanup state")
+        with self._store_lock(deadline, monotonic_fn):
+            data = self._read(strict=True)
+            record = data["records"].get(record_id)
+            if record is None or "iox_verification" not in record:
+                raise ValueError("unknown IOx journal: %s" % record_id)
+            journal = record["iox_verification"]
+            if journal["transaction_id"] != transaction_id:
+                raise ValueError("IOx transaction mismatch")
+            if (journal["revision"] != expected_revision or
+                    journal["phase"] != expected_phase):
+                raise StaleIoxRevision(
+                    "stale IOx cleanup CAS: expected revision %d phase %s" %
+                    (expected_revision, expected_phase))
+            existing = journal.get("instruction_cleanup_pending", False)
+            if pending and existing:
+                raise ValueError("IOx instruction cleanup intent already exists")
+            if not pending and not existing:
+                raise ValueError("IOx instruction cleanup intent is absent")
+
+            candidate = copy.deepcopy(journal)
+            if pending:
+                candidate["instruction_cleanup_pending"] = True
+            else:
+                candidate.pop("instruction_cleanup_pending", None)
+            candidate["revision"] += 1
+            _integer(candidate["revision"], "IOx revision")
+            timestamp = int(self._now())
+            _integer(timestamp, "IOx cleanup timestamp")
+            candidate["updated_at"] = max(timestamp, journal["updated_at"])
+            candidate_data = copy.deepcopy(data)
+            candidate_data["records"][record_id][
+                "iox_verification"] = candidate
+            self._check_candidate(candidate_data, ordinary=False)
+            _atomic_write_json(self.path, candidate_data)
+            return copy.deepcopy(candidate)
+
+    def iox_instruction_cleanup_intent(
+            self, record_id, transaction_id, expected_revision,
+            expected_phase, deadline=None, monotonic_fn=None):
+        return self._iox_instruction_cleanup_update(
+            record_id, transaction_id, expected_revision, expected_phase,
+            True, deadline=deadline, monotonic_fn=monotonic_fn)
+
+    def iox_instruction_cleanup_complete(
+            self, record_id, transaction_id, expected_revision,
+            expected_phase, deadline=None, monotonic_fn=None):
+        return self._iox_instruction_cleanup_update(
+            record_id, transaction_id, expected_revision, expected_phase,
+            False, deadline=deadline, monotonic_fn=monotonic_fn)
+
     def iox_obligations(self, board_identity, deadline=None,
                         monotonic_fn=None):
         _matching_string(board_identity, _BOARD_ID, "IOx board_identity")
@@ -1658,7 +1734,9 @@ class DeploymentRecordStore:
             values = [copy.deepcopy(record["iox_verification"])
                       for record in data["records"].values()
                       if (record.get("iox_verification") is not None and
-                          record["iox_verification"]["unresolved"] and
+                          (record["iox_verification"]["unresolved"] or
+                           record["iox_verification"].get(
+                               "instruction_cleanup_pending", False)) and
                           record["iox_verification"]["board_identity"] ==
                           board_identity)]
         return sorted(values, key=lambda item: (item["record_id"],
@@ -1673,6 +1751,8 @@ class DeploymentRecordStore:
         value = dict((key, copy.deepcopy(journal[key])) for key in keys)
         value["error_category"] = (journal["error"]["category"]
                                    if journal["error"] is not None else None)
+        if journal.get("instruction_cleanup_pending"):
+            value["instruction_cleanup_pending"] = True
         return value
 
     def iox_summary(self, device_id):
@@ -1693,7 +1773,9 @@ class DeploymentRecordStore:
             values = []
             for record in data["records"].values():
                 journal = record.get("iox_verification")
-                if journal is None or not journal["unresolved"]:
+                if (journal is None or not (
+                        journal["unresolved"] or journal.get(
+                            "instruction_cleanup_pending", False))):
                     continue
                 if (record.get("device_id") == device_id or
                         journal["board_identity"] in board_identities):

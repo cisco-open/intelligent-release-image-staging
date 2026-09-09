@@ -490,6 +490,7 @@ def request(value):
             code,category,detail=4,'transport','instruction staging failed'
         else:
             instructions=True
+            revision+=2
         remote_instructions=False
     elif name=='copy_certificate':
         assert state=='ACTIVATED','certificate copied before activation'

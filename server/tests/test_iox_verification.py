@@ -118,6 +118,7 @@ class _StatefulTransport(object):
         self.transcript = transcript
         self.supervisor = supervisor
         self.app_present = True
+        self.app_state = "RUNNING"
         self.closed = False
 
     def _purpose(self, command_id, command_bytes):
@@ -233,6 +234,30 @@ class _StatefulTransport(object):
                 stderr=("injected %s\n" % outcome).encode("ascii"),
                 returncode=1, error_category=outcome,
                 framing_complete=False)
+        if self.scenario is not None and self.scenario.recipe_compatible:
+            prerequisites = {
+                "routing_prereq": b"Gateway of last resort is 192.0.2.1\n",
+                "storage_prereq": b"IOx Partition Exists\n",
+                "clock": b"14:23:07 UTC Thu Aug 20 2026\n",
+                "iox_status": (b"IOx service (CAF) : Running\n"
+                               b"Dockerd : Running\n"),
+            }
+            if purpose in prerequisites:
+                return _transport_result(prerequisites[purpose])
+            lifecycle = {
+                "app_stop": "STOPPED", "app_deactivate": "DEPLOYED",
+                "app_uninstall": "", "remove_app_config": "",
+                "app_install": "DEPLOYED", "app_activate": "ACTIVATED",
+                "app_start": "RUNNING",
+            }
+            if purpose in lifecycle:
+                self.app_state = lifecycle[purpose]
+                self.app_present = bool(self.app_state)
+                return _transport_result()
+            if purpose == "app_list":
+                return _transport_result(
+                    (("iris %s\n" % self.app_state).encode("ascii")
+                     if self.app_state else b""))
         if b"app-hosting uninstall" in lower:
             self.app_present = False
             return _transport_result()
@@ -282,7 +307,8 @@ class _StatefulTransport(object):
 class _TransportFactory(object):
     def __init__(self, board=_BOARD, verification="enabled", boards=None,
                  calls=None, read_states=None, command_outcomes=None,
-                 clock=None, advances=None, identity_results=None):
+                 clock=None, advances=None, identity_results=None,
+                 recipe_compatible=False):
         self.calls = calls if calls is not None else []
         self.created = []
         self.board = board
@@ -296,6 +322,7 @@ class _TransportFactory(object):
         self.advances = dict(advances or {})
         self.identity_results = [dict(value) for value in
                                  (identity_results or [])]
+        self.recipe_compatible = recipe_compatible
 
     def __call__(self, config, transcript, supervisor, monotonic_fn):
         args = (config, transcript, supervisor, monotonic_fn)
@@ -1570,7 +1597,7 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
 
 def test_production_bash_recipe_accepts_exact_two_revision_instruction_commit(
         tmp_path):
-    factory = _TransportFactory()
+    factory = _TransportFactory(recipe_compatible=True)
     recipe = (Path(__file__).resolve().parents[2] /
               "device" / "iox" / "install.sh")
 

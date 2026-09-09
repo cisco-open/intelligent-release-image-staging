@@ -1759,6 +1759,8 @@ def _public_journal(journal):
             "terminal_at")
     value = dict((key, journal[key]) for key in keys)
     value["error_category"] = (journal.get("error") or {}).get("category")
+    if journal.get("instruction_cleanup_pending"):
+        value["instruction_cleanup_pending"] = True
     return value
 
 
@@ -3021,6 +3023,32 @@ class IoxController(object):
             self._append_ack(attempt, event)
         return updated
 
+    def _instruction_cleanup_update(self, attempt, pending):
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "instruction cleanup blocked after durability failure", 5)
+        journal = attempt.journal
+        method = ("iox_instruction_cleanup_intent" if pending else
+                  "iox_instruction_cleanup_complete")
+        try:
+            updated = self._store_call(
+                method, (journal["record_id"], journal["transaction_id"],
+                         journal["revision"], journal["phase"]),
+                attempt=attempt, mutation=True)
+        except _ControllerFailure:
+            raise
+        except Exception as exc:
+            category = ("stale_cas" if
+                        type(exc).__name__ == "StaleIoxRevision" else
+                        "journal_durability")
+            attempt.durability_uncertain = True
+            raise _ControllerFailure(
+                category, "IOx instruction cleanup journal update failed", 5)
+        attempt.journal = updated
+        self._fence_barrier(attempt)
+        return updated
+
     def _recover_journal(self, attempt, journal, initiating=False):
         if attempt.durability_uncertain:
             raise _ControllerFailure(
@@ -3041,6 +3069,9 @@ class IoxController(object):
                 "authority_mismatch", "foreign IOx journal authority", 5)
         attempt.record_id = journal["record_id"]
         attempt.journal = journal
+        if journal.get("instruction_cleanup_pending"):
+            self._remove_instruction_source(attempt)
+            journal = attempt.journal
         phase = journal["phase"]
         probe_read = None
         enable_send = None
@@ -3204,7 +3235,16 @@ class IoxController(object):
             raise _ControllerFailure(
                 "reconciliation_required",
                 "recovered restore intent has no live continuation", 3)
-        code = self._recover_journal(attempt, obligations[0], initiating=False)
+        incoming_target = attempt.target
+        try:
+            self._strict_recovery_binding(attempt, obligations[0])
+            code = self._recover_journal(
+                attempt, obligations[0], initiating=False)
+        finally:
+            # Recovery uses only the predecessor record's closed projection;
+            # the admitted retry resumes with its independently validated
+            # request target after the old obligation is discharged.
+            attempt.target = incoming_target
         attempt.recovery_code = code
         if code:
             raise _ControllerFailure("reconciliation_required" if code == 3 else
@@ -4195,8 +4235,6 @@ class IoxController(object):
                      "delete /force %siris-catalog.pem" % package_fs]
             if wrapper:
                 lines.insert(0, "delete /force %s" % wrapper)
-            if instruction_source:
-                lines.insert(0, "delete /force %s" % instruction_source)
             if share_ios:
                 lines.extend([
                     "delete /force %s/iris-staged.bin" % share_ios,
@@ -4214,8 +4252,6 @@ class IoxController(object):
                      "show running-config | include %s" % include]
         elif name == "cleanup_stage_probe":
             stage_patterns = [wrapper_pattern]
-            if instruction_name:
-                stage_patterns.append(re.escape(instruction_name))
             stage_patterns.extend(["iris-ca\\.pem", "iris-catalog\\.pem"])
             lines = ["dir %s | include %s" %
                      (package_fs, "|".join(stage_patterns)),
@@ -4586,41 +4622,38 @@ class IoxController(object):
         try:
             completed = protocol["completed"]
             admitted = protocol["seen"]
-            for upload, removal, basename in (
-                    ("upload_certificate", "remove_certificate", "iris-ca.pem"),
-                    ("upload_wrapper", "remove_wrapper",
-                     "iris-%s.tar" % attempt.journal["transaction_id"])):
+            for upload, removal in (
+                    ("upload_certificate", "remove_certificate"),
+                    ("upload_wrapper", "remove_wrapper")):
                 if upload not in admitted or removal in completed:
                     continue
                 result, unused = self._command(
                     attempt, removal, self._render_command(attempt, removal), 45)
                 if (not self._transport_ok(result) or
-                        _get(result, "error_category") or
-                        re.search(br"(?mi)^.*%s.*$" %
-                                  re.escape(basename.encode("ascii")),
-                                  _get(result, "stdout", b""))):
+                        _get(result, "error_category")):
                     raise _ControllerFailure(
                         _get(result, "error_category") or "rejected",
                         "IOx transient cleanup could not be verified", 4)
                 completed.add(removal)
-            if (protocol.get("instruction_source_attempted") and
-                    not protocol.get("instruction_source_removed")):
-                result, unused = self._command(
-                    attempt, "remove_instructions",
-                    self._render_command(attempt, "remove_instructions"), 45)
-                basename = ("iris-instructions-%s.envelope" %
-                            attempt.journal["transaction_id"])
-                if (not self._transport_ok(result) or
-                        _get(result, "error_category") or
-                        re.search(br"(?mi)^.*%s.*$" %
-                                  re.escape(basename.encode("ascii")),
-                                  _get(result, "stdout", b""))):
-                    raise _ControllerFailure(
-                        _get(result, "error_category") or "rejected",
-                        "IOx transient cleanup could not be verified", 4)
+            if attempt.journal.get("instruction_cleanup_pending"):
+                self._remove_instruction_source(attempt)
                 protocol["instruction_source_removed"] = True
         finally:
             attempt.safety_recovery = previous
+
+    def _remove_instruction_source(self, attempt):
+        """Discharge only this journal's transaction-derived source."""
+        if not attempt.journal.get("instruction_cleanup_pending"):
+            return
+        result, unused = self._command(
+            attempt, "remove_instructions",
+            self._render_command(attempt, "remove_instructions"), 45)
+        if (not self._transport_ok(result) or
+                _get(result, "error_category")):
+            raise _ControllerFailure(
+                _get(result, "error_category") or "rejected",
+                "IOx transient cleanup could not be verified", 4)
+        self._instruction_cleanup_update(attempt, False)
 
     def _stage_instructions(self, attempt, protocol):
         snapshot = attempt.instruction_snapshot
@@ -4630,6 +4663,7 @@ class IoxController(object):
         package_fs = attempt.target.get("package_fs", "flash:")
         remote = (package_fs + "iris-instructions-" +
                   attempt.journal["transaction_id"] + ".envelope")
+        self._instruction_cleanup_update(attempt, True)
         protocol["instruction_source_attempted"] = True
         primary = None
         cleanup_failure = None
@@ -4650,21 +4684,8 @@ class IoxController(object):
         previous = attempt.safety_recovery
         attempt.safety_recovery = True
         try:
-            result, unused = self._command(
-                attempt, "remove_instructions",
-                self._render_command(attempt, "remove_instructions"), 45)
-            basename = ("iris-instructions-%s.envelope" %
-                        attempt.journal["transaction_id"])
-            if (not self._transport_ok(result) or
-                    _get(result, "error_category") or
-                    re.search(br"(?mi)^.*%s.*$" %
-                              re.escape(basename.encode("ascii")),
-                              _get(result, "stdout", b""))):
-                cleanup_failure = _ControllerFailure(
-                    _get(result, "error_category") or "rejected",
-                    "IOx instruction cleanup could not be verified", 4)
-            else:
-                protocol["instruction_source_removed"] = True
+            self._remove_instruction_source(attempt)
+            protocol["instruction_source_removed"] = True
         except _ControllerFailure as exc:
             cleanup_failure = exc
         finally:
@@ -4797,6 +4818,10 @@ class IoxController(object):
                         if code:
                             attempt.recovery_code = code
                             raise _ControllerFailure("readback_unknown", "verification restoration failed", code)
+                        # `deployed` is a controller operation.  Its internal
+                        # authenticated app-list read must not turn the wire
+                        # response into a transport operation result.
+                        transport_result = None
                     elif (operation == "stage_instructions" and
                           arguments == {} and action == "install"):
                         self._stage_instructions(attempt, protocol)
@@ -4865,22 +4890,6 @@ class IoxController(object):
                         if not self._transport_ok(transport_result) or _get(transport_result, "error_category"):
                             raise _ControllerFailure(_get(transport_result, "error_category") or "rejected",
                                                      "IOx command failed")
-                        if name in ("remove_wrapper", "remove_certificate"):
-                            if name == "remove_certificate":
-                                basename = "iris-ca.pem"
-                            else:
-                                remote = self._render_command(
-                                    attempt, "remove_wrapper").split(
-                                        b"\n", 1)[0].split(b" ")[-1].decode(
-                                            "ascii")
-                                basename = os.path.basename(
-                                    remote.rsplit(":", 1)[-1])
-                            if re.search(br"(?mi)^.*%s.*$" % re.escape(
-                                    basename.encode("ascii")),
-                                    _get(transport_result, "stdout", b"")):
-                                raise _ControllerFailure(
-                                    "rejected",
-                                    "IOx transient cleanup left residue", 4)
                         if action == "uninstall" and name == "app_stop":
                             outputs["stdout"] += (
                                 "IRIS-READY-MODE:%s\n" %
