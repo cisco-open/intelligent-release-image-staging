@@ -1696,9 +1696,7 @@ def _auth(host, port):
 
 def _policy_device(fleet, device_id="d1"):
     return fleet.upsert({"device_id": device_id, "device_ip": "10.0.0.1",
-                         "vlan": "666", "svi_ip": "10.0.0.2",
-                         "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.3",
-                         "model": "C9300", "platform": "c9300"})
+                         "model": "C9300"})
 
 
 def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
@@ -1910,9 +1908,11 @@ def test_devices_crud_and_list_requires_auth(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices",
-                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "management_type": "routed", "iris_vlan": "666",
                          "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                         "guest_ip": "10.0.0.3"}, headers=hh)
+                         "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                         "app_gateway": "10.0.0.1"}, headers=hh)
         assert st == 200
         st, _, b = _req(host, port, "GET", "/api/devices", headers={"Cookie": ck})
         devs = json.loads(b)["devices"]
@@ -1963,10 +1963,8 @@ def test_idempotency_capacity_never_evicts_in_flight_work():
     assert cache == {"active": active}
 
 
-def test_device_upsert_ignores_machine_determined_fields(tmp_path):
-    """os_family is classified from the device's own banner and registered_at
-    is the store's own stamp; a client body carrying either used to be
-    merged as-is (a wrong os_family wedged planning until hand-corrected)."""
+def test_device_upsert_rejects_machine_determined_fields(tmp_path):
+    """Public input cannot claim server-owned observation or stamp fields."""
     host, port, (_, fleet, _, _), stop = _serve_full(tmp_path)
     try:
         ck, csrf = _auth(host, port)
@@ -1975,16 +1973,21 @@ def test_device_upsert_ignores_machine_determined_fields(tmp_path):
                         {"device_id": "d1", "device_ip": "10.0.0.1",
                          "model": "C9300", "os_family": "xr",
                          "registered_at": 7}, headers=hh)
-        assert st == 200
-        saved = json.loads(b)["device"]
-        assert "os_family" not in saved
-        assert saved["registered_at"] != 7
-        # a cached classification survives an edit that tries to change it
-        fleet.upsert({"device_id": "d1", "os_family": "xe"})
+        assert st == 422
+        assert "server-owned fleet field" in json.loads(b)["error"]
+        assert fleet.get_device("d1") is None
+        st, _, b = _req(host, port, "POST", "/api/devices",
+                        {"device_id": "d2", "device_ip": "10.0.0.2",
+                         "future_inventory_field": "surprise"}, headers=hh)
+        assert st == 422
+        assert "unknown fleet field" in json.loads(b)["error"]
+        assert fleet.get_device("d2") is None
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1"})
+        fleet.update_observation("d1", os_family="xe")
         st, _, b = _req(host, port, "POST", "/api/devices",
                         {"device_id": "d1", "os_family": "xr"}, headers=hh)
-        assert st == 200
-        assert json.loads(b)["device"]["os_family"] == "xe"
+        assert st == 422
+        assert fleet.get_device("d1")["os_family"] == "xe"
     finally:
         stop()
 
@@ -1997,9 +2000,11 @@ def test_device_delete_purges_catalog_state(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
-        dev = {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+        dev = {"device_id": "d1", "device_ip": "10.0.0.1",
+               "management_type": "routed", "iris_vlan": "666",
                "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-               "guest_ip": "10.0.0.3"}
+               "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+               "app_gateway": "10.0.0.1"}
         st, _, _ = _req(host, port, "POST", "/api/devices", dev, headers=hh)
         assert st == 200
         cat.set_policy("d1", approved_image_id="img1")
@@ -2026,9 +2031,11 @@ def test_device_assign_empty_unassigns(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices",
-                        {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                        {"device_id": "d1", "device_ip": "10.0.0.1",
+                         "management_type": "routed", "iris_vlan": "666",
                          "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                         "guest_ip": "10.0.0.3"}, headers=hh)
+                         "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                         "app_gateway": "10.0.0.1"}, headers=hh)
         assert st == 200
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
                         {"image_id": "img1"}, headers=hh)
@@ -2218,6 +2225,29 @@ def test_assign_singular_body_still_works(tmp_path):
         stop()
 
 
+def test_assign_unknown_fleet_device_is_422_without_catalog_write(tmp_path):
+    host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
+    _app, _fleet, _creds, cat = _ctx
+    try:
+        ck, csrf = _auth(host, port)
+        hh = {"Cookie": ck, "X-CSRF-Token": csrf}
+        st, _, b = _req(host, port, "POST", "/api/devices/ghost/assign",
+                        {"image_ids": ["img1"]}, headers=hh)
+        assert st == 422
+        assert json.loads(b)["error"] == "no such fleet device"
+        assert cat._policies.get("ghost") is None
+        events = [e for e in _read_audit_lines(audit_path)
+                  if e.get("event") == "device_assign"]
+        assert len(events) == 1
+        assert events[0]["target"] == "ghost"
+        assert events[0]["result"] == "fail"
+        prefix, before, after, removed = _assignment_audit_parts(events[0])
+        assert prefix == "assignment failed: no such fleet device"
+        assert before == [] and after == [] and removed == []
+    finally:
+        stop()
+
+
 def test_unassign_clears_the_whole_set(tmp_path):
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     _app, fleet, _creds, cat = _ctx
@@ -2240,8 +2270,11 @@ def test_unassign_clears_the_whole_set(tmp_path):
         # every image the unassign actually removed, not just the set's first:
         # the audit trail is the record of what was done to this device, and
         # "(was img1.bin)" hid two of the three images that were dropped.
-        assert events and events[-1]["detail"] == \
-            "unassigned (was img1.bin, img2.bin, img3.bin)"
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == "unassigned (was img1.bin, img2.bin, img3.bin)"
+        assert before == ["img1", "img2", "img3"]
+        assert after == []
+        assert removed == before
     finally:
         stop()
 
@@ -2255,7 +2288,7 @@ def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
 
     The picker now sends the set it was opened on. A stored set that has
     moved on is refused with 409 and the CURRENT set, nothing is written, and
-    nothing is audited. A body without the field keeps the unconditional
+    one failed outcome is audited. A body without the field keeps the unconditional
     write, so older clients and API callers are unaffected."""
     host, port, _ctx, audit_path, stop = _serve_full_audit(tmp_path)
     _app, fleet, _creds, cat = _ctx
@@ -2278,10 +2311,14 @@ def test_assign_honours_an_expected_set_and_409s_on_a_stale_one(tmp_path):
         assert body["error"] == "assignment_conflict"
         assert body["assigned_image_ids"] == ["img1"]      # what it really is
         assert cat.get_policy("d1")["approved_image_ids"] == ["img1"]
-        # a refused write is not an assignment, so it is not audited as one
+        # The shared service records one sanitized outcome for the refusal.
         assigns = [e for e in _read_audit_lines(audit_path)
                   if e.get("action") == "assign"]
-        assert len(assigns) == 1
+        assert len(assigns) == 2
+        assert assigns[-1]["result"] == "fail"
+        prefix, before, after, removed = _assignment_audit_parts(assigns[-1])
+        assert prefix == "assignment failed: assignment conflict"
+        assert before == ["img1"] and after == ["img1"] and removed == []
 
         # unassign is guarded the same way
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
@@ -2330,8 +2367,12 @@ def test_assign_audit_names_the_images_it_removed(tmp_path):
         assert st == 200
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "assign"]
-        assert events[-1]["detail"] == \
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == \
             "assigned 1 image(s): img1.bin; removed: img2.bin, img3.bin"
+        assert before == ["img1", "img2", "img3"]
+        assert after == ["img1"]
+        assert removed == ["img2", "img3"]
 
         # widening removes nothing, so nothing is claimed to have been removed
         st, _, _ = _req(host, port, "POST", "/api/devices/d1/assign",
@@ -2339,7 +2380,10 @@ def test_assign_audit_names_the_images_it_removed(tmp_path):
         assert st == 200
         events = [e for e in _read_audit_lines(audit_path)
                  if e.get("action") == "assign"]
-        assert events[-1]["detail"] == "assigned 2 image(s): img1.bin, img2.bin"
+        prefix, before, after, removed = _assignment_audit_parts(events[-1])
+        assert prefix == "assigned 2 image(s): img1.bin, img2.bin"
+        assert before == ["img1"] and after == ["img1", "img2"]
+        assert removed == []
     finally:
         stop()
 
@@ -2736,12 +2780,16 @@ def _serve_onboard(tmp_path, run_fn, **svc_kw):
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
-                  "vlan": "666", "svi_ip": "10.0.0.10",
-                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
-                  "vlan": "666", "svi_ip": "10.0.0.10",
-                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -3033,10 +3081,13 @@ def test_plan_refuses_device_with_cached_xr_family(tmp_path):
     app = gui_app.GuiApp(secrets_path); app.set_admin("admin", "pw")
     state = str(tmp_path / "state")
     fleet = gui_fleet.FleetStore(state)
-    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9", "model": "ASR-9906",
-                  "os_family": "xr", "credential_profile_id": "lab", "vlan": "666",
-                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                      "guest_ip": "10.0.0.11"})
+    fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
+                  "model": "ASR-9906", "credential_profile_id": "lab",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1"})
+    fleet.update_observation("xr1", os_family="xr")
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
     onboard = gui_onboard.OnboardService(fleet, creds, host_ip="10.9.9.9",
@@ -3076,9 +3127,10 @@ def test_xr_host_plan_carries_no_addressing_fields(tmp_path):
     _app, fleet, _creds, _cat = deps
     try:
         fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
-                      "model": "8201", "os_family": "xr",
+                      "model": "8201",
                       "platform": "xr-appmgr", "management_type": "xr-host",
                       "credential_profile_id": "lab"})
+        fleet.update_observation("xr1", os_family="xr")
         ck, csrf = _auth(host, port)
         status, _, body = _req(host, port, "GET", "/api/devices/xr1/plan",
                                headers={"Cookie": ck})
@@ -3114,10 +3166,10 @@ def test_plan_refuses_xr_appmgr_platform_without_xr_host_management_type(tmp_pat
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "xr1", "device_ip": "10.0.0.9",
-                      "model": "8201", "credential_profile_id": "lab", "vlan": "666",
-                      "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
-                      "guest_ip": "10.0.0.11"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "xr1,10.0.0.9,666,10.0.0.10,255.255.255.0,10.0.0.11,8201,\n")
+        fleet.upsert({"device_id": "xr1", "credential_profile_id": "lab"})
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         st, _, _ = _req(host, port, "POST", "/api/devices/xr1/platform",
@@ -4052,12 +4104,16 @@ def _serve_onboard_audit(tmp_path, run_fn, **svc_kw):
     audit_path = str(tmp_path / "audit.jsonl")
     fleet = gui_fleet.FleetStore(state)
     fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "model": "C9300",
-                  "vlan": "666", "svi_ip": "10.0.0.10",
-                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     fleet.upsert({"device_id": "d2", "device_ip": "10.0.0.2", "model": "C9300",
-                  "vlan": "666", "svi_ip": "10.0.0.10",
-                  "svi_mask": "255.255.255.0", "guest_ip": "10.0.0.11",
+                  "management_type": "routed", "iris_vlan": "666",
+                  "svi_ip": "10.0.0.10", "svi_mask": "255.255.255.0",
+                  "app_ip": "10.0.0.11", "app_mask": "255.255.255.0",
+                  "app_gateway": "10.0.0.1",
                   "credential_profile_id": "lab"})
     creds = gui_creds.CredentialStore(secrets_path)
     creds.set_profile("lab", {"name": "L", "device_user": "u", "device_pass": "p"})
@@ -4758,9 +4814,11 @@ def test_delete_image_stale_policy_after_device_removed(tmp_path):
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         # img1 preexists in _serve_full's catalog; add d1 and assign it img1
         assert _req(host, port, "POST", "/api/devices",
-                    {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+                    {"device_id": "d1", "device_ip": "10.0.0.1",
+                     "management_type": "routed", "iris_vlan": "666",
                      "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                     "guest_ip": "10.0.0.3"}, headers=hh)[0] == 200
+                     "app_ip": "10.0.0.3", "app_mask": "255.255.255.252",
+                     "app_gateway": "10.0.0.1"}, headers=hh)[0] == 200
         cat.set_policy("d1", approved_image_id="img1")
         # a live assigned device blocks deletion (409)
         st, _, b = _req(host, port, "DELETE", "/api/images/img1", headers=hh)
@@ -5240,9 +5298,9 @@ def test_device_credential_happy_path_preserves_other_fields(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
-                     "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                     "guest_ip": "10.0.0.3"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,,\n")
         creds.set_profile("lab", {"name": "Lab", "device_user": "admin",
                                   "device_pass": "pw"})
         ck, csrf = _auth(host, port)
@@ -5495,7 +5553,9 @@ def test_device_platform_happy_path_and_clear(tmp_path):
     host, port, deps, stop = _serve_full(tmp_path)
     _app, fleet, _creds, _cat = deps
     try:
-        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666"})
+        fleet.import_csv(
+            "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model,platform\n"
+            "d1,10.0.0.1,666,10.0.0.2,255.255.255.252,10.0.0.3,,\n")
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         # set iox
@@ -5545,6 +5605,15 @@ import audit as audit_mod
 def _read_audit_lines(path):
     with open(path) as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+def _assignment_audit_parts(event):
+    """Split the stable human prefix from exact machine-readable ID sets."""
+    prefix, rest = event["detail"].split("; before_ids=", 1)
+    before_raw, rest = rest.split("; after_ids=", 1)
+    after_raw, removed_raw = rest.split("; removed_ids=", 1)
+    return (prefix, json.loads(before_raw), json.loads(after_raw),
+            json.loads(removed_raw))
 
 
 # ---- forget SSH host key (issue #84) --------------------------------------
@@ -5944,8 +6013,10 @@ def test_device_assign_credential_and_request_report_emit_audit(tmp_path):
         assign_events = [e for e in lines if e.get("category") == "device"
                          and e.get("action") == "assign"]
         assert assign_events and assign_events[0]["target"] == "d1"
-        # detail names the image (filename + size + retrievable id), not a bare id
-        assert assign_events[0]["detail"] == "assigned img1.bin (3 B) id=img1"
+        # detail names the image, while the suffix pins authoritative ID sets.
+        prefix, before, after, removed = _assignment_audit_parts(assign_events[0])
+        assert prefix == "assigned img1.bin (3 B) id=img1"
+        assert before == [] and after == ["img1"] and removed == []
         cred_events = [e for e in lines if e.get("action") == "credential"]
         assert cred_events[0]["detail"] == "profile (none) -> (cleared)"
         report_events = [e for e in lines if e.get("category") == "telemetry"]
@@ -5968,8 +6039,10 @@ def test_device_assign_detail_notes_previous_image(tmp_path):
                     {"image_id": "img2"}, headers=hh)[0] == 200
         assigns = [e for e in _read_audit_lines(audit_path)
                    if e.get("action") == "assign"]
-        assert assigns[-1]["detail"] == \
-            "assigned img2.bin (1.2 GiB) id=img2, was img1.bin"
+        prefix, before, after, removed = _assignment_audit_parts(assigns[-1])
+        assert prefix == "assigned img2.bin (1.2 GiB) id=img2, was img1.bin"
+        assert before == ["img1"] and after == ["img2"]
+        assert removed == ["img1"]
     finally:
         stop()
 
@@ -6186,15 +6259,15 @@ def test_device_upsert_create_and_update_details(tmp_path):
         ck, csrf = _auth(host, port)
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         _req(host, port, "POST", "/api/devices",
-             {"device_id": "d1", "device_ip": "10.0.0.1", "vlan": "666",
+             {"device_id": "d1", "device_ip": "10.0.0.1", "iris_vlan": "666",
               "model": "C9300"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "model": "IE-3400"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
              {"device_id": "d1", "model": "IE-3400"}, headers=hh)
         _req(host, port, "POST", "/api/devices",
-             {"device_id": "d1", "device_ip": "10.0.0.9", "vlan": "777",
-              "svi_ip": "1.1.1.1", "guest_ip": "2.2.2.2"}, headers=hh)
+             {"device_id": "d1", "device_ip": "10.0.0.9", "iris_vlan": "777",
+              "svi_ip": "1.1.1.1", "app_ip": "2.2.2.2"}, headers=hh)
         ups = [e for e in _read_audit_lines(audit_path)
                if e.get("event") == "device_upsert"]
         assert [e["action"] for e in ups] == \
@@ -6203,9 +6276,9 @@ def test_device_upsert_create_and_update_details(tmp_path):
         assert ups[1]["detail"] == "changed model: C9300 -> IE-3400"
         assert ups[2]["detail"] == "no fields changed"
         # 4 changed fields -> first 3 alphabetically + a (+1 more) suffix
-        assert ups[3]["detail"] == ("changed device_ip: 10.0.0.1 -> 10.0.0.9, "
-                                    "guest_ip: (none) -> 2.2.2.2, "
-                                    "svi_ip: (none) -> 1.1.1.1 (+1 more)")
+        assert ups[3]["detail"] == ("changed app_ip: (none) -> 2.2.2.2, "
+                                    "device_ip: 10.0.0.1 -> 10.0.0.9, "
+                                    "iris_vlan: 666 -> 777 (+1 more)")
     finally:
         stop()
 
@@ -6482,9 +6555,7 @@ def test_device_view_exposes_telemetry_flags(tmp_path):
         hh = {"Cookie": ck, "X-CSRF-Token": csrf}
         for did in ("d-stream", "d-quiet", "d-old"):
             _req(host, port, "POST", "/api/devices",
-                 {"device_id": did, "device_ip": "10.0.0.1", "vlan": "666",
-                  "svi_ip": "10.0.0.2", "svi_mask": "255.255.255.252",
-                  "guest_ip": "10.0.0.3"}, headers=hh)
+                 {"device_id": did, "device_ip": "10.0.0.1"}, headers=hh)
         cat.record_heartbeat("d-stream", {"stage_state": "ready",
                                           "telemetry_enabled": True,
                                           "telemetry_stream_enabled": True})

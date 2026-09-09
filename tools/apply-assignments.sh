@@ -5,8 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Apply image assignments from fleet/assignments.csv (device_id,image_id).
-# Run on the server machine. Each device picks up its assignment within ~60s;
-# a device whose image CHANGED cleans up the old one automatically first.
+# Run on the server machine. Each row merge-adds one image to the device's
+# ordered assignment; existing assigned images remain until an explicit
+# replacement or unassign. Devices pick up the resulting set within ~60s.
 #
 # Usage: tools/apply-assignments.sh [--dry-run] [csv]
 #

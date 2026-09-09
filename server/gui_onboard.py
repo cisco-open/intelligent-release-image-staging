@@ -1458,11 +1458,10 @@ class OnboardService:
                 # would overwrite a previously cached family (upsert filters
                 # None, not empty strings) and silently reopen the misroute
                 # this guard exists to close.
-                record = {"device_id": device_id, "model": model}
                 family = d.get("os_family")
-                if family:
-                    record["os_family"] = family
-                self.fleet.upsert(record)
+                self.fleet.update_observation(
+                    device_id, model=model,
+                    os_family=family if family else None)
                 dev["model"] = model   # so the job line reports what was found
             return model
 
@@ -1581,7 +1580,7 @@ class OnboardService:
         if not family or family == prior_family:
             return
         try:
-            self.fleet.upsert({"device_id": device_id, "os_family": family})
+            self.fleet.update_observation(device_id, os_family=family)
         except Exception:
             pass
 
@@ -1759,8 +1758,8 @@ class OnboardService:
                     # classification exists, and no existing fleet row carries
                     # one. Cache it so later calls short-circuit at resolution.
                     if dev.get("os_family") == "xr":
-                        self.fleet.upsert({"device_id": device_id,
-                                           "os_family": "xr"})
+                        self.fleet.update_observation(
+                            device_id, os_family="xr")
                         _refuse_xr(device_id)
                     # Guest Shell used to stop there, so a device still
                     # carrying IRIS config was refused as a router and

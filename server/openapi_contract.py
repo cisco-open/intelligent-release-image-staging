@@ -1262,6 +1262,30 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix == "/devices":
+        # Fleet JSON input is a closed operator-owned schema. Historical
+        # vlan/guest_ip aliases remain CSV compatibility fields only, while
+        # schema_version, registered_at and os_family are server-owned.
+        writable = (
+            "device_id", "device_ip", "management_type", "iris_vlan",
+            "svi_ip", "svi_mask", "app_ip", "app_mask", "app_gateway",
+            "inband_vlan", "ios_ssh_host", "model", "vpg_number",
+            "nat_interface", "svi_igp", "role", "platform",
+            "credential_profile_id",
+        )
+        for field in writable:
+            schema["properties"].setdefault(
+                field, {"type": ["string", "integer"]})
+        schema["properties"]["role"] = {"type": ["string", "null"]}
+        schema["properties"]["management_type"].update({"enum": [
+            "routed", "inband", "router-routed", "router-nat", "xr-host"]})
+        schema["properties"]["platform"].update({"enum": [
+            "", "guestshell", "iox", "router", "xr-appmgr"]})
+        schema["additionalProperties"] = False
+        schema["description"] = (
+            "Closed operator-owned fleet record. Unknown fields and the "
+            "server-owned schema_version, registered_at and os_family fields "
+            "are rejected with 422.")
     if route.service == "catalog" and path.endswith("/heartbeat"):
         return {"required": required_body, "content": {
             "application/json": _instruction_attestation_request(schema, example)}}
@@ -1429,7 +1453,9 @@ def _json_success_example(route):
                 "_event_id": "0123456789abcdef0123456789abcdef"}]},
         "/devices/{device_id}/deployment": {
             "record": None, "total": 0},
-        "/devices/{device_id}/assign": {"ok": True},
+        "/devices/{device_id}/assign": {
+            "ok": True, "assigned_image_ids": ["image-01"],
+            "removed_image_ids": []},
         "/devices/{device_id}/credential": {"ok": True},
         "/devices/{device_id}/platform": {"ok": True},
         "/devices/{device_id}/forget-host-key": {
@@ -2331,6 +2357,8 @@ def _error_statuses(route):
     if _policy_mutation(route):
         statuses.update((409, 412, 422, 428))
     if suffix in ("/peer-policy/explain", "/devices/{device_id}/effective-qos"):
+        statuses.add(422)
+    if suffix in ("/devices", "/devices/{device_id}/assign"):
         statuses.add(422)
     if suffix in ("/peer-policy/quarantine/{device_id}",):
         statuses.update((409, 412, 422))

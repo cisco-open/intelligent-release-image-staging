@@ -11,7 +11,13 @@ processes.
 Lock order is a hard invariant::
 
     role-management transaction lock
-      -> fleet/keyed-state locks OR peer-policy umbrella lock
+      -> fleet membership guard
+        -> catalog image-policy lock
+          -> keyed-state shard locks
+
+Role-only operations may go directly from the role transaction lock to the
+fleet/keyed-state or peer-policy locks. Device retirement uses the complete
+order above so an assignment cannot land after fleet deletion.
 
 No callback from either inner store may enter this coordinator.  In
 particular, callers must never hold the peer-policy umbrella lock before
@@ -22,6 +28,7 @@ import json
 import os
 import time
 
+import assignment_service
 import gui_fleet
 import peer_policy
 import secrets_store
@@ -567,6 +574,10 @@ class RoleCoordinator:
     def upsert_device(self, record, actor, expected_revision=None,
                       dry_run=False, allow_shadow=False):
         """Coordinate generic device creation/update when ``role`` is explicit."""
+        # Validate the complete logical fleet row before a relaxing role
+        # change can commit policy first. The eventual upsert repeats these
+        # checks while holding the device shard lock.
+        self.fleet.validate_operator_upsert(record)
         if "role" not in record:
             saved = self.fleet.upsert(record)
             return {"ok": True, "device": saved, "applied": 1,
@@ -784,49 +795,62 @@ class RoleCoordinator:
             except Exception as exc:
                 self._translate_policy_error(exc)
 
-    def retire_device(self, device_id, actor):
-        """Clean policy membership/QoS before deleting one fleet declaration.
+    def retire_device(self, device_id, actor, catalog=None):
+        """Clean policy, fleet, and optional catalog state for one device.
 
         The caller owns durable credential revocation and performs it before
         entering here.  Policy cleanup failure therefore degrades but does not
         block fleet retirement; a fleet failure after policy cleanup is a
-        reported partial result and the first phase is never rolled back.
+        reported partial result and the first phase is never rolled back. The
+        membership guard spans fleet deletion and catalog purge, preventing a
+        waiting assignment from recreating policy for the deleted device.
         """
         with secrets_store.store_lock(self.lock_path):
-            policy_error = None
-            committed = None
-            try:
-                committed = peer_policy.unassign_device(
-                    self.auth_path, self.lkg_path, device_id, actor=actor,
-                    now=self.now_fn(), acked_revision=self._acked())
-            except Exception as exc:
-                policy_error = exc
-            try:
-                deleted = self.fleet.delete(device_id)
-            except Exception as exc:
-                result = {}
-                if committed is not None:
-                    result["revision"] = committed["revision"]
+            with assignment_service.membership_guard(self.fleet):
+                policy_error = None
+                committed = None
+                try:
+                    committed = peer_policy.unassign_device(
+                        self.auth_path, self.lkg_path, device_id, actor=actor,
+                        now=self.now_fn(), acked_revision=self._acked())
+                except Exception as exc:
+                    policy_error = exc
+                try:
+                    deleted = self.fleet.delete(device_id)
+                except Exception as exc:
+                    result = {}
+                    if committed is not None:
+                        result["revision"] = committed["revision"]
+                        try:
+                            result["role_drift"] = self.role_drift()
+                        except Exception:
+                            result["role_drift"] = {
+                                "count": 1, "device_ids": [device_id],
+                                "truncated": False}
+                    raise RoleManagementError(
+                        str(exc), code="fleet_write_failed", status=503,
+                        partial=committed is not None, result=result) from None
+                purged = False
+                catalog_degraded = False
+                if catalog is not None:
                     try:
-                        result["role_drift"] = self.role_drift()
+                        purged = catalog.purge_device(device_id)
                     except Exception:
-                        result["role_drift"] = {
-                            "count": 1, "device_ids": [device_id],
-                            "truncated": False}
-                raise RoleManagementError(
-                    str(exc), code="fleet_write_failed", status=503,
-                    partial=committed is not None, result=result) from None
-            try:
-                drift = self.role_drift()
-            except Exception:
-                drift = {"count": 1 if policy_error is not None else 0,
-                         "device_ids": [device_id] if policy_error is not None
-                         else [], "truncated": False}
-            return {"deleted": deleted,
-                    "policy_degraded": policy_error is not None,
-                    "revision": committed.get("revision")
-                    if committed is not None else None,
-                    "role_drift": drift}
+                        catalog_degraded = True
+                try:
+                    drift = self.role_drift()
+                except Exception:
+                    drift = {"count": 1 if policy_error is not None else 0,
+                             "device_ids": [device_id]
+                             if policy_error is not None else [],
+                             "truncated": False}
+                return {"deleted": deleted,
+                        "policy_degraded": policy_error is not None,
+                        "catalog_purged": purged,
+                        "catalog_degraded": catalog_degraded,
+                        "revision": committed.get("revision")
+                        if committed is not None else None,
+                        "role_drift": drift}
 
     def define_role(self, name, definition, actor, **kwargs):
         with secrets_store.store_lock(self.lock_path):

@@ -13062,6 +13062,25 @@
               }
             }
           },
+          "422": {
+            "description": "Unprocessable content",
+            "x-iris-problem-codes": [
+              "unprocessable-content"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#unprocessable-content",
+                  "title": "Unprocessable content",
+                  "status": 422,
+                  "code": "unprocessable-content"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Management API unavailable or Service unavailable",
             "x-iris-problem-codes": [
@@ -13120,13 +13139,105 @@
                     "type": "string"
                   },
                   "management_type": {
-                    "type": "string"
+                    "type": "string",
+                    "enum": [
+                      "routed",
+                      "inband",
+                      "router-routed",
+                      "router-nat",
+                      "xr-host"
+                    ]
                   },
                   "model": {
                     "type": "string"
                   },
                   "credential_profile_id": {
                     "type": "string"
+                  },
+                  "iris_vlan": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_ip": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_mask": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_ip": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_mask": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_gateway": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "inband_vlan": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "ios_ssh_host": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "vpg_number": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "nat_interface": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_igp": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "role": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "platform": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ],
+                    "enum": [
+                      "",
+                      "guestshell",
+                      "iox",
+                      "router",
+                      "xr-appmgr"
+                    ]
                   }
                 },
                 "required": [
@@ -13134,7 +13245,8 @@
                   "device_ip",
                   "management_type"
                 ],
-                "additionalProperties": true
+                "additionalProperties": false,
+                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at and os_family fields are rejected with 422."
               },
               "example": {
                 "device_id": "edge-01",
@@ -15559,15 +15671,33 @@
                   "properties": {
                     "ok": {
                       "type": "boolean"
+                    },
+                    "assigned_image_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "removed_image_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
-                    "ok"
+                    "ok",
+                    "assigned_image_ids",
+                    "removed_image_ids"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
-                  "ok": true
+                  "ok": true,
+                  "assigned_image_ids": [
+                    "image-01"
+                  ],
+                  "removed_image_ids": []
                 }
               }
             }
@@ -15749,6 +15879,25 @@
                   "title": "Payload too large",
                   "status": 413,
                   "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable content",
+            "x-iris-problem-codes": [
+              "unprocessable-content"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#unprocessable-content",
+                  "title": "Unprocessable content",
+                  "status": 422,
+                  "code": "unprocessable-content"
                 }
               }
             }
@@ -41610,6 +41759,25 @@
               }
             }
           },
+          "422": {
+            "description": "Unprocessable content",
+            "x-iris-problem-codes": [
+              "unprocessable-content"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#unprocessable-content",
+                  "title": "Unprocessable content",
+                  "status": 422,
+                  "code": "unprocessable-content"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Service unavailable",
             "x-iris-problem-codes": [
@@ -41655,13 +41823,105 @@
                     "type": "string"
                   },
                   "management_type": {
-                    "type": "string"
+                    "type": "string",
+                    "enum": [
+                      "routed",
+                      "inband",
+                      "router-routed",
+                      "router-nat",
+                      "xr-host"
+                    ]
                   },
                   "model": {
                     "type": "string"
                   },
                   "credential_profile_id": {
                     "type": "string"
+                  },
+                  "iris_vlan": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_ip": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_mask": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_ip": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_mask": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "app_gateway": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "inband_vlan": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "ios_ssh_host": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "vpg_number": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "nat_interface": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "svi_igp": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ]
+                  },
+                  "role": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "platform": {
+                    "type": [
+                      "string",
+                      "integer"
+                    ],
+                    "enum": [
+                      "",
+                      "guestshell",
+                      "iox",
+                      "router",
+                      "xr-appmgr"
+                    ]
                   }
                 },
                 "required": [
@@ -41669,7 +41929,8 @@
                   "device_ip",
                   "management_type"
                 ],
-                "additionalProperties": true
+                "additionalProperties": false,
+                "description": "Closed operator-owned fleet record. Unknown fields and the server-owned schema_version, registered_at and os_family fields are rejected with 422."
               },
               "example": {
                 "device_id": "edge-01",
@@ -43676,15 +43937,33 @@
                   "properties": {
                     "ok": {
                       "type": "boolean"
+                    },
+                    "assigned_image_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "removed_image_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
-                    "ok"
+                    "ok",
+                    "assigned_image_ids",
+                    "removed_image_ids"
                   ],
                   "additionalProperties": true
                 },
                 "example": {
-                  "ok": true
+                  "ok": true,
+                  "assigned_image_ids": [
+                    "image-01"
+                  ],
+                  "removed_image_ids": []
                 }
               }
             }
@@ -43847,6 +44126,25 @@
                   "title": "Payload too large",
                   "status": 413,
                   "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable content",
+            "x-iris-problem-codes": [
+              "unprocessable-content"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#unprocessable-content",
+                  "title": "Unprocessable content",
+                  "status": 422,
+                  "code": "unprocessable-content"
                 }
               }
             }

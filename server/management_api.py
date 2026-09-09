@@ -35,6 +35,7 @@ from urllib.parse import unquote, parse_qs, urlsplit
 import audit
 import auth
 import audit_export
+import assignment_service
 import bounded_pool
 import bulkhash_refresh
 # aliased: `catalog` is the injected STORE everywhere below
@@ -4891,16 +4892,13 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 rec = self._json_body(raw)
                 if rec is None:
                     return
-                # Machine-determined fields never come from a client body:
-                # os_family is classified from the device's own 'show
-                # version' banner (a wrong value here wedged planning until
-                # hand-corrected), and registered_at is the store's own
-                # stamp. The same rule the CSV importer already applies.
-                for machine_key in ("os_family", "registered_at"):
-                    rec.pop(machine_key, None)
                 rec_id = str(rec.get("device_id") or "").strip()
                 prev = fleet.get_device(rec_id) if rec_id else None
                 try:
+                    # Reject closed, server-owned and malformed fields before
+                    # role coordination can apply a policy-first relaxation.
+                    # FleetStore.upsert repeats this under its shard lock.
+                    fleet.validate_operator_upsert(rec)
                     if "role" in rec:
                         saved = role_coordinator().upsert_device(
                             rec, actor=actor)["device"]
@@ -4913,6 +4911,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         result="fail", detail="role coordination refused: %s"
                         % exc.code)
                     self._json(exc.status, exc.result); return
+                except gui_fleet.FleetFieldError as exc:
+                    self._json(422, {"error": str(exc)}); return
                 except (ValueError, KeyError) as exc:
                     self._json(400, {"error": str(exc)}); return
                 if prev is None:
@@ -5074,79 +5074,35 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 else:
                     image_id = str(body.get("image_id") or "")
                     ids = [image_id] if image_id else []
-                if not ids:
-                    # explicit unassign: clear the approval so the agent stops
-                    # staging without deleting the device
-                    old_ids = catalog.get_policy(did).get("approved_image_ids") or []
-                    try:
-                        catalog.set_policy(did, approved_image_ids=[],
-                                           expect_image_ids=expect)
-                    except catalog_mod.PolicyConflict as exc:
-                        self._json(409, {"error": "assignment_conflict",
-                                         "assigned_image_ids": exc.current_ids})
-                        return
-                    # EVERY image this cleared, not just the set's first: the
-                    # audit trail is the record of what was done to the
-                    # device, and naming one of three removed images made it
-                    # read as a far smaller change than it was.
-                    self._audit("device_assign", "device", action="unassign",
-                               target=did, actor=actor,
-                               detail="unassigned (was %s)"
-                                      % (self._audit_image_names(catalog, old_ids)
-                                         or "none"))
-                    self._json(200, {"ok": True}); return
-                entries = {}
-                for iid in ids:
-                    entry = catalog.get_image(iid)
-                    if entry is None:
-                        self._json(400, {"error": "no such image"}); return
-                    entries[iid] = entry
-                old_pol = catalog.get_policy(did)
-                old = old_pol.get("approved_image_id")
-                old_ids = old_pol.get("approved_image_ids") or []
+                service = assignment_service.AssignmentService(
+                    catalog, fleet, audit_path)
                 try:
-                    # approval is the whole policy: IRIS stages, never installs
-                    catalog.set_policy(did, approved_image_ids=ids,
-                                       expect_image_ids=expect)
+                    # API compatibility remains replacement semantics. The
+                    # shared service holds fleet membership through the
+                    # catalog CAS and writes exactly one success/failure audit.
+                    result = service.apply(
+                        did, ids, actor=actor, mode="replace",
+                        expect_image_ids=expect, retry_conflict=False,
+                        plural=plural)
+                except assignment_service.MissingFleetDevice:
+                    self._json(422, {"error": "no such fleet device"})
+                    return
                 except catalog_mod.PolicyConflict as exc:
-                    # a lost race, not a bad request: answer with what is
-                    # really stored so the client can show it and decide again
                     self._json(409, {"error": "assignment_conflict",
                                      "assigned_image_ids": exc.current_ids})
                     return
                 except catalog_mod.QuarantinedImage as exc:
-                    # a Cisco Bulk Hash sha512 mismatch blocked this id --
-                    # surface the verdict so the operator sees WHY, not just
-                    # a bare 400 (KGV reconciler).
                     self._json(400, {"error": "image_quarantined",
                                      "image_id": exc.image_id,
                                      "verdict": exc.hash_verification})
                     return
                 except ValueError as exc:
                     self._json(400, {"error": str(exc)}); return
-                if plural:
-                    detail = "assigned %d image(s): %s" % (
-                        len(ids), ", ".join(entries[i].get("filename") for i in ids))
-                    # Narrowing a set is an assign, and what it REMOVED is the
-                    # consequential half of that edit: an operator reading
-                    # "assigned 1 image(s): A" had no way to tell it from a
-                    # fresh assignment that dropped nothing.
-                    removed = [i for i in old_ids if i not in ids]
-                    if removed:
-                        detail += "; removed: %s" % self._audit_image_names(
-                            catalog, removed)
-                else:
-                    # singular compat: keep the pre-multi-image detail shape
-                    # (existing audit tests assert this text verbatim)
-                    entry = entries[ids[0]]
-                    detail = "assigned %s (%s) id=%s" % (
-                        entry.get("filename"), _fmt_bytes(entry.get("size")), ids[0])
-                    if old and old != ids[0]:
-                        old_entry = catalog.get_image(old)
-                        detail += ", was %s" % ((old_entry or {}).get("filename") or old)
-                self._audit("device_assign", "device", action="assign", target=did,
-                           detail=detail, actor=actor)
-                self._json(200, {"ok": True}); return
+                self._json(200, {
+                    "ok": True,
+                    "assigned_image_ids": result.after_ids,
+                    "removed_image_ids": result.removed_ids,
+                }); return
             if path.startswith("/api/devices/") and path.endswith("/credential"):
                 if fleet is None:
                     self._json(404, {"error": "not found"}); return
@@ -5483,7 +5439,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # partial/degraded but CANNOT permit the device.
                 degraded = []
                 try:
-                    role_cleanup = role_coordinator().retire_device(did, actor)
+                    role_cleanup = role_coordinator().retire_device(
+                        did, actor, catalog=catalog)
                 except role_management.RoleManagementError as exc:
                     self._audit(
                         "device_delete", "device", action="delete", target=did,
@@ -5495,16 +5452,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if role_cleanup["policy_degraded"]:
                     degraded.append("policy")
                 deleted = role_cleanup["deleted"]
-                # Purge catalog-side state (assignment, heartbeat record,
-                # telemetry history, seen-report ledger, pending pull) even when
-                # the fleet row was already gone — a deleted-and-re-added device
-                # must come back unassigned. Endpoints are NOT purged (retained
-                # to TTL); re-onboard clears them before new credentials mint.
-                try:
-                    purged = (catalog.purge_device(did)
-                              if catalog is not None else False)
-                except Exception:
-                    purged = False
+                # The coordinator keeps its membership guard across fleet
+                # deletion and this catalog purge. A concurrent CLI/API assign
+                # therefore resumes only after deletion, observes no fleet row,
+                # and cannot recreate stale policy for a replacement device.
+                purged = role_cleanup["catalog_purged"]
+                if role_cleanup["catalog_degraded"]:
                     degraded.append("catalog")
                 # Retire the deployment records for the same reason the catalog
                 # state goes: a record outlives the fleet row, and the NEXT

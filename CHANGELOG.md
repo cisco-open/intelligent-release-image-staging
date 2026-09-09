@@ -12,6 +12,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Reject unknown, nested, and server-owned fleet fields before any inventory or
+  role-policy write; trusted model and OS observations use a bounded internal
+  update path, while historical CSV imports remain compatible (issue #171).
+- Make Console and CLI image assignment share one fleet-aware transaction and
+  audit outcome. The CLI now merges ordered image sets by default, explicit
+  `--replace` reports removals, and device retirement cannot race an assignment
+  into orphaned catalog state (issues #163 and #172).
+- Refuse incomplete legacy inventory before onboarding creates a job, mints a
+  credential, or contacts a device; complete historical rows remain usable
+  (issue #173).
 - Keep each ordinary ACL assignment preserved through peer quarantine and
   release. Legacy rows whose ACL was already overwritten have unrecoverable
   assignment history, and older servers ignore independent quarantine during a

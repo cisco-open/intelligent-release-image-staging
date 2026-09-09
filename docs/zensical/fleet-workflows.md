@@ -68,6 +68,19 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 See [Management Type and VLAN Ownership](management-type.md) for the full
 ownership rules.
 
+Console/API inventory writes accept only the named operator fields in this
+schema (plus `credential_profile_id`). Unknown names are rejected instead of
+being stored for a future component to interpret. `schema_version`,
+`registered_at`, and the observed `os_family` are maintained by the server and
+cannot be supplied in a JSON request. Older `vlan`/`guest_ip` headers remain a
+CSV import compatibility path; they are not public JSON aliases.
+
+An old CSV row can remain in inventory before its management type is
+classified. IRIS onboards it only when the complete historical routed tuple is
+valid (`device_id`, `device_ip`, VLAN, SVI address/mask, and app address).
+Incomplete rows fail before a job, enrollment credential, or device connection
+is created; edit them into one of the current management types first.
+
 ### Credentials are not in the CSV
 
 The inventory carries network information only. There is no
@@ -175,9 +188,9 @@ Start from the template:
 cp fleet/assignments.csv.example fleet/assignments.csv
 ```
 
-Assignments are release intent, one image per device per row — this CSV path
-does not carry the console's multi-image set; assign more than one image to a
-device from the console instead (see [Bulk device actions](console.md#bulk-device-actions)):
+Assignments are release intent, one image per device per row. The CSV requires
+each device id once; applying that row adds its image without discarding images
+already assigned to the device:
 
 ```text
 device_id,image_id
@@ -190,6 +203,12 @@ tools/apply-assignments.sh fleet/assignments.csv
 ```
 
 The script validates all rows first, then applies assignments. That avoids partially applying a malformed file.
+Each target must already exist in fleet inventory. The command-line
+To add several images in one operation, use
+`iris-assign DEVICE IMAGE [IMAGE ...]`, which also merges by default. Use
+`iris-assign --replace DEVICE IMAGE [IMAGE ...]` only when the reviewed intent
+is to replace the set and remove images that are no longer listed. The Console
+and assignment API keep replacement semantics.
 The agent picks up assignments on its next policy poll. Approval alone is not
 staging activity: the Console shows **Waiting for staging** until the device
 reports work, then uses that device's progress and errors.

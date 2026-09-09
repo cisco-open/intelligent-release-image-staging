@@ -295,6 +295,10 @@ tools/apply-assignments.sh fleet/assignments.csv
 
 This requires the running `iris` container by that name; set
 `IRIS_CONTAINER=<name>` if yours differs.
+Each CSV device id appears once, and its image is merged into that device's
+existing ordered assignment. Use `iris-assign DEVICE IMAGE [IMAGE ...]` to add
+several directly, or `iris-assign --replace DEVICE IMAGE [IMAGE ...]` when the
+reviewed intent is to remove images omitted from the new set.
 
 Agents poll the catalog, transfer assigned images, verify them, and stage them
 on the device filesystem. Removing an assignment stops that image's torrent

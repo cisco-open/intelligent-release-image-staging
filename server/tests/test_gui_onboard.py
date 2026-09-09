@@ -31,6 +31,14 @@ class _Fleet:
         self._d[did] = merged
         return merged
 
+    def update_observation(self, device_id, *, model=None, os_family=None):
+        record = {"device_id": device_id}
+        if model is not None:
+            record["model"] = model
+        if os_family is not None:
+            record["os_family"] = os_family
+        return self.upsert(record)
+
 
 class _Creds:
     def __init__(self, profs): self._p = profs
