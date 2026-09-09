@@ -3863,12 +3863,18 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def _schedule_views(self, rows):
             admin = gui_auth.get_admin(app._load())
+            now = int(now_fn())
             views = []
             for row in rows:
                 view = dict(row)
                 view["etag"] = schedules.schedule_etag(row)
                 view["creator_exists"] = self._schedule_actor_exists(
                     row["created_by"], admin)
+                # The current or next slot, computed by the same authority the
+                # runner fires from. A console that recomputed weekly local
+                # time itself would be a second, quietly divergent answer to
+                # the one question an operator plans a window from.
+                view["next_fire"] = schedules.occurrence_slot(row, now)
                 views.append(view)
             return views
 

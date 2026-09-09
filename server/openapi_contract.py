@@ -527,6 +527,9 @@ def _schedule_view_schema():
     fields = {
         "etag": dict(_schedule_etag_header()["schema"], readOnly=True),
         "creator_exists": {"type": "boolean", "readOnly": True, "description": "Response-only marker from the authoritative administrator record; an absent creator does not prevent firing."},
+        "next_fire": {"oneOf": [_schedule_slot_schema(), {"type": "null"}],
+                      "readOnly": True,
+                      "description": "Response-only current or next slot, computed by the same authority the runner fires from, so a client never recomputes local weekly time itself. Null when the schedule is paused or completed, or when a one-time schedule has no further slot."},
     }
     schema["properties"].update(fields)
     schema["required"].extend(fields)
@@ -616,12 +619,9 @@ def _schedule_receipt_schema(*, predecessor=False):
     return schema
 
 
-def _schedule_occurrence_schema():
+def _schedule_slot_schema():
     epoch = _schedule_integer(0, schedules.MAX_EPOCH)
-    snapshot = _schedule_object({
-        "revision": _schedule_integer(), "now": epoch,
-        "device_ids": _schedule_ids_schema()})
-    slot = _schedule_object({
+    return _schedule_object({
         "scheduled_at": epoch, "window_end": epoch,
         "status": {"type": "string", "enum": ["future", "due", "missed"]},
         "resolution": {"type": "string", "enum": ["normal", "gap", "fold"]},
@@ -629,6 +629,14 @@ def _schedule_occurrence_schema():
         "local_time": _schedule_text_schema(64),
         "next_at": {"oneOf": [epoch, {"type": "null"}]},
     })
+
+
+def _schedule_occurrence_schema():
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    snapshot = _schedule_object({
+        "revision": _schedule_integer(), "now": epoch,
+        "device_ids": _schedule_ids_schema()})
+    slot = _schedule_slot_schema()
     properties = {
         "id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
         "schedule_id": _schedule_id_schema(),
@@ -677,16 +685,19 @@ def _schedule_definition_example(kind="assign"):
 
 
 def _schedule_view_example():
-    return dict(_schedule_definition_example(), id="s-boat", generation="0" * 32, rev=1,
-                created_by="console:alice", created_at=1788883200,
-                preview={"revision": 2, "now": 1788883200, "device_ids": ["edge-01"]},
-                etag='"iris-schedule-s-boat-1"', creator_exists=True)
+    row = dict(_schedule_definition_example(), id="s-boat", generation="0" * 32, rev=1,
+               created_by="console:alice", created_at=1788883200,
+               preview={"revision": 2, "now": 1788883200, "device_ids": ["edge-01"]},
+               etag='"iris-schedule-s-boat-1"', creator_exists=True)
+    return dict(row, next_fire=schedules.occurrence_slot(
+        row, row["when"]["at"] - 60))
 
 
 def _schedule_occurrence_example():
     schedule = _schedule_view_example()
     schedule.pop("etag")
     schedule.pop("creator_exists")
+    schedule.pop("next_fire")
     scheduled_at = schedule["when"]["at"]
     slot = schedules.occurrence_slot(schedule, scheduled_at)
     return {

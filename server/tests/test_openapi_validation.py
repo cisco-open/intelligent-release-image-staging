@@ -525,7 +525,8 @@ def test_schedule_closed_schemas_cover_stage_only_defaults_and_patch_replacement
                       {"payload": {"max_devices": 1}}, {"target": {}}):
             patch.validate(value)
         reaffirm.validate({})
-        for key in ("id", "generation", "rev", "created_by", "created_at", "preview", "etag", "creator_exists"):
+        for key in ("id", "generation", "rev", "created_by", "created_at",
+                    "preview", "etag", "creator_exists", "next_fire"):
             assert list(put.iter_errors(dict(definition, **{key: "forged"}))), key
             assert list(patch.iter_errors({key: "forged"})), key
         for bad in (dict(definition, kind="install"), dict(definition, kind="activate"),
@@ -566,7 +567,8 @@ def test_schedule_response_views_history_and_receipts_are_closed_and_bounded():
         schema = OAS32Validator(_local_schema(media["schema"], document))
         example = copy.deepcopy(_media_examples(media)[0])
         schema.validate(example)
-        for field in ("etag", "creator_exists", "generation", "rev", "preview"):
+        for field in ("etag", "creator_exists", "next_fire", "generation",
+                      "rev", "preview"):
             broken = copy.deepcopy(example)
             broken["schedule"].pop(field)
             assert list(schema.iter_errors(broken)), field
@@ -659,7 +661,8 @@ def test_schedule_examples_match_store_rows_and_if_match_rejects_invalid_tags():
                         rows = [example["schedule"]] if "schedule" in example else example.get("schedules", [])
                         for view in rows:
                             stored = {key: value for key, value in view.items()
-                                      if key not in ("etag", "creator_exists")}
+                                      if key not in ("etag", "creator_exists",
+                                                     "next_fire")}
                             schedules.validate_schedule(stored["id"], stored)
                             assert schedules.schedule_etag(stored) == view["etag"]
                         for receipt in example.get("receipts", []):

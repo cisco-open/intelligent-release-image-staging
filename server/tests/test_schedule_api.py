@@ -402,7 +402,7 @@ def test_cross_occurrence_receipts_are_visible_and_capped(schedule_api):
     assert status == 201
     row = json.loads(raw)["schedule"]
     row = {key: value for key, value in row.items()
-           if key not in ("etag", "creator_exists")}
+           if key not in ("etag", "creator_exists", "next_fire")}
     occurrences = schedules.OccurrenceStore(server.schedule_store.state_dir)
     receipts = schedules.ReceiptStore(server.schedule_store.state_dir)
     for index in range(2):
@@ -437,7 +437,7 @@ def test_receiptless_occurrences_remain_visible_after_schedule_delete(
     assert status == 201
     row = json.loads(raw)["schedule"]
     row = {key: value for key, value in row.items()
-           if key not in ("etag", "creator_exists")}
+           if key not in ("etag", "creator_exists", "next_fire")}
     occurrences = schedules.OccurrenceStore(server.schedule_store.state_dir)
     slot = schedules.occurrence_slot(row, NOW + 60)
     missed = occurrences.create(row, slot, None, now=slot["window_end"])

@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 import inspect
+import json
 import os
 import re
 
@@ -12138,6 +12139,9 @@ function devicesPageQuery() { return ''; }
 function deviceFilterState() { return {}; }
 function deviceFilterQuery() { return ''; }
 function renderPeerPolicyPanel() {}
+// The schedule read rides along with the device read and is advisory; this
+// harness is about the device projection, so it stands in for it.
+async function refreshScheduleList() {}
 var pagerTotal = null;
 function updateDevPager(total) { pagerTotal = total; }
 var replayed = null;
@@ -13629,3 +13633,229 @@ def test_tracker_state_write_retains_success_failure_audit_and_read_only_preview
         assert _loaded_peer_policy(cat).document == before_policy
     finally:
         stop()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2, Task 25: schedules list and the "Schedule…" bulk action
+# ---------------------------------------------------------------------------
+
+def _schedule_projections():
+    """The console's own schedule projections, run under Node.
+
+    They are pure string builders over the schedule/occurrence documents the
+    API returns, so they are executed here rather than pattern-matched: a
+    console that renders a wave's counts or an orphaned creator wrongly is a
+    console the operator cannot plan a window from.
+    """
+    import shutil
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for console schedule projection tests")
+    source = _webroot("app.js")
+    start = source.index("  // ---- schedule projections")
+    end = source.index("  // ---- end schedule projections")
+    return node, source[start:end]
+
+
+def _run_schedule_projections(script):
+    import json as _json
+    import subprocess
+    node, block = _schedule_projections()
+    program = (block + "\nconst esc = value => String(value);\n" + script)
+    result = subprocess.run([node], input=program, text=True,
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return _json.loads(result.stdout)
+
+
+_SCHEDULE_ROW = {
+    "id": "s-core", "kind": "assign", "state": "pending",
+    "target": {"filters": {"role": "core", "status": "deployed"},
+               "device_ids": [], "bind": "late"},
+    "payload": {"image_ids": ["image-a"], "mode": "merge"},
+    "when": {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+             "tz": "Europe/Stockholm", "window_seconds": 3600},
+    "created_by": "console:alice", "created_at": 1788883200, "rev": 1,
+    "generation": "0" * 32, "creator_exists": True,
+    "preview": {"revision": 2, "now": 1788883200,
+                "device_ids": ["edge-1", "edge-2"]},
+    "etag": '"iris-schedule-s-core-1"',
+    "next_fire": {"scheduled_at": 1789000200, "window_end": 1789003800,
+                  "status": "future", "resolution": "normal",
+                  "tz": "Europe/Stockholm", "local_time": "2026-09-13T02:30",
+                  "next_at": 1789605000},
+}
+
+_SCHEDULE_OCCURRENCE = {
+    "id": "a" * 32, "schedule_id": "s-core", "state": "running",
+    "scheduled_at": 1788940200, "window_end": 1788943800,
+    "delta": {"added": 3, "removed": 1},
+    "annotations": {"wave": {
+        "schedule_id": "s-before", "occurrence_id": "b" * 32, "total": 10,
+        "staged": 7, "errored": 1, "missing": 2, "gate": "held",
+        "observed_at": 1788940260}},
+}
+
+
+def test_schedules_panel_lists_the_schedule_facts_an_operator_plans_from():
+    html = _webroot("index.html")
+    assert 'id="manage-schedules"' in html
+    panel = html.split('id="sched-panel"', 1)[1].split("</div>", 1)[0] + \
+        html.split('id="sched-panel"', 1)[1]
+    for column in ("Action", "Target", "Next run", "State",
+                   "Latest run", "Created by"):
+        assert ">" + column + "<" in panel, column
+    assert 'id="sched-rows"' in html and 'id="sched-close"' in html
+
+    js = _webroot("app.js")
+    assert "function renderSchedules(" in js
+    assert "'/api/v1/schedules'" in js
+    # The list reads the schedule's own next-fire slot rather than
+    # recomputing DST-aware weekly arithmetic in the browser.
+    assert "row.next_fire" in js
+
+
+def test_schedule_row_projections_report_target_delta_and_wave_counts():
+    out = _run_schedule_projections(
+        "const row = " + json.dumps(_SCHEDULE_ROW) + ";"
+        "const occ = " + json.dumps(_SCHEDULE_OCCURRENCE) + ";"
+        "process.stdout.write(JSON.stringify({"
+        "target: scheduleTargetSummary(row),"
+        "fleet: scheduleTargetSummary({target: {filters: {}, device_ids: [],"
+        " bind: 'late'}}),"
+        "next: scheduleNextFireText(row),"
+        "paused: scheduleNextFireText({state: 'paused', next_fire: null}),"
+        "delta: scheduleDeltaText(occ),"
+        "nodelta: scheduleDeltaText(null),"
+        "wave: scheduleWaveText(occ),"
+        "nowave: scheduleWaveText({id: 'x'})}));")
+    assert out["target"] == \
+        "role=core, status=deployed · resolved at each run"
+    assert out["fleet"] == "whole fleet · resolved at each run"
+    assert out["next"] == "2026-09-13T02:30 Europe/Stockholm (future)"
+    assert out["paused"] == "paused"
+    assert out["delta"] == "+3 / −1 since preview"
+    assert out["nodelta"] == ""
+    # Missing is reported apart from errored, and the gate says whether the
+    # wave is still waiting on them.
+    assert out["wave"] == ("wave held · 7 staged / 1 errored / "
+                           "2 missing of 10")
+    assert out["nowave"] == ""
+
+
+def test_orphaned_schedule_names_the_missing_actor_and_can_be_reaffirmed():
+    out = _run_schedule_projections(
+        "const row = " + json.dumps(_SCHEDULE_ROW) + ";"
+        "process.stdout.write(JSON.stringify({"
+        "present: scheduleCreatorText(row),"
+        "gone: scheduleCreatorText(Object.assign({}, row,"
+        " {created_by: 'console:departed', creator_exists: false}))}));")
+    assert out["present"] == "console:alice"
+    assert out["gone"] == "console:departed (actor no longer exists)"
+
+    js = _webroot("app.js")
+    assert "'/reaffirm'" in js
+    # Re-affirming rewrites created_by and bumps rev, so it carries the
+    # revision the operator was looking at.
+    reaffirm = js.split("async function reaffirmSchedule(", 1)[1] \
+        .split("\n  }", 1)[0]
+    assert "'If-Match': row.etag" in reaffirm and "csrfHdr(" in reaffirm
+    assert "method: 'POST'" in reaffirm
+    assert "sched-reaffirm" in js and "#sched-rows .sched-reaffirm" in js
+
+
+def test_schedule_bulk_action_targets_the_current_device_filter():
+    html = _webroot("index.html")
+    assert 'id="schedule-selected"' in html
+    for element in ('id="sched-modal"', 'id="sched-modal-scope"',
+                    'id="sched-modal-kind"', 'id="sched-modal-when"',
+                    'id="sched-modal-preview"', 'id="create-schedule"'):
+        assert element in html, element
+
+    js = _webroot("app.js")
+    block = js.split("var BULK_BTNS = [")[1].split("]")[0]
+    assert "'create-schedule'" in block
+    assert "'schedule-selected'" in js.split("var BULK_OPENERS = [")[1] \
+        .split("]")[0]
+
+    out = _run_schedule_projections(
+        "const f = {q: 'edge', role: 'core', status: 'deployed',"
+        " managementType: '', platform: '', cred: '', telemetry: '',"
+        " peer: '', modelFamily: '', osFamily: ''};"
+        "process.stdout.write(JSON.stringify({"
+        "filter: scheduleTargetFromFilters(f, ['edge-1'], 'filter'),"
+        "selection: scheduleTargetFromFilters(f, ['edge-1', 'edge-2'],"
+        " 'selection')}));")
+    # The filter itself is the target: it is re-resolved at each run, which
+    # is the whole reason to schedule against it rather than a row list.
+    assert out["filter"] == {
+        "filters": {"q": "edge", "role": "core", "status": "deployed"},
+        "device_ids": [], "bind": "late"}
+    assert out["selection"] == {
+        "filters": {}, "device_ids": ["edge-1", "edge-2"], "bind": "late"}
+
+
+def test_schedule_creation_posts_one_normalized_definition():
+    out = _run_schedule_projections(
+        "const target = {filters: {role: 'core'}, device_ids: [],"
+        " bind: 'late'};"
+        "process.stdout.write(JSON.stringify({"
+        "once: scheduleDefinitionFromForm({id: 'win-1', kind: 'assign',"
+        " target: target, imageIds: ['image-a'], mode: 'merge',"
+        " recurring: false, at: 1789000200, tz: 'UTC', windowSeconds: 3600}),"
+        "weekly: scheduleDefinitionFromForm({id: 'win-2', kind: 'onboard',"
+        " target: target, maxDevices: 20, telemetry: true,"
+        " telemetryStream: false, recurring: true, weekday: 6, hour: 2,"
+        " minute: 30, tz: 'Europe/Stockholm', windowSeconds: 3600})}));")
+    assert out["once"] == {
+        "id": "win-1", "kind": "assign",
+        "target": {"filters": {"role": "core"}, "device_ids": [],
+                   "bind": "late"},
+        "payload": {"image_ids": ["image-a"], "mode": "merge"},
+        "when": {"kind": "once", "at": 1789000200, "tz": "UTC",
+                 "window_seconds": 3600}}
+    assert out["weekly"] == {
+        "id": "win-2", "kind": "onboard",
+        "target": {"filters": {"role": "core"}, "device_ids": [],
+                   "bind": "late"},
+        "payload": {"telemetry": True, "telemetry_stream": False,
+                    "mode": "new-only", "max_devices": 20},
+        "when": {"kind": "recurring", "weekday": 6, "hour": 2, "minute": 30,
+                 "tz": "Europe/Stockholm", "window_seconds": 3600}}
+
+
+def test_device_row_shows_a_pending_schedule_before_a_manual_conflict():
+    out = _run_schedule_projections(
+        "const rows = [" + json.dumps(_SCHEDULE_ROW) + ","
+        " Object.assign({}, " + json.dumps(_SCHEDULE_ROW) +
+        ", {id: 'paused-one', state: 'paused'})];"
+        "process.stdout.write(JSON.stringify({"
+        "hit: pendingScheduleText('edge-1', rows),"
+        "miss: pendingScheduleText('edge-9', rows),"
+        "none: pendingScheduleText('edge-1', [])}));")
+    # A paused schedule is not pending work, and must not read as a conflict.
+    assert out["hit"] == "Scheduled: s-core"
+    assert out["miss"] == "" and out["none"] == ""
+
+    js = _webroot("app.js")
+    assert "pendingScheduleText(d.device_id" in js
+    assert "sched-chip" in js
+
+
+def test_schedule_view_carries_its_own_next_fire_slot(tmp_path):
+    """The console must not recompute DST-aware weekly arithmetic itself."""
+    import schedules
+    row = {"id": "s-core", "generation": "0" * 32, "rev": 1,
+           "created_by": "console:alice", "created_at": 1788883200,
+           "preview": {"revision": 1, "now": 1788883200, "device_ids": []},
+           "kind": "assign",
+           "target": {"filters": {}, "device_ids": [], "bind": "late"},
+           "payload": {"image_ids": ["image-a"], "mode": "merge"},
+           "when": {"kind": "recurring", "weekday": 6, "hour": 2,
+                    "minute": 30, "tz": "Europe/Stockholm",
+                    "window_seconds": 3600},
+           "state": "pending"}
+    slot = schedules.occurrence_slot(row, 1788883200)
+    assert slot["tz"] == "Europe/Stockholm" and slot["local_time"]
+    source = inspect.getsource(gui_server.make_server)
+    assert 'view["next_fire"] = schedules.occurrence_slot(' in source

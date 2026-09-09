@@ -62394,7 +62394,16 @@
                         ]
                       },
                       "etag": "\"iris-schedule-s-boat-1\"",
-                      "creator_exists": true
+                      "creator_exists": true,
+                      "next_fire": {
+                        "scheduled_at": 1788883260,
+                        "window_end": 1788886860,
+                        "status": "future",
+                        "resolution": "normal",
+                        "tz": "UTC",
+                        "local_time": "2026-09-08T16:01:00+00:00",
+                        "next_at": null
+                      }
                     }
                   ],
                   "total": 1
@@ -63027,7 +63036,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   },
                   "target_facts": {
                     "missing_os_family": 0,
@@ -64444,7 +64462,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   }
                 }
               }
@@ -65138,7 +65165,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   },
                   "target_facts": {
                     "missing_os_family": 0,
@@ -66721,7 +66757,16 @@
                           ]
                         },
                         "etag": "\"iris-schedule-s-boat-1\"",
-                        "creator_exists": true
+                        "creator_exists": true,
+                        "next_fire": {
+                          "scheduled_at": 1788883260,
+                          "window_end": 1788886860,
+                          "status": "future",
+                          "resolution": "normal",
+                          "tz": "UTC",
+                          "local_time": "2026-09-08T16:01:00+00:00",
+                          "next_at": null
+                        }
                       },
                       "target_facts": {
                         "missing_os_family": 0,
@@ -66769,7 +66814,16 @@
                           ]
                         },
                         "etag": "\"iris-schedule-s-boat-1\"",
-                        "creator_exists": true
+                        "creator_exists": true,
+                        "next_fire": {
+                          "scheduled_at": 1788883260,
+                          "window_end": 1788886860,
+                          "status": "future",
+                          "resolution": "normal",
+                          "tz": "UTC",
+                          "local_time": "2026-09-08T16:01:00+00:00",
+                          "next_at": null
+                        }
                       },
                       "target_facts": null
                     }
@@ -70398,7 +70452,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   }
                 }
               }
@@ -71176,7 +71239,16 @@
                         ]
                       },
                       "etag": "\"iris-schedule-s-boat-1\"",
-                      "creator_exists": true
+                      "creator_exists": true,
+                      "next_fire": {
+                        "scheduled_at": 1788883260,
+                        "window_end": 1788886860,
+                        "status": "future",
+                        "resolution": "normal",
+                        "tz": "UTC",
+                        "local_time": "2026-09-08T16:01:00+00:00",
+                        "next_at": null
+                      }
                     }
                   ],
                   "total": 1
@@ -71625,7 +71697,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   },
                   "target_facts": {
                     "missing_os_family": 0,
@@ -72938,7 +73019,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   }
                 }
               }
@@ -73448,7 +73538,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   },
                   "target_facts": {
                     "missing_os_family": 0,
@@ -74927,7 +75026,16 @@
                           ]
                         },
                         "etag": "\"iris-schedule-s-boat-1\"",
-                        "creator_exists": true
+                        "creator_exists": true,
+                        "next_fire": {
+                          "scheduled_at": 1788883260,
+                          "window_end": 1788886860,
+                          "status": "future",
+                          "resolution": "normal",
+                          "tz": "UTC",
+                          "local_time": "2026-09-08T16:01:00+00:00",
+                          "next_at": null
+                        }
                       },
                       "target_facts": {
                         "missing_os_family": 0,
@@ -74975,7 +75083,16 @@
                           ]
                         },
                         "etag": "\"iris-schedule-s-boat-1\"",
-                        "creator_exists": true
+                        "creator_exists": true,
+                        "next_fire": {
+                          "scheduled_at": 1788883260,
+                          "window_end": 1788886860,
+                          "status": "future",
+                          "resolution": "normal",
+                          "tz": "UTC",
+                          "local_time": "2026-09-08T16:01:00+00:00",
+                          "next_at": null
+                        }
                       },
                       "target_facts": null
                     }
@@ -78028,7 +78145,16 @@
                       ]
                     },
                     "etag": "\"iris-schedule-s-boat-1\"",
-                    "creator_exists": true
+                    "creator_exists": true,
+                    "next_fire": {
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "status": "future",
+                      "resolution": "normal",
+                      "tz": "UTC",
+                      "local_time": "2026-09-08T16:01:00+00:00",
+                      "next_at": null
+                    }
                   }
                 }
               }
@@ -79120,6 +79246,84 @@
             "type": "boolean",
             "readOnly": true,
             "description": "Response-only marker from the authoritative administrator record; an absent creator does not prevent firing."
+          },
+          "next_fire": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "scheduled_at": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 253370764799
+                  },
+                  "window_end": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 253370764799
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "future",
+                      "due",
+                      "missed"
+                    ]
+                  },
+                  "resolution": {
+                    "type": "string",
+                    "enum": [
+                      "normal",
+                      "gap",
+                      "fold"
+                    ]
+                  },
+                  "tz": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 128,
+                    "description": "Valid UTF-8, at most 128 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "local_time": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 64,
+                    "description": "Valid UTF-8, at most 64 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "next_at": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 253370764799
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "scheduled_at",
+                  "window_end",
+                  "status",
+                  "resolution",
+                  "tz",
+                  "local_time",
+                  "next_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "readOnly": true,
+            "description": "Response-only current or next slot, computed by the same authority the runner fires from, so a client never recomputes local weekly time itself. Null when the schedule is paused or completed, or when a one-time schedule has no further slot."
           }
         },
         "required": [
@@ -79135,7 +79339,8 @@
           "created_at",
           "preview",
           "etag",
-          "creator_exists"
+          "creator_exists",
+          "next_fire"
         ],
         "additionalProperties": false,
         "allOf": [

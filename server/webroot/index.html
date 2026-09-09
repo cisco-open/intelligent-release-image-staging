@@ -442,6 +442,7 @@
             </div>
             <input type="file" id="csv-file" accept=".csv" hidden>
             <button class="btn ghost" id="manage-creds">Manage credentials</button>
+            <button class="btn ghost" id="manage-schedules">Schedules</button>
             <button class="btn" id="add-dev">Add device</button>
           </div>
         </div>
@@ -490,6 +491,7 @@
                 <button class="menu-item menu-close" type="button" id="release-selected">Release</button>
                 <button class="menu-item menu-close" type="button" id="set-cred-selected">Set credential…</button>
                 <button class="menu-item menu-close" type="button" id="set-role-selected">Set role…</button>
+                <button class="menu-item menu-close" type="button" id="schedule-selected">Schedule…</button>
                 <hr class="menu-divider">
                 <!-- Magnetic Dropdown > Types: "A dropdown menu can contain
                      regular, disabled, and destructive menu item types." Delete
@@ -543,6 +545,25 @@
             </div>
             <span class="err" id="cf-err" role="alert"></span>
           </form>
+        </div>
+        <!-- Schedules (Phase 2, Task 25): a list and one action, deliberately
+             no deeper. Editing a window, its gate or its payload stays with
+             the API and iris-schedule; what an operator needs on this screen
+             is what is going to run, against what, when, and how the last run
+             went. It lives beside the device table because the target of a
+             schedule IS this table's filter. -->
+        <div class="inline-form" id="sched-panel" hidden>
+          <div class="table-scroll">
+          <table class="tbl">
+            <thead><tr><th>Schedule</th><th>Action</th><th>Target</th><th>Next run</th><th>State</th><th>Latest run</th><th>Created by</th><th></th></tr></thead>
+            <tbody id="sched-rows"></tbody>
+          </table>
+          </div>
+          <div class="form-actions">
+            <button class="btn ghost" type="button" id="sched-refresh">Refresh</button>
+            <button class="btn ghost" type="button" id="sched-close">Close</button>
+          </div>
+          <p class="muted" id="sched-status" role="status" aria-live="polite"></p>
         </div>
         <!-- devices-table-wrap (fix wave 1): the Status legend popover
              (#status-legend-pop below) must NOT be a descendant of
@@ -724,6 +745,64 @@
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="role-modal-cancel">Cancel</button>
               <button class="btn" type="button" id="apply-role-selected">Preview change</button>
+            </div>
+          </div>
+        </div>
+        <div id="sched-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="sched-modal-title" aria-describedby="sched-modal-help">
+          <div class="modal">
+            <div class="modal-head">
+              <span id="sched-modal-title">Schedule <span id="sched-modal-count" class="muted"></span></span>
+              <button class="btn ghost icon-only" type="button" id="sched-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p id="sched-modal-help">Run one stage-only action inside a maintenance window. IRIS stages and verifies images; it never installs, activates, changes boot variables or reloads a device, on a schedule or otherwise.</p>
+              <label class="field" for="sched-modal-id"><span class="field-label">Schedule id</span><input id="sched-modal-id" placeholder="e.g. core-wave"></label>
+              <label class="field" for="sched-modal-scope"><span class="field-label">Target</span>
+                <select id="sched-modal-scope">
+                  <option value="filter" selected>The current Devices filter — re-resolved at each run</option>
+                  <option value="selection">Only the devices selected now</option>
+                </select>
+              </label>
+              <p class="muted" id="sched-modal-preview" aria-live="polite"></p>
+              <label class="field" for="sched-modal-kind"><span class="field-label">Action</span>
+                <select id="sched-modal-kind">
+                  <option value="assign" selected>Assign images (stage only)</option>
+                  <option value="onboard">Onboard new devices</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-images"><span class="field-label">Images to assign</span>
+                <select id="sched-modal-images" multiple size="4"></select>
+              </label>
+              <label class="field" for="sched-modal-mode"><span class="field-label">Assignment mode</span>
+                <select id="sched-modal-mode">
+                  <option value="merge" selected>Merge with the existing approved set</option>
+                  <option value="replace">Replace the approved set</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-max" hidden><span class="field-label">Maximum devices per run</span><input id="sched-modal-max" type="number" min="1" value="20"></label>
+              <label class="field" for="sched-modal-when"><span class="field-label">When</span>
+                <select id="sched-modal-when">
+                  <option value="once" selected>Once, at a time you pick</option>
+                  <option value="recurring">Every week</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-at"><span class="field-label">Start (your browser's local time)</span><input id="sched-modal-at" type="datetime-local"></label>
+              <label class="field" for="sched-modal-weekday" hidden><span class="field-label">Weekday</span>
+                <select id="sched-modal-weekday">
+                  <option value="0">Monday</option><option value="1">Tuesday</option>
+                  <option value="2">Wednesday</option><option value="3">Thursday</option>
+                  <option value="4">Friday</option><option value="5">Saturday</option>
+                  <option value="6" selected>Sunday</option>
+                </select>
+              </label>
+              <label class="field" for="sched-modal-time" hidden><span class="field-label">Local time of day</span><input id="sched-modal-time" type="time" value="02:30"></label>
+              <label class="field" for="sched-modal-tz"><span class="field-label">Time zone (IANA)</span><input id="sched-modal-tz" placeholder="e.g. Europe/Stockholm"></label>
+              <label class="field" for="sched-modal-window"><span class="field-label">Window length (minutes)</span><input id="sched-modal-window" type="number" min="1" value="60"></label>
+              <p class="role-message" id="sched-modal-msg" role="status" aria-live="polite"></p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="sched-modal-cancel">Cancel</button>
+              <button class="btn" type="button" id="create-schedule">Create schedule</button>
             </div>
           </div>
         </div>
