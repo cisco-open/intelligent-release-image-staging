@@ -470,7 +470,7 @@ def request(value):
             returncode=None
         elif name in ('app_uninstall','remove_app_config'): state=''
         if name=='app_install':
-            state='INSTALLING' if scenario in ('install_timeout','install_timeout_cleanup_rejected') else 'DEPLOYED'
+            state='INSTALLING' if scenario in ('install_timeout','install_timeout_cleanup_rejected','install_poll_exhaustion') else 'DEPLOYED'
             stdout="Installing package for 'iris'.\n%IOX: application installation accepted\n"
     elif name=='deployed':
         assert state=='DEPLOYED' and admitted
@@ -811,15 +811,18 @@ ASSERTIONS
   _iox_assert_trace finish DEPLOYED
 }
 
-@test "controller install timeout removes only the partial IRIS app configuration" {
+# Controller ordering allows remove_app_config only before configure_app.
+# A failed DEPLOYED poll must retain its failure and enter mandatory cleanup.
+@test "controller install timeout enters cleanup without repeating app configuration removal" {
   _iox_fixture_setup
   run _iox_controller_run install install_timeout
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 4 ]
+  _iox_assert_trace count remove_app_config 1
   [[ "$output" == *'did not reach DEPLOYED within 2 seconds'* ]]
-  [[ "$output" == *'Partial app configuration removed'* ]]
-  _iox_assert_trace count remove_app_config 2
+  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" != *'Partial app configuration removed'* ]]
   _iox_assert_trace absent app_activate app_start
-  _iox_assert_trace finish ''
+  _iox_assert_trace finish INSTALLING
 }
 
 @test "controller IOx readiness reads both required fields in one observation" {
@@ -1022,15 +1025,16 @@ _assert_signal_finalization() {
   done
 }
 
-@test "install timeout cannot claim rejected partial app configuration removal succeeded" {
+@test "install timeout never sends or claims the forbidden repeated app configuration removal" {
   _iox_fixture_setup
   run _iox_controller_run install install_timeout_cleanup_rejected
   [ "$status" -eq 4 ]
+  _iox_assert_trace count remove_app_config 1
   [[ "$output" == *'did not reach DEPLOYED within 2 seconds'* ]]
-  [[ "$output" == *'repeated app configuration removal rejected'* ]]
+  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" != *'repeated app configuration removal rejected'* ]]
   [[ "$output" != *'Partial app configuration removed'* ]]
   [[ "$output" != *'onboard complete:'* ]]
-  _iox_assert_trace count remove_app_config 2
   _iox_assert_trace count cleanup 1
   _iox_assert_trace count finish 1
   _iox_assert_trace absent app_activate app_start
@@ -1095,4 +1099,19 @@ _assert_signal_finalization() {
   _iox_assert_trace count remove_app_config 1
   _iox_assert_trace absent deployed app_activate app_start
   [[ "$output" != *'Partial app configuration removed'* ]]
+}
+
+@test "install poll exhaustion enters cleanup without repeating app configuration removal" {
+  _iox_fixture_setup
+  run _iox_controller_run install install_poll_exhaustion
+  [ "$status" -eq 4 ]
+  _iox_assert_trace count remove_app_config 1
+  [[ "$output" == *'onboarding aborted; controller cleanup follows'* ]]
+  [[ "$output" != *'Partial app configuration removed'* ]]
+  [[ "$output" != *'onboard complete:'* ]]
+  _iox_assert_trace count app_list 24
+  _iox_assert_trace count cleanup 1
+  _iox_assert_trace count finish 1
+  _iox_assert_trace absent app_activate app_start
+  _iox_assert_trace finish INSTALLING
 }
