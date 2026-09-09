@@ -1344,3 +1344,313 @@ def test_iox_store_lock_wait_honors_supplied_absolute_deadline(
             monotonic_fn=lambda: clock[0])
     assert attempts == [0.0, 0.01, 0.02]
     assert clock[0] == 0.025
+
+
+# Scheduled admission must establish live authority as well as durable ownership.
+def _provenance(**changes):
+    value = {"schema_version": 1, "schedule_id": "nightly", "schedule_rev": 3,
+             "occurrence_id": "c" * 32, "device_id": "edge-01"}
+    value.update(changes)
+    return value
+
+
+def _scheduled(store, *, record_id="new", provenance=None, attempt=1,
+               authorize=None, resume_record_id=None, router=False, **changes):
+    return store.admit_scheduled(
+        _record(record_id=record_id, **changes),
+        provenance=_provenance() if provenance is None else provenance,
+        attempt=attempt,
+        authorize=(lambda *args: None) if authorize is None else authorize,
+        resume_record_id=resume_record_id, router=router)
+
+
+@pytest.mark.parametrize("changes", [
+    {"schema_version": True}, {"schema_version": 2}, {"schedule_rev": True},
+    {"schedule_rev": 0}, {"schedule_id": "../bad"}, {"schedule_id": ""},
+    {"device_id": "seeder"}, {"occurrence_id": "bad"}, {"unexpected": True},
+])
+def test_schedule_provenance_is_closed_and_validated(tmp_path, changes):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    with pytest.raises(ValueError):
+        store.create(_record(schedule_provenance=_provenance(**changes)))
+    assert store.list() == []
+
+
+def test_schedule_provenance_binding_and_immutability(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    with pytest.raises(ValueError):
+        store.create(_record(schedule_provenance=_provenance(device_id="other")))
+    tag = _provenance()
+    made = store.create(_record(record_id="mine", schedule_provenance=tag))
+    tag["schedule_rev"] = 99
+    made["schedule_provenance"]["schedule_rev"] = 98
+    updated = store.update_planned("mine", plan_hash="b" * 64, resolved={},
+                                   preflight={}, resources=[])
+    assert updated["schedule_provenance"] == _provenance()
+    store.transition("mine", "applying", {"schedule_provenance": tag})
+    assert store.get("mine")["schedule_provenance"] == _provenance()
+    with pytest.raises(TypeError):
+        store.update_planned("mine", plan_hash="b" * 64, resolved={},
+                             preflight={}, resources=[], schedule_provenance=tag)
+
+
+@pytest.mark.parametrize("state", ["planned", "applying"])
+def test_recovery_preserves_interrupted_origin_and_generic_update_stays_closed(tmp_path, state):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    if state == "applying":
+        store.transition("mine", state)
+    store.recover_interrupted()
+    assert store.get("mine")["recovery"] == {
+        "schema_version": 1, "interrupted_from": state, "interrupted_at": 100}
+    assert store.recover_interrupted() == []
+    with pytest.raises(ValueError, match="only planned"):
+        store.update_planned("mine", plan_hash="b" * 64, resolved={}, preflight={}, resources=[])
+
+
+@pytest.mark.parametrize("state", ["planned", "applying", "active", "unknown", "drifted", "needs-reconcile"])
+def test_scheduled_new_only_refuses_every_live_record(tmp_path, state):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="old"))
+    if state != "planned":
+        store.transition("old", "applying")
+        if state == "drifted":
+            store.transition("old", "active")
+        if state != "applying":
+            store.transition("old", state)
+    before = (tmp_path / "deployment_records.json").read_bytes()
+    result = _scheduled(store)
+    assert result["status"] == "refused"
+    assert result["reason"] == ("foreign_interrupted_record" if state == "unknown" else "existing_deployment")
+    assert (tmp_path / "deployment_records.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("state", ["planned", "applying"])
+def test_own_interrupted_record_requires_live_attempt_and_window(tmp_path, state):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    if state == "applying":
+        store.transition("mine", state)
+    store.recover_interrupted()
+    original = store.get("mine")
+    for reason in ("conflict", "window_closed"):
+        result = _scheduled(store, resume_record_id="mine", authorize=lambda *args: reason)
+        assert result["status"] == "refused" and result["reason"] == reason
+        assert store.get("mine") == original
+    calls = []
+    def live(tag, attempt, record):
+        calls.append((tag, attempt, record))
+    result = _scheduled(store, resume_record_id="mine", attempt=2, authorize=live)
+    assert calls == [(_provenance(), 2, original)]
+    assert result["status"] == "resumed"
+    assert result["record"]["record_id"] == "mine"
+    assert result["record"]["state"] == "planned"
+    assert result["record"]["recovery"] == original["recovery"]
+
+
+@pytest.mark.parametrize("foreign,router,reason", [
+    (True, False, "foreign_interrupted_record"),
+    (False, True, "router_requires_undeploy"),
+    (True, True, "router_requires_undeploy"),
+])
+def test_schedule_recovery_distinguishes_foreign_and_router(tmp_path, foreign, router, reason):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    tag = _provenance(schedule_rev=2) if foreign else _provenance()
+    store.create(_record(record_id="old", schedule_provenance=tag))
+    store.recover_interrupted()
+    result = _scheduled(store, resume_record_id="old", router=router)
+    assert result["status"] == "refused" and result["reason"] == reason
+    assert store.get("old")["state"] == "unknown"
+
+
+def test_schedule_admission_strict_reads_and_invalid_authority_do_not_write(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    for authorize in (None, lambda *args: True, lambda *args: "arbitrary"):
+        with pytest.raises(ValueError):
+            store.admit_scheduled(_record(), provenance=_provenance(), attempt=1, authorize=authorize)
+        assert store.list() == []
+    path = tmp_path / "deployment_records.json"
+    path.write_text("corrupt")
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        _scheduled(store)
+    assert path.read_text() == "corrupt"
+
+
+def test_schedule_new_only_admission_is_atomic_across_store_instances(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    barrier = threading.Barrier(2)
+    def submit(index):
+        store = deployment_records.DeploymentRecordStore(str(tmp_path))
+        barrier.wait(timeout=5)
+        return _scheduled(store, record_id="r%d" % index)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, range(2)))
+    assert sorted(result["status"] for result in results) == ["created", "refused"]
+    assert len(deployment_records.DeploymentRecordStore(str(tmp_path)).list()) == 1
+
+
+def test_schedule_iox_resume_requires_controller_recovery_then_fresh_lineage(tmp_path):
+    ref, observation = _iox_transcript(tmp_path, state="disabled")
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
+    store.create(_record(record_id="old", controller_id=_IOX_CONTROLLER,
+                         schedule_provenance=_provenance(), resolved={"platform": "iox"}))
+    journal = store.iox_begin("old", _IOX_CONTROLLER, _IOX_BOARD, _iox_wrapper(), observation, ref)
+    store.recover_interrupted()
+    result = _scheduled(store, resume_record_id="old", controller_id=_IOX_CONTROLLER,
+                        resolved={"platform": "iox"})
+    assert result["status"] == "recovery_required"
+    assert store.get("old")["iox_verification"] == journal
+    terminal = store.iox_event("old", journal["transaction_id"], journal["revision"],
+                               journal["phase"], "unchanged", {
+                                   "reason": "initially_disabled", "observation": None,
+                                   "transcript_refs": []})
+    pending = store.iox_instruction_cleanup_intent("old", terminal["transaction_id"],
+                                                   terminal["revision"], terminal["phase"])
+    assert _scheduled(store, resume_record_id="old")["status"] == "recovery_required"
+    terminal = store.iox_instruction_cleanup_complete("old", pending["transaction_id"],
+                                                      pending["revision"], pending["phase"])
+    result = _scheduled(store, resume_record_id="old", controller_id=_IOX_CONTROLLER,
+                        resolved={"platform": "iox"})
+    assert result["status"] == "created"
+    assert result["predecessor_record_id"] == "old"
+    assert result["record"]["predecessor_record_id"] == "old"
+    assert result["record"]["schedule_provenance"] == _provenance()
+    assert "iox_verification" not in result["record"]
+    assert store.get("old")["state"] == "abandoned"
+    assert store.get("old")["iox_verification"] == terminal
+    with pytest.raises(ValueError, match="already"):
+        store.iox_begin("old", _IOX_CONTROLLER, _IOX_BOARD, _iox_wrapper(), observation, ref)
+    assert _scheduled(store, record_id="third", resume_record_id="old")["status"] == "refused"
+
+
+@pytest.mark.parametrize("extra", [
+    {"predecessor_record_id": "missing"},
+    {"recovery": {"schema_version": 1, "interrupted_from": "planned", "interrupted_at": 1}},
+])
+def test_generic_create_cannot_forge_schedule_recovery_lineage(tmp_path, extra):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    with pytest.raises(ValueError):
+        store.create(_record(schedule_provenance=_provenance(), **extra))
+
+
+@pytest.mark.parametrize("change,reason", [("attempt", "conflict"), ("window", "window_closed")])
+def test_schedule_authority_is_checked_after_waiting_for_store_lock(tmp_path, change, reason):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import contextlib
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    store.recover_interrupted()
+    authority = {"attempt": 1, "open": True}
+    waiting = threading.Event()
+    calls = []
+    class WaitingStore(deployment_records.DeploymentRecordStore):
+        @contextlib.contextmanager
+        def _store_lock(self, *args, **kwargs):
+            waiting.set()
+            with super()._store_lock(*args, **kwargs):
+                yield
+    contender = WaitingStore(str(tmp_path))
+    def authorize(tag, attempt, record):
+        calls.append(record["record_id"])
+        if attempt != authority["attempt"]:
+            return "conflict"
+        if not authority["open"]:
+            return "window_closed"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store._store_lock():
+            future = pool.submit(_scheduled, contender, resume_record_id="mine", authorize=authorize)
+            assert waiting.wait(timeout=5)
+            assert calls == []
+            if change == "attempt":
+                authority["attempt"] = 2
+            else:
+                authority["open"] = False
+        result = future.result(timeout=5)
+    assert result["status"] == "refused" and result["reason"] == reason
+    assert calls == ["mine"]
+    assert store.get("mine")["state"] == "unknown"
+    assert len(store.list()) == 1
+
+
+def test_schedule_conflicting_planned_write_wins_before_waiting_admission(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import contextlib
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    waiting = threading.Event()
+    class WaitingStore(deployment_records.DeploymentRecordStore):
+        @contextlib.contextmanager
+        def _store_lock(self, *args, **kwargs):
+            waiting.set()
+            with super()._store_lock(*args, **kwargs):
+                yield
+    contender = WaitingStore(str(tmp_path))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store._store_lock():
+            future = pool.submit(_scheduled, contender)
+            assert waiting.wait(timeout=5)
+            # Commit a direct planned record while the contender waits. Its
+            # strict read must occur after acquiring this same store lock.
+            row = dict(_record(record_id="manual"), state="planned",
+                       timestamps={"planned_at": 100, "finished_at": None})
+            deployment_records._atomic_write_json(store.path, {"records": {"manual": row}})
+        result = future.result(timeout=5)
+    assert result["status"] == "refused" and result["reason"] == "existing_deployment"
+    assert [row["record_id"] for row in store.list()] == ["manual"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"schedule_id": "another"}, {"schedule_rev": 4},
+    {"occurrence_id": "d" * 32},
+])
+def test_schedule_resume_requires_every_provenance_identity_field(tmp_path, changes):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    store.recover_interrupted()
+    result = _scheduled(store, resume_record_id="mine", provenance=_provenance(**changes))
+    assert result["reason"] == "foreign_interrupted_record"
+    assert store.get("mine")["state"] == "unknown"
+
+
+def test_schedule_resume_cannot_claim_unknown_without_interruption_evidence(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    store.transition("mine", "unknown")
+    assert _scheduled(store, resume_record_id="mine")["reason"] == "existing_deployment"
+
+
+def test_schedule_resume_prepared_record_keeps_tag_and_original_inputs(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    original = store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    result = _scheduled(store, resume_record_id="mine", plan_hash="b" * 64)
+    assert result["status"] == "resumed"
+    assert result["record"] == original
+
+
+def test_schedule_new_only_ignores_terminal_history(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="old"))
+    store.transition("old", "removed")
+    assert _scheduled(store)["status"] == "created"
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("schedule_provenance", {"schema_version": 1}),
+    ("schedule_provenance", _provenance(schedule_rev=True)),
+    ("recovery", {"schema_version": 1, "interrupted_from": [], "interrupted_at": 1}),
+    ("recovery", {"schema_version": 1, "interrupted_from": "active", "interrupted_at": 1}),
+    ("predecessor_record_id", "missing"),
+])
+def test_schedule_corrupt_persisted_authority_refuses_strict_reads(tmp_path, field, bad):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    path = tmp_path / "deployment_records.json"
+    data = json.loads(path.read_text())
+    data["records"]["mine"][field] = bad
+    path.write_text(json.dumps(data))
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store.get("mine", strict=True)
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        _scheduled(store)

@@ -85,6 +85,12 @@ _LOWER_HEX_32 = re.compile(r"^[0-9a-f]{32}$")
 _LOWER_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _RECORD_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _BOARD_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_SCHEDULE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SCHEDULE_PROVENANCE_KEYS = frozenset((
+    "schema_version", "schedule_id", "schedule_rev", "occurrence_id", "device_id"))
+_RECOVERY_KEYS = frozenset((
+    "schema_version", "interrupted_from", "interrupted_at"))
+_SCHEDULE_AUTHORITY_REFUSALS = frozenset(("conflict", "window_closed"))
 
 _IOX_STATES = frozenset(("enabled", "disabled", "unknown"))
 _IOX_PHASES = frozenset((
@@ -192,6 +198,21 @@ def _matching_string(value, regex, name):
 def _nullable_integer(value, name, minimum=0, maximum=_MAX_INTEGER):
     if value is not None:
         _integer(value, name, minimum, maximum)
+
+
+def validate_schedule_provenance(value, device_id=None):
+    """Return a detached, closed occurrence tag; a tag is not live authority."""
+    _closed_object(value, _SCHEDULE_PROVENANCE_KEYS, "schedule provenance")
+    _integer(value["schema_version"], "schedule schema_version", 1, 1)
+    _integer(value["schedule_rev"], "schedule_rev", 1)
+    for key in ("schedule_id", "device_id"):
+        _matching_string(value[key], _SCHEDULE_IDENTIFIER, key)
+    _matching_string(value["occurrence_id"], _LOWER_HEX_32, "occurrence_id")
+    if value["device_id"] == "seeder":
+        raise ValueError("reserved schedule device_id")
+    if device_id is not None and value["device_id"] != device_id:
+        raise ValueError("schedule provenance device_id mismatch")
+    return copy.deepcopy(value)
 
 
 def _pairs_object(pairs):
@@ -816,6 +837,25 @@ class DeploymentRecordStore:
             raise ValueError("record missing %s" % ", ".join(missing))
         if new_record and "iox_verification" in record:
             raise ValueError("generic records cannot supply iox_verification authority")
+        if new_record and ("recovery" in record or "predecessor_record_id" in record):
+            raise ValueError("generic records cannot supply recovery lineage")
+        if "schedule_provenance" in record:
+            validate_schedule_provenance(record["schedule_provenance"], record["device_id"])
+            if record["schedule_provenance"]["device_id"] != record["device_id"]:
+                raise ValueError("schedule provenance device_id mismatch")
+        if "recovery" in record:
+            recovery = record["recovery"]
+            _closed_object(recovery, _RECOVERY_KEYS, "record recovery")
+            _integer(recovery["schema_version"], "recovery schema_version", 1, 1)
+            if (not isinstance(recovery["interrupted_from"], str) or
+                    recovery["interrupted_from"] not in _NONTERMINAL):
+                raise ValueError("invalid interrupted record origin")
+            _integer(recovery["interrupted_at"], "interrupted_at")
+        if "predecessor_record_id" in record:
+            _matching_string(record["predecessor_record_id"], _RECORD_ID,
+                             "predecessor_record_id")
+            if "schedule_provenance" not in record:
+                raise ValueError("record predecessor requires schedule provenance")
         if new_record and record.get("state", "planned") != "planned":
             raise ValueError("new records must start planned")
         if type(record["inventory_revision"]) is not int:
@@ -836,6 +876,7 @@ class DeploymentRecordStore:
         obligations = 0
         obligation_boards = set()
         journals = []
+        predecessors = set()
         for record_key, record in records.items():
             if not isinstance(record_key, str):
                 raise ValueError("deployment record key must be text")
@@ -847,6 +888,23 @@ class DeploymentRecordStore:
                 raise ValueError("invalid persisted deployment record state")
             if len(_canonical_json(record)) > _RECORD_MAX_BYTES:
                 raise ValueError("deployment record exceeds size limit")
+            if "predecessor_record_id" in record:
+                predecessor_id = record["predecessor_record_id"]
+                predecessor = records.get(predecessor_id)
+                if (not isinstance(predecessor, dict) or predecessor_id == record_id or
+                        predecessor_id in predecessors or
+                        predecessor.get("device_id") != record["device_id"] or
+                        predecessor.get("schedule_provenance") != record["schedule_provenance"] or
+                        predecessor.get("state") != "abandoned" or
+                        "recovery" not in predecessor):
+                    raise ValueError("invalid scheduled record predecessor lineage")
+                journal = predecessor.get("iox_verification")
+                if (not isinstance(journal, dict) or
+                        journal.get("phase") not in _IOX_TERMINAL_PHASES or
+                        journal.get("unresolved") is not False or
+                        journal.get("instruction_cleanup_pending", False)):
+                    raise ValueError("record predecessor has outstanding IOx recovery")
+                predecessors.add(predecessor_id)
             if "iox_verification" in record:
                 journal = record["iox_verification"]
                 if record.get("adopted") is True:
@@ -1134,6 +1192,108 @@ class DeploymentRecordStore:
             _atomic_write_json(self.path, data)
         return copy.deepcopy(record)
 
+    def admit_scheduled(self, record_in, *, provenance, attempt, authorize,
+                        resume_record_id=None, router=False):
+        """Atomically admit new-only work or resume an owned interrupted record.
+
+        ``authorize(provenance, attempt, record_or_none)`` must verify the live
+        occurrence, receipt/attempt ownership, and remaining window. Return
+        None on success, or ``conflict`` / ``window_closed`` to refuse. A tag
+        alone never authorizes recovery. The caller holds all outer authority
+        guards (role, fleet, revocation, job) through this call. The callback
+        runs under the record lock: it must not acquire those outer guards or
+        perform probes, controller work, or other blocking operations.
+
+        Results contain status, reason, and a detached record (when admitted
+        or needing IOx recovery). ``recovery_required`` asks the caller to run
+        controller recovery outside every admission lock and retry admission.
+        A recovered IOx journal stays on an abandoned predecessor; the fresh
+        successor alone receives a new journal through the existing IOx API.
+        Ordinary interrupted resumes retain their original execution inputs;
+        the worker may refresh them through update_planned before applying.
+        """
+        record = copy.deepcopy(record_in)
+        self._validate(record)
+        tag = validate_schedule_provenance(provenance, record["device_id"])
+        if ("schedule_provenance" in record and
+                record["schedule_provenance"] != tag):
+            raise ValueError("conflicting schedule provenance")
+        record["schedule_provenance"] = tag
+        self._validate(record)
+        _integer(attempt, "schedule attempt", 1)
+        if not callable(authorize):
+            raise ValueError("live schedule authority callback required")
+        _boolean(router, "router")
+        if resume_record_id is not None:
+            _matching_string(resume_record_id, _RECORD_ID, "resume_record_id")
+        record["record_id"] = record.get("record_id") or secrets.token_hex(16)
+        _matching_string(record["record_id"], _RECORD_ID, "scheduled record_id")
+        resolved = record["resolved"]
+        router = (router or resolved.get("platform") == "router" or
+                  resolved.get("management_type") in ("router-routed", "router-nat"))
+
+        def result(status, reason=None, value=None):
+            response = {"status": status, "reason": reason,
+                        "record": copy.deepcopy(value)}
+            if value is not None and "predecessor_record_id" in value:
+                response["predecessor_record_id"] = value["predecessor_record_id"]
+            return response
+
+        with self._store_lock():
+            data = self._read(strict=True)
+            records = data["records"]
+            existing = records.get(resume_record_id) if resume_record_id else None
+            refusal = authorize(copy.deepcopy(tag), attempt, copy.deepcopy(existing))
+            if refusal is not None:
+                if (not isinstance(refusal, str) or
+                        refusal not in _SCHEDULE_AUTHORITY_REFUSALS):
+                    raise ValueError("invalid schedule authority refusal")
+                return result("refused", refusal)
+            conflicts = [row for row in records.values()
+                         if row["device_id"] == tag["device_id"] and
+                         row["state"] not in _TERMINAL]
+            if router and any(row["state"] in _RECOVERABLE or
+                              row["state"] == "active" for row in conflicts):
+                return result("refused", "router_requires_undeploy")
+            if any(row["state"] == "unknown" and
+                   row.get("schedule_provenance") != tag for row in conflicts):
+                return result("refused", "foreign_interrupted_record")
+            if any(row["record_id"] != resume_record_id for row in conflicts):
+                return result("refused", "existing_deployment")
+            timestamp = int(self._now())
+            if resume_record_id is not None:
+                if (existing is None or existing.get("schedule_provenance") != tag or
+                        existing["device_id"] != tag["device_id"]):
+                    return result("refused", "conflict")
+                if (existing["state"] not in ("planned", "unknown") or
+                        (existing["state"] == "unknown" and "recovery" not in existing)):
+                    return result("refused", "existing_deployment")
+                if "iox_verification" not in existing:
+                    existing["state"] = "planned"
+                    existing.setdefault("timestamps", {})["finished_at"] = None
+                    self._check_candidate(data, ordinary=True)
+                    _atomic_write_json(self.path, data)
+                    return result("resumed", value=existing)
+                journal = existing["iox_verification"]
+                if (existing["state"] != "unknown" or
+                        journal["phase"] not in _IOX_TERMINAL_PHASES or
+                        journal["unresolved"] or
+                        journal.get("instruction_cleanup_pending", False)):
+                    return result("recovery_required", value=existing)
+                # This is the only path allowed to establish successor lineage.
+                # The predecessor journal is never rewritten or reinitialized.
+                existing["state"] = "abandoned"
+                existing.setdefault("timestamps", {})["finished_at"] = timestamp
+                record["predecessor_record_id"] = existing["record_id"]
+            if record["record_id"] in records:
+                return result("refused", "conflict")
+            record["state"] = "planned"
+            record["timestamps"] = {"planned_at": timestamp, "finished_at": None}
+            records[record["record_id"]] = record
+            self._check_candidate(data, ordinary=True)
+            _atomic_write_json(self.path, data)
+            return result("created", value=record)
+
     def adopt(self, record_in):
         """Create a record directly in ``active`` for an already-deployed device
         that predates records. This is the ONLY path that bypasses the planned
@@ -1237,6 +1397,11 @@ class DeploymentRecordStore:
             data = self._read(strict=True)
             for record in data["records"].values():
                 if record.get("state") in _NONTERMINAL:
+                    record["recovery"] = {
+                        "schema_version": 1,
+                        "interrupted_from": record["state"],
+                        "interrupted_at": int(self._now()),
+                    }
                     record["state"] = "unknown"
                     record.setdefault("timestamps", {})["finished_at"] = int(self._now())
                     changed.append(record["record_id"])
