@@ -736,19 +736,21 @@ def _swarm_page(body, limit, offset):
 
 
 # ---- server-side filter parity for the Devices table (issue #112) --------
-# The console's filter bar offers eight controls: free-text q (already
-# server-side, above) plus seven column filters -- management type, agent
-# install (platform), credential, telemetry, peer-quarantine and status --
+# The console's filter bar offers ten controls: free-text q (already
+# server-side, above) plus nine column filters -- management type, agent
+# install (platform), credential, telemetry, peer-quarantine, role, model
+# family, OS family and status --
 # and app.js filters every one of them client-side over the whole fleet
 # (deviceMatchesFilters, webroot/app.js). A paged table can only offer a
 # filter the server can also apply -- otherwise a page would silently
 # disagree with what the filter bar promises. _device_filter_params reads
-# the six off the query string; Handler._row_matches_extra_filters (below,
+# the nine off the query string; Handler._row_matches_extra_filters (below,
 # next to _row_matches_q) applies them, deliberately mirroring
 # deviceMatchesFilters condition-for-condition so the two can never decide
 # a row differently.
 _DEVICE_FILTER_PARAM_NAMES = ("management_type", "platform", "cred",
-                              "telemetry", "peer", "role", "status")
+                              "telemetry", "peer", "role", "model_family",
+                              "os_family", "status")
 
 
 def _device_filter_params(qs):
@@ -763,6 +765,139 @@ def _device_filter_params(qs):
         if raw:
             out[name] = raw
     return out
+
+
+def trusted_target_projection(fleet_row, deployment_type=None):
+    """Derive scheduling facts from server-owned inventory/record inputs.
+
+    The intentionally narrow signature has no heartbeat argument. A caller
+    may pass a row that happens to contain display-only heartbeat fields, but
+    they are ignored and cannot influence any returned targeting fact.
+    """
+    deployment_type = deployment_type or {}
+    return {
+        "model_family": gui_onboard.family(fleet_row.get("model")),
+        "os_family": (fleet_row.get("os_family") or
+                      deployment_type.get("os_family") or ""),
+        "platform_resolved": (deployment_type.get("platform") or
+                              fleet_row.get("platform") or ""),
+    }
+
+
+def deployment_target_snapshot(records):
+    """Project one newest live deployment type per device from a bulk read."""
+    live_states = frozenset((
+        "planned", "applying", "active", "unknown", "drifted",
+        "needs-reconcile",
+    ))
+    newest = {}
+    for position, record in enumerate(records):
+        if not isinstance(record, dict) or record.get("state") not in live_states:
+            continue
+        device_id = record.get("device_id")
+        resolved = record.get("resolved")
+        if not isinstance(device_id, str) or not isinstance(resolved, dict):
+            continue
+        timestamps = record.get("timestamps")
+        timestamps = timestamps if isinstance(timestamps, dict) else {}
+        planned_at = timestamps.get("planned_at")
+        planned_at = planned_at if type(planned_at) is int else -1
+        rank = (planned_at, position)
+        if device_id not in newest or rank > newest[device_id][0]:
+            newest[device_id] = (rank, {
+                "platform": resolved.get("platform"),
+                "os_family": resolved.get("os_family"),
+            })
+    return {device_id: value
+            for device_id, (_rank, value) in newest.items()}
+
+
+_TARGET_CONTEXT_OMITTED = object()
+
+
+def target_row_matches(row, filters, *, now,
+                       quarantined_ids=_TARGET_CONTEXT_OMITTED,
+                       status_key_fn=None, status_level_fn=None,
+                       offline_fn=None):
+    """Pure target-expression predicate shared by HTTP and schedulers.
+
+    Fleet/record projections supply role, model_family, os_family and
+    platform_resolved. Peer and status evaluation need explicit context so a
+    caller cannot accidentally substitute device-authored or client-local
+    state for the server-owned targeting facts.
+    """
+    mtype = filters.get("management_type")
+    if mtype:
+        raw = row.get("management_type")
+        actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
+        if actual != mtype:
+            return False
+    platform = filters.get("platform")
+    if platform:
+        actual = row.get("platform_resolved") or row.get("platform") or ""
+        if platform == "__none":
+            if actual:
+                return False
+        elif actual != platform:
+            return False
+    cred = filters.get("cred")
+    if cred:
+        actual = row.get("credential_profile_id") or ""
+        if cred == "__none":
+            if actual:
+                return False
+        elif actual != cred:
+            return False
+    telemetry = filters.get("telemetry")
+    if telemetry:
+        if row.get("telemetry_enabled") is False:
+            actual = "off"
+        elif (row.get("telemetry_enabled") is True
+              or isinstance(row.get("telemetry_stream_enabled"), bool)):
+            actual = "on"
+        else:
+            actual = "unknown"
+        if actual != telemetry:
+            return False
+    peer = filters.get("peer")
+    if peer:
+        if (quarantined_ids is _TARGET_CONTEXT_OMITTED
+                or quarantined_ids is None):
+            raise ValueError("peer targeting requires quarantine assignments")
+        actual = ("quarantined"
+                  if row.get("device_id") in quarantined_ids
+                  else "not-quarantined")
+        if actual != peer:
+            return False
+    role = filters.get("role")
+    if role:
+        declared = row.get("role") or ""
+        if role == "__none":
+            if declared:
+                return False
+        elif declared != role:
+            return False
+    model_family = filters.get("model_family")
+    if model_family and row.get("model_family") != model_family:
+        return False
+    os_family = filters.get("os_family")
+    if os_family and (row.get("os_family") or "") != os_family:
+        return False
+    status = filters.get("status")
+    if status:
+        if not all((status_key_fn, status_level_fn, offline_fn)):
+            raise ValueError("status targeting requires server status evaluators")
+        if status == "offline":
+            if not offline_fn(row, now):
+                return False
+        elif status == "__attention":
+            key = status_key_fn(row)
+            if status_level_fn(row, key) not in (
+                    "negative", "severe", "warning"):
+                return False
+        elif status_key_fn(row) != status:
+            return False
+    return True
 
 
 # Mirrors app.js's STATUS_LEVELS (the 12-level Magnetic mapping) just far
@@ -1943,6 +2078,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         result = peer_policy.load_policy(auth_path, lkg_path)
         return peer_policy.quarantine_device_ids(result.document)
 
+    def compiled_role_snapshot():
+        """The enforcement-side role assignment for preview drift counts."""
+        auth_path, lkg_path, _ = policy_paths()
+        return dict(peer_policy.load_policy(auth_path, lkg_path).roles.role_of)
+
+    def deployment_type_snapshot(required=False):
+        """One bulk read of live deployment facts, keyed by device id.
+
+        The newest applicable record wins. Terminal removed, superseded and
+        abandoned records describe history and cannot classify a current
+        targeting row. Only the small trusted type projection crosses into
+        the Devices response.
+        """
+        if record_store is None or not required:
+            return {}
+        records = record_store.list(strict=True)
+        return deployment_target_snapshot(records)
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -2812,15 +2965,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if q is not None:
                     q = q.strip().lower() or None
                 filters = _device_filter_params(qs)
-                rows, total, revision = self._device_page(limit, offset, q, filters)
+                try:
+                    rows, total, revision, target_facts = self._device_page(
+                        limit, offset, q, filters)
+                except deployment_records.RecordStoreUnreadable:
+                    self._json(503, {
+                        "error": "deployment targeting facts unavailable"})
+                    return
                 # "now" rides along so last_seen freshness is computed
                 # server-clock-to-server-clock in the UI (skewed lab VMs).
                 # total/revision ride along on EVERY response, paged or not:
                 # a client that never pages still needs to be able to tell
                 # that what it holds is the whole fleet.
-                self._json(200, {"devices": rows, "now": int(time.time()),
+                target_warnings = []
+                if target_facts["missing_os_family"]:
+                    target_warnings.append(
+                        "%d devices have no os_family yet" %
+                        target_facts["missing_os_family"])
+                if target_facts["role_drift"]:
+                    target_warnings.append(
+                        "%d devices have declared role drift" %
+                        target_facts["role_drift"])
+                self._json(200, {"devices": rows, "now": int(now_fn()),
                                  "total": total, "offset": offset,
-                                 "limit": limit, "revision": revision},
+                                 "limit": limit, "revision": revision,
+                                 "target_facts": target_facts,
+                                 "target_warnings": target_warnings},
                            extra_headers=[
                                ("ETag", _revision_etag("fleet", revision))])
                 return
@@ -3156,10 +3326,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return self._device_page()[0]
 
         def _device_page(self, limit=None, offset=0, q=None, filters=None):
-            """(rows, total, revision) for the merged device projection.
+            """(rows, total, revision, target_facts) for the device projection.
 
             *limit*/*offset* page it; *q* and *filters* (see _row_matches_q
-            and _row_matches_extra_filters -- the seven column filters the
+            and _row_matches_extra_filters -- the nine column filters the
             issue #112 prerequisite requires parity for) narrow it. With
             everything at its default this is the full fleet in store order,
             exactly what the console has always received.
@@ -3197,6 +3367,28 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             policies = catalog.list_policies() if catalog else {}
             revoked_principals = instruction_revocation_snapshot()
             observed_at = now_fn()
+            deployment_types = deployment_type_snapshot(
+                bool({"platform", "os_family"} & set(filters)))
+            compiled_roles = compiled_role_snapshot()
+
+            def merge(device):
+                return self._merge_device_row(
+                    device, policies, hb, jobs, observed_at,
+                    heartbeat_available, revoked_principals,
+                    deployment_types.get(device.get("device_id"), {}))
+
+            def role_drift(row):
+                declared = row.get("role") or None
+                compiled = compiled_roles.get(row.get("device_id"))
+                return declared != compiled
+
+            def matches_without_os(row):
+                if q is not None and not self._row_matches_q(row, q):
+                    return False
+                other_filters = {key: value for key, value in filters.items()
+                                 if key != "os_family"}
+                return (not other_filters or self._row_matches_extra_filters(
+                    row, other_filters, observed_at, quarantined_ids))
 
             if not active_filter:
                 # Nothing to count that the inventory does not already know,
@@ -3206,10 +3398,23 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 total = len(devs)
                 window = devs[offset:] if limit is None else \
                     devs[offset:offset + limit]
-                return ([self._merge_device_row(
-                            d, policies, hb, jobs, observed_at,
-                            heartbeat_available, revoked_principals)
-                         for d in window], total, revision)
+                rows = [merge(d) for d in window]
+                # These facts describe the whole match set, never just the
+                # requested page. They need only trusted fleet/record fields,
+                # so the fast path still avoids merging heartbeat and catalog
+                # state for rows it will not render.
+                fact_rows = []
+                for device in devs:
+                    resolved = deployment_types.get(device.get("device_id"), {})
+                    fact_row = dict(device)
+                    fact_row.update(trusted_target_projection(device, resolved))
+                    fact_rows.append(fact_row)
+                facts = {
+                    "missing_os_family": sum(
+                        not row.get("os_family") for row in fact_rows),
+                    "role_drift": sum(role_drift(row) for row in fact_rows),
+                }
+                return rows, total, revision, facts
 
             # A filter reaches merged fields (heartbeat_model, status), so
             # every row is merged to be counted; only the window is
@@ -3219,19 +3424,26 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                if "peer" in filters else None)
             now = observed_at
             rows, total = [], 0
+            missing_os_family = 0
+            drift = 0
             for d in devs:
-                row = self._merge_device_row(
-                    d, policies, hb, jobs, observed_at,
-                    heartbeat_available, revoked_principals)
+                row = merge(d)
+                if not row.get("os_family") and matches_without_os(row):
+                    missing_os_family += 1
                 if q is not None and not self._row_matches_q(row, q):
                     continue
                 if filters and not self._row_matches_extra_filters(
                         row, filters, now, quarantined_ids):
                     continue
+                if role_drift(row):
+                    drift += 1
                 total += 1
                 if total > offset and (limit is None or len(rows) < limit):
                     rows.append(row)
-            return rows, total, revision
+            return rows, total, revision, {
+                "missing_os_family": missing_os_family,
+                "role_drift": drift,
+            }
 
         @staticmethod
         def _row_matches_q(row, q):
@@ -3252,72 +3464,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             (issue #112 prerequisite 1). quarantined_ids is the peer-policy
             quarantine-assignment set, or None when the peer filter is not
             in play (it is never consulted in that case)."""
-            mtype = filters.get("management_type")
-            if mtype:
-                # Mirrors managementTypeLabel/deviceMatchesFilters' own
-                # legacy_routed/legacy equivalence: the wire value for an
-                # unclassified device is always the truthy "legacy_routed".
-                raw = row.get("management_type")
-                actual = "legacy" if (raw == "legacy_routed" or not raw) else raw
-                if actual != mtype:
-                    return False
-            platform = filters.get("platform")
-            if platform:
-                plat = row.get("platform") or ""
-                if platform == "__none":
-                    if plat != "":
-                        return False
-                elif plat != platform:
-                    return False
-            cred = filters.get("cred")
-            if cred:
-                c = row.get("credential_profile_id") or ""
-                if cred == "__none":
-                    if c != "":
-                        return False
-                elif c != cred:
-                    return False
-            telemetry = filters.get("telemetry")
-            if telemetry:
-                # Same tri-state as the console's telemetryCell/filter:
-                # "on" only once the device has actually reported it.
-                if row.get("telemetry_enabled") is False:
-                    tel = "off"
-                elif (row.get("telemetry_enabled") is True
-                      or isinstance(row.get("telemetry_stream_enabled"), bool)):
-                    tel = "on"
-                else:
-                    tel = "unknown"
-                if tel != telemetry:
-                    return False
-            peer = filters.get("peer")
-            if peer:
-                q = ("quarantined"
-                     if row.get("device_id") in (quarantined_ids or ())
-                     else "not-quarantined")
-                if q != peer:
-                    return False
-            role = filters.get("role")
-            if role:
-                declared = row.get("role") or ""
-                if role == "__none":
-                    if declared:
-                        return False
-                elif declared != role:
-                    return False
-            status = filters.get("status")
-            if status:
-                if status == "offline":
-                    if not self._device_is_offline(row, now):
-                        return False
-                elif status == "__attention":
-                    key = self._device_status_key(row)
-                    level = self._device_status_level(row, key)
-                    if level not in ("negative", "severe", "warning"):
-                        return False
-                elif self._device_status_key(row) != status:
-                    return False
-            return True
+            return target_row_matches(
+                row, filters, now=now, quarantined_ids=quarantined_ids,
+                status_key_fn=self._device_status_key,
+                status_level_fn=self._device_status_level,
+                offline_fn=self._device_is_offline)
 
         def _device_status_key(self, row):
             """Server-side mirror of app.js deviceStatus()'s KEY derivation,
@@ -3384,12 +3535,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         @staticmethod
         def _merge_device_row(d, policies, hb, jobs, observed_at,
-                              heartbeat_available, revoked_principals):
+                              heartbeat_available, revoked_principals,
+                              deployment_type=None):
             """One inventory record joined with policy, heartbeat and job."""
             did = d.get("device_id")
             pol = policies.get(did, {})
             h = hb.get(did, {})
             row = dict(d)
+            row.update(trusted_target_projection(d, deployment_type))
             row["assigned_image_id"] = pol.get("approved_image_id")
             row["assigned_image_ids"] = pol.get("approved_image_ids")
             row["last_seen"] = h.get("last_seen")

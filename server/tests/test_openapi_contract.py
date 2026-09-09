@@ -61,6 +61,25 @@ def test_openapi_is_generated_from_exact_runtime_route_registry():
     assert doc == openapi_contract.build_document()
 
 
+def test_devices_target_expression_and_projection_are_public_contracts():
+    document = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        operation = document["paths"][prefix + "/devices"]["get"]
+        parameters = {item["name"]: item for item in operation["parameters"]}
+        assert {"role", "model_family", "os_family"} <= set(parameters)
+        assert parameters["model_family"]["schema"]["enum"] == [
+            "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+            "XR8000", "unknown"]
+        assert parameters["os_family"]["schema"]["enum"] == ["xe", "xr"]
+        response = operation["responses"]["200"]["content"][
+            "application/json"]["schema"]
+        assert {"target_facts", "target_warnings"} <= set(
+            response["properties"])
+        row = response["properties"]["devices"]["items"]
+        assert {"model_family", "os_family", "platform_resolved"} <= set(
+            row["properties"])
+
+
 def test_instruction_resources_are_exact_registered_device_routes():
     routes = [route for route in api_routes.ROUTES
               if "instruction" in route.path]
@@ -786,7 +805,8 @@ def test_console_read_query_contract_matches_runtime_filters_and_limits():
                    if p["in"] == "query"}
         assert set(devices) == {
             "limit", "offset", "q", "management_type", "platform", "cred",
-            "telemetry", "peer", "status"}
+            "telemetry", "peer", "role", "model_family", "os_family",
+            "status"}
         assert devices["limit"]["schema"]["maximum"] == 1000
         assert "__none" in devices["platform"]["schema"]["enum"]
         expected = {

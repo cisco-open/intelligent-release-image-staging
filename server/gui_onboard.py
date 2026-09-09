@@ -191,6 +191,29 @@ _XR_PLATFORM = "xr-appmgr"
 # path recorded it (console form, CSV import, live probe).
 _SYS_SUFFIX_RE = re.compile(r"^(8[0-9]{2,3})-SYS$")
 
+_MODEL_FAMILY_NAMES = (
+    "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+)
+assert len(_MODEL_FAMILY_NAMES) == len(_MODEL_INSTALL_TABLE)
+
+
+def family(model):
+    """Return the stable scheduling family for a trusted fleet model.
+
+    This deliberately shares the onboarding classifier instead of growing a
+    second model taxonomy. Callers decide whether their model source is
+    trusted; management targeting passes only the fleet/record projection and
+    never the device-authored heartbeat model.
+    """
+    model = (model or "").strip()
+    if _XR_MODEL_RE.match(model):
+        return "XR8000"
+    for (pattern, _options), name in zip(
+            _MODEL_INSTALL_TABLE, _MODEL_FAMILY_NAMES):
+        if re.match(pattern, model, re.IGNORECASE):
+            return name
+    return "unknown"
+
 
 def normalize_model(model):
     """Strip the '-SYS' suffix some Cisco 8000-series banners carry, so

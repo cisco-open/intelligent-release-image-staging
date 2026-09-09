@@ -375,6 +375,21 @@
                   <option value="">Role: any</option>
                   <option value="__none">— no role —</option>
                 </select>
+                <select id="dev-filter-model-family" aria-label="Filter by model family">
+                  <option value="">Model family: any</option>
+                  <option value="IE3x00">IE3x00</option>
+                  <option value="IR1x00">IR1x00</option>
+                  <option value="C9xxx">C9xxx</option>
+                  <option value="C8xxx">C8xxx</option>
+                  <option value="ISR/ASR/CSR">ISR/ASR/CSR</option>
+                  <option value="XR8000">XR8000</option>
+                  <option value="unknown">unknown</option>
+                </select>
+                <select id="dev-filter-os-family" aria-label="Filter by OS family">
+                  <option value="">OS family: any</option>
+                  <option value="xe">IOS XE / IOS</option>
+                  <option value="xr">IOS XR</option>
+                </select>
               </div>
             </details>
             <!-- Reset (Magnetic Filter bar > Anatomy: "Displayed when at least
@@ -391,6 +406,7 @@
                  down in the filter row, which disagreed on wording and made
                  the reader check both. -->
             <span class="filter-total" id="dev-count"></span>
+            <span class="muted" id="dev-target-warning" role="status"></span>
             <!-- Prev/Next paging over the CURRENT filter's match set (issue
                  #112 step 3: the table only pages once server-side filter
                  parity and id-keyed selection, both above, hold). Hidden

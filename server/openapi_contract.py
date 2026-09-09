@@ -952,6 +952,12 @@ def _query_parameters(route):
                 "on", "off", "unknown"]}, "on"),
             "peer": ({"type": "string", "enum": [
                 "quarantined", "not-quarantined"]}, "not-quarantined"),
+            "role": ({"type": "string"}, "boat"),
+            "model_family": ({"type": "string", "enum": [
+                "IE3x00", "IR1x00", "C9xxx", "C8xxx", "ISR/ASR/CSR",
+                "XR8000", "unknown"]}, "C9xxx"),
+            "os_family": ({"type": "string", "enum": ["xe", "xr"]},
+                          "xe"),
             "status": ({"type": "string", "enum": [
                 "onboarding", "undeploying", "waiting-heartbeat", "waiting-staging",
                 "onboard-failed", "undeploy-failed", "deployed",
@@ -1606,9 +1612,15 @@ def _json_success_example(route):
     if suffix == "/devices" and route.method == "GET":
         return {"devices": [{"device_id": "edge-01",
                               "device_ip": "192.0.2.10",
+                              "model_family": "C9xxx",
+                              "os_family": "xe",
+                              "platform_resolved": "guestshell",
                               "instruction": _instruction_device_example()}],
                 "total": 1, "offset": 0, "limit": None,
-                "revision": 7, "now": 1788470400}
+                "revision": 7, "now": 1788470400,
+                "target_facts": {"missing_os_family": 0,
+                                 "role_drift": 0},
+                "target_warnings": []}
     if suffix == "/devices" and route.method == "POST":
         return {"device": {"device_id": "edge-01",
                             "device_ip": "192.0.2.10",

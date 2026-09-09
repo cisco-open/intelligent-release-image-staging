@@ -1,6 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import inspect
 import os
 import re
 
@@ -1032,6 +1033,7 @@ import json
 import threading
 
 import gui_app
+import deployment_records
 
 
 def _serve(tmp_path):
@@ -1664,7 +1666,7 @@ import keyed_state
 import peer_enforcement
 
 
-def _serve_full(tmp_path):
+def _serve_full(tmp_path, record_store=None, now_fn=time.time):
     secrets_path = str(tmp_path / "secrets.json")
     app = gui_app.GuiApp(secrets_path)
     app.set_admin("admin", "pw")
@@ -1681,8 +1683,9 @@ def _serve_full(tmp_path):
     cat = catalog_mod.CatalogStore(state)
     cat.save_image({"id": "img1", "filename": "img1.bin", "sha256": "ab",
                     "published_at": 1})
-    srv = gui_server.make_server("127.0.0.1", 0, app, images, fleet, creds, cat,
-                                 certfile=None)
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, images, fleet, creds, cat, certfile=None,
+        record_store=record_store, now_fn=now_fn)
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return "127.0.0.1", port, (app, fleet, creds, cat), srv.shutdown
@@ -11538,7 +11541,7 @@ def test_devices_offset_past_the_end_is_an_empty_page_not_an_error(tmp_path):
         stop()
 
 
-# --- server-side parity for the six console column filters (#112) ----------
+# --- server-side parity for the nine console column filters (#112) ---------
 # app.js's deviceMatchesFilters() decides these client-side over the whole
 # fleet; a paged table can only offer a filter the server can also apply, or
 # a page would silently disagree with what the filter bar promises. Every
@@ -11889,6 +11892,148 @@ def test_declared_role_filter_has_server_and_client_parity():
     assert "f.role" in predicate and "d.role" in predicate
     assert "Object.keys(" in js.split("function syncDeviceFilterOptions()", 1)[1]
     assert ".roles || {}).members" in js
+
+
+def test_target_filters_use_fleet_and_deployment_facts_not_heartbeat(tmp_path):
+    class Records:
+        def list(self, strict=False):
+            assert strict is True
+            return [{
+                "record_id": "r1", "device_id": "auto-1", "state": "active",
+                "timestamps": {"planned_at": 10, "finished_at": 11},
+                "resolved": {"platform": "guestshell", "os_family": "xe"},
+            }]
+
+    host, port, (_, fleet, _, cat), stop = _serve_full(
+        tmp_path, record_store=Records(), now_fn=lambda: 4242.9)
+    try:
+        fleet.upsert({"device_id": "auto-1", "device_ip": "10.0.0.1",
+                      "model": "C9300", "role": "boat"})
+        fleet.upsert({"device_id": "missing-os", "device_ip": "10.0.0.2",
+                      "model": "IE-3400", "role": "boat"})
+        # A device controls heartbeat_model. It may be displayed and searched,
+        # but it must never change a targeting family.
+        cat.record_heartbeat("auto-1", {"model": "8201"}, now=4000)
+        ck, _ = _login(host, port)
+        st, _, raw = _req(
+            host, port, "GET",
+            "/api/devices?role=boat&model_family=C9xxx&os_family=xe&platform=guestshell",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200
+        assert [row["device_id"] for row in body["devices"]] == ["auto-1"]
+        assert body["devices"][0]["model_family"] == "C9xxx"
+        assert body["devices"][0]["platform_resolved"] == "guestshell"
+        assert body["devices"][0]["heartbeat_model"] == "8201"
+        assert body["total"] == 1
+        assert body["revision"] == fleet.revision()
+        assert body["now"] == 4242
+        assert body["target_facts"] == {
+            "missing_os_family": 0, "role_drift": 1}
+
+        # The missing fact is counted inside the other target dimensions even
+        # though os_family=xe necessarily excludes that row from total.
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?role=boat&os_family=xe",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200 and body["total"] == 1
+        assert body["target_facts"]["missing_os_family"] == 1
+        assert "1 devices have no os_family yet" in body["target_warnings"]
+
+        # Targeting follows the declared fleet role even while compiled
+        # enforcement is absent/drifted.
+        assert body["target_facts"]["role_drift"] == 1
+        assert "1 devices have declared role drift" in body["target_warnings"]
+
+        # Missing-fact counting composes with the peer quarantine predicate;
+        # the row is relevant to every other target dimension even though the
+        # absent OS fact keeps it out of the final xe result.
+        ck, csrf = _auth(host, port)
+        revision = _loaded_peer_policy(cat).document["revision"]
+        st, _, raw = _req(
+            host, port, "PUT",
+            "/api/peer-policy/quarantine/missing-os",
+            {"quarantined": True, "if_revision": revision},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert st == 200, raw
+        st, _, raw = _req(
+            host, port, "GET", "/api/devices?peer=quarantined&os_family=xe",
+            headers={"Cookie": ck})
+        body = json.loads(raw)
+        assert st == 200 and body["total"] == 0
+        assert body["target_facts"]["missing_os_family"] == 1
+    finally:
+        stop()
+
+
+def test_device_type_filters_have_server_and_client_preview_parity():
+    html = _webroot("index.html")
+    js = _webroot("app.js")
+    assert 'id="dev-filter-model-family"' in html
+    assert 'id="dev-filter-os-family"' in html
+    assert "modelFamily: val('dev-filter-model-family')" in js
+    assert "osFamily: val('dev-filter-os-family')" in js
+    assert "modelFamily: 'model_family'" in js
+    assert "osFamily: 'os_family'" in js
+    predicate = js.split("function deviceMatchesFilters(d, f, devNow) {", 1)[1]
+    predicate = predicate.split("\n  }", 1)[0]
+    assert "d.model_family" in predicate
+    assert "d.os_family" in predicate
+    assert "d.platform_resolved || d.platform" in predicate
+    assert "target_warnings" in js
+    assert 'id="dev-target-warning"' in html
+
+    # Task 22 consumes this same pure predicate; the HTTP handler delegates to
+    # it rather than owning a second copy of the target language.
+    row = {"device_id": "d1", "role": "boat", "model_family": "C9xxx",
+           "os_family": "xe", "platform": "",
+           "platform_resolved": "guestshell"}
+    assert gui_server.target_row_matches(
+        row, {"role": "boat", "model_family": "C9xxx",
+              "os_family": "xe", "platform": "guestshell"}, now=1)
+    assert not gui_server.target_row_matches(
+        row, {"role": "fiber"}, now=1)
+    with pytest.raises(
+            ValueError, match="peer targeting requires quarantine assignments"):
+        gui_server.target_row_matches(
+            row, {"peer": "not-quarantined"}, now=1)
+    assert gui_server.target_row_matches(
+        row, {"peer": "not-quarantined"}, now=1,
+        quarantined_ids=set())
+    projected = gui_server.trusted_target_projection(
+        {"model": "C9300", "heartbeat_model": "8201", "os_family": "xe"},
+        {"platform": "guestshell"})
+    assert projected == {"model_family": "C9xxx", "os_family": "xe",
+                         "platform_resolved": "guestshell"}
+    assert "return target_row_matches(" in inspect.getsource(
+        gui_server.make_server)
+
+
+def test_resolved_type_filter_fails_visible_on_unreadable_record_state(tmp_path):
+    calls = []
+
+    class BrokenRecords:
+        def list(self, strict=False):
+            calls.append(strict)
+            raise deployment_records.RecordStoreUnreadable("broken")
+
+    host, port, (_, fleet, _, _cat), stop = _serve_full(
+        tmp_path, record_store=BrokenRecords())
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "model": "C9300"})
+        ck, _ = _login(host, port)
+        st, _, _ = _req(host, port, "GET", "/api/devices",
+                        headers={"Cookie": ck})
+        assert st == 200 and calls == []
+        st, _, raw = _req(host, port, "GET", "/api/devices?platform=guestshell",
+                          headers={"Cookie": ck})
+        assert st == 503 and calls == [True]
+        problem = json.loads(raw)
+        assert problem["code"] == "service-unavailable"
+    finally:
+        stop()
 
 
 def test_role_filter_facet_is_complete_when_role_is_absent_from_current_page(

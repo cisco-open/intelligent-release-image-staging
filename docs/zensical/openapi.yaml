@@ -12174,6 +12174,49 @@
             "example": "not-quarantined"
           },
           {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string"
+            },
+            "example": "boat"
+          },
+          {
+            "name": "model_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "IE3x00",
+                "IR1x00",
+                "C9xxx",
+                "C8xxx",
+                "ISR/ASR/CSR",
+                "XR8000",
+                "unknown"
+              ]
+            },
+            "example": "C9xxx"
+          },
+          {
+            "name": "os_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xe",
+                "xr"
+              ]
+            },
+            "example": "xe"
+          },
+          {
             "name": "status",
             "in": "query",
             "required": false,
@@ -12221,6 +12264,15 @@
                             "type": "string"
                           },
                           "device_ip": {
+                            "type": "string"
+                          },
+                          "model_family": {
+                            "type": "string"
+                          },
+                          "os_family": {
+                            "type": "string"
+                          },
+                          "platform_resolved": {
                             "type": "string"
                           },
                           "instruction": {
@@ -12421,6 +12473,9 @@
                         "required": [
                           "device_id",
                           "device_ip",
+                          "model_family",
+                          "os_family",
+                          "platform_resolved",
                           "instruction"
                         ],
                         "additionalProperties": true
@@ -12443,6 +12498,29 @@
                     },
                     "now": {
                       "type": "integer"
+                    },
+                    "target_facts": {
+                      "title": "ConsoleDevicesResponseTarget_Facts",
+                      "type": "object",
+                      "properties": {
+                        "missing_os_family": {
+                          "type": "integer"
+                        },
+                        "role_drift": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "missing_os_family",
+                        "role_drift"
+                      ],
+                      "additionalProperties": true
+                    },
+                    "target_warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -12451,7 +12529,9 @@
                     "offset",
                     "limit",
                     "revision",
-                    "now"
+                    "now",
+                    "target_facts",
+                    "target_warnings"
                   ],
                   "additionalProperties": true
                 },
@@ -12460,6 +12540,9 @@
                     {
                       "device_id": "edge-01",
                       "device_ip": "192.0.2.10",
+                      "model_family": "C9xxx",
+                      "os_family": "xe",
+                      "platform_resolved": "guestshell",
                       "instruction": {
                         "display_state": "applied",
                         "label": "applied r9223372036854775807",
@@ -12488,7 +12571,12 @@
                   "offset": 0,
                   "limit": null,
                   "revision": 7,
-                  "now": 1788470400
+                  "now": 1788470400,
+                  "target_facts": {
+                    "missing_os_family": 0,
+                    "role_drift": 0
+                  },
+                  "target_warnings": []
                 }
               }
             },
@@ -12802,6 +12890,49 @@
               ]
             },
             "example": "not-quarantined"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string"
+            },
+            "example": "boat"
+          },
+          {
+            "name": "model_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "IE3x00",
+                "IR1x00",
+                "C9xxx",
+                "C8xxx",
+                "ISR/ASR/CSR",
+                "XR8000",
+                "unknown"
+              ]
+            },
+            "example": "C9xxx"
+          },
+          {
+            "name": "os_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xe",
+                "xr"
+              ]
+            },
+            "example": "xe"
           },
           {
             "name": "status",
@@ -40940,6 +41071,49 @@
             "example": "not-quarantined"
           },
           {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string"
+            },
+            "example": "boat"
+          },
+          {
+            "name": "model_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "IE3x00",
+                "IR1x00",
+                "C9xxx",
+                "C8xxx",
+                "ISR/ASR/CSR",
+                "XR8000",
+                "unknown"
+              ]
+            },
+            "example": "C9xxx"
+          },
+          {
+            "name": "os_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xe",
+                "xr"
+              ]
+            },
+            "example": "xe"
+          },
+          {
             "name": "status",
             "in": "query",
             "required": false,
@@ -40987,6 +41161,15 @@
                             "type": "string"
                           },
                           "device_ip": {
+                            "type": "string"
+                          },
+                          "model_family": {
+                            "type": "string"
+                          },
+                          "os_family": {
+                            "type": "string"
+                          },
+                          "platform_resolved": {
                             "type": "string"
                           },
                           "instruction": {
@@ -41187,6 +41370,9 @@
                         "required": [
                           "device_id",
                           "device_ip",
+                          "model_family",
+                          "os_family",
+                          "platform_resolved",
                           "instruction"
                         ],
                         "additionalProperties": true
@@ -41209,6 +41395,29 @@
                     },
                     "now": {
                       "type": "integer"
+                    },
+                    "target_facts": {
+                      "title": "ManagementDevicesResponseTarget_Facts",
+                      "type": "object",
+                      "properties": {
+                        "missing_os_family": {
+                          "type": "integer"
+                        },
+                        "role_drift": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "missing_os_family",
+                        "role_drift"
+                      ],
+                      "additionalProperties": true
+                    },
+                    "target_warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   },
                   "required": [
@@ -41217,7 +41426,9 @@
                     "offset",
                     "limit",
                     "revision",
-                    "now"
+                    "now",
+                    "target_facts",
+                    "target_warnings"
                   ],
                   "additionalProperties": true
                 },
@@ -41226,6 +41437,9 @@
                     {
                       "device_id": "edge-01",
                       "device_ip": "192.0.2.10",
+                      "model_family": "C9xxx",
+                      "os_family": "xe",
+                      "platform_resolved": "guestshell",
                       "instruction": {
                         "display_state": "applied",
                         "label": "applied r9223372036854775807",
@@ -41254,7 +41468,12 @@
                   "offset": 0,
                   "limit": null,
                   "revision": 7,
-                  "now": 1788470400
+                  "now": 1788470400,
+                  "target_facts": {
+                    "missing_os_family": 0,
+                    "role_drift": 0
+                  },
+                  "target_warnings": []
                 }
               }
             },
@@ -41518,6 +41737,49 @@
               ]
             },
             "example": "not-quarantined"
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string"
+            },
+            "example": "boat"
+          },
+          {
+            "name": "model_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "IE3x00",
+                "IR1x00",
+                "C9xxx",
+                "C8xxx",
+                "ISR/ASR/CSR",
+                "XR8000",
+                "unknown"
+              ]
+            },
+            "example": "C9xxx"
+          },
+          {
+            "name": "os_family",
+            "in": "query",
+            "required": false,
+            "description": "Exact server-side device table filter",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xe",
+                "xr"
+              ]
+            },
+            "example": "xe"
           },
           {
             "name": "status",

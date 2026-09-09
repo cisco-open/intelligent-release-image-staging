@@ -98,7 +98,7 @@
   // picking. Filter state lives in the DOM controls, not in the row data,
   // so the periodic re-render never clears it.
   //
-  // Issue #112: the seven column filters and the status filter now have
+  // Issue #112: the nine column filters now have
   // SERVER-SIDE parity (gui_server.py's _row_matches_extra_filters mirrors
   // deviceMatchesFilters below condition-for-condition) -- a prerequisite
   // for paging the table, because a page filtered only on what the server
@@ -139,17 +139,21 @@
       telemetry: val('dev-filter-telemetry'),
       peer: val('dev-filter-peer'),
       role: val('dev-filter-role'),
+      modelFamily: val('dev-filter-model-family'),
+      osFamily: val('dev-filter-os-family'),
       status: val('dev-filter-status')
     };
   }
   // The SAME filter state as a GET /api/v1/devices query string (q/
-  // management_type/platform/cred/telemetry/peer/status) -- the wire names
+  // management_type/platform/cred/telemetry/peer/role/model_family/
+  // os_family/status) -- the wire names
   // _device_filter_params (gui_server.py) reads. Kept as one function so a
   // filter added to deviceFilterState() above can never be forgotten here.
   function deviceFilterQuery(f) {
     var names = { q: 'q', managementType: 'management_type', platform: 'platform',
                   cred: 'cred', telemetry: 'telemetry', peer: 'peer',
-                  role: 'role', status: 'status' };
+                  role: 'role', modelFamily: 'model_family',
+                  osFamily: 'os_family', status: 'status' };
     var parts = [];
     Object.keys(names).forEach(function (key) {
       if (f[key]) parts.push(names[key] + '=' + encodeURIComponent(f[key]));
@@ -581,7 +585,7 @@
     // remove: the option itself stays exactly as it is).
     if (f.managementType && (d.management_type === 'legacy_routed' ? 'legacy' : (d.management_type || 'legacy')) !== f.managementType) return false;
     if (f.platform) {
-      var plat = d.platform || '';
+      var plat = d.platform_resolved || d.platform || '';
       if (f.platform === '__none' ? plat !== '' : plat !== f.platform) return false;
     }
     if (f.cred) {
@@ -605,6 +609,8 @@
       var role = d.role || '';
       if (f.role === '__none' ? role !== '' : role !== f.role) return false;
     }
+    if (f.modelFamily && d.model_family !== f.modelFamily) return false;
+    if (f.osFamily && (d.os_family || '') !== f.osFamily) return false;
     if (f.status) {
       // "offline" is a modifier on top of whatever the cell says (a device can
       // read "deployed" and still be stale), so it stays its own choice.
@@ -1283,6 +1289,10 @@
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     devTotal = dbody.total || 0;
     devOffset = dbody.offset || 0;
+    var targetWarning = document.getElementById('dev-target-warning');
+    if (targetWarning) {
+      targetWarning.textContent = (dbody.target_warnings || []).join(' · ');
+    }
     if (devicesPageWentEmpty(devs)) return refreshDevices();
     var imgs = ir.ok ? ((await ir.json()).images || []) : [];
     imageListOk = ir.ok;
@@ -1362,12 +1372,13 @@
     roleSel.value = keepRole;
   }
 
-  // The five filter fields living inside the <details id="more-filters">
+  // The seven filter fields living inside the <details id="more-filters">
   // disclosure panel (density pass, Task 8) -- Search/Agent
   // install/Status stay above the fold and are not counted here.
   var MORE_FILTER_IDS = ['dev-filter-management-type', 'dev-filter-cred',
                           'dev-filter-telemetry', 'dev-filter-peer',
-                          'dev-filter-role'];
+                          'dev-filter-role', 'dev-filter-model-family',
+                          'dev-filter-os-family'];
   function updateMoreFiltersSummary() {
     // Magnetic Filter bar > Anatomy fixes the overflow button's format as
     // "<icon> + Filters", so the label lives in its own span and the icon
@@ -2724,6 +2735,7 @@
   })();
   ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
    'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
+   'dev-filter-model-family', 'dev-filter-os-family',
    'dev-filter-status'].forEach(function (id) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -2736,6 +2748,7 @@
     clear.addEventListener('click', function () {
       ['dev-filter-q', 'dev-filter-management-type', 'dev-filter-platform',
        'dev-filter-cred', 'dev-filter-telemetry', 'dev-filter-peer', 'dev-filter-role',
+       'dev-filter-model-family', 'dev-filter-os-family',
        'dev-filter-status'].forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.value = '';

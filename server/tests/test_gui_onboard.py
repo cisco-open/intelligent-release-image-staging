@@ -912,6 +912,23 @@ def test_install_options_for_xr_os_family_offers_only_the_appmgr_container():
     assert gui_onboard.install_options_for("", "xr") == ["xr-appmgr"]
 
 
+@pytest.mark.parametrize("model, expected", [
+    ("IE-3400-8T2S", "IE3x00"),
+    ("IE3300", "IE3x00"),
+    ("IR1101", "IR1x00"),
+    ("IR1800", "IR1x00"),
+    ("C9300-48UXM", "C9xxx"),
+    ("C8000V", "C8xxx"),
+    ("ISR4451", "ISR/ASR/CSR"),
+    ("ASR1001-X", "ISR/ASR/CSR"),
+    ("8201-SYS", "XR8000"),
+    ("N9K-C93180YC-EX", "unknown"),
+    ("", "unknown"),
+])
+def test_family_reuses_the_install_model_taxonomy(model, expected):
+    assert gui_onboard.family(model) == expected
+
+
 def test_install_options_for_xr_os_family_refuses_non_8000_models():
     # v1 is validated on the Cisco 8000 series only (agentinfo plan scope:
     # "8000-series first, capability-gated"). os_family is still
