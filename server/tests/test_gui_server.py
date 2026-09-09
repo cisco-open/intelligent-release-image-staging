@@ -39,6 +39,7 @@ management_api._serve_with_shutdown(Server(), cleanup)
 '''
     proc = subprocess.Popen(
         [sys.executable, "-c", program, str(ready), str(cleaned)],
+        cwd=os.path.dirname(gui_server.__file__),
         env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True)
     try:
@@ -90,6 +91,7 @@ management_api._serve_with_shutdown(
     proc = subprocess.Popen(
         [sys.executable, "-c", program, str(ready), str(cleaned), str(served),
          str(admitted)],
+        cwd=os.path.dirname(gui_server.__file__),
         env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True)
     try:

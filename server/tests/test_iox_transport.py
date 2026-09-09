@@ -14,7 +14,7 @@ monotonic_fn=None), admit_wrapper(...), _StreamingRedactor.feed/finish,
 _encode_frame, _FrameReader.read, and _TranscriptWriter.append/reference.
 
 All archives, peers, credentials, and process trees are tiny temporary fixtures.
-The fake SSH executable implements receipt-dependent dialogue; sending commands
+The fake SSH executable implements response-dependent dialogue; sending commands
 early is observable. supervisor=None means the isolated transport owns/reaps its
 own children. The crash suite covers the production supervisor and durable fence.
 """
