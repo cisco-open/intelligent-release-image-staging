@@ -3978,6 +3978,88 @@ def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
         assert all(needle not in body for body in persisted_files)
 
 
+def test_real_iox_teardown_accepts_restored_predecessor_transition(tmp_path):
+    """A restored scheduled predecessor remains usable for real teardown."""
+    import test_deployment_records as records_spec
+    import test_iox_verification as iox_spec
+
+    board_identity = records_spec._IOX_BOARD
+    model = "IE-3400-8T2S"
+    state_dir = tmp_path / "state"
+    store = deployment_records.DeploymentRecordStore(str(state_dir))
+    recipe_event = tmp_path / "teardown-recipe-events"
+    recipe = iox_spec._write_recipe_peer(
+        tmp_path, event_path=str(recipe_event))
+    transport = iox_spec._TransportFactory(board=board_identity)
+    controller = iox_spec._controller(
+        tmp_path, store, transport,
+        credential_resolver=lambda reference: (
+            {"device_user": "admin", "device_pass": "device-pass",
+             "enable_secret": "enable-pass"}
+            if reference == "lab" else None),
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    provenance = records_spec._provenance(device_id="d1")
+    resolved = {
+        "platform": "iox", "model": model, "os_family": "xe",
+        "device_ip": "10.0.0.1", "management_type": "routed",
+        "device_identity": board_identity,
+    }
+    resources = [{"kind": "iox-app", "ownership": "iris-created"}]
+    store.create(records_spec._record(
+        record_id="old", device_id="d1",
+        controller_id=records_spec._IOX_CONTROLLER,
+        schedule_provenance=provenance, resolved=resolved,
+        resources=resources))
+    transcript_ref, observation = records_spec._iox_transcript(
+        state_dir, state="disabled", board_identity=board_identity)
+    journal = store.iox_begin(
+        "old", records_spec._IOX_CONTROLLER, board_identity,
+        records_spec._iox_wrapper(), observation, transcript_ref)
+    store.recover_interrupted()
+    terminal_journal = store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    admitted = store.admit_scheduled(
+        records_spec._record(
+            record_id="new", device_id="d1",
+            controller_id=records_spec._IOX_CONTROLLER,
+            resolved=resolved, resources=resources),
+        provenance=provenance, attempt=1,
+        authorize=lambda *_args: None, resume_record_id="old")
+    assert store.get("old", strict=True)["state"] == "abandoned"
+    store.retire_planned(admitted["record"]["record_id"])
+    restored = store.get("old", strict=True)
+    assert restored["state"] == "unknown"
+    assert restored["iox_verification"] == terminal_journal
+
+    service = gui_onboard.OnboardService(
+        _iox_fleet(platform="iox", model=model), _iox_creds(),
+        host_ip="10.9.9.9", mint_fn=lambda device_id: "unused",
+        run_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("IOx job bypassed controller custody")),
+        iox_preflight_fn=_iox_preflight_ok(
+            identity=board_identity, model=model),
+        artifacts_dir=str(tmp_path), record_store=store,
+        iox_controller=controller)
+
+    try:
+        job = _wait(service, service.start(
+            "d1", action="undeploy", record_id="old",
+            prepare=lambda: "old", teardown_mode="recorded"))
+    finally:
+        controller.close()
+
+    assert job["state"] == "done", job["lines"]
+    assert job["result_code"] == 0
+    assert job["record_id"] == "old"
+    assert recipe_event.read_bytes() == b"finish_ack\n"
+    removed = store.get("old", strict=True)
+    assert removed["state"] == "removed"
+    assert removed["iox_verification"] == terminal_journal
+
+
 def test_real_iox_install_routes_only_through_the_controller(tmp_path):
     raw_runs = []
     controller = _FrozenIoxController()

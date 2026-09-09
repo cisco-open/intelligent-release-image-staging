@@ -3823,7 +3823,13 @@ class IoxController(object):
                     current = self.store.get(attempt.record_id, strict=True)
                 except TypeError:
                     current = self.store.get(attempt.record_id)
-                if current != authorized_preliminary:
+                applying = copy.deepcopy(authorized_preliminary)
+                applying["state"] = "applying"
+                # OnboardService prepares recorded teardown by advancing the
+                # selected lifecycle state under the durable store lock.  The
+                # controller still requires every other authority field to
+                # match its pre-contact snapshot exactly.
+                if current not in (authorized_preliminary, applying):
                     raise ValueError("recorded teardown binding changed")
             elif authorized is not None:
                 raise ValueError("force must remain recordless")

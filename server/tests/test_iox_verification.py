@@ -2358,6 +2358,7 @@ def test_same_record_recovery_still_rejects_unrelated_record_drift(
     recipe = _write_recipe_peer(tmp_path, event_path=str(recipe_started))
 
     def prepare(unused_request, unused_identity):
+        store.transition("selected-r1", "applying")
         current = store.records["selected-r1"]
         if drift == "target":
             current["resolved"]["device_ip"] = "192.0.2.99"
