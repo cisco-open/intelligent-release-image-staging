@@ -77,6 +77,8 @@ pack_valid_bundle() {
   # Match the production packer's explicit top-level list: no leading ./ entry.
   tar czf "$out" -C "$BUNDLE_TREE" agent bootstrap.sh guestshell-start.sh \
     rotate-logs.sh aria2c iris-signers.allowed_signers iris-root.allowed_signers
+  cp "$BUNDLE_TREE/iris-signers.allowed_signers" \
+    "$(dirname "$out")/iris-signers.allowed_signers"
 }
 
 write_bundle_digest() {
@@ -88,6 +90,8 @@ install_prior_agent() {
   mkdir -p "$STAGE/agent"
   printf 'open(r"%s/prior-agent-invoked", "w").write("ran")\n' "$TMP" \
     > "$STAGE/agent/iris_agent.py"
+  printf 'prior instruction signer trust\n' > "$STAGE/iris-signers.allowed_signers"
+  printf 'prior root signer trust\n' > "$STAGE/iris-root.allowed_signers"
 }
 
 @test "bootstrap syncs rpc-secret from conf and bounces aria2c when it changed" {
@@ -314,6 +318,9 @@ install_prior_agent() {
   [ ! -e "$STAGE/bundle.tgz.sha256" ]
   [ "$(cat "$STAGE/iris-instructions.lkg")" = persistent ]
   grep -q 'prior-agent-invoked' "$STAGE/.bundle-previous/files/agent/iris_agent.py"
+  [ -x "$STAGE/aria2c" ]
+  [ -x "$STAGE/agent/peer-transfer-hook.sh" ]
+  [ -x "$STAGE/guestshell-start.sh" ]
 }
 
 @test "a digest without a bundle waits without discarding the evidence" {
@@ -342,6 +349,8 @@ install_prior_agent() {
 @test "malformed and mismatched digests are bounded and never replace the prior runtime" {
   install_prior_agent
   cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cp "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cp "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
   pack_valid_bundle "$SRC/bundle.tgz"
   printf 'NOT-A-DIGEST secret-material-that-must-not-be-logged\n' \
     > "$SRC/bundle.tgz.sha256"
@@ -349,6 +358,8 @@ install_prior_agent() {
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cmp -s "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cmp -s "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
   [[ "$output" != *"secret-material"* ]]
   [ "${#output}" -lt 512 ]
@@ -360,14 +371,30 @@ install_prior_agent() {
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  cmp -s "$STAGE/iris-signers.allowed_signers" "$TMP/prior-signers"
+  cmp -s "$STAGE/iris-root.allowed_signers" "$TMP/prior-root-signers"
   [ -f "$TMP/prior-agent-invoked" ]
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (digest-mismatch)"* ]]
+}
+
+@test "a 64-hex digest without its one required newline is malformed" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  sha256sum "$SRC/bundle.tgz" | awk '{printf "%s", $1}' \
+    > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
 }
 
 @test "a hash-matching archive with a symlink is rejected before extraction" {
   install_prior_agent
   cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
   make_valid_bundle_tree
+  cp "$BUNDLE_TREE/iris-signers.allowed_signers" \
+    "$SRC/iris-signers.allowed_signers"
   rm -f "$BUNDLE_TREE/aria2c"
   ln -s /etc/passwd "$BUNDLE_TREE/aria2c"
   tar czf "$SRC/bundle.tgz" -C "$BUNDLE_TREE" agent bootstrap.sh \
@@ -378,8 +405,29 @@ install_prior_agent() {
       bash "$BATS_TEST_DIRNAME/bootstrap.sh"
   [ "$status" -eq 0 ]
   cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = \
+    "prior instruction signer trust" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = \
+    "prior root signer trust" ]
   [ ! -L "$STAGE/aria2c" ]
   [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
+@test "a standalone signer that differs from the verified bundle cannot change live trust" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  printf 'different public signer bytes\n' > "$SRC/iris-signers.allowed_signers"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STAGE/iris-signers.allowed_signers")" = \
+    "prior instruction signer trust" ]
+  [ "$(cat "$STAGE/iris-root.allowed_signers")" = \
+    "prior root signer trust" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (signer-mismatch)"* ]]
 }
 
 @test "an incomplete promotion is rolled back before anything launches" {
@@ -408,6 +456,20 @@ install_prior_agent() {
   [ ! -e "$STAGE/aria2c" ]
   [ ! -e "$TX" ]
   [[ "$output" == *"IRIS-BOOTSTRAP: recovered interrupted bundle install"* ]]
+}
+
+@test "a rollback that cannot prove the prior footprint hard-stops before launch" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files" "$TX/prior/absent" "$STAGE/agent"
+  printf 'promoting\n' > "$TX/phase"
+  printf 'open(r"%s/untrusted-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TMP/untrusted-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle transaction recovery failed"* ]]
 }
 
 @test "a bad initial bundle fails after one fixed diagnostic" {

@@ -290,7 +290,9 @@ if [ "$DRY" -eq 1 ]; then
   fi
   echo "===== [5/5] Remove IRIS files under $IOS_ROOT ====="
   echo "delete /force /recursive $IRIS_DIR"
-  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+              bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+              iris-instructions.bootstrap; do
     echo "delete /force $IOS_ROOT/$name"
   done
   echo "===== Save startup-config ====="
@@ -506,7 +508,9 @@ fi
 echo "[5/5] remove IRIS files"
 {
   printf 'delete /force /recursive %s\n' "$IRIS_DIR"
-  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+  for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+              bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+              iris-instructions.bootstrap; do
     printf 'delete /force %s/%s\n' "$IOS_ROOT" "$name"
   done
 } | "$RUN" "$DEVICE_IP" >/dev/null 2>&1 || true
@@ -594,7 +598,9 @@ case "$FILES" in
   *"Directory of bootflash:/guest-share/iris"*)
     forbidden="${forbidden}${forbidden:+, }bootflash:guest-share/iris" ;;
 esac
-for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz iris-catalog.pem; do
+for name in bootstrap.sh iris-agent.conf rpc-secret bundle.tgz \
+            bundle.tgz.sha256 iris-catalog.pem iris-signers.allowed_signers \
+            iris-instructions.bootstrap; do
   case "$FILES" in *"$name"*) forbidden="${forbidden}${forbidden:+, }$IOS_ROOT/$name" ;; esac
 done
 

@@ -431,6 +431,9 @@ run_with_timeout() {
   [[ "$output" != *"set HOST_USER"* ]]
   [ "$(find "$ARTDIR/staging" -name 'iris-agent-203.0.113.3-*.conf' | wc -l)" -eq 1 ]
   [ "$(find "$ARTDIR/staging" -name 'rpc-secret-*' | wc -l)" -eq 1 ]
+  digest="$ARTDIR/staging/bundle-sha256-$TEST_CAP"
+  [ "$(wc -c < "$digest")" -eq 65 ]
+  cmp -s "$digest" "$ARTDIR/iris-agent.tgz.sha256"
 }
 
 @test "local staging refuses a missing bundle sidecar before device configuration" {
@@ -723,6 +726,7 @@ EOF
 cmds="\$(cat)"
 printf '%s\n' "\$cmds" >> '$BATS_TEST_TMPDIR/device-commands'
 case "\$cmds" in
+  *'__IRIS_STAGE_WRITABLE__'*) echo '__IRIS_STAGE_WRITABLE__' ;;
   *'__IRIS_PRECHECK_'*)
     # [1/6]+[pre] ride ONE combined session now (marker __IRIS_PRECHECK_) --
     # answer all three sections so the real run sails past the PREREQ gate.
@@ -777,6 +781,7 @@ case "\$cmds" in
   *"__IRIS_PRECHECK_"*) printf 'PRECHECK\n' >> '$CALLLOG' ;;
 esac
 case "\$cmds" in
+  *"__IRIS_STAGE_WRITABLE__"*) echo "__IRIS_STAGE_WRITABLE__" ;;
   *"__IRIS_PRECHECK_"*)
     echo "__IRIS_PRECHECK_FLASH__"
     echo "bytes free stub"

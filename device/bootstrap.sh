@@ -55,41 +55,582 @@ rand_below() {
   python3 -c 'import random,sys; print(random.randrange(int(sys.argv[1])))' "$1"
 }
 
-# 0. collect freshly dropped files into OUR (guest-owned) working dir
-mkdir -p "$STAGE" || { echo "IRIS-BOOTSTRAP: cannot create stage directory $STAGE" >&2; exit 1; }
-for f in bundle.tgz iris-agent.conf rpc-secret iris-catalog.pem; do
-  if [ -f "$SRC/$f" ]; then
-    if ! mv -f "$SRC/$f" "$STAGE/$f"; then
+# 0. collect freshly dropped files into OUR (guest-owned) working dir. The
+# digest is collected before the archive and the installer sends the archive
+# last, so a timer tick can wait on an orphan digest but never unpack an
+# archive whose evidence has not arrived.
+mkdir -p "$STAGE" \
+  || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+
+# EEM can fire again while a slow flash transaction is still in progress. An
+# atomic mkdir plus a live PID keeps concurrent ticks out; a process death
+# leaves a stale PID that the next tick can remove before transaction recovery.
+LOCK="$STAGE/.bundle-lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  lock_pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  case "$lock_pid" in
+    ''|*[!0-9]*) lock_pid="" ;;
+  esac
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    exit 0
+  fi
+  rm -f "$LOCK/pid" 2>/dev/null || true
+  rmdir "$LOCK" 2>/dev/null \
+    || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+  mkdir "$LOCK" 2>/dev/null \
+    || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+fi
+printf '%s\n' "$$" > "$LOCK/pid" \
+  || { rmdir "$LOCK" 2>/dev/null || true
+       echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; exit 1; }
+release_bundle_lock() {
+  rm -f "$LOCK/pid" 2>/dev/null || true
+  rmdir "$LOCK" 2>/dev/null || true
+}
+trap release_bundle_lock EXIT
+trap 'exit 1' HUP INT TERM
+
+collect_file() {
+  _name="$1"
+  _destination="${2:-$_name}"
+  if [ -e "$SRC/$_name" ] || [ -L "$SRC/$_name" ]; then
+    if ! mv -f "$SRC/$_name" "$STAGE/$_destination" 2>/dev/null; then
       # IOS guest-share and the guest-owned stage can be separate filesystems.
-      cp -f "$SRC/$f" "$STAGE/$f" \
-        || { echo "IRIS-BOOTSTRAP: failed to copy $SRC/$f into $STAGE" >&2; exit 1; }
-      rm -f "$SRC/$f" \
-        || { echo "IRIS-BOOTSTRAP: copied $f but failed to remove its source" >&2; exit 1; }
+      cp -f "$SRC/$_name" "$STAGE/$_destination" 2>/dev/null \
+        && rm -f "$SRC/$_name" 2>/dev/null \
+        || { echo "IRIS-BOOTSTRAP: stage is not writable; repair guest-share/iris ownership" >&2; return 1; }
     fi
   fi
+}
+for f in bundle.tgz.sha256 iris-agent.conf rpc-secret iris-catalog.pem \
+         iris-instructions.bootstrap; do
+  collect_file "$f" || exit 1
 done
+collect_file iris-signers.allowed_signers .incoming-iris-signers.allowed_signers \
+  || exit 1
+collect_file bundle.tgz || exit 1
+unset f
 
-# 1. unpack a newly dropped bundle, then remove it
+# All archive inspection, extraction, snapshotting, and promotion happens in
+# one Python helper so the archive is hashed and parsed through the same open
+# file descriptor. It never asks tar to write a pathname. The only promoted
+# paths are the frozen bundle footprint below.
+bundle_transaction() {
+  python3 - "$@" <<'PY'
+import hashlib
+import os
+import re
+import shutil
+import stat
+import sys
+import tarfile
+
+MAX_ARCHIVE = 32 * 1024 * 1024
+MAX_MEMBER = 16 * 1024 * 1024
+MAX_TOTAL = 32 * 1024 * 1024
+MAX_MEMBERS = 64
+AGENT_FILES = (
+    "agent_config.py", "catalog_client.py", "cli_ssh.py",
+    "flash_target.py", "flashcheck.py", "instr.py", "iris_agent.py",
+    "peer-transfer-hook.sh", "telemetry_report.py", "verify_image.py",
+    "xr_deps.py",
+)
+ROOT_FILES = (
+    "aria2c", "bootstrap.sh", "guestshell-start.sh", "rotate-logs.sh",
+    "iris-signers.allowed_signers", "iris-root.allowed_signers",
+)
+ARCHIVE_FILES = tuple("agent/" + name for name in AGENT_FILES) + ROOT_FILES
+TOP_LEVEL = (
+    "agent", "aria2c", "bootstrap.sh", "guestshell-start.sh",
+    "rotate-logs.sh", "iris-signers.allowed_signers",
+    "iris-root.allowed_signers",
+)
+
+
+class BundleError(Exception):
+    def __init__(self, reason):
+        self.reason = reason
+
+
+def lexists(path):
+    return os.path.lexists(path)
+
+
+def remove_path(path):
+    if not lexists(path):
+        return
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
+def fsync_dir(path):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Some Guest Shell shared-flash filesystems do not implement directory
+        # fsync. Atomic rename remains the required same-filesystem primitive.
+        pass
+
+
+def write_phase(tx, value):
+    tmp = os.path.join(tx, ".phase-%d" % os.getpid())
+    with open(tmp, "wb") as stream:
+        stream.write((value + "\n").encode("ascii"))
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(tmp, os.path.join(tx, "phase"))
+    fsync_dir(tx)
+
+
+def read_phase(tx):
+    try:
+        with open(os.path.join(tx, "phase"), "rb") as stream:
+            data = stream.read(32)
+    except OSError:
+        return "preparing"
+    try:
+        value = data.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return "invalid"
+    return value
+
+
+def open_regular(path, max_bytes):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise BundleError("invalid-evidence")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            raise BundleError("invalid-evidence")
+        return os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def files_equal_regular(first, second, max_bytes):
+    left = open_regular(first, max_bytes)
+    right = open_regular(second, max_bytes)
+    try:
+        left_info = os.fstat(left.fileno())
+        right_info = os.fstat(right.fileno())
+        if left_info.st_size == 0 or left_info.st_size != right_info.st_size:
+            return False
+        while True:
+            left_chunk = left.read(65536)
+            right_chunk = right.read(65536)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+    finally:
+        left.close()
+        right.close()
+
+
+def checked_digest(bundle_path, digest_path):
+    try:
+        digest_stream = open_regular(digest_path, 65)
+        with digest_stream:
+            raw = digest_stream.read(66)
+    except BundleError:
+        raise BundleError("invalid-digest")
+    if len(raw) != 65 or raw[64:] != b"\n" \
+            or re.match(br"\A[0-9a-f]{64}\n\Z", raw) is None:
+        raise BundleError("invalid-digest")
+    try:
+        bundle_stream = open_regular(bundle_path, MAX_ARCHIVE)
+    except BundleError:
+        raise BundleError("invalid-archive")
+    info = os.fstat(bundle_stream.fileno())
+    if info.st_size == 0:
+        bundle_stream.close()
+        raise BundleError("invalid-archive")
+    actual = hashlib.sha256()
+    while True:
+        chunk = bundle_stream.read(1024 * 1024)
+        if not chunk:
+            break
+        actual.update(chunk)
+    if actual.hexdigest().encode("ascii") != raw[:64]:
+        bundle_stream.close()
+        raise BundleError("digest-mismatch")
+    bundle_stream.seek(0)
+    return bundle_stream
+
+
+def inspect_and_extract(bundle_path, digest_path, new_dir):
+    stream = checked_digest(bundle_path, digest_path)
+    expected = set(ARCHIVE_FILES)
+    seen = set()
+    total = 0
+    try:
+        with stream:
+            try:
+                archive = tarfile.open(fileobj=stream, mode="r:gz")
+            except (tarfile.TarError, EOFError, OSError):
+                raise BundleError("invalid-archive")
+            with archive:
+                members = []
+                for member in archive:
+                    members.append(member)
+                    if len(members) > MAX_MEMBERS:
+                        raise BundleError("invalid-archive")
+                for member in members:
+                    name = member.name
+                    parts = name.split("/")
+                    if (not name or name.startswith("/") or "\\" in name
+                            or any(part in ("", ".", "..") for part in parts)):
+                        raise BundleError("invalid-archive")
+                    if name in seen:
+                        raise BundleError("invalid-archive")
+                    seen.add(name)
+                    if name == "agent":
+                        if not member.isdir():
+                            raise BundleError("invalid-archive")
+                        continue
+                    if name not in expected or not member.isreg() \
+                            or getattr(member, "sparse", None):
+                        raise BundleError("invalid-archive")
+                    if member.size < 0 or member.size > MAX_MEMBER:
+                        raise BundleError("invalid-archive")
+                    total += member.size
+                    if total > MAX_TOTAL:
+                        raise BundleError("invalid-archive")
+                if seen != expected | {"agent"}:
+                    raise BundleError("invalid-archive")
+
+                os.mkdir(new_dir, 0o700)
+                os.mkdir(os.path.join(new_dir, "agent"), 0o700)
+                by_name = dict((member.name, member) for member in members)
+                for name in ARCHIVE_FILES:
+                    member = by_name[name]
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise BundleError("invalid-archive")
+                    destination = os.path.join(new_dir, *name.split("/"))
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+                    executable = name in (
+                        "aria2c", "bootstrap.sh", "guestshell-start.sh",
+                        "rotate-logs.sh", "agent/peer-transfer-hook.sh",
+                    )
+                    out_fd = os.open(destination, flags,
+                                     0o700 if executable else 0o600)
+                    copied = 0
+                    try:
+                        with os.fdopen(out_fd, "wb") as target:
+                            while True:
+                                chunk = source.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                copied += len(chunk)
+                                if copied > member.size or copied > MAX_MEMBER:
+                                    raise BundleError("invalid-archive")
+                                target.write(chunk)
+                            target.flush()
+                            os.fsync(target.fileno())
+                    finally:
+                        source.close()
+                    if copied != member.size:
+                        raise BundleError("invalid-archive")
+                fsync_dir(os.path.join(new_dir, "agent"))
+                fsync_dir(new_dir)
+    except BundleError:
+        raise
+    except (OSError, tarfile.TarError, EOFError):
+        raise BundleError("invalid-archive")
+
+
+def validate_prior(prior):
+    files = os.path.join(prior, "files")
+    absent = os.path.join(prior, "absent")
+    for name in TOP_LEVEL:
+        if not lexists(os.path.join(files, name)) \
+                and not lexists(os.path.join(absent, name)):
+            raise BundleError("transaction-invalid")
+
+
+def rollback(stage, tx):
+    prior = os.path.join(tx, "prior")
+    validate_prior(prior)
+    files = os.path.join(prior, "files")
+    for name in TOP_LEVEL:
+        remove_path(os.path.join(stage, name))
+    for name in TOP_LEVEL:
+        saved = os.path.join(files, name)
+        if lexists(saved):
+            os.replace(saved, os.path.join(stage, name))
+    fsync_dir(stage)
+    remove_path(tx)
+    fsync_dir(stage)
+
+
+def rollback_capture(stage, tx):
+    # No new runtime path is installed before phase=promoting. Restore any
+    # old path already moved during an interrupted capture, then discard.
+    files = os.path.join(tx, "prior", "files")
+    if os.path.isdir(files) and not os.path.islink(files):
+        for name in TOP_LEVEL:
+            saved = os.path.join(files, name)
+            live = os.path.join(stage, name)
+            if lexists(saved):
+                if lexists(live):
+                    raise BundleError("transaction-invalid")
+                os.replace(saved, live)
+    remove_path(tx)
+    fsync_dir(stage)
+
+
+def recover(stage):
+    tx = os.path.join(stage, ".bundle-transaction")
+    if not lexists(tx):
+        print("none")
+        return
+    if not os.path.isdir(tx) or os.path.islink(tx):
+        raise BundleError("transaction-invalid")
+    phase = read_phase(tx)
+    if phase == "committed":
+        print("committed")
+        return
+    if phase in ("promoting",):
+        rollback(stage, tx)
+        print("rolled-back")
+        return
+    if phase in ("preparing", "capturing"):
+        rollback_capture(stage, tx)
+        print("rolled-back")
+        return
+    raise BundleError("transaction-invalid")
+
+
+def install(stage, bundle_path, digest_path, signer_path):
+    tx = os.path.join(stage, ".bundle-transaction")
+    if lexists(tx):
+        raise BundleError("transaction-invalid")
+    os.mkdir(tx, 0o700)
+    write_phase(tx, "preparing")
+    try:
+        new_dir = os.path.join(tx, "new")
+        inspect_and_extract(bundle_path, digest_path, new_dir)
+        try:
+            signer_matches = files_equal_regular(
+                signer_path,
+                os.path.join(new_dir, "iris-signers.allowed_signers"),
+                65536,
+            )
+        except BundleError:
+            raise BundleError("invalid-signer")
+        if not signer_matches:
+            raise BundleError("signer-mismatch")
+        prior = os.path.join(tx, "prior")
+        files = os.path.join(prior, "files")
+        absent = os.path.join(prior, "absent")
+        os.makedirs(files, 0o700)
+        os.makedirs(absent, 0o700)
+        write_phase(tx, "capturing")
+        for name in TOP_LEVEL:
+            live = os.path.join(stage, name)
+            if lexists(live):
+                os.replace(live, os.path.join(files, name))
+            else:
+                marker = os.path.join(absent, name)
+                with open(marker, "wb") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        fsync_dir(files)
+        fsync_dir(absent)
+        write_phase(tx, "promoting")
+
+        # Put every dependency in place before the executable agent entrypoint.
+        for name in ROOT_FILES:
+            os.replace(os.path.join(new_dir, name), os.path.join(stage, name))
+        new_agent = os.path.join(new_dir, "agent")
+        live_agent = os.path.join(stage, "agent")
+        os.mkdir(live_agent, 0o700)
+        for name in AGENT_FILES:
+            if name == "iris_agent.py":
+                continue
+            os.replace(os.path.join(new_agent, name), os.path.join(live_agent, name))
+        os.replace(os.path.join(new_agent, "iris_agent.py"),
+                   os.path.join(live_agent, "iris_agent.py"))
+        fsync_dir(live_agent)
+        fsync_dir(stage)
+        print("promoted")
+    except Exception as original:
+        phase = read_phase(tx) if lexists(tx) else "invalid"
+        try:
+            if phase == "promoting":
+                rollback(stage, tx)
+            elif lexists(tx):
+                rollback_capture(stage, tx)
+        except Exception:
+            raise BundleError("rollback-failed")
+        raise original
+
+
+def commit(stage):
+    tx = os.path.join(stage, ".bundle-transaction")
+    if read_phase(tx) != "promoting":
+        raise BundleError("transaction-invalid")
+    write_phase(tx, "committed")
+    print("committed")
+
+
+def finalize(stage):
+    tx = os.path.join(stage, ".bundle-transaction")
+    if read_phase(tx) != "committed":
+        raise BundleError("transaction-invalid")
+    prior = os.path.join(tx, "prior")
+    previous = os.path.join(stage, ".bundle-previous")
+    if lexists(prior):
+        remove_path(previous)
+        os.replace(prior, previous)
+    elif not lexists(previous):
+        raise BundleError("transaction-invalid")
+    remove_path(tx)
+    fsync_dir(stage)
+    print("finalized")
+
+
+def main():
+    operation = sys.argv[1]
+    stage = sys.argv[2]
+    if operation == "recover":
+        recover(stage)
+    elif operation == "install":
+        install(stage, sys.argv[3], sys.argv[4], sys.argv[5])
+    elif operation == "rollback":
+        tx = os.path.join(stage, ".bundle-transaction")
+        rollback(stage, tx)
+        print("rolled-back")
+    elif operation == "commit":
+        commit(stage)
+    elif operation == "finalize":
+        finalize(stage)
+    else:
+        raise BundleError("transaction-invalid")
+
+
+try:
+    main()
+except BundleError as exc:
+    print(exc.reason)
+    sys.exit(1)
+except Exception:
+    print("install-failed")
+    sys.exit(1)
+PY
+}
+
+sync_eem_bootstrap() {
+  [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ] || return 1
+  cp -f "$STAGE/bootstrap.sh" "$SRC/bootstrap.sh.new" 2>/dev/null \
+    && mv -f "$SRC/bootstrap.sh.new" "$SRC/bootstrap.sh" 2>/dev/null
+}
+
+recovery="$(bundle_transaction recover "$STAGE")" || {
+  echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2
+  exit 1
+}
+case "$recovery" in
+  rolled-back)
+    # A crash may have happened after the EEM-facing rename but before commit.
+    # Restore that entry from the recovered runtime when one existed.
+    if [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ]; then
+      sync_eem_bootstrap \
+        || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+    fi
+    echo "IRIS-BOOTSTRAP: recovered interrupted bundle install" ;;
+  committed)
+    sync_eem_bootstrap \
+      || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+    bundle_transaction finalize "$STAGE" >/dev/null \
+      || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+    rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
+          "$STAGE/.incoming-iris-signers.allowed_signers" 2>/dev/null || true ;;
+  none) ;;
+  *) echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1 ;;
+esac
+
+reject_bundle() {
+  _reason="$1"
+  rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
+        "$STAGE/.incoming-iris-signers.allowed_signers" \
+        "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256" \
+        "$SRC/iris-signers.allowed_signers" 2>/dev/null || true
+  echo "IRIS-BOOTSTRAP: bundle rejected ($_reason)" >&2
+}
+
+# 1. Verify, inspect, and promote a newly dropped bundle. A digest by itself
+# waits for the installer's bundle-last copy. Every definitive rejection
+# removes the pair and falls through to the prior runnable agent.
 bundle_updated=0
-if [ -f "$STAGE/bundle.tgz" ]; then
-  tar xzf "$STAGE/bundle.tgz" -C "$STAGE" --no-same-owner --no-same-permissions -m \
-    || { echo "IRIS-BOOTSTRAP: failed to unpack $STAGE/bundle.tgz" >&2; exit 1; }
-  rm -f "$STAGE/bundle.tgz"
-  # The bundle ships a (possibly newer) bootstrap — do not hide a failed update.
-  # $SRC/bootstrap.sh is THIS script, still being read by the running bash.
-  # `cp -f` rewrites the same inode, so the interpreter would continue at its
-  # old byte offset inside the NEW content and execute whatever token lands
-  # there (reproduced: a comment fragment as a command, then a mid-file
-  # re-run). Write beside it and rename over it instead: rename swaps the
-  # directory entry to a new inode and this process keeps reading the old one
-  # untouched. Same idiom guestshell-start.sh uses for the hook.
-  if [ -f "$STAGE/bootstrap.sh" ]; then
-    cp -f "$STAGE/bootstrap.sh" "$SRC/bootstrap.sh.new" \
-      && mv -f "$SRC/bootstrap.sh.new" "$SRC/bootstrap.sh" \
-      || { rm -f "$SRC/bootstrap.sh.new"
-           echo "IRIS-BOOTSTRAP: failed to update $SRC/bootstrap.sh" >&2; exit 1; }
+bundle_rejected=0
+if [ -e "$STAGE/bundle.tgz" ] || [ -L "$STAGE/bundle.tgz" ]; then
+  if [ ! -e "$STAGE/bundle.tgz.sha256" ] && [ ! -L "$STAGE/bundle.tgz.sha256" ]; then
+    reject_bundle missing-digest
+    bundle_rejected=1
+  else
+    result="$(bundle_transaction install "$STAGE" "$STAGE/bundle.tgz" \
+               "$STAGE/bundle.tgz.sha256" \
+               "$STAGE/.incoming-iris-signers.allowed_signers")" || {
+      case "$result" in
+        invalid-digest|digest-mismatch|invalid-archive|invalid-signer|signer-mismatch)
+          reason="$result" ;;
+        rollback-failed)
+          reject_bundle install-failed
+          echo "IRIS-BOOTSTRAP: bundle rollback failed; refusing to launch" >&2
+          exit 1 ;;
+        *) reason="install-failed" ;;
+      esac
+      reject_bundle "$reason"
+      bundle_rejected=1
+    }
+    if [ "$bundle_rejected" -eq 0 ]; then
+      if ! sync_eem_bootstrap; then
+        bundle_transaction rollback "$STAGE" >/dev/null 2>&1 \
+          || { echo "IRIS-BOOTSTRAP: bundle rollback failed; refusing to launch" >&2; exit 1; }
+        if [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ]; then
+          sync_eem_bootstrap >/dev/null 2>&1 || true
+        fi
+        reject_bundle install-failed
+        bundle_rejected=1
+      elif ! bundle_transaction commit "$STAGE" >/dev/null; then
+        bundle_transaction rollback "$STAGE" >/dev/null 2>&1 \
+          || { echo "IRIS-BOOTSTRAP: bundle rollback failed; refusing to launch" >&2; exit 1; }
+        if [ -f "$STAGE/bootstrap.sh" ] && [ ! -L "$STAGE/bootstrap.sh" ]; then
+          sync_eem_bootstrap >/dev/null 2>&1 \
+            || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+        fi
+        reject_bundle install-failed
+        bundle_rejected=1
+      else
+        rm -f "$STAGE/bundle.tgz" "$STAGE/bundle.tgz.sha256" \
+              "$STAGE/.incoming-iris-signers.allowed_signers" 2>/dev/null || true
+        bundle_transaction finalize "$STAGE" >/dev/null \
+          || { echo "IRIS-BOOTSTRAP: bundle transaction recovery failed" >&2; exit 1; }
+        bundle_updated=1
+      fi
+    fi
   fi
-  bundle_updated=1
+fi
+
+if [ "$bundle_rejected" -eq 1 ] \
+    && { [ ! -f "$STAGE/agent/iris_agent.py" ] || [ -L "$STAGE/agent/iris_agent.py" ]; }; then
+  exit 1
 fi
 
 # 2. reconcile aria2c's RPC secret with the one the agent uses.

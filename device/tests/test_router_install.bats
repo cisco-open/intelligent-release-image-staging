@@ -222,6 +222,9 @@ apphost_reply() {
 }
 
 case "$cmds" in
+  *"__IRIS_STAGE_WRITABLE__"*)
+    echo "__IRIS_STAGE_WRITABLE__"
+    ;;
   *"__IRIS_VERIFY_RUNNING__"*)
     echo "terminal width 512"
     if [ "${FAKE_VERIFY_OMIT_RUNNING:-no}" != "yes" ]; then
