@@ -411,11 +411,12 @@ check_existing_stage_writable() {
   esac
   _probe="$(printf "guestshell run bash -c 'test -d %s && test -w %s && echo __IRIS_STAGE_WRITABLE__'\n" \
     "$STAGE" "$STAGE" | "$HERE/../lab/device-run.sh" "$DEVICE_IP" 2>/dev/null || true)"
-  case "$_probe" in
-    *__IRIS_STAGE_WRITABLE__*) return 0 ;;
-    *) echo "ERROR: guest-share/iris is not writable by Guest Shell; repair its ownership before re-onboarding" >&2
-       return 1 ;;
-  esac
+  if printf '%s\n' "$_probe" | tr -d '\r' \
+      | grep -qx '__IRIS_STAGE_WRITABLE__'; then
+    return 0
+  fi
+  echo "ERROR: guest-share/iris is not writable by Guest Shell; repair its ownership before re-onboarding" >&2
+  return 1
 }
 
 echo "[1/6] check storage on $DEVICE_IP"
