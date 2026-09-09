@@ -115,6 +115,55 @@ install_prior_agent() {
   [ ! -f "$TMP/pkill.log" ]
 }
 
+@test "config-only re-onboarding retains the device-local LKG key when incoming config omits it" {
+  key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  printf 'device_id = retained\nlkg_key = %s\n' "$key" \
+    > "$STAGE/iris-agent.conf"
+  printf 'opaque encrypted fallback\n' > "$STAGE/iris-instructions.lkg"
+  printf 'device_id = replacement\ncatalog_token = fresh\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -eq 0 ]
+  grep -qx "lkg_key = $key" "$STAGE/iris-agent.conf"
+  [ "$(cat "$STAGE/iris-instructions.lkg")" = "opaque encrypted fallback" ]
+  [ ! -e "$SRC/iris-agent.conf" ]
+}
+
+@test "incoming config cannot rotate an established device-local LKG key" {
+  old=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  incoming=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  printf 'device_id = retained\nlkg_key = %s\n' "$old" \
+    > "$STAGE/iris-agent.conf"
+  printf 'device_id = replacement\nlkg_key = %s\n' "$incoming" \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^lkg_key[[:space:]]*=' "$STAGE/iris-agent.conf")" -eq 1 ]
+  grep -qx "lkg_key = $old" "$STAGE/iris-agent.conf"
+}
+
+@test "unsafe or malformed established LKG config blocks replacement" {
+  printf 'device_id = old\nlkg_key = NOT-A-LOCAL-KEY\n' \
+    > "$STAGE/iris-agent.conf"
+  cp "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  printf 'device_id = replacement\ncatalog_token = fresh\n' \
+    > "$SRC/iris-agent.conf"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+
+  [ "$status" -ne 0 ]
+  cmp -s "$STAGE/iris-agent.conf" "$TMP/original-conf"
+  [ -f "$SRC/iris-agent.conf" ]
+  [[ "$output" == *"existing iris-agent.conf is unsafe or has an invalid lkg_key"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Persisted aria2c launch overrides from iris-agent.conf (issue #122):
 # guestshell-start.sh only reads its own live process environment, refreshed
