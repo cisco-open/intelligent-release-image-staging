@@ -20,6 +20,7 @@ import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import keyed_state
+import secrets_store
 
 
 MAX_INTEGER = (1 << 63) - 1
@@ -35,6 +36,7 @@ FILTER_KEYS = frozenset(("q", "management_type", "platform", "cred", "telemetry"
 DEFINITION_KEYS = frozenset(("kind", "target", "payload", "when", "after", "state"))
 ROW_KEYS = DEFINITION_KEYS | {"id", "generation", "rev", "created_by", "created_at", "preview"}
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_IMAGE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 _HEX_RE = re.compile(r"[0-9a-f]{32}\Z")
 _ROLE_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}\Z")
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -47,6 +49,7 @@ OCCURRENCE_TRANSITIONS = {
 }
 TERMINAL_RECEIPT_STATES = frozenset(("ok", "skipped", "error"))
 RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"intent", "submitted", "running"}
+MAX_RECEIPT_ATTEMPTS = 16
 
 
 class ScheduleValidationError(ValueError):
@@ -118,10 +121,23 @@ def _ids(value, field="device_ids", maximum=MAX_TARGETS, empty=True):
     if not isinstance(value, list) or len(value) > maximum or (not empty and not value):
         raise ScheduleValidationError("invalid %s list" % field)
     for item in value:
-        _identifier(item, field)
+        if field == "image_ids":
+            if not isinstance(item, str) or not _IMAGE_ID_RE.fullmatch(item):
+                raise ScheduleValidationError("invalid catalog image id")
+        else:
+            _device_id(item)
     if len(set(value)) != len(value):
         raise ScheduleValidationError("duplicate %s" % field)
     return list(value)
+
+
+def _device_id(value):
+    _identifier(value, "device id")
+    try:
+        secrets_store.validate_device_id(value)
+    except ValueError as exc:
+        raise ScheduleValidationError(str(exc)) from None
+    return value
 
 
 def _actor(actor):
@@ -251,6 +267,12 @@ def _progress_valid(key, row):
     _hex(row["active_occurrence_id"], "occurrence id")
 
 
+def _retired_valid(key, row):
+    _identifier(key)
+    _object(row, {"revision"}, "retired schedule", {"revision"})
+    _integer(row["revision"], "retired revision", 1)
+
+
 class ScheduleStore:
     def __init__(self, state_dir):
         self.state_dir = os.fspath(state_dir)
@@ -258,6 +280,8 @@ class ScheduleStore:
             error=ScheduleStateError, validate=validate_schedule, durable=True)
         self._progress = keyed_state.KeyedState(os.path.join(self.state_dir, "schedule-progress.json"),
             error=ScheduleStateError, validate=_progress_valid, durable=True)
+        self._retired = keyed_state.KeyedState(os.path.join(self.state_dir, "schedule-retired.json"),
+            error=ScheduleStateError, validate=_retired_valid, durable=True)
 
     def get(self, schedule_id):
         return self._rows.get(_identifier(schedule_id))
@@ -268,12 +292,13 @@ class ScheduleStore:
     def create(self, schedule_id, definition, *, actor, now, preview=None):
         _identifier(schedule_id)
         normalized = normalize_definition(definition)
+        preview = normalize_snapshot(preview)
         def mutate(old):
             if old is not None:
                 raise ScheduleConflict("schedule already exists")
+            floor = (self._retired.get(schedule_id) or {}).get("revision", 0)
             row = dict(normalized, id=schedule_id, generation=uuid.uuid4().hex,
-                       rev=1, created_by=actor, created_at=now,
-                       preview=preview if preview is not None else {"revision": 0, "now": now, "device_ids": []})
+                       rev=floor + 1, created_by=actor, created_at=now, preview=preview)
             validate_schedule(schedule_id, row)
             return copy.deepcopy(row)
         return self._rows.update(schedule_id, mutate)
@@ -327,6 +352,11 @@ class ScheduleStore:
         _identifier(schedule_id)
         def mutate(old):
             _compare(schedule_id, old, expected_rev)
+            # Persist the floor before physical deletion while the schedule
+            # shard excludes create/edit. A crash here leaves the live row
+            # intact; a completed delete can never recycle its strong ETag.
+            prior = self._retired.get(schedule_id)
+            self._retired.put(schedule_id, {"revision": max(old["rev"], (prior or {}).get("revision", 0))})
             return keyed_state.DELETE
         self._rows.update(schedule_id, mutate)
         return True
@@ -340,7 +370,7 @@ class ScheduleStore:
         progress = self._progress.get(schedule_id)
         return progress if row and progress and progress["generation"] == row["generation"] else None
 
-    def claim_occurrence(self, schedule_id, *, expected_rev, slot, target_snapshot, now):
+    def claim_occurrence(self, schedule_id, *, expected_rev, expected_generation, slot, target_snapshot, now):
         """Recheck live authority; freeze a claim before advancing its cursor.
 
         Lock order: schedule shard -> occurrence shard -> progress shard.
@@ -348,9 +378,13 @@ class ScheduleStore:
         after the claim but before progress is repaired by the identical claim.
         """
         _identifier(schedule_id)
+        _integer(expected_rev, "expected_rev", 1)
+        _hex(expected_generation, "expected_generation")
         claimed = []
         def mutate(row):
             _compare(schedule_id, row, expected_rev)
+            if row["generation"] != expected_generation:
+                raise ScheduleConflict("schedule generation changed")
             if row["state"] != "pending":
                 raise ScheduleConflict("schedule is not pending")
             _integer(now, "now", maximum=MAX_EPOCH)
@@ -443,6 +477,11 @@ def next_fire(schedule, now_epoch, *, after_epoch=None, metadata=False):
         while stamp < floor:
             day += dt.timedelta(days=7)
             stamp, resolution, local_label = weekly_at(day)
+        if after_epoch is None and stamp > now_epoch:
+            prior_day = day - dt.timedelta(days=7)
+            prior_stamp, prior_resolution, prior_label = weekly_at(prior_day)
+            if prior_stamp >= created and prior_stamp <= now_epoch < prior_stamp + window:
+                day, stamp, resolution, local_label = prior_day, prior_stamp, prior_resolution, prior_label
         # Today's later local slot is the future slot; otherwise this is
         # the most recent slot, including a missed slot after downtime.
         next_at = weekly_at(day + dt.timedelta(days=7))[0]
@@ -488,7 +527,7 @@ def _validate_slot(slot):
 
 def _validate_occurrence(key, row):
     keys = {"id", "schedule_id", "schedule_generation", "schedule_rev", "schedule", "actor", "slot", "scheduled_at", "window_end", "state", "preview", "target_snapshot", "delta", "created_at", "updated_at"}
-    _object(row, keys, "occurrence", keys)
+    _object(row, keys, "occurrence", keys - {"target_snapshot", "delta"})
     _hex(key, "occurrence id")
     validate_schedule(row["schedule_id"], row["schedule"])
     if (row["id"] != key or occurrence_id(row["schedule"], row["scheduled_at"]) != key or
@@ -504,15 +543,22 @@ def _validate_occurrence(key, row):
     if not isinstance(row["state"], str) or row["state"] not in OCCURRENCE_TRANSITIONS:
         raise ScheduleValidationError("invalid occurrence state")
     normalize_snapshot(row["preview"])
-    normalize_snapshot(row["target_snapshot"])
-    _object(row["delta"], {"added", "removed"}, "target delta", {"added", "removed"})
-    prior, fired = set(row["preview"]["device_ids"]), set(row["target_snapshot"]["device_ids"])
-    for field, expected in (("added", len(fired - prior)), ("removed", len(prior - fired))):
-        _integer(row["delta"][field], field, maximum=MAX_TARGETS)
-        if row["delta"][field] != expected:
-            raise ScheduleValidationError("occurrence target delta mismatch")
     _integer(row["created_at"], "occurrence created_at", maximum=MAX_EPOCH)
     _integer(row["updated_at"], "occurrence updated_at", row["created_at"], MAX_EPOCH)
+    if row["state"] == "missed":
+        if ("target_snapshot" in row or "delta" in row or row["created_at"] < row["window_end"]
+                or row["slot"]["status"] != "missed"):
+            raise ScheduleValidationError("missed occurrence must be expired and unbound")
+    else:
+        if not {"target_snapshot", "delta"} <= set(row):
+            raise ScheduleValidationError("dispatchable occurrence needs a bound target")
+        normalize_snapshot(row["target_snapshot"])
+        _object(row["delta"], {"added", "removed"}, "target delta", {"added", "removed"})
+        prior, fired = set(row["preview"]["device_ids"]), set(row["target_snapshot"]["device_ids"])
+        for field, expected in (("added", len(fired - prior)), ("removed", len(prior - fired))):
+            _integer(row["delta"][field], field, maximum=MAX_TARGETS)
+            if row["delta"][field] != expected:
+                raise ScheduleValidationError("occurrence target delta mismatch")
 
 
 class OccurrenceStore:
@@ -537,19 +583,22 @@ class OccurrenceStore:
             if old is not None:
                 return old
             preview = normalize_snapshot(schedule["preview"])
-            snapshot = normalize_snapshot(target_snapshot)
-            if schedule["target"]["bind"] == "early":
-                # Freeze the early IDs while retaining when/revision the
-                # fire actually observed; both preview and fire stay visible.
-                snapshot["device_ids"] = list(preview["device_ids"])
-            prior, fired = set(preview["device_ids"]), set(snapshot["device_ids"])
+            missed = now >= slot["window_end"]
+            if missed and target_snapshot is not None:
+                raise ScheduleValidationError("missed occurrence must not claim a target snapshot")
+            frozen_slot = dict(slot, status="missed" if missed else "future" if now < slot["scheduled_at"] else "due")
             row = {"id": identifier, "schedule_id": schedule["id"],
                    "schedule_generation": schedule["generation"], "schedule_rev": schedule["rev"],
                    "schedule": copy.deepcopy(schedule), "actor": "schedule:" + schedule["id"],
-                   "slot": copy.deepcopy(slot), "scheduled_at": slot["scheduled_at"],
-                   "window_end": slot["window_end"], "state": "pending", "preview": preview,
-                   "target_snapshot": snapshot, "delta": {"added": len(fired - prior), "removed": len(prior - fired)},
+                   "slot": frozen_slot, "scheduled_at": slot["scheduled_at"],
+                   "window_end": slot["window_end"], "state": "missed" if missed else "pending", "preview": preview,
                    "created_at": now, "updated_at": now}
+            if not missed:
+                snapshot = normalize_snapshot(target_snapshot)
+                if schedule["target"]["bind"] == "early":
+                    snapshot["device_ids"] = list(preview["device_ids"])
+                prior, fired = set(preview["device_ids"]), set(snapshot["device_ids"])
+                row.update(target_snapshot=snapshot, delta={"added": len(fired - prior), "removed": len(prior - fired)})
             _validate_occurrence(identifier, row)
             return row
         return self._rows.update(identifier, mutate)
@@ -564,6 +613,8 @@ class OccurrenceStore:
                 raise ScheduleConflict("occurrence state changed")
             if state == old["state"]:
                 return old
+            if state == "missed":
+                raise ScheduleConflict("a bound occurrence cannot become an unbound missed slot")
             if not isinstance(state, str) or state not in OCCURRENCE_TRANSITIONS[old["state"]]:
                 raise ScheduleConflict("invalid occurrence transition")
             row = dict(old, state=state, updated_at=max(now, old["updated_at"]))
@@ -587,22 +638,29 @@ class OccurrenceStore:
         return max(slots) if slots else None
 
 
-def _validate_receipt(key, row):
-    required = {"occurrence_id", "device_id", "rev", "status", "reason", "created_at", "updated_at", "completed_at", "notes"}
-    _object(row, required | {"job_id", "record_id", "detail"}, "receipt", required)
-    _identifier(key, "device id")
+_RECEIPT_REQUIRED = {"occurrence_id", "device_id", "rev", "attempt", "attempt_started_at",
+                     "predecessors", "status", "reason", "created_at", "updated_at", "completed_at", "notes"}
+_RECEIPT_OPTIONAL = {"job_id", "record_id", "predecessor_record_id", "manual_generation",
+                     "before_image_ids", "after_image_ids", "removed_image_ids"}
+
+
+def _validate_receipt(key, row, *, history=True):
+    _object(row, _RECEIPT_REQUIRED | _RECEIPT_OPTIONAL, "receipt", _RECEIPT_REQUIRED)
+    _device_id(key)
     if row["device_id"] != key:
         raise ScheduleValidationError("receipt key mismatch")
     _hex(row["occurrence_id"], "occurrence id")
     _integer(row["rev"], "receipt rev", 1)
+    _integer(row["attempt"], "receipt attempt", 1, MAX_RECEIPT_ATTEMPTS)
     if not isinstance(row["status"], str) or row["status"] not in RECEIPT_STATES:
         raise ScheduleValidationError("invalid receipt status")
     if not isinstance(row["reason"], str) or not _REASON_RE.fullmatch(row["reason"]):
         raise ScheduleValidationError("invalid receipt reason")
     _integer(row["created_at"], "receipt created_at", maximum=MAX_EPOCH)
     _integer(row["updated_at"], "receipt updated_at", row["created_at"], MAX_EPOCH)
+    _integer(row["attempt_started_at"], "attempt_started_at", row["created_at"], row["updated_at"])
     if row["status"] in TERMINAL_RECEIPT_STATES:
-        _integer(row["completed_at"], "completed_at", row["created_at"], row["updated_at"])
+        _integer(row["completed_at"], "completed_at", row["attempt_started_at"], row["updated_at"])
     elif row["completed_at"] is not None:
         raise ScheduleValidationError("nonterminal receipt has completion time")
     if not isinstance(row["notes"], list) or len(row["notes"]) > 16:
@@ -610,22 +668,50 @@ def _validate_receipt(key, row):
     for note in row["notes"]:
         if not isinstance(note, str) or not _REASON_RE.fullmatch(note):
             raise ScheduleValidationError("invalid receipt note")
-    for field in ("job_id", "record_id"):
+    for field in ("job_id", "record_id", "predecessor_record_id"):
         if field in row:
             _identifier(row[field], field)
-    if "detail" in row:
-        _text(row["detail"], "receipt detail", 1024, empty=True)
+    if "manual_generation" in row:
+        _integer(row["manual_generation"], "manual_generation")
+    for field in ("before_image_ids", "after_image_ids", "removed_image_ids"):
+        if field in row:
+            _ids(row[field], "image_ids", maximum=10)
+    if {"after_image_ids", "removed_image_ids"} & set(row) and row["status"] not in TERMINAL_RECEIPT_STATES:
+        raise ScheduleValidationError("assignment outcomes require a terminal receipt")
+    if {"before_image_ids", "after_image_ids", "removed_image_ids"} <= set(row):
+        if set(row["removed_image_ids"]) != set(row["before_image_ids"]) - set(row["after_image_ids"]):
+            raise ScheduleValidationError("assignment removal evidence disagrees")
+    predecessors = row["predecessors"]
+    if not isinstance(predecessors, list) or len(predecessors) >= MAX_RECEIPT_ATTEMPTS:
+        raise ScheduleValidationError("invalid receipt predecessors")
+    if not history:
+        if predecessors:
+            raise ScheduleValidationError("nested receipt predecessors")
+        return
+    if row["attempt"] != len(predecessors) + 1:
+        raise ScheduleValidationError("receipt attempt lineage disagrees")
+    last_rev = 0
+    for index, prior in enumerate(predecessors, 1):
+        _object(prior, (_RECEIPT_REQUIRED | _RECEIPT_OPTIONAL) - {"predecessors"}, "predecessor receipt", _RECEIPT_REQUIRED - {"predecessors"})
+        _validate_receipt(key, dict(prior, predecessors=[]), history=False)
+        if (prior["attempt"] != index or prior["occurrence_id"] != row["occurrence_id"] or
+                prior["created_at"] != row["created_at"] or not last_rev < prior["rev"] < row["rev"] or
+                prior["status"] in TERMINAL_RECEIPT_STATES or prior["updated_at"] > row["attempt_started_at"]):
+            raise ScheduleValidationError("invalid predecessor provenance")
+        last_rev = prior["rev"]
 
 
 class ReceiptStore:
-    """Separate per-occurrence shards; terminal outcomes are immutable.
+    """Per-occurrence evidence with CAS-protected, bounded attempt lineage.
 
-    Intent/submitted/running receipts preserve job ownership across crash cuts.
-    Pagination never prunes storage. Terminal IDs remain available in full for
-    replay suppression even when the public receipt page is truncated.
+    Every nonterminal update requires its current revision. Ownership fields
+    bind once per attempt. A successor retains the old attempt in full and
+    cannot be created after a terminal outcome. Response caps never prune the
+    durable terminal IDs used to suppress replay.
     """
     def __init__(self, state_dir):
-        self.directory = os.path.join(os.fspath(state_dir), "schedule-receipts")
+        self.state_dir = os.fspath(state_dir)
+        self.directory = os.path.join(self.state_dir, "schedule-receipts")
 
     def _rows(self, identifier):
         _hex(identifier, "occurrence id")
@@ -636,15 +722,28 @@ class ReceiptStore:
         return keyed_state.KeyedState(os.path.join(self.directory, identifier + ".json"),
             error=ScheduleStateError, validate=validate, durable=True)
 
-    def get(self, identifier, device_id):
-        return self._rows(identifier).get(_identifier(device_id, "device id"))
+    def _admit(self, identifier, device_id):
+        _device_id(device_id)
+        occurrence = OccurrenceStore(self.state_dir).get(identifier)
+        if occurrence is None:
+            raise ScheduleNotFound("no such occurrence")
+        if occurrence["state"] == "missed" or device_id not in occurrence["target_snapshot"]["device_ids"]:
+            raise ScheduleConflict("device has no bound occurrence target")
 
-    def begin(self, identifier, device_id, *, now):
-        return self.record(identifier, device_id, status="intent", reason="pending", now=now)
+    def get(self, identifier, device_id):
+        return self._rows(identifier).get(_device_id(device_id))
+
+    def begin(self, identifier, device_id, *, now, manual_generation=None,
+              before_image_ids=None, predecessor_record_id=None):
+        return self.record(identifier, device_id, status="intent", reason="pending", now=now,
+                           manual_generation=manual_generation, before_image_ids=before_image_ids,
+                           predecessor_record_id=predecessor_record_id)
 
     def record(self, identifier, device_id, *, status, reason, now, notes=None,
-               expected_status=None, expected_rev=None, job_id=None, record_id=None, detail=None):
-        _identifier(device_id, "device id")
+               expected_status=None, expected_rev=None, job_id=None, record_id=None,
+               predecessor_record_id=None, manual_generation=None, before_image_ids=None,
+               after_image_ids=None, removed_image_ids=None):
+        self._admit(identifier, device_id)
         _integer(now, "now", maximum=MAX_EPOCH)
         if not isinstance(status, str) or status not in RECEIPT_STATES:
             raise ScheduleValidationError("invalid receipt status")
@@ -652,28 +751,70 @@ class ReceiptStore:
             raise ScheduleValidationError("receipt notes must be a list")
         if expected_rev is not None:
             _integer(expected_rev, "expected receipt rev", 1)
+        supplied = {key: value for key, value in {
+            "job_id": job_id, "record_id": record_id, "predecessor_record_id": predecessor_record_id,
+            "manual_generation": manual_generation, "before_image_ids": before_image_ids,
+            "after_image_ids": after_image_ids, "removed_image_ids": removed_image_ids}.items() if value is not None}
         def mutate(old):
             if old is not None and old["status"] in TERMINAL_RECEIPT_STATES:
                 return old
             if old is not None and status == "intent":
+                # begin is create-if-absent, never an implicit attempt reset.
                 return old
+            if old is not None and (expected_rev is None or old["rev"] != expected_rev):
+                raise ScheduleConflict("receipt revision is required and must match")
+            if old is None and expected_rev is not None:
+                raise ScheduleConflict("receipt revision changed")
             if expected_status is not None and (old or {}).get("status") != expected_status:
                 raise ScheduleConflict("receipt state changed")
-            if expected_rev is not None and (old or {}).get("rev") != expected_rev:
-                raise ScheduleConflict("receipt revision changed")
-            if old is not None and status not in TERMINAL_RECEIPT_STATES:
-                ranks = {"intent": 0, "submitted": 1, "running": 2}
-                if status not in ranks or ranks[status] < ranks[old["status"]]:
-                    raise ScheduleConflict("invalid receipt transition")
+            if old is not None:
+                for field in ("job_id", "record_id", "predecessor_record_id", "manual_generation", "before_image_ids"):
+                    if field in old and field in supplied and old[field] != supplied[field]:
+                        raise ScheduleConflict("receipt attempt ownership is immutable")
+                if status not in TERMINAL_RECEIPT_STATES:
+                    ranks = {"intent": 0, "submitted": 1, "running": 2}
+                    if ranks[status] < ranks[old["status"]]:
+                        raise ScheduleConflict("invalid receipt transition")
             timestamp = max(now, old["updated_at"]) if old else now
             row = dict(old or {}, occurrence_id=identifier, device_id=device_id, status=status,
-                       rev=old["rev"] + 1 if old else 1,
+                       rev=old["rev"] + 1 if old else 1, attempt=old["attempt"] if old else 1,
+                       attempt_started_at=old["attempt_started_at"] if old else now,
+                       predecessors=copy.deepcopy(old["predecessors"]) if old else [],
                        reason=reason, created_at=old["created_at"] if old else now,
                        updated_at=timestamp, completed_at=timestamp if status in TERMINAL_RECEIPT_STATES else None,
-                       notes=list(notes) if notes is not None else (old or {}).get("notes", []))
-            for field, value in (("job_id", job_id), ("record_id", record_id), ("detail", detail)):
-                if value is not None:
-                    row[field] = value
+                       notes=copy.deepcopy(notes) if notes is not None else (old or {}).get("notes", []))
+            row.update(copy.deepcopy(supplied))
+            _validate_receipt(device_id, row)
+            return row
+        return self._rows(identifier).update(device_id, mutate)
+
+    def successor_attempt(self, identifier, device_id, *, expected_rev, now,
+                          manual_generation, predecessor_record_id=None, before_image_ids=None):
+        """Start a recovery attempt with new CAS and immutable predecessor evidence."""
+        self._admit(identifier, device_id)
+        _integer(expected_rev, "expected receipt rev", 1)
+        _integer(now, "now", maximum=MAX_EPOCH)
+        _integer(manual_generation, "manual_generation")
+        def mutate(old):
+            if old is None or old["rev"] != expected_rev:
+                raise ScheduleConflict("receipt revision changed")
+            if old["status"] in TERMINAL_RECEIPT_STATES or old["attempt"] >= MAX_RECEIPT_ATTEMPTS:
+                raise ScheduleConflict("receipt cannot start another attempt")
+            predecessor = predecessor_record_id if predecessor_record_id is not None else old.get("record_id")
+            if old.get("record_id") is not None and predecessor != old["record_id"]:
+                raise ScheduleConflict("predecessor record ownership changed")
+            timestamp = max(now, old["updated_at"])
+            row = {"occurrence_id": identifier, "device_id": device_id,
+                   "rev": old["rev"] + 1, "attempt": old["attempt"] + 1,
+                   "attempt_started_at": timestamp, "created_at": old["created_at"], "updated_at": timestamp,
+                   "status": "intent", "reason": "pending", "completed_at": None, "notes": [],
+                   "manual_generation": manual_generation,
+                   "predecessors": copy.deepcopy(old["predecessors"]) + [{key: copy.deepcopy(value) for key, value in old.items() if key != "predecessors"}]}
+            if predecessor is not None:
+                row["predecessor_record_id"] = predecessor
+            before = before_image_ids if before_image_ids is not None else old.get("before_image_ids")
+            if before is not None:
+                row["before_image_ids"] = copy.deepcopy(before)
             _validate_receipt(device_id, row)
             return row
         return self._rows(identifier).update(device_id, mutate)

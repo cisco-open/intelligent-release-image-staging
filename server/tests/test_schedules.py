@@ -355,7 +355,7 @@ def test_invalid_server_metadata_refused_before_write(tmp_path, metadata):
     store = schedules.ScheduleStore(tmp_path)
     kwargs = {"actor": "console:alice", "now": NOW, **metadata}
     with pytest.raises(schedules.ScheduleValidationError):
-        store.create("s-boat", definition(), **kwargs)
+        store.create("s-boat", definition(), preview={"revision": 1, "now": NOW, "device_ids": []}, **kwargs)
     assert store.list() == []
 
 
