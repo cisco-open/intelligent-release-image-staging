@@ -2500,6 +2500,34 @@ def test_iox_begin_durability_failure_stops_all_later_commands(
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
 
 
+def test_post_device_fence_failure_forbids_cleanup_and_recovery_commands(
+        tmp_path, monkeypatch):
+    module = _module()
+    factory = _TransportFactory(verification="enabled")
+    original = module.IoxController._update_fence
+    failed = []
+
+    def fail_after_app_stop(controller, attempt, *args, **kwargs):
+        purposes = [call[4] for call in factory.calls
+                    if call[0] == "command"]
+        if not failed and purposes and purposes[-1] == "app_stop":
+            failed.append(len(factory.calls))
+            raise OSError("injected post-device fence failure")
+        return original(controller, attempt, *args, **kwargs)
+
+    monkeypatch.setattr(module.IoxController, "_update_fence",
+                        fail_after_app_stop)
+    result, unused_store, unused_timeline, unused_wrapper = \
+        _run_scripted_install(tmp_path, factory, cleanup_on_error=True)
+    assert failed
+    assert result["result_code"] == 5
+    assert result["error_category"] == "journal_durability"
+    app_stop = max(index for index, call in enumerate(factory.calls)
+                   if call[0] == "command" and call[4] == "app_stop")
+    assert not [call for call in factory.calls[app_stop + 1:]
+                if call[0] in ("command", "upload")]
+
+
 def test_discovery_cleanup_failure_dominates_the_original_error(
         tmp_path, monkeypatch):
     module = _module()
