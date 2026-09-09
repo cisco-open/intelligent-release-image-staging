@@ -1,0 +1,5272 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Authoritative IOx application execution and verification recovery.
+
+This module is deliberately the only bridge between service jobs, durable IOx
+verification records, and the bounded IOx transport.  It never installs or
+activates network operating-system software; ``install`` below refers only to
+the IRIS IOx application.
+"""
+from __future__ import print_function
+
+import argparse
+import base64
+import copy
+import errno
+import fcntl
+import hashlib
+import ipaddress
+import json
+import math
+import os
+import re
+import select
+import signal
+import socket
+import ssl
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+try:
+    from urllib.parse import urlsplit
+except ImportError:  # pragma: no cover - Python 2 is not supported in IRIS
+    from urlparse import urlsplit
+
+import deployment_records
+
+
+_MAX_INT = (1 << 63) - 1
+_HEX16 = re.compile(r"^[0-9a-f]{16}$")
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_RECORD_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_BOARD_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_BOOT_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+_SESSION_FILES = 8192
+_TRANSCRIPT_FILES = 8192
+_ORDINARY_TRANSCRIPTS = 4096
+_ACTIVE_FENCES = 512
+_SESSION_FILE_BYTES = 16 * 1024
+_TRANSCRIPT_FILE_BYTES = 1024 * 1024
+_SUPERVISOR_PACKET_BYTES = 64 * 1024
+_SUPERVISOR_MAX_FDS = 16
+_SUPERVISOR_REAP_SECONDS = 10.0
+
+_RESULT_CODES = {
+    "identity_mismatch": 2, "board_busy": 2,
+    "wrapper_unreadable": 2, "wrapper_not_regular": 2,
+    "wrapper_oversize": 2, "wrapper_changed": 2,
+    "wrapper_archive_invalid": 2, "wrapper_archive_limit": 2,
+    "unsupported_syntax_local": 2,
+    "reconciliation_required": 3,
+    "rejected": 4, "unsupported_syntax": 4,
+    "unsupported_response": 4, "silence": 4, "timeout": 4,
+    "ssh_authentication": 4, "host_key": 4, "connection": 4,
+    "transport": 4, "caf_transient": 4, "readback_unknown": 4,
+    "readback_mismatch": 4, "wrapper_copy_timeout": 4,
+    "wrapper_scan_failed": 4,
+    "cancelled": 130,
+    "journal_unreadable": 5, "journal_durability": 5,
+    "stale_cas": 5, "invalid_transition": 5,
+    "authority_mismatch": 5, "transcript_limit": 5,
+    "descendant_unreaped": 5,
+}
+
+_VERIFY_READ = b"show app-hosting infra"
+_VERIFY_DISABLE = b"app-hosting verification disable"
+_VERIFY_ENABLE = b"app-hosting verification enable"
+_IDENTITY = b"show version"
+
+_COMMANDS = frozenset((
+    "iox_status", "app_list", "routing_prereq", "storage_prereq", "clock",
+    "prepare_iox_scp", "configure_network", "mkdir_share", "app_stop",
+    "app_deactivate", "app_uninstall", "remove_app_config", "configure_app",
+    "app_install", "app_activate", "copy_certificate", "app_start", "save",
+    "remove_wrapper", "remove_certificate", "cleanup_config", "cleanup_files",
+    "cleanup_config_probe", "cleanup_stage_probe"))
+
+_TARGET_KEYS = frozenset((
+    "host", "port", "platform", "model", "os_family",
+    "management_type", "device_identity", "resources", "device_ip",
+    "package_fs", "iox_appid", "vlan", "svi_ip", "svi_mask",
+    "guest_ip", "inband_vlan", "app_ip", "app_mask", "app_gateway",
+    "vpg_number", "nat_interface", "bt_listen_port",
+    "nat_outside_owned", "ios_ssh_host", "target_fs",
+    "share_host_path", "share_ios_path", "app_intf", "pkg",
+    "telemetry", "telemetry_stream", "log"))
+_SECRET_TARGET_FRAGMENTS = ("pass", "password", "secret", "token",
+                            "credential", "private", "key")
+_SAFE_HOST = re.compile(r"^[A-Za-z0-9._:-]{1,255}$")
+_SAFE_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_SAFE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$")
+_SAFE_APPID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SAFE_INTERFACE = re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,127}$")
+_SAFE_FILESYSTEM = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}:$")
+_SAFE_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SAFE_HOST_PATH = re.compile(r"^/[A-Za-z0-9._/-]{1,254}$")
+_SAFE_IOS_PATH = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]{0,31}:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
+_NETMASKS = frozenset(str(ipaddress.IPv4Network(
+    "0.0.0.0/%d" % prefix).netmask) for prefix in range(33))
+
+_INSTALL_ONLY = frozenset(("upload_wrapper", "upload_certificate",
+                           "begin_install", "deployed"))
+_UNINSTALL_COMMANDS = frozenset((
+    "iox_status", "app_list", "app_stop", "app_deactivate",
+    "app_uninstall", "remove_app_config", "remove_wrapper",
+    "remove_certificate", "cleanup_config", "cleanup_files",
+    "cleanup_config_probe", "cleanup_stage_probe", "save"))
+
+_IRIS_NAMED_COLLISIONS = (
+    (r"(?m)^event manager applet IRIS-(?:AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)(?:\s|$)",
+     "an IRIS EEM applet"),
+    (r"(?m)^logging discriminator IRISQ(?:\s|$)",
+     "logging discriminator IRISQ"),
+    (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
+     "an IRISQ logging binding"),
+    (r"(?m)^crypto pki trustpoint IRIS\s*$",
+     "crypto pki trustpoint IRIS"),
+    (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
+     "the IRIS HTTP client trustpoint binding"),
+)
+_IOX_RETRY_REINSTATED = frozenset((
+    "crypto pki trustpoint IRIS",
+    "the IRIS HTTP client trustpoint binding",
+))
+
+class _ControllerFailure(Exception):
+    def __init__(self, category, detail="", code=None):
+        Exception.__init__(self, detail or category)
+        self.category = category
+        self.detail = _bounded_text(detail or category)
+        self.code = _RESULT_CODES.get(category, 4) if code is None else code
+
+
+class _SyntheticCommandFailure(Exception):
+    """A legacy injected transport failed at its command call boundary."""
+    def __init__(self, original):
+        Exception.__init__(self, str(original))
+        self.original = original
+
+
+class _NoopContext(object):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, unused_kind, unused_value, unused_traceback):
+        return False
+
+
+class _StoreLockContext(object):
+    """Translate a bounded record-lock miss into the controller taxonomy."""
+    def __init__(self, context):
+        self.context = context
+
+    def __enter__(self):
+        try:
+            return self.context.__enter__()
+        except deployment_records.StoreLockTimeout:
+            raise _ControllerFailure(
+                "timeout", "deployment-record store lock timed out", 4)
+
+    def __exit__(self, kind, value, traceback):
+        return self.context.__exit__(kind, value, traceback)
+
+
+def _bounded_text(value, limit=1024):
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    value = str(value)
+    raw = value.encode("utf-8")[:limit]
+    while True:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raw = raw[:-1]
+
+
+def _get(value, key, default=None):
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def _has(value, key):
+    return key in value if isinstance(value, dict) else hasattr(value, key)
+
+
+def _cancelled(cancel):
+    if cancel is None:
+        return False
+    if callable(cancel):
+        return bool(cancel())
+    return bool(cancel.is_set())
+
+
+def _ascii_value(value, pattern, name):
+    if (not isinstance(value, str) or pattern.fullmatch(value) is None or
+            any(ord(character) < 33 or ord(character) > 126
+                for character in value)):
+        raise ValueError("invalid IOx target %s" % name)
+    return value
+
+
+def _ipv4_value(value, name):
+    if not isinstance(value, str):
+        raise ValueError("invalid IOx target %s" % name)
+    try:
+        parsed = ipaddress.IPv4Address(value)
+    except ValueError:
+        raise ValueError("invalid IOx target %s" % name)
+    if str(parsed) != value:
+        raise ValueError("noncanonical IOx target %s" % name)
+    return value
+
+
+def _boolean_word(value, name):
+    if type(value) is bool:
+        return "on" if value else "off"
+    if isinstance(value, str) and value in ("on", "off"):
+        return value
+    raise ValueError("invalid IOx target %s" % name)
+
+
+def _https_url(value):
+    if (not isinstance(value, str) or not value or len(value) > 2048 or
+            any(ord(character) < 33 or ord(character) > 126
+                for character in value) or
+            re.fullmatch(
+                r"https://[a-z0-9.-]+(?::[0-9]{1,5})?"
+                r"(?:/[A-Za-z0-9._~/%+,-]*)?"
+                r"(?:\?[A-Za-z0-9._~/%+,&=-]*)?", value) is None):
+        raise ValueError("invalid IOx catalog URL")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError("invalid IOx catalog URL")
+    if (parsed.scheme != "https" or not parsed.hostname or
+            parsed.username is not None or parsed.password is not None or
+            (port is not None and not 1 <= port <= 65535) or
+            parsed.fragment or parsed.hostname != parsed.hostname.lower() or
+            parsed.netloc != parsed.hostname +
+            ((":" + str(port)) if port is not None else "")):
+        raise ValueError("invalid IOx catalog URL")
+    return value
+
+
+def _command_bytes(lines):
+    if isinstance(lines, bytes):
+        body = lines
+    else:
+        body = "\n".join(lines).encode("ascii")
+    executable = [line for line in body.split(b"\n")
+                  if line and not line.startswith(b"!")]
+    if (not executable or len(body) > 16384 or
+            any(not 1 <= len(line) <= 320 or
+                any(byte < 32 or byte > 126 for byte in bytearray(line))
+                for line in executable)):
+        raise _ControllerFailure(
+            "unsupported_syntax", "rendered IOx command is invalid", 2)
+    return body
+
+
+def _open_public_certificate(path, validate_x509=True):
+    if (not isinstance(path, str) or not os.path.isabs(path) or
+            any(ord(character) < 32 for character in path)):
+        raise ValueError("invalid IOx catalog certificate")
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    before = os.lstat(path)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (not stat.S_ISREG(opened.st_mode) or
+                opened.st_uid != os.geteuid() or opened.st_nlink != 1 or
+                stat.S_IMODE(opened.st_mode) & 0o022 or
+                not 1 <= opened.st_size <= 65536 or
+                (before.st_dev, before.st_ino) !=
+                (opened.st_dev, opened.st_ino) or
+                (named.st_dev, named.st_ino) !=
+                (opened.st_dev, opened.st_ino)):
+            raise ValueError("unsafe IOx catalog certificate")
+        chunks = []
+        remaining = 65537
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) != opened.st_size or len(raw) > 65536:
+            raise ValueError("invalid IOx catalog certificate")
+        if validate_x509:
+            text = raw.decode("ascii")
+            if ("PRIVATE KEY" in text or
+                    text.count("-----BEGIN CERTIFICATE-----") != 1 or
+                    text.count("-----END CERTIFICATE-----") != 1):
+                raise ValueError("invalid IOx catalog certificate")
+            ssl.PEM_cert_to_DER_cert(text)
+            ssl._ssl._test_decode_cert("/proc/self/fd/%d" % descriptor)
+        final_opened = os.fstat(descriptor)
+        final_named = os.lstat(path)
+        fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_nlink",
+                  "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(opened, key) != getattr(final_opened, key) or
+               getattr(opened, key) != getattr(final_named, key)
+               for key in fields):
+            raise ValueError("IOx catalog certificate changed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _service_job_context(cancel, default_device, default_credential=None):
+    """Read the private service-job binding carried by a cancel token."""
+    job_id = getattr(cancel, "_iris_job_id", "0" * 16)
+    device_id = getattr(cancel, "_iris_device_id", default_device)
+    credential_ref = getattr(
+        cancel, "_iris_credential_ref", default_credential)
+    if not isinstance(job_id, str) or not _HEX16.fullmatch(job_id):
+        raise ValueError("invalid recovery service job id")
+    if (not isinstance(device_id, str) or not device_id or
+            len(device_id.encode("utf-8")) > 128 or
+            any(ord(character) < 32 for character in device_id)):
+        raise ValueError("invalid recovery service device id")
+    if (credential_ref is not None and
+            (not isinstance(credential_ref, str) or not credential_ref or
+             len(credential_ref.encode("utf-8")) > 256 or
+             any(ord(character) < 32 for character in credential_ref))):
+        raise ValueError("invalid recovery credential reference")
+    return job_id, device_id, credential_ref
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=True,
+                      separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key: %s" % key)
+        value[key] = item
+    return value
+
+
+def _read_json_strict(path, maximum):
+    directory = os.path.dirname(path)
+    name = os.path.basename(path)
+    directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        metadata = os.fstat(fd)
+        after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if ((before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino) or
+                (after.st_dev, after.st_ino) !=
+                (metadata.st_dev, metadata.st_ino) or
+                not stat.S_ISREG(metadata.st_mode) or
+                metadata.st_uid != os.geteuid() or metadata.st_nlink != 1):
+            raise ValueError("unsafe authority file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > maximum:
+            raise ValueError("unsafe authority file metadata")
+        chunks = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > maximum:
+            raise ValueError("authority file exceeds limit")
+        final_metadata = os.fstat(fd)
+        final_path = os.stat(
+            name, dir_fd=directory_fd, follow_symlinks=False)
+        stable_fields = ("st_dev", "st_ino", "st_uid", "st_mode",
+                         "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(metadata, field) != getattr(final_metadata, field) or
+               getattr(metadata, field) != getattr(final_path, field)
+               for field in stable_fields):
+            raise ValueError("authority file changed during read")
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs,
+                          parse_constant=lambda value: (_ for _ in ()).throw(
+                              ValueError("non-finite JSON")))
+    finally:
+        os.close(fd)
+        os.close(directory_fd)
+
+
+def _open_directory_anchor(path, required_mode=None):
+    before = os.lstat(path)
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+             getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0))
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        after = os.lstat(path)
+        if (not stat.S_ISDIR(metadata.st_mode) or
+                metadata.st_uid != os.geteuid() or
+                (required_mode is not None and
+                 stat.S_IMODE(metadata.st_mode) != required_mode) or
+                (before.st_dev, before.st_ino) !=
+                (metadata.st_dev, metadata.st_ino) or
+                (after.st_dev, after.st_ino) !=
+                (metadata.st_dev, metadata.st_ino)):
+            raise ValueError("unsafe authority directory")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _fsync_directory(path):
+    fd = _open_directory_anchor(path)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+class _AnchoredPath(os.PathLike):
+    """A dirfd-anchored syscall path retaining its diagnostic identity."""
+    def __init__(self, directory_fd, name, display):
+        self._path = "/proc/self/fd/%d/%s" % (directory_fd, name)
+        self._display = display
+
+    def __fspath__(self):
+        return self._path
+
+    def __eq__(self, other):
+        try:
+            return os.fspath(other) == self._display
+        except TypeError:
+            return False
+
+    def __str__(self):
+        return self._display
+
+
+def _durable_json(path, value, replace=True):
+    directory = os.path.dirname(path)
+    name = os.path.basename(path)
+    body = _canonical(value)
+    if len(body) > _SESSION_FILE_BYTES and "/sessions/" in path:
+        raise _ControllerFailure("journal_durability", "session fence exceeds limit", 5)
+    directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+    temporary = ".iox-%s.tmp" % os.urandom(12).hex()
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0), 0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary_metadata = os.stat(
+            temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(temporary_metadata.st_mode) or
+                stat.S_IMODE(temporary_metadata.st_mode) != 0o600 or
+                temporary_metadata.st_uid != os.geteuid() or
+                temporary_metadata.st_nlink != 1):
+            raise ValueError("unsafe temporary authority file")
+        anchored_source = _AnchoredPath(directory_fd, temporary,
+                                        os.path.join(directory, temporary))
+        anchored_destination = _AnchoredPath(directory_fd, name, path)
+        if replace:
+            os.replace(anchored_source, anchored_destination)
+        else:
+            os.link(anchored_source, anchored_destination,
+                    follow_symlinks=False)
+            os.unlink(temporary, dir_fd=directory_fd)
+        committed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if ((committed.st_dev, committed.st_ino) !=
+                (temporary_metadata.st_dev, temporary_metadata.st_ino) or
+                not stat.S_ISREG(committed.st_mode) or
+                stat.S_IMODE(committed.st_mode) != 0o600 or
+                committed.st_uid != os.geteuid() or committed.st_nlink != 1):
+            raise ValueError("authority commit path changed")
+        os.fsync(directory_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except OSError:
+            pass
+        os.close(directory_fd)
+
+
+def _safe_directory(path, create=False):
+    expected = None
+    if create:
+        parent = os.path.dirname(path)
+        name = os.path.basename(path)
+        parent_fd = _open_directory_anchor(parent)
+        try:
+            try:
+                # Keep the durable-creation syscall observable at its full
+                # authority path, then prove that it created the entry below
+                # the parent descriptor held across the operation.
+                os.mkdir(path, 0o700)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    raise
+            metadata = os.stat(
+                name, dir_fd=parent_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(metadata.st_mode) or
+                    metadata.st_uid != os.geteuid() or
+                    stat.S_IMODE(metadata.st_mode) != 0o700):
+                raise ValueError("unsafe authority directory")
+            expected = (metadata.st_dev, metadata.st_ino)
+        finally:
+            os.close(parent_fd)
+    descriptor = _open_directory_anchor(path, required_mode=0o700)
+    try:
+        if expected is not None:
+            metadata = os.fstat(descriptor)
+            if expected != (metadata.st_dev, metadata.st_ino):
+                raise ValueError("authority directory path changed")
+    finally:
+        os.close(descriptor)
+
+
+def _reject_symlink_components(raw_path):
+    current = os.path.sep
+    for component in os.path.abspath(raw_path).split(os.path.sep)[1:]:
+        current = os.path.join(current, component)
+        if os.path.lexists(current) and stat.S_ISLNK(os.lstat(current).st_mode):
+            raise ValueError("state_dir must not traverse symlinks")
+
+
+def _safe_state_root(raw_path):
+    if (not isinstance(raw_path, str) or not raw_path or
+            not os.path.isabs(raw_path)):
+        raise ValueError("state_dir must be a non-empty absolute path")
+    _reject_symlink_components(raw_path)
+    canonical = os.path.realpath(raw_path)
+    if os.path.abspath(raw_path) != canonical:
+        raise ValueError("state_dir must not traverse symlinks")
+    metadata = os.lstat(raw_path)
+    if (stat.S_ISLNK(metadata.st_mode) or
+            not stat.S_ISDIR(metadata.st_mode) or
+            metadata.st_uid != os.geteuid()):
+        raise ValueError("unsafe state_dir")
+    return canonical
+
+
+def _board_key(board):
+    return hashlib.sha256(b"IRIS-IOX-BOARD-v1\0" +
+                          board.encode("ascii")).hexdigest() + ".lock"
+
+
+def _open_board_lock(directory, board):
+    name = _board_key(board)
+    directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+    flags = (os.O_RDWR | getattr(os, "O_CLOEXEC", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        created = False
+        try:
+            descriptor = os.open(
+                name, flags | os.O_CREAT | os.O_EXCL, 0o600,
+                dir_fd=directory_fd)
+            created = True
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            descriptor = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            metadata = os.fstat(descriptor)
+            path_metadata = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(metadata.st_mode) or
+                    metadata.st_uid != os.geteuid() or
+                    stat.S_IMODE(metadata.st_mode) != 0o600 or
+                    metadata.st_nlink != 1 or
+                    metadata.st_size > _SESSION_FILE_BYTES or
+                    (metadata.st_dev, metadata.st_ino) !=
+                    (path_metadata.st_dev, path_metadata.st_ino)):
+                raise ValueError("unsafe physical-board lock")
+            if created:
+                os.fsync(directory_fd)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(directory_fd)
+
+
+def _revalidate_board_lock(directory, board, descriptor):
+    directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+    try:
+        held = os.fstat(descriptor)
+        named = os.stat(_board_key(board), dir_fd=directory_fd,
+                        follow_symlinks=False)
+        if (not stat.S_ISREG(held.st_mode) or held.st_uid != os.geteuid() or
+                stat.S_IMODE(held.st_mode) != 0o600 or held.st_nlink != 1 or
+                (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)):
+            raise ValueError("physical-board lock pathname changed")
+    finally:
+        os.close(directory_fd)
+
+
+def _boot_id():
+    with open("/proc/sys/kernel/random/boot_id") as stream:
+        value = stream.read().strip().lower()
+    if not _BOOT_ID.fullmatch(value):
+        raise ValueError("invalid host boot identity")
+    return value
+
+
+def _process_start_ticks(pid):
+    with open("/proc/%d/stat" % pid) as stream:
+        return int(stream.read().split()[21])
+
+
+def _supervisor_send(peer, value, descriptors=()):
+    body = _canonical(value)
+    if len(body) > _SUPERVISOR_PACKET_BYTES:
+        raise ValueError("supervisor message exceeds limit")
+    descriptors = tuple(descriptors)
+    if len(descriptors) > _SUPERVISOR_MAX_FDS:
+        raise ValueError("too many supervisor descriptors")
+    ancillary = []
+    if descriptors:
+        packed = struct.pack("%di" % len(descriptors), *descriptors)
+        ancillary.append((socket.SOL_SOCKET, socket.SCM_RIGHTS, packed))
+    sent = peer.sendmsg([body], ancillary)
+    if sent != len(body):
+        raise IOError("short supervisor message")
+
+
+def _supervisor_receive(peer):
+    body, ancillary, flags, unused_address = peer.recvmsg(
+        _SUPERVISOR_PACKET_BYTES + 1,
+        socket.CMSG_SPACE(_SUPERVISOR_MAX_FDS * struct.calcsize("i")))
+    descriptors = []
+    invalid_ancillary = False
+    try:
+        width = struct.calcsize("i")
+        for level, kind, data in ancillary:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                usable = len(data) - (len(data) % width)
+                if usable:
+                    descriptors.extend(struct.unpack(
+                        "%di" % (usable // width), data[:usable]))
+                if usable != len(data):
+                    invalid_ancillary = True
+            else:
+                invalid_ancillary = True
+        if not body:
+            raise EOFError("supervisor peer closed")
+        if flags & (getattr(socket, "MSG_TRUNC", 0) |
+                    getattr(socket, "MSG_CTRUNC", 0)):
+            raise ValueError("truncated supervisor message")
+        if invalid_ancillary:
+            raise ValueError("unexpected supervisor ancillary data")
+        if len(descriptors) > _SUPERVISOR_MAX_FDS:
+            raise ValueError("too many supervisor descriptors")
+        value = json.loads(
+            body.decode("utf-8"), object_pairs_hook=_pairs,
+            parse_constant=lambda item: (_ for _ in ()).throw(
+                ValueError("non-finite JSON")))
+    except Exception:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    return value, descriptors
+
+
+class _SupervisedProcess(object):
+    """Small Popen-compatible view of a child owned by the supervisor."""
+    def __init__(self, supervisor, token, pid, streams):
+        self._supervisor = supervisor
+        self._token = token
+        self.pid = pid
+        self.returncode = None
+        self.stdin = streams.get("stdin")
+        self.stdout = streams.get("stdout")
+        self.stderr = streams.get("stderr")
+
+    def poll(self, timeout=2.0):
+        if (not isinstance(timeout, (int, float)) or
+                isinstance(timeout, bool) or timeout <= 0):
+            raise ValueError("invalid poll timeout")
+        response, descriptors = self._supervisor._request(
+            "poll", {"token": self._token}, timeout=min(2.0, timeout))
+        for descriptor in descriptors:
+            os.close(descriptor)
+        self.returncode = response["returncode"]
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            timeout = _SUPERVISOR_REAP_SECONDS
+        if (not isinstance(timeout, (int, float)) or
+                isinstance(timeout, bool) or timeout < 0):
+            raise ValueError("invalid wait timeout")
+        response_value = self._supervisor._request(
+            "wait", {"token": self._token, "timeout": min(
+                float(timeout), _SUPERVISOR_REAP_SECONDS)},
+            timeout=min(float(timeout), _SUPERVISOR_REAP_SECONDS),
+            allow_timeout=True)
+        if response_value is None:
+            raise subprocess.TimeoutExpired(["supervised"], timeout)
+        response, descriptors = response_value
+        for descriptor in descriptors:
+            os.close(descriptor)
+        if response.get("timed_out"):
+            raise subprocess.TimeoutExpired(["supervised"], timeout)
+        self.returncode = response["returncode"]
+        return self.returncode
+
+    def send_signal(self, sig, timeout=2.0):
+        if (not isinstance(sig, int) or isinstance(sig, bool) or
+                sig not in (signal.SIGTERM, signal.SIGKILL,
+                            signal.SIGINT, signal.SIGHUP)):
+            raise ValueError("unsupported supervised signal")
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or
+                timeout <= 0):
+            raise ValueError("invalid signal timeout")
+        response, descriptors = self._supervisor._request(
+            "signal", {"token": self._token, "signal": sig},
+            timeout=timeout)
+        for descriptor in descriptors:
+            os.close(descriptor)
+        self.returncode = response["returncode"]
+
+    def terminate(self):
+        self.send_signal(signal.SIGTERM)
+
+    def kill(self):
+        self.send_signal(signal.SIGKILL)
+
+
+class _RecipeCapture(object):
+    """Continuously drain recipe pipes with bounded streaming redaction."""
+    def __init__(self, process, secret_values):
+        import iox_transport
+        self._stop = threading.Event()
+        self._values = {"stdout": bytearray(), "stderr": bytearray()}
+        self._threads = []
+        for name in ("stdout", "stderr"):
+            stream = getattr(process, name)
+            redactor = iox_transport._StreamingRedactor(secret_values)
+            wake_read, wake_write = socket.socketpair()
+            thread = threading.Thread(
+                target=self._reader,
+                args=(name, stream, redactor, wake_read))
+            thread.daemon = True
+            thread.start()
+            self._threads.append((thread, wake_write))
+
+    def _reader(self, name, stream, redactor, wake):
+        descriptor = stream.fileno()
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        fcntl.fcntl(descriptor, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            while not self._stop.is_set():
+                readable, unused, unused2 = select.select(
+                    [descriptor, wake], [], [])
+                if wake in readable:
+                    break
+                try:
+                    chunk = os.read(descriptor, 4096)
+                except OSError as exc:
+                    if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        continue
+                    break
+                if not chunk:
+                    break
+                self._append(name, redactor.feed(chunk))
+        finally:
+            self._append(name, redactor.finish())
+            try:
+                stream.close()
+            except OSError:
+                pass
+            wake.close()
+
+    def _append(self, name, body):
+        remaining = 32768 - len(self._values[name])
+        if remaining > 0:
+            self._values[name].extend(body[:remaining])
+
+    def finish(self, writers_reaped, deadline, monotonic_fn):
+        if not writers_reaped:
+            self._stop.set()
+            for unused_thread, wake in self._threads:
+                try:
+                    wake.send(b"x")
+                except OSError:
+                    pass
+        for thread, unused_wake in self._threads:
+            remaining = deadline - monotonic_fn()
+            if remaining > 0:
+                thread.join(remaining)
+        complete = not any(thread.is_alive()
+                           for thread, unused_wake in self._threads)
+        if not complete:
+            self._stop.set()
+            for unused_thread, wake in self._threads:
+                try:
+                    wake.send(b"x")
+                except OSError:
+                    pass
+        for unused_thread, wake in self._threads:
+            try:
+                wake.close()
+            except OSError:
+                pass
+        return complete, dict((name, bytes(body))
+                              for name, body in self._values.items())
+
+
+def _wait_local_process(process, timeout):
+    """Wait without the process-wide ``time.sleep`` monkeypatch surface."""
+    end = time.monotonic() + max(0.0, timeout)
+    while True:
+        if process.returncode is not None:
+            return process.returncode
+        try:
+            pid, status = os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            return process.returncode
+        if pid == process.pid:
+            process._handle_exitstatus(status)
+            return process.returncode
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        select.select([], [], [], min(0.01, remaining))
+
+
+class _SupervisorClient(object):
+    """Authenticated local handle for one dedicated Linux subreaper."""
+    def __init__(self, peer, process, ready, monotonic_fn):
+        self._peer = peer
+        self._process = process
+        self._monotonic = monotonic_fn or time.monotonic
+        self._lock = threading.RLock()
+        self._sequence = 0
+        self._released = False
+        self.pid = ready["pid"]
+        self.start_ticks = ready["start_ticks"]
+
+    @classmethod
+    def start(cls, lock_fd, monotonic_fn, deadline):
+        remaining_budget = deadline - monotonic_fn()
+        if remaining_budget <= 0:
+            raise socket.timeout("supervisor start deadline elapsed")
+        supervisor_deadline = time.monotonic() + remaining_budget
+        kind = getattr(socket, "SOCK_SEQPACKET", socket.SOCK_DGRAM)
+        parent, child = socket.socketpair(socket.AF_UNIX, kind)
+        inherited = [child.fileno()]
+        lock_value = -1
+        if lock_fd is not None:
+            inherited.append(lock_fd)
+            lock_value = lock_fd
+        argv = [sys.executable, os.path.abspath(__file__),
+                "--_iris-iox-supervisor", str(child.fileno()),
+                str(lock_value), repr(float(supervisor_deadline))]
+        process = None
+        try:
+            process = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, pass_fds=tuple(inherited),
+                close_fds=True, start_new_session=True)
+            child.close()
+            remaining = deadline - monotonic_fn()
+            if remaining <= 0:
+                raise socket.timeout("supervisor start deadline elapsed")
+            parent.settimeout(min(5.0, remaining))
+            ready, descriptors = _supervisor_receive(parent)
+            for descriptor in descriptors:
+                os.close(descriptor)
+            if (not isinstance(ready, dict) or set(ready) != {
+                    "version", "type", "pid", "start_ticks", "lock_held"} or
+                    type(ready["version"]) is not int or
+                    ready["version"] != 1 or ready["type"] != "ready" or
+                    type(ready["pid"]) is not int or ready["pid"] != process.pid or
+                    type(ready["start_ticks"]) is not int or
+                    ready["start_ticks"] != _process_start_ticks(process.pid) or
+                    type(ready["lock_held"]) is not bool or
+                    ready["lock_held"] != (lock_fd is not None)):
+                raise ValueError("invalid supervisor readiness proof")
+            parent.settimeout(None)
+            return cls(parent, process, ready, monotonic_fn)
+        except Exception:
+            child.close()
+            parent.close()
+            if process is not None:
+                try:
+                    remaining = deadline - monotonic_fn()
+                    if remaining > 0:
+                        process.terminate()
+                        _wait_local_process(process, remaining)
+                except Exception:
+                    pass
+            raise
+
+    def _request(self, operation, arguments, descriptors=(), timeout=5.0,
+                 allow_timeout=False):
+        with self._lock:
+            if self._released:
+                raise OSError(errno.EPIPE, "supervisor was released")
+            self._sequence += 1
+            sequence = self._sequence
+            message = {"version": 1, "type": "request",
+                       "sequence": sequence, "operation": operation,
+                       "arguments": arguments}
+            previous = self._peer.gettimeout()
+            timeout = min(float(timeout), 12.0)
+            if timeout <= 0:
+                if allow_timeout:
+                    return None
+                raise socket.timeout("supervisor deadline elapsed")
+            self._peer.settimeout(timeout)
+            try:
+                _supervisor_send(self._peer, message, descriptors)
+                response, received = _supervisor_receive(self._peer)
+            except socket.timeout:
+                if allow_timeout:
+                    self._released = True
+                    self._peer.close()
+                    return None
+                raise
+            finally:
+                if not self._released:
+                    self._peer.settimeout(previous)
+            if (not isinstance(response, dict) or set(response) != {
+                    "version", "type", "sequence", "ok", "result"} or
+                    type(response["version"]) is not int or
+                    response["version"] != 1 or response["type"] != "response" or
+                    type(response["sequence"]) is not int or
+                    response["sequence"] != sequence or response["ok"] is not True or
+                    not isinstance(response["result"], dict)):
+                for descriptor in received:
+                    os.close(descriptor)
+                raise RuntimeError("invalid supervisor acknowledgement")
+            return response["result"], received
+
+    def popen(self, args, stdin=None, stdout=None, stderr=None, env=None,
+              pass_fds=(), close_fds=True, start_new_session=True,
+              role="transport", timeout=5.0):
+        if role not in ("transport", "recipe"):
+            raise ValueError("invalid supervised child role")
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or
+                timeout <= 0):
+            raise ValueError("invalid supervised spawn timeout")
+        if close_fds is not True or start_new_session is not True:
+            raise ValueError("supervised children require isolated descriptors and session")
+        modes = []
+        for value in (stdin, stdout, stderr):
+            if value not in (None, subprocess.PIPE, subprocess.DEVNULL):
+                raise ValueError("unsupported supervised stdio")
+            modes.append(value)
+        pass_fds = tuple(pass_fds)
+        if (len(pass_fds) > _SUPERVISOR_MAX_FDS or
+                any(type(value) is not int or value < 3 for value in pass_fds) or
+                len(set(pass_fds)) != len(pass_fds)):
+            raise ValueError("invalid supervised pass_fds")
+        response, received = self._request("spawn", {
+            "args": list(args), "env": dict(env or {}),
+            "stdio": modes, "pass_fds": list(pass_fds), "role": role,
+        }, descriptors=pass_fds, timeout=timeout)
+        slots = response.get("stdio")
+        if (set(response) != {"token", "pid", "stdio"} or
+                not isinstance(response["token"], str) or
+                not _HEX32.fullmatch(response["token"]) or
+                type(response["pid"]) is not int or response["pid"] <= 0 or
+                not isinstance(slots, dict) or set(slots) != {
+                    "stdin", "stdout", "stderr"}):
+            for descriptor in received:
+                os.close(descriptor)
+            raise RuntimeError("invalid supervisor spawn acknowledgement")
+        streams = {}
+        used = set()
+        for name, mode in zip(("stdin", "stdout", "stderr"), modes):
+            slot = slots[name]
+            if mode == subprocess.PIPE:
+                if type(slot) is not int or not 0 <= slot < len(received) or slot in used:
+                    for descriptor in received:
+                        os.close(descriptor)
+                    raise RuntimeError("invalid supervisor stream descriptor")
+                used.add(slot)
+                streams[name] = os.fdopen(received[slot], "wb" if name == "stdin" else "rb", 0)
+            elif slot is not None:
+                for descriptor in received:
+                    os.close(descriptor)
+                raise RuntimeError("unexpected supervisor stream descriptor")
+        for index, descriptor in enumerate(received):
+            if index not in used:
+                os.close(descriptor)
+        return _SupervisedProcess(self, response["token"], response["pid"], streams)
+
+    def reap_process(self, process, deadline):
+        if not isinstance(process, _SupervisedProcess) or process._supervisor is not self:
+            return False
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return False
+        seconds = min(_SUPERVISOR_REAP_SECONDS, remaining)
+        try:
+            response, descriptors = self._request(
+                "reap", {"scope": "token", "value": process._token,
+                         "timeout": seconds}, timeout=seconds)
+            for descriptor in descriptors:
+                os.close(descriptor)
+            process.returncode = response.get("returncode")
+            return (set(response) == {"reaped", "remaining", "returncode"} and
+                    response["reaped"] is True and response["remaining"] == 0)
+        except Exception:
+            return False
+
+    def reap_role(self, role, deadline):
+        return self._reap_scope("role", role, deadline)
+
+    def reap_all(self, deadline):
+        return self._reap_scope("all", None, deadline)
+
+    def _reap_scope(self, scope, value, deadline):
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return False
+        seconds = min(_SUPERVISOR_REAP_SECONDS, remaining)
+        try:
+            response, descriptors = self._request(
+                "reap", {"scope": scope, "value": value,
+                         "timeout": seconds}, timeout=seconds)
+            for descriptor in descriptors:
+                os.close(descriptor)
+            return (set(response) == {"reaped", "remaining", "returncode"} and
+                    response["reaped"] is True and response["remaining"] == 0)
+        except Exception:
+            return False
+
+    def release(self, deadline):
+        """Release a clean supervisor without crossing the enclosing deadline."""
+        with self._lock:
+            if self._released:
+                return self._process.poll() is not None
+        acknowledged = False
+        try:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return False
+            response, descriptors = self._request(
+                "release", {}, timeout=remaining)
+            for descriptor in descriptors:
+                os.close(descriptor)
+            if response != {"released": True}:
+                raise RuntimeError("supervisor did not acknowledge release")
+            acknowledged = True
+        finally:
+            with self._lock:
+                self._released = True
+                self._peer.close()
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            _wait_local_process(self._process, remaining)
+            return acknowledged
+        except subprocess.TimeoutExpired:
+            return False
+
+    def abandon(self, deadline):
+        """Trigger controller-EOF cleanup, bounded by the enclosing deadline."""
+        with self._lock:
+            if not self._released:
+                self._released = True
+                self._peer.close()
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return self._process.poll() is not None
+        try:
+            _wait_local_process(self._process, remaining)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    def disconnect(self, deadline):
+        """Trigger controller-EOF cleanup and observe supervisor exit."""
+        with self._lock:
+            if not self._released:
+                self._released = True
+                self._peer.close()
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return self._process.poll() is not None
+        try:
+            _wait_local_process(self._process, remaining)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+def _supervisor_children(pid):
+    try:
+        with open("/proc/%d/task/%d/children" % (pid, pid)) as stream:
+            return [int(value) for value in stream.read().split()]
+    except (OSError, ValueError):
+        return []
+
+
+def _supervisor_start(pid):
+    try:
+        return _process_start_ticks(pid)
+    except (OSError, IOError, ValueError, IndexError):
+        return None
+
+
+def _supervisor_tree(root):
+    result = {}
+    pending = [root]
+    while pending and len(result) <= 4096:
+        pid = pending.pop()
+        if pid in result:
+            continue
+        started = _supervisor_start(pid)
+        if started is None:
+            continue
+        result[pid] = started
+        pending.extend(_supervisor_children(pid))
+    return result
+
+
+def _supervisor_signal(entry, sig):
+    process = entry["process"]
+    root_started = entry["root_started"]
+    if _supervisor_start(process.pid) == root_started:
+        try:
+            os.killpg(process.pid, sig)
+        except OSError:
+            try:
+                os.kill(process.pid, sig)
+            except OSError:
+                pass
+    for pid, started in list(entry["known"].items()):
+        if _supervisor_start(pid) == started:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+
+
+def _supervisor_refresh(entries):
+    for entry in entries.values():
+        tree = _supervisor_tree(entry["process"].pid)
+        entry["known"].update(tree)
+        entry["process"].poll()
+    claimed = set()
+    active = []
+    for entry in entries.values():
+        claimed.update(entry["known"])
+        alive = [pid for pid, started in entry["known"].items()
+                 if pid != entry["process"].pid and
+                 _supervisor_start(pid) == started]
+        if entry["process"].returncode is None or alive:
+            active.append(entry)
+    unknown = set(_supervisor_children(os.getpid())) - claimed
+    if len(active) == 1:
+        for pid in unknown:
+            started = _supervisor_start(pid)
+            if started is not None:
+                active[0]["known"][pid] = started
+
+
+def _supervisor_reap(entries, selected, timeout):
+    if timeout <= 0:
+        selected = set(selected)
+        _supervisor_refresh(entries)
+        for token in selected:
+            entry = entries.get(token)
+            if entry is not None:
+                _supervisor_signal(entry, signal.SIGKILL)
+        _supervisor_refresh(entries)
+        remaining = 0
+        for token in selected:
+            entry = entries.get(token)
+            if entry is None:
+                continue
+            process = entry["process"]
+            process.poll()
+            remaining += process.returncode is None
+            remaining += sum(
+                pid != process.pid and _supervisor_start(pid) == started
+                for pid, started in entry["known"].items())
+        return remaining == 0, remaining
+    started = time.monotonic()
+    end = started + min(timeout, _SUPERVISOR_REAP_SECONDS)
+    term_end = min(end, started + 5.0)
+    selected = set(selected)
+    _supervisor_refresh(entries)
+    for token in selected:
+        entry = entries.get(token)
+        if entry is not None:
+            _supervisor_signal(entry, signal.SIGTERM)
+    killed = False
+    empty_rounds = 0
+    while time.monotonic() < end:
+        _supervisor_refresh(entries)
+        reserved = set()
+        for token, entry in entries.items():
+            if token not in selected:
+                reserved.update(entry["known"])
+                reserved.add(entry["process"].pid)
+        adopted = set(_supervisor_children(os.getpid()))
+        unknown = adopted - reserved
+        if selected:
+            # Once a descendant is reparented to this subreaper, its former
+            # ancestry is unavailable.  The controller admits only sequential
+            # transport children; exclude every still-known other-role tree
+            # and bind remaining orphans to the set currently being reaped.
+            target = entries.get(next(iter(selected)))
+            if target is not None:
+                for pid in unknown:
+                    started = _supervisor_start(pid)
+                    if started is not None:
+                        target["known"][pid] = started
+        if not killed and time.monotonic() >= term_end:
+            for token in selected:
+                entry = entries.get(token)
+                if entry is not None:
+                    _supervisor_signal(entry, signal.SIGKILL)
+            killed = True
+        remaining = 0
+        for token in selected:
+            entry = entries.get(token)
+            if entry is None:
+                continue
+            process = entry["process"]
+            process.poll()
+            for pid, started in list(entry["known"].items()):
+                if pid == process.pid:
+                    continue
+                waited = 0
+                try:
+                    waited, unused_status = os.waitpid(pid, os.WNOHANG)
+                except (OSError, ChildProcessError):
+                    pass
+                if waited == pid or _supervisor_start(pid) != started:
+                    entry["known"].pop(pid, None)
+            alive = [pid for pid, started in entry["known"].items()
+                     if pid != process.pid and _supervisor_start(pid) == started]
+            if process.returncode is None or alive:
+                remaining += 1 + len(alive)
+        if remaining == 0:
+            empty_rounds += 1
+            if empty_rounds >= 2:
+                return True, 0
+        else:
+            empty_rounds = 0
+        now = time.monotonic()
+        phase_end = end if killed else term_end
+        remaining_wait = phase_end - now
+        if remaining_wait > 0:
+            time.sleep(min(0.005, remaining_wait))
+    if not killed:
+        # A total budget shorter than the TERM allowance has no blocking KILL
+        # phase.  Still issue the immediate safety signal at expiry, then
+        # report the nonblocking reap observation truthfully.
+        for token in selected:
+            entry = entries.get(token)
+            if entry is not None:
+                _supervisor_signal(entry, signal.SIGKILL)
+        _supervisor_refresh(entries)
+    remaining = 0
+    for token in selected:
+        entry = entries.get(token)
+        if entry is None:
+            continue
+        entry["process"].poll()
+        if entry["process"].returncode is None:
+            remaining += 1
+        remaining += sum(
+            pid != entry["process"].pid and _supervisor_start(pid) == started
+            for pid, started in entry["known"].items())
+    return remaining == 0, remaining
+
+
+def _supervisor_response(peer, sequence, result):
+    descriptors = result.pop("_descriptors", ())
+    _supervisor_send(peer, {"version": 1, "type": "response",
+        "sequence": sequence, "ok": True, "result": result}, descriptors)
+
+
+def _supervisor_spawn(peer, entries, arguments, received, critical):
+    keys = {"args", "env", "stdio", "pass_fds", "role"}
+    if not isinstance(arguments, dict) or set(arguments) != keys:
+        raise ValueError("invalid supervisor spawn request")
+    argv = arguments["args"]
+    environment = arguments["env"]
+    modes = arguments["stdio"]
+    targets = arguments["pass_fds"]
+    role = arguments["role"]
+    if (not isinstance(argv, list) or not 1 <= len(argv) <= 256 or
+            any(not isinstance(value, str) or not value or "\0" in value or
+                len(value.encode("utf-8")) > 8192 for value in argv) or
+            not isinstance(environment, dict) or len(environment) > 128 or
+            any(not isinstance(key, str) or not key or "\0" in key or
+                not isinstance(value, str) or "\0" in value or
+                len(key.encode("utf-8")) > 256 or
+                len(value.encode("utf-8")) > 8192
+                for key, value in environment.items()) or
+            not isinstance(modes, list) or len(modes) != 3 or
+            any(value not in (None, subprocess.PIPE, subprocess.DEVNULL)
+                for value in modes) or
+            not isinstance(targets, list) or len(targets) != len(received) or
+            len(targets) > _SUPERVISOR_MAX_FDS or
+            any(type(value) is not int or not 3 <= value <= 1048575
+                for value in targets) or len(set(targets)) != len(targets) or
+            role not in ("transport", "recipe")):
+        raise ValueError("invalid supervisor spawn binding")
+
+    # SCM_RIGHTS chooses receiver descriptor numbers.  Duplicate each source
+    # out of the requested range, then bind it to the exact number named in
+    # argv/environment.  This occurs in the single-threaded supervisor before
+    # Popen, so no preexec_fn is needed.
+    safe = []
+    floor = max([64] + targets) + 32
+    for descriptor in received:
+        safe.append(fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, floor))
+        os.close(descriptor)
+    received[:] = []
+    for target in targets:
+        if target in critical:
+            raise ValueError("pass descriptor collides with supervisor authority")
+    try:
+        for source, target in zip(safe, targets):
+            os.dup2(source, target, inheritable=True)
+        process = subprocess.Popen(
+            argv, stdin=modes[0], stdout=modes[1], stderr=modes[2],
+            env=environment, pass_fds=tuple(targets), close_fds=True,
+            start_new_session=True)
+    finally:
+        for descriptor in safe:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        for target in targets:
+            try:
+                os.close(target)
+            except OSError:
+                pass
+    token = os.urandom(16).hex()
+    entries[token] = {"process": process, "role": role,
+                      "root_started": _process_start_ticks(process.pid),
+                      "known": {process.pid: _process_start_ticks(process.pid)}}
+    streams = {"stdin": None, "stdout": None, "stderr": None}
+    outgoing = []
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(process, name)
+        if stream is not None:
+            streams[name] = len(outgoing)
+            outgoing.append(stream.fileno())
+    result = {"token": token, "pid": process.pid, "stdio": streams,
+              "_descriptors": tuple(outgoing)}
+    # The sent SCM_RIGHTS copies become the controller's sole pipe endpoints.
+    # Close the supervisor copies immediately after send in the caller.
+    result["_close_streams"] = tuple(
+        stream for stream in (process.stdin, process.stdout, process.stderr)
+        if stream is not None)
+    return result
+
+
+def _supervisor_main(control_fd, lock_fd, deadline):
+    import ctypes
+    import resource
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        return 111
+    descriptor_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    authority_floor = max(64, min(int(descriptor_limit) - 16, 65520))
+    moved_control = fcntl.fcntl(
+        control_fd, fcntl.F_DUPFD_CLOEXEC, authority_floor)
+    os.close(control_fd)
+    peer = socket.socket(fileno=moved_control)
+    if lock_fd >= 0:
+        moved_lock = fcntl.fcntl(
+            lock_fd, fcntl.F_DUPFD_CLOEXEC, authority_floor)
+        os.close(lock_fd)
+        lock_fd = moved_lock
+    lock_held = lock_fd >= 0
+    if lock_held:
+        metadata = os.fstat(lock_fd)
+        if (not stat.S_ISREG(metadata.st_mode) or
+                metadata.st_uid != os.geteuid() or
+                stat.S_IMODE(metadata.st_mode) != 0o600):
+            return 112
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                  struct.calcsize("3i"))
+    unused_pid, uid, unused_gid = struct.unpack("3i", credentials)
+    if uid != os.geteuid():
+        return 113
+    entries = {}
+    released = False
+    try:
+        _supervisor_send(peer, {"version": 1, "type": "ready",
+            "pid": os.getpid(), "start_ticks": _process_start_ticks(os.getpid()),
+            "lock_held": lock_held})
+        while True:
+            _supervisor_refresh(entries)
+            try:
+                request, received = _supervisor_receive(peer)
+            except EOFError:
+                break
+            try:
+                if (not isinstance(request, dict) or set(request) != {
+                        "version", "type", "sequence", "operation", "arguments"} or
+                        type(request["version"]) is not int or
+                        request["version"] != 1 or request["type"] != "request" or
+                        type(request["sequence"]) is not int or request["sequence"] <= 0 or
+                        not isinstance(request["arguments"], dict)):
+                    raise ValueError("invalid supervisor request")
+                operation = request["operation"]
+                arguments = request["arguments"]
+                result = None
+                close_streams = ()
+                if operation == "spawn":
+                    result = _supervisor_spawn(
+                        peer, entries, arguments, received,
+                        {peer.fileno(), lock_fd})
+                    close_streams = result.pop("_close_streams")
+                elif received:
+                    raise ValueError("unexpected supervisor descriptors")
+                elif operation in ("poll", "wait", "signal"):
+                    if set(arguments) not in (
+                            {"token"}, {"token", "timeout"},
+                            {"token", "signal"}):
+                        raise ValueError("invalid process request")
+                    token = arguments.get("token")
+                    if token not in entries:
+                        raise ValueError("unknown supervised process")
+                    process = entries[token]["process"]
+                    if operation == "poll":
+                        result = {"returncode": process.poll()}
+                    elif operation == "wait":
+                        timeout = arguments.get("timeout")
+                        if (not isinstance(timeout, (int, float)) or
+                                isinstance(timeout, bool) or
+                                not 0 <= timeout <= _SUPERVISOR_REAP_SECONDS):
+                            raise ValueError("invalid process wait")
+                        try:
+                            code = process.wait(timeout=timeout)
+                            result = {"returncode": code, "timed_out": False}
+                        except subprocess.TimeoutExpired:
+                            result = {"returncode": None, "timed_out": True}
+                    else:
+                        sig = arguments.get("signal")
+                        if (not isinstance(sig, int) or isinstance(sig, bool) or
+                                sig not in (signal.SIGTERM, signal.SIGKILL,
+                                            signal.SIGINT, signal.SIGHUP)):
+                            raise ValueError("invalid process signal")
+                        _supervisor_signal(entries[token], sig)
+                        result = {"returncode": process.poll()}
+                elif operation == "reap":
+                    if set(arguments) != {"scope", "value", "timeout"}:
+                        raise ValueError("invalid reap request")
+                    scope, value = arguments["scope"], arguments["value"]
+                    timeout = arguments["timeout"]
+                    if (not isinstance(timeout, (int, float)) or
+                            isinstance(timeout, bool) or
+                            not 0 <= timeout <= _SUPERVISOR_REAP_SECONDS):
+                        raise ValueError("invalid reap timeout")
+                    if scope == "token" and value in entries:
+                        selected = [value]
+                    elif scope == "role" and value in ("transport", "recipe"):
+                        selected = [token for token, entry in entries.items()
+                                    if entry["role"] == value]
+                    elif scope == "all" and value is None:
+                        selected = list(entries)
+                    else:
+                        raise ValueError("invalid reap scope")
+                    reaped, remaining = _supervisor_reap(entries, selected, timeout)
+                    returncode = (entries[value]["process"].returncode
+                                  if scope == "token" else None)
+                    result = {"reaped": reaped, "remaining": remaining,
+                              "returncode": returncode}
+                elif operation == "release" and arguments == {}:
+                    remaining_budget = max(0.0, deadline - time.monotonic())
+                    reaped, remaining = _supervisor_reap(
+                        entries, list(entries), remaining_budget)
+                    if not reaped or remaining:
+                        raise ValueError("supervisor release before reap")
+                    result = {"released": True}
+                    released = True
+                else:
+                    raise ValueError("unknown supervisor operation")
+                _supervisor_response(peer, request["sequence"], result)
+                for stream in close_streams:
+                    stream.close()
+                if released:
+                    break
+            finally:
+                for descriptor in received:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+    finally:
+        if not released:
+            remaining_budget = max(0.0, deadline - time.monotonic())
+            if remaining_budget > 0:
+                _supervisor_reap(entries, list(entries), remaining_budget)
+            else:
+                _supervisor_refresh(entries)
+                for entry in entries.values():
+                    _supervisor_signal(entry, signal.SIGKILL)
+                    entry["process"].poll()
+        peer.close()
+        if lock_fd >= 0:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+            except OSError:
+                pass
+    return 0 if released else 114
+
+
+def _load_or_create_controller_id(record_store, state_dir):
+    """Return the persistent controller domain, creating it once if empty.
+
+    This private bootstrap seam keeps production startup race-safe while the
+    public ``IoxController`` constructor retains its strict, caller-supplied
+    authority contract.
+    """
+    raw_root = os.fspath(state_dir)
+    if (not isinstance(raw_root, str) or not raw_root or
+            not os.path.isabs(raw_root)):
+        raise ValueError("state_dir must be a non-empty absolute path")
+    _reject_symlink_components(raw_root)
+    root = os.path.realpath(raw_root)
+    if os.path.abspath(raw_root) != root and os.path.lexists(raw_root):
+        raise ValueError("state_dir must not traverse symlinks")
+    raw_store_path = os.fspath(record_store.path)
+    if (not isinstance(raw_store_path, str) or not raw_store_path or
+            not os.path.isabs(raw_store_path)):
+        raise ValueError("record store path must be absolute")
+    _reject_symlink_components(raw_store_path)
+    store_path = os.path.realpath(raw_store_path)
+    if os.path.dirname(store_path) != root:
+        raise ValueError("state_dir and record-store authority diverge")
+    if not os.path.isdir(root):
+        try:
+            os.makedirs(root, 0o700)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+    if os.path.abspath(raw_root) != root:
+        raise ValueError("state_dir must not traverse symlinks")
+    root_metadata = os.lstat(raw_root)
+    if (stat.S_ISLNK(root_metadata.st_mode) or
+            not stat.S_ISDIR(root_metadata.st_mode) or
+            root_metadata.st_uid != os.geteuid()):
+        raise ValueError("unsafe state_dir")
+    iox_directory = os.path.join(root, "iox")
+    try:
+        _safe_directory(iox_directory, create=True)
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+        _safe_directory(iox_directory)
+    authority_path = os.path.join(iox_directory, "authority.json")
+
+    def load():
+        authority = _read_json_strict(authority_path, 16 * 1024)
+        if (not isinstance(authority, dict) or set(authority) !=
+                {"schema_version", "controller_id", "record_store"} or
+                type(authority.get("schema_version")) is not int or
+                authority.get("schema_version") != 1 or
+                not isinstance(authority.get("controller_id"), str) or
+                not _HEX32.fullmatch(authority["controller_id"]) or
+                authority.get("record_store") != store_path):
+            raise ValueError("IOx authority mismatch")
+        return authority["controller_id"]
+
+    if os.path.lexists(authority_path):
+        return load()
+    try:
+        records = record_store.list(strict=True)
+    except TypeError:
+        records = record_store.list()
+    if any(record.get("iox_verification") is not None for record in records):
+        raise ValueError("IOx authority missing for existing journal")
+    candidate = os.urandom(16).hex()
+    try:
+        _durable_json(authority_path, {
+            "schema_version": 1, "controller_id": candidate,
+            "record_store": store_path}, replace=False)
+        return candidate
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+        return load()
+
+
+def _public_journal(journal):
+    if journal is None:
+        return None
+    keys = ("schema_version", "record_id", "transaction_id", "revision",
+            "board_identity", "prior_state", "current_state", "phase",
+            "unresolved", "created_at", "updated_at", "observed_at",
+            "terminal_at")
+    value = dict((key, journal[key]) for key in keys)
+    value["error_category"] = (journal.get("error") or {}).get("category")
+    return value
+
+
+def _session_summary(fence):
+    keys = ("attempt_id", "job_id", "device_id", "board_identity",
+            "operation", "teardown_mode", "record_id", "state")
+    value = dict((key, fence[key]) for key in keys)
+    value["mutation_blocked"] = fence["state"] == "active"
+    return value
+
+
+class _Attempt(object):
+    def __init__(self, controller, operation, request, cancel, recovery=False,
+                 started=None):
+        self.controller = controller
+        self.operation = operation
+        self.request = request
+        self.cancel = cancel
+        self.recovery = recovery
+        self.attempt_id = os.urandom(16).hex()
+        self.started = (controller._monotonic() if started is None else
+                        started)
+        self.session_deadline = self.started + controller.session_seconds
+        self.ordinary_deadline = self.session_deadline - controller.reserve_seconds
+        self.command_id = 0
+        self.transcript = None
+        self.transport = None
+        self.supervisor = None
+        self.lock_fd = None
+        self.fence = None
+        self.fence_owned = False
+        self.fence_path = None
+        self.board = None
+        self.identity = None
+        self.record_id = _get(request, "record_id") if request is not None else None
+        self.journal = None
+        self.primary = None
+        self.recovery_code = None
+        self.recipe_returncode = None
+        self.snapshot = None
+        self.upload_deadline = None
+        self.credentials = {}
+        self.notice = ""
+        self.target = copy.deepcopy(_get(request, "target", {})) if request is not None else {}
+        self.finished_protocol = False
+        self.prechecked_obligations = {}
+        self.safety_recovery = False
+        self.shutdown = threading.Event()
+        self.continuations = {}
+        self.operation_results = []
+        self.durability_uncertain = False
+        self.retire_device_on_success = False
+        self.owner_thread = threading.current_thread()
+
+    def remaining(self):
+        return self.session_deadline - self.controller._monotonic()
+
+    def check(self):
+        if self.is_cancelled():
+            self.invalidate_continuations()
+            raise _ControllerFailure("cancelled", "operation cancelled", 130)
+        if self.controller._monotonic() >= self.session_deadline:
+            raise _ControllerFailure("timeout", "IOx session deadline elapsed", 4)
+
+    def is_cancelled(self):
+        return (self.shutdown.is_set() or
+                (not self.safety_recovery and _cancelled(self.cancel)))
+
+    def invalidate_continuations(self):
+        self.continuations.clear()
+
+    def deadline(self, seconds, ordinary=False):
+        now = self.controller._monotonic()
+        enclosing = self.ordinary_deadline if ordinary else self.session_deadline
+        return min(now + seconds, enclosing)
+
+    def next_context(self, purpose, kind="ssh", record=True):
+        self.command_id += 1
+        journal = self.journal if record else None
+        return {
+            "schema_version": 1, "type": "command_start",
+            "command_id": self.command_id, "kind": kind, "purpose": purpose,
+            "board_identity": self.board,
+            "record_id": journal.get("record_id") if journal else None,
+            "transaction_id": journal.get("transaction_id") if journal else None,
+            "revision": journal.get("revision") if journal else None,
+            "phase": journal.get("phase") if journal else None,
+            "started_at": int(self.controller._now()),
+        }
+
+
+class _IoxContinuation(object):
+    """Opaque, same-process, one-use device-I/O continuation."""
+    __slots__ = ("_pid", "_token")
+
+    def __init__(self, token):
+        self._pid = os.getpid()
+        self._token = token
+
+    def __reduce__(self):
+        raise TypeError("IOx continuations cannot be serialized")
+
+
+class IoxController(object):
+    """Run IOx work under durable physical-board authority."""
+    _mints_enrollment_token = True
+
+    def __init__(self, record_store, authority_config, transport_factory,
+                 now_fn, monotonic_fn):
+        self.store = record_store
+        self.config = dict(authority_config)
+        self.transport_factory = transport_factory
+        self._now = now_fn
+        self._monotonic = monotonic_fn
+        self._closed = False
+        self._active = set()
+        self._active_lock = threading.Lock()
+        self._admission_lock = threading.Lock()
+        try:
+            import iox_transport
+            self._strict_target = transport_factory is iox_transport.IoxTransport
+        except Exception:
+            self._strict_target = False
+        self._validate_config()
+        self._initialize_authority()
+
+    def _validate_config(self):
+        controller_id = self.config.get("controller_id")
+        if (not isinstance(controller_id, str) or
+                not _HEX32.fullmatch(controller_id)):
+            raise ValueError("invalid controller_id")
+        self.controller_id = controller_id
+        raw_state_dir = self.config.get("state_dir")
+        if (not isinstance(raw_state_dir, str) or not raw_state_dir or
+                not os.path.isabs(raw_state_dir)):
+            raise ValueError("state_dir must be a non-empty absolute path")
+        _reject_symlink_components(raw_state_dir)
+        if os.path.lexists(raw_state_dir):
+            if os.path.abspath(raw_state_dir) != os.path.realpath(raw_state_dir):
+                raise ValueError("state_dir must not traverse symlinks")
+            state_metadata = os.lstat(raw_state_dir)
+            if (stat.S_ISLNK(state_metadata.st_mode) or
+                    not stat.S_ISDIR(state_metadata.st_mode) or
+                    state_metadata.st_uid != os.geteuid()):
+                raise ValueError("unsafe state_dir")
+        configured_root = os.path.realpath(raw_state_dir)
+        store_root = os.path.realpath(os.path.dirname(self.store.path))
+        if not os.path.isabs(self.store.path) or not store_root:
+            raise ValueError("record store must have an absolute authority root")
+        # Deployment records resolve transcript evidence relative to their own
+        # durable state root.  Keep one authority tree even when an older
+        # caller supplied its enclosing application-state directory here.
+        self.state_dir = _safe_state_root(store_root)
+        if configured_root != store_root:
+            if os.path.dirname(store_root) != configured_root:
+                raise ValueError("state_dir and record-store authority diverge")
+            self.config["state_dir"] = store_root
+        session = self.config.get("session_seconds", 7200)
+        reserve = self.config.get("restoration_reserve_seconds", 180)
+        if type(session) is not int or session <= 0 or session > _MAX_INT:
+            raise ValueError("invalid session_seconds")
+        if type(reserve) is not int or reserve != 180:
+            raise ValueError("restoration_reserve_seconds must be 180")
+        self.session_seconds = session
+        self.reserve_seconds = reserve
+        appid = self.config.get("application_id", "iris")
+        if (not isinstance(appid, str) or
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", appid) is None):
+            raise ValueError("invalid IOx application_id")
+        self.application_id = appid
+        catalog_url = self.config.get("catalog_url")
+        if catalog_url is not None:
+            self.config["catalog_url"] = _https_url(catalog_url)
+        certificate_path = self.config.get("catalog_certificate_path")
+        if self._strict_target and certificate_path is None:
+            raise ValueError("IOx catalog certificate is required")
+        if certificate_path is not None:
+            descriptor = _open_public_certificate(
+                certificate_path, self._strict_target)
+            os.close(descriptor)
+        if self._strict_target and catalog_url is None:
+            raise ValueError("IOx catalog URL is required")
+        for key, default in (("install_timeout", 300),
+                             ("activate_timeout", 300),
+                             ("start_timeout", 300),
+                             ("state_poll", 5)):
+            value = self.config.get(key, default)
+            if type(value) is not int or not 1 <= value <= 86400:
+                raise ValueError("invalid %s" % key)
+            self.config[key] = value
+        limits = self.config.get("test_limits")
+        expected = frozenset(("session_files", "transcript_files",
+                              "ordinary_transcripts", "active_fences"))
+        if limits is None:
+            limits = {"session_files": _SESSION_FILES,
+                      "transcript_files": _TRANSCRIPT_FILES,
+                      "ordinary_transcripts": _ORDINARY_TRANSCRIPTS,
+                      "active_fences": _ACTIVE_FENCES}
+        if not isinstance(limits, dict) or frozenset(limits) != expected:
+            raise ValueError("invalid test_limits")
+        maxima = {"session_files": _SESSION_FILES,
+                  "transcript_files": _TRANSCRIPT_FILES,
+                  "ordinary_transcripts": _ORDINARY_TRANSCRIPTS,
+                  "active_fences": _ACTIVE_FENCES}
+        for key in expected:
+            if type(limits[key]) is not int or not 1 <= limits[key] <= maxima[key]:
+                raise ValueError("invalid test limit: %s" % key)
+        if limits["ordinary_transcripts"] > limits["transcript_files"] or \
+                limits["active_fences"] > limits["session_files"]:
+            raise ValueError("inconsistent test limits")
+        self.limits = limits
+
+    def _initialize_authority(self):
+        if not os.path.isdir(self.state_dir):
+            os.makedirs(self.state_dir, 0o700)
+        self.iox_dir = os.path.join(self.state_dir, "iox")
+        self.lock_dir = os.path.join(self.iox_dir, "locks")
+        self.session_dir = os.path.join(self.iox_dir, "sessions")
+        self.transcript_dir = os.path.join(self.iox_dir, "transcripts")
+        self.snapshot_dir = os.path.join(self.iox_dir, "snapshots")
+        authority_path = os.path.join(self.iox_dir, "authority.json")
+        store_path = os.path.realpath(self.store.path)
+        configured = self.config.get("record_store")
+        if configured is not None:
+            if not isinstance(configured, str) or not configured:
+                raise ValueError("record_store path is invalid")
+            if not os.path.isabs(configured):
+                # The historical private constructor accepted only a store
+                # basename, resolved under its already validated state root.
+                # Do not interpret a relative path against the process CWD.
+                if (configured != os.path.basename(configured) or
+                        configured in (".", "..")):
+                    raise ValueError("relative record_store path is invalid")
+                configured = os.path.join(self.state_dir, configured)
+            _reject_symlink_components(configured)
+            configured_path = configured
+            if os.path.realpath(configured_path) != store_path:
+                raise ValueError("record_store authority mismatch")
+        journals_exist = False
+        try:
+            records = self.store.list(strict=True)
+            journals_exist = any(record.get("iox_verification") is not None
+                                 for record in records)
+        except TypeError:
+            records = self.store.list()
+            journals_exist = any(record.get("iox_verification") is not None
+                                 for record in records)
+        if os.path.lexists(authority_path):
+            _safe_directory(self.iox_dir)
+            authority = _read_json_strict(authority_path, 16 * 1024)
+            if set(authority) != {"schema_version", "controller_id", "record_store"}:
+                raise ValueError("malformed IOx authority")
+            if (type(authority["schema_version"]) is not int or
+                    authority["schema_version"] != 1 or
+                    authority["controller_id"] != self.controller_id or
+                    authority["record_store"] != store_path):
+                raise ValueError("IOx authority mismatch")
+        else:
+            # Persisted journals require their original controller-domain
+            # authority.  In-memory test stores have no durable store path and
+            # therefore cannot carry that cross-restart binding.
+            if journals_exist and os.path.exists(store_path):
+                raise ValueError("IOx authority missing for existing journal")
+            _safe_directory(self.iox_dir, create=True)
+            _durable_json(authority_path, {
+                "schema_version": 1, "controller_id": self.controller_id,
+                "record_store": store_path}, replace=False)
+        for path in (self.iox_dir, self.lock_dir, self.session_dir,
+                     self.transcript_dir, self.snapshot_dir):
+            _safe_directory(path, create=path != self.iox_dir)
+        self._scan_authority()
+
+    def _scan_authority(self):
+        self._scan_directory(self.lock_dir, ".lock",
+                             self.limits["session_files"],
+                             _SESSION_FILE_BYTES)
+        sessions = self._scan_directory(self.session_dir, ".lock.json",
+                                        self.limits["session_files"],
+                                        _SESSION_FILE_BYTES)
+        transcripts = self._scan_directory(self.transcript_dir, ".transcript",
+                                           self.limits["transcript_files"],
+                                           _TRANSCRIPT_FILE_BYTES)
+        active = 0
+        for path in sessions:
+            fence = _read_json_strict(path, _SESSION_FILE_BYTES)
+            self._validate_fence(fence, path)
+            active += fence["state"] == "active"
+        if active > self.limits["active_fences"]:
+            raise ValueError("too many active IOx fences")
+        store_lock = self.store.path + ".lock"
+        if os.path.lexists(store_lock):
+            directory_fd = _open_directory_anchor(
+                os.path.dirname(store_lock))
+            name = os.path.basename(store_lock)
+            flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                     getattr(os, "O_NOFOLLOW", 0) |
+                     getattr(os, "O_NONBLOCK", 0))
+            try:
+                before = os.stat(name, dir_fd=directory_fd,
+                                 follow_symlinks=False)
+                descriptor = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    metadata = os.fstat(descriptor)
+                    after = os.stat(name, dir_fd=directory_fd,
+                                    follow_symlinks=False)
+                    if (not stat.S_ISREG(metadata.st_mode) or
+                            stat.S_IMODE(metadata.st_mode) != 0o600 or
+                            metadata.st_uid != os.geteuid() or
+                            metadata.st_nlink != 1 or
+                            metadata.st_size > _SESSION_FILE_BYTES or
+                            (before.st_dev, before.st_ino) !=
+                            (metadata.st_dev, metadata.st_ino) or
+                            (after.st_dev, after.st_ino) !=
+                            (metadata.st_dev, metadata.st_ino)):
+                        raise ValueError(
+                            "unsafe deployment-record store lock")
+                finally:
+                    os.close(descriptor)
+            finally:
+                os.close(directory_fd)
+        return sessions, transcripts
+
+    def _scan_directory(self, directory, suffix, limit, maximum):
+        patterns = {
+            ".lock": re.compile(r"^[0-9a-f]{64}\.lock$"),
+            ".lock.json": re.compile(r"^[0-9a-f]{64}\.lock\.json$"),
+            ".transcript": re.compile(r"^[0-9a-f]{32}\.transcript$"),
+        }
+        pattern = patterns.get(suffix)
+        if pattern is None:
+            raise ValueError("unknown IOx authority directory class")
+        result = []
+        directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) |
+                 getattr(os, "O_NOFOLLOW", 0) |
+                 getattr(os, "O_NONBLOCK", 0))
+        directory_before = os.fstat(directory_fd)
+        try:
+            anchored_directory = "/proc/self/fd/%d" % directory_fd
+            with os.scandir(anchored_directory) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if len(result) >= limit:
+                        raise ValueError("IOx authority capacity exceeded")
+                    if (not isinstance(name, str) or
+                            pattern.fullmatch(name) is None):
+                        raise ValueError("unknown IOx authority entry")
+                    before = os.stat(name, dir_fd=directory_fd,
+                                     follow_symlinks=False)
+                    descriptor = os.open(name, flags, dir_fd=directory_fd)
+                    try:
+                        metadata = os.fstat(descriptor)
+                        after = os.stat(name, dir_fd=directory_fd,
+                                        follow_symlinks=False)
+                        fields = ("st_dev", "st_ino", "st_uid", "st_mode",
+                                  "st_nlink", "st_size", "st_mtime_ns",
+                                  "st_ctime_ns")
+                        if (not stat.S_ISREG(metadata.st_mode) or
+                                stat.S_IMODE(metadata.st_mode) != 0o600 or
+                                metadata.st_uid != os.geteuid() or
+                                metadata.st_nlink != 1 or
+                                metadata.st_size > maximum or
+                                any(getattr(before, field) !=
+                                    getattr(metadata, field) or
+                                    getattr(after, field) !=
+                                    getattr(metadata, field)
+                                    for field in fields)):
+                            raise ValueError("unsafe IOx authority entry")
+                    finally:
+                        os.close(descriptor)
+                    result.append(os.path.join(directory, name))
+            directory_after = os.fstat(directory_fd)
+            named_after = os.lstat(directory)
+            directory_fields = ("st_dev", "st_ino", "st_uid", "st_mode",
+                                "st_nlink")
+            if (not stat.S_ISDIR(directory_after.st_mode) or
+                    directory_after.st_uid != os.geteuid() or
+                    stat.S_IMODE(directory_after.st_mode) != 0o700 or
+                    any(getattr(directory_before, field) !=
+                        getattr(directory_after, field) or
+                        getattr(directory_before, field) !=
+                        getattr(named_after, field)
+                        for field in directory_fields)):
+                raise ValueError("authority directory changed during scan")
+        finally:
+            os.close(directory_fd)
+        return result
+
+    def _validate_fence(self, fence, path=None):
+        keys = set("schema_version controller_id board_identity attempt_id device_id job_id operation teardown_mode record_id boot_id supervisor_pid supervisor_start_ticks transcript_ref state created_at updated_at".split())
+        if not isinstance(fence, dict) or set(fence) != keys:
+            raise ValueError("malformed IOx session fence")
+        if (type(fence["schema_version"]) is not int or
+                fence["schema_version"] != 1 or
+                not isinstance(fence["controller_id"], str) or
+                fence["controller_id"] != self.controller_id):
+            raise ValueError("foreign IOx session fence")
+        if (not isinstance(fence["board_identity"], str) or
+                not _BOARD_ID.fullmatch(fence["board_identity"]) or
+                not isinstance(fence["attempt_id"], str) or
+                not _HEX32.fullmatch(fence["attempt_id"])):
+            raise ValueError("invalid IOx session identity")
+        if (not isinstance(fence["job_id"], str) or
+                not _HEX16.fullmatch(fence["job_id"])):
+            raise ValueError("invalid IOx session job")
+        if fence["state"] not in ("active", "reaped"):
+            raise ValueError("invalid IOx session state")
+        if fence["operation"] not in ("install", "uninstall", "recover", "reconcile_enabled"):
+            raise ValueError("invalid IOx session operation")
+        if fence["teardown_mode"] not in ("none", "recorded", "force_agent_only"):
+            raise ValueError("invalid IOx teardown mode")
+        if (not isinstance(fence["device_id"], str) or
+                not _BOARD_ID.fullmatch(fence["device_id"])):
+            raise ValueError("invalid IOx session device")
+        if (fence["record_id"] is not None and
+                (not isinstance(fence["record_id"], str) or
+                 not _RECORD_ID.fullmatch(fence["record_id"]))):
+            raise ValueError("invalid IOx session record")
+        if (not isinstance(fence["boot_id"], str) or
+                not _BOOT_ID.fullmatch(fence["boot_id"])):
+            raise ValueError("invalid IOx session boot identity")
+        for key in ("supervisor_pid", "supervisor_start_ticks",
+                    "created_at", "updated_at"):
+            if (type(fence[key]) is not int or
+                    not 0 <= fence[key] <= _MAX_INT):
+                raise ValueError("invalid IOx session timestamp or process")
+        if (fence["supervisor_pid"] <= 0 or
+                fence["updated_at"] < fence["created_at"]):
+            raise ValueError("invalid IOx session timestamp or process")
+        reference = fence["transcript_ref"]
+        if (not isinstance(reference, dict) or set(reference) != {
+                "id", "attempt_id", "stored_bytes", "observed_bytes",
+                "dropped_bytes", "truncated"} or
+                not isinstance(reference["id"], str) or
+                not _HEX32.fullmatch(reference["id"]) or
+                reference["attempt_id"] != reference["id"] or
+                type(reference["stored_bytes"]) is not int or
+                not 1 <= reference["stored_bytes"] <=
+                _TRANSCRIPT_FILE_BYTES or
+                type(reference["observed_bytes"]) is not int or
+                not 0 <= reference["observed_bytes"] <= _MAX_INT or
+                type(reference["dropped_bytes"]) is not int or
+                not 0 <= reference["dropped_bytes"] <=
+                reference["observed_bytes"] or
+                type(reference["truncated"]) is not bool or
+                reference["attempt_id"] != fence["attempt_id"]):
+            raise ValueError("invalid IOx session transcript reference")
+        import iox_transport
+        iox_transport._load_transcript_prefix(
+            self.state_dir, reference, self.controller_id)
+        if path is not None:
+            expected = _board_key(fence["board_identity"]) + ".json"
+            if os.path.basename(path) != expected:
+                raise ValueError("session fence board-key mismatch")
+
+    def _authority_store_lock(self, attempt):
+        lock_method = getattr(self.store, "_store_lock", None)
+        owner = getattr(lock_method, "__self__", None)
+        if isinstance(owner, deployment_records.DeploymentRecordStore):
+            return _StoreLockContext(lock_method(
+                deadline=attempt.session_deadline,
+                monotonic_fn=self._monotonic))
+        if callable(lock_method):
+            return lock_method()
+        return _NoopContext()
+
+    def _store_call(self, method_name, args, attempt=None, deadline=None,
+                    kwargs=None, mutation=False, required_completion=False):
+        method = getattr(self.store, method_name)
+        call_kwargs = dict(kwargs or {})
+        if isinstance(self.store, deployment_records.DeploymentRecordStore):
+            bound = (attempt.session_deadline if attempt is not None else
+                     deadline)
+            if bound is not None:
+                call_kwargs["deadline"] = bound
+                call_kwargs["monotonic_fn"] = self._monotonic
+        if attempt is not None:
+            if required_completion:
+                if self._monotonic() >= attempt.session_deadline:
+                    raise _ControllerFailure(
+                        "timeout", "IOx session deadline elapsed", 4)
+            else:
+                attempt.check()
+        try:
+            result = method(*args, **call_kwargs)
+        except deployment_records.StoreLockTimeout:
+            raise _ControllerFailure(
+                "timeout", "deployment-record store lock timed out", 4)
+        # A durable mutation may commit before its return value is published
+        # into the attempt.  Its caller publishes first; the next operation
+        # admission observes cancellation or expiry.  Reads retain both checks.
+        if attempt is not None and not mutation:
+            attempt.check()
+        return result
+
+    def _new_attempt(self, operation, request, cancel, recovery=False,
+                     started=None):
+        with self._admission_lock:
+            if self._closed:
+                raise ValueError("controller is closed")
+            attempt = _Attempt(
+                self, operation, request, cancel, recovery, started=started)
+            attempt.check()
+            try:
+                with self._authority_store_lock(attempt):
+                    attempt.check()
+                    sessions, transcripts = self._scan_authority()
+                    expected_board = _get(
+                        _get(request, "target", {}), "device_identity")
+                    if (len(sessions) >= self.limits["session_files"] and
+                            isinstance(expected_board, str) and
+                            _BOARD_ID.fullmatch(expected_board) is not None and
+                            os.path.join(
+                                self.session_dir,
+                                _board_key(expected_board) + ".json") not in
+                            sessions):
+                        raise _ControllerFailure(
+                            "journal_durability",
+                            "session fence capacity exhausted", 5)
+                    ceiling = (self.limits["transcript_files"] if recovery else
+                               self.limits["ordinary_transcripts"])
+                    if len(transcripts) >= ceiling:
+                        raise _ControllerFailure(
+                            "transcript_limit",
+                            "transcript capacity exhausted", 5)
+                    import iox_transport
+                    attempt.check()
+                    try:
+                        attempt.transcript = iox_transport._TranscriptWriter(
+                            self.state_dir, attempt.attempt_id,
+                            self.controller_id, created_at=int(self._now()))
+                    except Exception:
+                        raise _ControllerFailure(
+                            "transcript_limit",
+                            "transcript creation failed", 5)
+            except _ControllerFailure:
+                raise
+            except Exception:
+                raise _ControllerFailure(
+                    "journal_durability",
+                    "authority admission failed", 5)
+            with self._active_lock:
+                if self._closed:
+                    raise ValueError("controller is closed")
+                self._active.add(attempt)
+            return attempt
+
+    def _transport_config(self, attempt):
+        target = attempt.target
+        user = attempt.credentials.get("device_user", "")
+        password = attempt.credentials.get("device_pass", "")
+        enable = attempt.credentials.get("enable_secret") or password
+        credentials = {
+            "DEVICE_PASS": password, "DEVICE_ENABLE": enable,
+            "DEVICE_SSH_PASS": password, "CATALOG_TOKEN":
+                attempt.credentials.get("catalog_token", ""),
+            "SSHPASS": password,
+        }
+        return {
+            "host": str(_get(target, "host", "")),
+            "port": _get(target, "port", 22), "user": str(user),
+            "state_dir": self.state_dir,
+            "tmp_dir": os.path.join(self.iox_dir, "tmp-" + attempt.attempt_id),
+            "home": self.state_dir, "attempt_id": attempt.attempt_id,
+            "controller_id": self.controller_id,
+            "ssh_binary": self.config.get("ssh_binary", "/usr/bin/ssh"),
+            "scp_binary": self.config.get("scp_binary", "/usr/bin/scp"),
+            "sshpass_binary": self.config.get("sshpass_binary", "/usr/bin/sshpass"),
+            "ssh_policy_path": self.config.get("ssh_policy_path",
+                os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "lab", "iris-ssh-policy.sh"))),
+            "ssh_policy_env": dict(self.config.get("ssh_policy_env", {})),
+            "credentials": credentials, "command_contexts": {},
+            "session_deadline": attempt.session_deadline,
+            "cancel": attempt.is_cancelled,
+        }
+
+    def _make_transport(self, attempt, supervisor=None):
+        config = self._transport_config(attempt)
+        transport = self.transport_factory(config, attempt.transcript,
+                                           supervisor, self._monotonic)
+        transport._iris_config = config
+        return transport
+
+    def _start_supervisor(self, attempt):
+        if attempt.supervisor is not None:
+            raise _ControllerFailure(
+                "journal_durability", "duplicate IOx supervisor", 5)
+        try:
+            supervisor = _SupervisorClient.start(
+                attempt.lock_fd, self._monotonic,
+                attempt.session_deadline)
+        except Exception:
+            raise _ControllerFailure(
+                "descendant_unreaped", "IOx supervisor unavailable", 5)
+        attempt.supervisor = supervisor
+        # Its inherited open-file description keeps the flock held.  LOCK_UN
+        # here would also unlock the supervisor's copy.
+        if attempt.lock_fd is not None:
+            os.close(attempt.lock_fd)
+            attempt.lock_fd = None
+
+    def _command(self, attempt, purpose, body, seconds=45, ordinary=False,
+                 record=True, transport=None):
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "device work blocked after durability failure", 5)
+        attempt.check()
+        context = attempt.next_context(purpose, record=record)
+        active = transport or attempt.transport
+        config = getattr(active, "_iris_config", None)
+        if config is None:
+            config = getattr(active, "config", None)
+        if config is not None:
+            config.setdefault("command_contexts", {})[context["command_id"]] = context
+        try:
+            result = active.command(
+                context["command_id"], body,
+                attempt.deadline(seconds, ordinary=ordinary))
+        except Exception as exc:
+            import iox_transport
+            if (transport is None and purpose == "verification_read" and
+                    not isinstance(active, iox_transport.IoxTransport)):
+                raise _SyntheticCommandFailure(exc)
+            raise
+        self._validate_transport_result(result)
+        if transport is None:
+            self._adopt_synthetic_result(attempt, result, context, active)
+            attempt.operation_results.append(result)
+        if transport is None and attempt.fence is not None:
+            self._fence_barrier(attempt)
+        return result, context
+
+    def _adopt_synthetic_result(self, attempt, result, context, transport):
+        """Bind legacy in-process transport doubles to the real transcript.
+
+        Production transport writes this command itself.  A controller-side
+        adapter is necessary for older injected transports: durable record
+        evidence must still name the controller-owned attempt transcript.
+        """
+        reference = _get(result, "transcript_ref")
+        import iox_transport
+        if isinstance(transport, iox_transport.IoxTransport):
+            if reference != attempt.transcript.reference():
+                raise _ControllerFailure(
+                    "authority_mismatch",
+                    "production transport transcript binding changed", 5)
+            return
+        if (isinstance(reference, dict) and
+                reference.get("attempt_id") == attempt.attempt_id):
+            return
+        if context["command_id"] in getattr(attempt.transcript, "_commands", {}):
+            raise _ControllerFailure(
+                "journal_unreadable", "transport transcript binding changed", 5)
+        purpose = context["purpose"]
+        restoration = (purpose == "verification_enable" or
+                       context.get("phase") in
+                       ("ownership_probe", "restore_intent"))
+        attempt.transcript.append(context, restoration=restoration)
+        stdout = bytes(_get(result, "stdout", b""))
+        stderr = bytes(_get(result, "stderr", b""))
+        for name, body in (("stdout", stdout), ("stderr", stderr)):
+            if body:
+                attempt.transcript.append({
+                    "schema_version": 1, "type": "stream",
+                    "command_id": context["command_id"], "stream": name,
+                    "offset": 0,
+                    "data_b64": base64.b64encode(body).decode("ascii")},
+                    restoration=restoration)
+        framing = bool(_get(result, "framing_complete", False))
+        observed_state = None
+        transition = None
+        if purpose == "verification_read":
+            observed_state = self._parse_state(result) if framing else "unknown"
+        elif purpose in ("verification_disable", "verification_enable"):
+            transition, unused_category = iox_transport._classify_transition(
+                purpose, stdout)
+        attempt.transcript.append({
+            "schema_version": 1, "type": "command_end",
+            "command_id": context["command_id"],
+            "finished_at": int(self._now()),
+            "returncode": _get(result, "returncode"),
+            "timed_out": bool(_get(result, "timed_out", False)),
+            "stdout_truncated": bool(_get(result, "stdout_truncated", False)),
+            "stderr_truncated": bool(_get(result, "stderr_truncated", False)),
+            "framing_complete": framing,
+            "error_category": _get(result, "error_category"),
+            "stdout_observed_bytes": len(stdout),
+            "stderr_observed_bytes": len(stderr),
+            "stdout_dropped_bytes": 0, "stderr_dropped_bytes": 0,
+            "payload_spans": ([{"offset": 0, "length": len(stdout)}]
+                              if framing and context["kind"] == "ssh" else []),
+            "observed_state": observed_state,
+            "transition_response": transition,
+        }, restoration=restoration)
+        actual = attempt.transcript.reference()
+        if isinstance(result, dict):
+            result["transcript_ref"] = actual
+        else:
+            setattr(result, "transcript_ref", actual)
+
+    @staticmethod
+    def _transport_ok(result):
+        return (type(_get(result, "returncode")) is int and
+                _get(result, "returncode") == 0 and
+                _get(result, "timed_out") is False and
+                _get(result, "stdout_truncated") is False and
+                _get(result, "stderr_truncated") is False and
+                _get(result, "framing_complete") is True)
+
+    @staticmethod
+    def _validate_transport_result(result):
+        reference = _get(result, "transcript_ref")
+        returncode = _get(result, "returncode")
+        no_process_failure = (
+            returncode is None and
+            _get(result, "error_category") in _RESULT_CODES and
+            _get(result, "framing_complete") is False)
+        if ((not no_process_failure and
+             (type(returncode) is not int or
+              not -255 <= returncode <= 255)) or
+                any(type(_get(result, key)) is not bool for key in
+                    ("timed_out", "stdout_truncated", "stderr_truncated",
+                     "framing_complete")) or
+                not isinstance(_get(result, "stdout"), bytes) or
+                not isinstance(_get(result, "stderr"), bytes) or
+                (_get(result, "error_category") is not None and
+                 _get(result, "error_category") not in _RESULT_CODES) or
+                not isinstance(reference, dict) or set(reference) != {
+                    "id", "attempt_id", "stored_bytes", "observed_bytes",
+                    "dropped_bytes", "truncated"} or
+                not isinstance(reference["id"], str) or
+                not _HEX32.fullmatch(reference["id"]) or
+                not isinstance(reference["attempt_id"], str) or
+                not _HEX32.fullmatch(reference["attempt_id"]) or
+                type(reference["stored_bytes"]) is not int or
+                not 0 <= reference["stored_bytes"] <=
+                _TRANSCRIPT_FILE_BYTES or
+                type(reference["observed_bytes"]) is not int or
+                reference["observed_bytes"] < 0 or
+                type(reference["dropped_bytes"]) is not int or
+                not 0 <= reference["dropped_bytes"] <=
+                reference["observed_bytes"] or
+                type(reference["truncated"]) is not bool):
+            raise _ControllerFailure(
+                "unsupported_response", "malformed IOx transport result", 4)
+
+    def _identity_from_result(self, result):
+        if not self._transport_ok(result):
+            raise _ControllerFailure(_get(result, "error_category") or "transport",
+                                     "identity discovery failed")
+        text = _get(result, "stdout", b"").decode("utf-8", "replace")
+        boards = re.findall(r"^Processor board ID ([A-Za-z0-9._:-]{1,128})\s*$",
+                            text, re.I | re.M)
+        models = re.findall(r"^Model Number\s*:\s*([A-Za-z0-9._-]{1,128})\s*$",
+                            text, re.I | re.M)
+        if not models:
+            models = re.findall(r"^cisco\s+([A-Za-z0-9._-]{1,128})\s+\([^\n]+\)\s+processor\s*$",
+                                text, re.I | re.M)
+        family = "xe" if re.search(r"IOS XE Software", text, re.I) else (
+            "xr" if re.search(r"IOS XR Software", text, re.I) else None)
+        if len(boards) != 1 or len(models) != 1 or family is None:
+            raise _ControllerFailure("identity_mismatch", "unable to establish exact IOx identity", 2)
+        return {"board_identity": boards[0], "board": boards[0],
+                "device_identity": boards[0],
+                "model": models[0], "os_family": family, "platform": "iox"}
+
+    def _discover_and_lock(self, attempt):
+        try:
+            discovery_supervisor = _SupervisorClient.start(
+                None, self._monotonic, attempt.session_deadline)
+        except Exception:
+            raise _ControllerFailure(
+                "descendant_unreaped", "discovery supervisor unavailable", 5)
+        discovery = None
+        context_board = attempt.board
+        attempt.board = None
+        discovery_reaped = False
+        discovery_error = None
+        try:
+            discovery = self._make_transport(attempt, discovery_supervisor)
+            result, unused = self._command(attempt, "identity_discovery", _IDENTITY,
+                                           75, record=False, transport=discovery)
+            identity = self._identity_from_result(result)
+        except Exception as exc:
+            discovery_error = exc
+        finally:
+            deadline = min(self._monotonic() + _SUPERVISOR_REAP_SECONDS,
+                           attempt.session_deadline)
+            transport_reaped = True
+            if discovery is not None:
+                try:
+                    transport_reaped = discovery.cancel_and_reap(deadline)
+                except Exception:
+                    transport_reaped = False
+            try:
+                supervisor_reaped = discovery_supervisor.reap_all(deadline)
+            except Exception:
+                supervisor_reaped = False
+            discovery_reaped = transport_reaped and supervisor_reaped
+            if supervisor_reaped:
+                try:
+                    discovery_reaped = (discovery_supervisor.release(deadline)
+                                        and discovery_reaped)
+                except Exception:
+                    discovery_reaped = False
+            else:
+                try:
+                    discovery_supervisor.abandon(deadline)
+                except Exception:
+                    pass
+            attempt.board = context_board
+        if not discovery_reaped:
+            raise _ControllerFailure(
+                "descendant_unreaped",
+                "identity discovery descendants were not reaped", 5)
+        if discovery_error is not None:
+            raise discovery_error
+        board = identity["board_identity"]
+        expected = _get(attempt.target, "device_identity")
+        if expected and expected != board:
+            raise _ControllerFailure("identity_mismatch", "recorded board identity mismatch", 2)
+        expected_model = _get(attempt.target, "model")
+        if (expected_model and
+                expected_model.upper() != identity["model"].upper()):
+            raise _ControllerFailure(
+                "identity_mismatch", "recorded device model mismatch", 2)
+        if identity["os_family"] != "xe" or (
+                _get(attempt.target, "os_family") is not None and
+                _get(attempt.target, "os_family") != "xe"):
+            raise _ControllerFailure(
+                "identity_mismatch", "target is not IOS XE", 2)
+        package = _get(attempt.target, "pkg")
+        expected_package = ("iris-amd64.tar" if re.match(
+            r"^C9", identity["model"], re.I) else "iris-arm64.tar")
+        if package and package != expected_package:
+            raise _ControllerFailure(
+                "identity_mismatch", "IOx package architecture mismatch", 2)
+        attempt.board = board
+        attempt.identity = identity
+        try:
+            fd = _open_board_lock(self.lock_dir, board)
+        except (OSError, ValueError):
+            raise _ControllerFailure(
+                "journal_durability", "unsafe physical-board lock", 5)
+        wait_deadline = min(self._monotonic() + 60, attempt.session_deadline)
+        while True:
+            if attempt.is_cancelled():
+                os.close(fd)
+                raise _ControllerFailure("cancelled", "operation cancelled", 130)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    _revalidate_board_lock(self.lock_dir, board, fd)
+                except Exception:
+                    os.close(fd)
+                    raise _ControllerFailure(
+                        "journal_durability",
+                        "physical-board lock changed after acquisition", 5)
+                break
+            except BlockingIOError:
+                now = self._monotonic()
+                if now >= wait_deadline:
+                    os.close(fd)
+                    if wait_deadline >= attempt.session_deadline:
+                        raise _ControllerFailure("timeout", "board lock wait exhausted", 4)
+                    raise _ControllerFailure("board_busy", "physical board is busy", 2)
+                time.sleep(min(0.05, wait_deadline - now))
+            except (IOError, OSError):
+                os.close(fd)
+                raise _ControllerFailure(
+                    "journal_durability",
+                    "physical-board lock acquisition failed", 5)
+        attempt.lock_fd = fd
+        self._start_supervisor(attempt)
+        self._admit_fence(attempt)
+        attempt.transport = self._make_transport(attempt, attempt.supervisor)
+        result, unused = self._command(attempt, "identity_revalidation", _IDENTITY,
+                                       75, record=False)
+        locked = self._identity_from_result(result)
+        if any(locked[key] != identity[key]
+               for key in ("board_identity", "model", "os_family")):
+            raise _ControllerFailure("identity_mismatch", "identity changed after board lock", 2)
+
+    def _acquire_known_board_lock(self, attempt):
+        try:
+            fd = _open_board_lock(self.lock_dir, attempt.board)
+        except (OSError, ValueError):
+            raise _ControllerFailure(
+                "journal_unreadable", "unsafe physical-board lock", 5)
+        wait_deadline = min(
+            self._monotonic() + 60, attempt.session_deadline)
+        while True:
+            if attempt.is_cancelled():
+                os.close(fd)
+                raise _ControllerFailure("cancelled", "operation cancelled", 130)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    _revalidate_board_lock(
+                        self.lock_dir, attempt.board, fd)
+                except Exception:
+                    os.close(fd)
+                    raise _ControllerFailure(
+                        "journal_unreadable",
+                        "physical-board lock changed after acquisition", 5)
+                attempt.lock_fd = fd
+                return
+            except BlockingIOError:
+                now = self._monotonic()
+                if now >= wait_deadline:
+                    os.close(fd)
+                    category = ("timeout" if
+                                wait_deadline >= attempt.session_deadline else
+                                "board_busy")
+                    raise _ControllerFailure(
+                        category, "physical board lock wait exhausted",
+                        4 if category == "timeout" else 2)
+                time.sleep(min(0.05, wait_deadline - now))
+            except (IOError, OSError):
+                os.close(fd)
+                raise _ControllerFailure(
+                    "journal_unreadable",
+                    "physical-board lock acquisition failed", 5)
+
+    def _admit_fence(self, attempt):
+        path = os.path.join(self.session_dir, _board_key(attempt.board) + ".json")
+        if attempt.supervisor is None:
+            raise _ControllerFailure(
+                "descendant_unreaped", "missing IOx supervisor custody", 5)
+        reference = attempt.transcript.reference()
+        now = int(self._now())
+        fence = {
+            "schema_version": 1, "controller_id": self.controller_id,
+            "board_identity": attempt.board, "attempt_id": attempt.attempt_id,
+            "device_id": _get(attempt.request, "device_id", "recovery"),
+            "job_id": _get(attempt.request, "job_id", "0" * 16),
+            "operation": attempt.operation,
+            "teardown_mode": (_get(attempt.request, "teardown_mode", "none")
+                              if attempt.operation == "uninstall" else "none"),
+            "record_id": attempt.record_id, "boot_id": _boot_id(),
+            "supervisor_pid": attempt.supervisor.pid,
+            "supervisor_start_ticks": attempt.supervisor.start_ticks,
+            "transcript_ref": reference, "state": "active",
+            "created_at": now, "updated_at": now,
+        }
+        attempt.check()
+        try:
+            with self._authority_store_lock(attempt):
+                attempt.check()
+                sessions, unused_transcripts = self._scan_authority()
+                old = None
+                if path in sessions:
+                    old = _read_json_strict(path, _SESSION_FILE_BYTES)
+                    self._validate_fence(old, path)
+                    if (old["state"] == "active" and
+                            old["boot_id"] == _boot_id()):
+                        attempt.fence = old
+                        attempt.fence_path = path
+                        raise _ControllerFailure(
+                            "descendant_unreaped",
+                            "active same-boot IOx session fence", 5)
+                active = 0
+                for session_path in sessions:
+                    existing = _read_json_strict(
+                        session_path, _SESSION_FILE_BYTES)
+                    self._validate_fence(existing, session_path)
+                    active += existing["state"] == "active"
+                projected_total = len(sessions) + (old is None)
+                projected_active = active + (
+                    old is None or old["state"] == "reaped")
+                if projected_total > self.limits["session_files"]:
+                    raise _ControllerFailure(
+                        "journal_durability",
+                        "session fence capacity exhausted", 5)
+                if projected_active > self.limits["active_fences"]:
+                    raise _ControllerFailure(
+                        "journal_durability",
+                        "active session capacity exhausted", 5)
+                attempt.check()
+                _durable_json(path, fence, replace=old is not None)
+        except _ControllerFailure:
+            raise
+        except ValueError as exc:
+            if "store lock timed out" in str(exc):
+                raise _ControllerFailure(
+                    "timeout", "store lock wait exhausted", 4)
+            raise _ControllerFailure(
+                "journal_durability", "session fence admission failed", 5)
+        except Exception:
+            raise _ControllerFailure(
+                "journal_durability", "session fence admission failed", 5)
+        attempt.fence = fence
+        attempt.fence_path = path
+        attempt.fence_owned = True
+
+    def _update_fence(self, attempt, state=None, record_id=None):
+        if attempt.fence is None:
+            return
+        updated = copy.deepcopy(attempt.fence)
+        if state is not None:
+            updated["state"] = state
+        if record_id is not None:
+            updated["record_id"] = record_id
+        updated["transcript_ref"] = attempt.transcript.reference()
+        updated["updated_at"] = int(self._now())
+        _durable_json(attempt.fence_path, updated)
+        attempt.fence = updated
+
+    def _fence_barrier(self, attempt, state=None, record_id=None):
+        try:
+            self._update_fence(
+                attempt, state=state, record_id=record_id)
+        except _ControllerFailure:
+            attempt.durability_uncertain = True
+            raise
+        except Exception:
+            attempt.durability_uncertain = True
+            raise _ControllerFailure(
+                "journal_durability",
+                "unable to persist IOx session fence", 5)
+
+    def _resolve_credentials(self, attempt):
+        resolver = self.config.get("credential_resolver")
+        reference = _get(attempt.request, "credential_ref") if attempt.request else None
+        if callable(resolver) and reference is not None:
+            value = resolver(reference)
+            if not isinstance(value, dict):
+                raise ValueError("credential resolver returned no credentials")
+            if set(value) - {"name", "device_user", "device_pass",
+                             "enable_secret"}:
+                raise ValueError(
+                    "credential resolver returned unknown fields")
+            if ("name" in value and
+                    (not isinstance(value["name"], str) or
+                     len(value["name"].encode("utf-8")) > 256)):
+                raise ValueError("invalid credential profile name")
+            attempt.credentials = dict(
+                (key, value[key]) for key in
+                ("device_user", "device_pass", "enable_secret")
+                if key in value)
+        if set(attempt.credentials) - {
+                "device_user", "device_pass", "enable_secret",
+                "catalog_token"}:
+            raise ValueError("credential resolver returned unknown fields")
+        for key, value in attempt.credentials.items():
+            if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
+                raise ValueError("invalid credential value")
+        user = attempt.credentials.get("device_user")
+        password = attempt.credentials.get("device_pass")
+        if (self._strict_target and
+                (_SAFE_USER.fullmatch(user or "") is None or not password)):
+            raise ValueError("incomplete IOx device credentials")
+        for key in ("device_pass", "enable_secret"):
+            value = attempt.credentials.get(key)
+            if value is not None and (not value or '"' in value or
+                                      "\\" in value or
+                                      "\r" in value or "\n" in value or
+                                      any(ord(character) > 126
+                                          for character in value)):
+                raise ValueError("invalid IOx credential syntax")
+
+    def _observation(self, attempt, result, context, state=None):
+        import iox_transport
+        reference = _get(result, "transcript_ref")
+        # Frozen transport doubles predate the durable writer and return their
+        # own synthetic reference.  The production transport is domain-bound
+        # to this attempt and always takes the strict parser path below.
+        if reference.get("attempt_id") != attempt.attempt_id:
+            complete = self._transport_ok(result)
+            observed = state if state is not None else self._parse_state(result)
+            stdout = _get(result, "stdout", b"")
+            stderr = _get(result, "stderr", b"")
+            return {
+                "state": observed if complete else "unknown",
+                "observed_at": int(self._now()),
+                "command_id": context["command_id"],
+                "transcript_id": reference["id"],
+                "stdout_offset": 0,
+                "stdout_length": len(stdout) if complete else 0,
+                "stderr_offset": 0, "stderr_length": len(stderr),
+                "returncode": _get(result, "returncode"),
+                "timed_out": bool(_get(result, "timed_out", False)),
+                "truncated": bool(_get(result, "stdout_truncated", False) or
+                                  _get(result, "stderr_truncated", False)),
+                "framing_complete": bool(_get(
+                    result, "framing_complete", False)),
+            }
+        prefix = iox_transport._load_transcript_prefix(
+            self.state_dir, reference, self.controller_id)
+        command = prefix["commands"].get(context["command_id"])
+        if command is None or command.get("end") is None:
+            raise _ControllerFailure(
+                "journal_unreadable", "verification evidence is incomplete", 5)
+        end = command["end"]
+        spans = end["payload_spans"]
+        if len(spans) == 1:
+            stdout_offset = spans[0]["offset"]
+            stdout_length = spans[0]["length"]
+        elif not spans:
+            stdout_offset = 0
+            stdout_length = 0
+        else:
+            raise _ControllerFailure(
+                "journal_unreadable", "verification evidence is ambiguous", 5)
+        if state is None:
+            state = end["observed_state"] or "unknown"
+        return {
+            "state": state,
+            "observed_at": end["finished_at"],
+            "command_id": context["command_id"],
+            "transcript_id": reference["id"],
+            "stdout_offset": stdout_offset,
+            "stdout_length": stdout_length,
+            "stderr_offset": 0,
+            "stderr_length": len(command["stderr"]),
+            "returncode": end["returncode"],
+            "timed_out": end["timed_out"],
+            "truncated": (end["stdout_truncated"] or
+                          end["stderr_truncated"]),
+            "framing_complete": end["framing_complete"],
+        }
+
+    def _parse_state(self, result):
+        if not self._transport_ok(result):
+            return "unknown"
+        lines = _get(result, "stdout", b"").replace(b"\r\n", b"\n").splitlines()
+        matches = []
+        for line in lines:
+            match = re.match(br"^App signature verification: (enabled|disabled)$",
+                             line, re.I)
+            if match:
+                matches.append(match.group(1).decode("ascii").lower())
+        return matches[0] if len(matches) == 1 else "unknown"
+
+    def _verification_read(self, attempt):
+        try:
+            result, context = self._command(
+                attempt, "verification_read", _VERIFY_READ, 45)
+        except _SyntheticCommandFailure as failed:
+            # A transport adapter can fail after its durable command_end was
+            # committed (for example, while notifying an observer).  Continue
+            # only when the strict transcript proves the complete result;
+            # otherwise preserve the original exception.
+            import iox_transport
+            reference = attempt.transcript.reference()
+            try:
+                prefix = iox_transport._load_transcript_prefix(
+                    self.state_dir, reference, self.controller_id)
+                command = prefix["commands"].get(attempt.command_id)
+                if (command is None or command.get("end") is None or
+                        command["start"].get("purpose") !=
+                        "verification_read"):
+                    raise ValueError("no committed verification result")
+            except Exception:
+                raise failed.original
+            context = command["start"]
+            end = command["end"]
+            result = {
+                "returncode": end["returncode"],
+                "timed_out": end["timed_out"],
+                "stdout": command["stdout"], "stderr": command["stderr"],
+                "stdout_truncated": end["stdout_truncated"],
+                "stderr_truncated": end["stderr_truncated"],
+                "framing_complete": end["framing_complete"],
+                "error_category": end["error_category"],
+                "transcript_ref": reference,
+            }
+        return self._observation(attempt, result, context), result, context
+
+    def _bind_catalog_token(self, attempt, token):
+        """Add a freshly minted token to every live bounded redactor."""
+        config = getattr(attempt.transport, "_iris_config", None)
+        credentials = (config.get("credentials")
+                       if isinstance(config, dict) else None)
+        if not isinstance(credentials, dict):
+            raise _ControllerFailure(
+                "authority_mismatch", "transport credential binding missing", 5)
+        credentials["CATALOG_TOKEN"] = token
+        attempt.credentials["catalog_token"] = token
+        import iox_transport
+        if isinstance(attempt.transport, iox_transport.IoxTransport):
+            encoded = token.encode("utf-8")
+            if encoded not in attempt.transport._secret_values:
+                attempt.transport._secret_values.append(encoded)
+
+    def _append_ack(self, attempt, event):
+        journal = attempt.journal
+        attempt.transcript.append({
+            "schema_version": 1, "type": "journal_ack",
+            "record_id": journal["record_id"],
+            "transaction_id": journal["transaction_id"],
+            "revision": journal["revision"], "phase": journal["phase"],
+            "event": event, "at": int(self._now()),
+        })
+        self._fence_barrier(attempt)
+
+    def _issue_continuation(self, attempt, kind):
+        journal = attempt.journal
+        if kind not in ("disable_send", "disable_result", "probe_read",
+                        "probe_result", "enable_send", "restore_result"):
+            raise _ControllerFailure(
+                "invalid_transition", "unknown IOx continuation", 5)
+        if journal is None or any(
+                binding[-1] == kind
+                for binding in attempt.continuations.values()):
+            raise _ControllerFailure(
+                "invalid_transition", "duplicate IOx continuation", 5)
+        token = os.urandom(32).hex()
+        capability = _IoxContinuation(token)
+        binding = (os.getpid(), self.controller_id, attempt.attempt_id,
+                   journal["record_id"], journal["transaction_id"],
+                   attempt.board, journal["revision"], journal["phase"], kind)
+        attempt.continuations[token] = binding
+        return capability
+
+    def _consume_continuation(self, attempt, capability, kind):
+        if (type(capability) is not _IoxContinuation or
+                capability._pid != os.getpid()):
+            attempt.invalidate_continuations()
+            raise _ControllerFailure(
+                "authority_mismatch", "invalid IOx continuation", 5)
+        binding = attempt.continuations.pop(capability._token, None)
+        journal = attempt.journal
+        expected = ((os.getpid(), self.controller_id, attempt.attempt_id,
+                     journal["record_id"], journal["transaction_id"],
+                     attempt.board, journal["revision"], journal["phase"], kind)
+                    if journal is not None else None)
+        if binding != expected:
+            attempt.invalidate_continuations()
+            raise _ControllerFailure(
+                "authority_mismatch", "stale IOx continuation", 5)
+
+    def _event(self, attempt, event, evidence, capability=None, ack=False):
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "journal work blocked after durability failure", 5)
+        journal = attempt.journal
+        try:
+            updated = self._store_call(
+                "iox_event", (
+                    journal["record_id"], journal["transaction_id"],
+                    journal["revision"], journal["phase"], event, evidence),
+                attempt=attempt, kwargs={"capability": capability},
+                mutation=True)
+        except _ControllerFailure:
+            raise
+        except Exception as exc:
+            category = "stale_cas" if type(exc).__name__ == "StaleIoxRevision" else "journal_durability"
+            attempt.durability_uncertain = True
+            raise _ControllerFailure(category, "IOx journal update failed", 5)
+        attempt.journal = updated
+        if ack:
+            self._append_ack(attempt, event)
+        return updated
+
+    def _recover_journal(self, attempt, journal, initiating=False):
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "recovery blocked after durability failure", 5)
+        previous = attempt.safety_recovery
+        attempt.safety_recovery = True
+        try:
+            return self._recover_journal_owned(
+                attempt, journal, initiating=initiating)
+        finally:
+            attempt.safety_recovery = previous
+
+    def _recover_journal_owned(self, attempt, journal, initiating=False):
+        if (not isinstance(journal, dict) or
+                journal.get("controller_id") != self.controller_id):
+            raise _ControllerFailure(
+                "authority_mismatch", "foreign IOx journal authority", 5)
+        attempt.record_id = journal["record_id"]
+        attempt.journal = journal
+        phase = journal["phase"]
+        probe_read = None
+        enable_send = None
+        if not journal["unresolved"]:
+            return 0
+        # Once a durable unresolved ownership phase is held under the board
+        # lock, an external cancellation stops ordinary work but cannot abort
+        # the bounded safety decision.  Controller shutdown remains fatal.
+        if phase == "indeterminate":
+            return 3
+        # A persisted failure after restore intent proves that the one allowed
+        # enable send was already consumed.  Cleanup must preserve the
+        # unresolved obligation instead of issuing a second mutation.
+        if phase == "restore_intent" and journal.get("error") is not None:
+            return 4
+        error = lambda category, detail: {
+            "category": category, "detail": _bounded_text(detail),
+            "at": int(self._now()), "transcript_id": attempt.attempt_id}
+        refs = lambda result: [_get(result, "transcript_ref")]
+        if phase == "ownership_probe" and probe_read is None:
+            prior_transcript = journal["transcript_refs"][-1]["id"]
+            self._event(attempt, "indeterminate", {
+                "observation": None,
+                "error": {
+                    "category": "reconciliation_required",
+                    "detail": "recovered ownership probe has no continuation",
+                    "at": int(self._now()),
+                    "transcript_id": prior_transcript,
+                },
+                "transcript_refs": []})
+            return 3
+        if phase in ("disabled_confirmed", "installing"):
+            self._event(attempt, "ownership_probe", {}, ack=True)
+            probe_read = self._issue_continuation(attempt, "probe_read")
+            phase = "ownership_probe"
+            initiating = True
+        if phase == "ownership_probe":
+            self._consume_continuation(
+                attempt, probe_read, "probe_read")
+            observation, result, unused = self._verification_read(attempt)
+            if observation["state"] == "unknown":
+                self._event(attempt, "error", {"error": error(
+                    _get(result, "error_category") or "readback_unknown",
+                    "verification ownership probe was not authoritative"),
+                    "transcript_refs": refs(result)})
+                return 4
+            if observation["state"] == "enabled":
+                probe_result = self._issue_continuation(
+                    attempt, "probe_result")
+                self._consume_continuation(
+                    attempt, probe_result, "probe_result")
+                capability = deployment_records._issue_iox_capability(
+                    self.controller_id, attempt.attempt_id, journal["record_id"],
+                    journal["transaction_id"], attempt.board,
+                    attempt.journal["revision"], attempt.journal["phase"],
+                    "relinquished", {"observation": observation,
+                                     "transcript_refs": refs(result)})
+                self._event(attempt, "relinquished", {
+                    "observation": observation, "transcript_refs": refs(result)},
+                    capability=capability)
+                return 0
+            probe_result = self._issue_continuation(
+                attempt, "probe_result")
+            self._consume_continuation(
+                attempt, probe_result, "probe_result")
+            self._event(attempt, "restore_intent", {
+                "observation": observation, "transcript_refs": refs(result)},
+                capability=deployment_records._issue_iox_capability(
+                    self.controller_id, attempt.attempt_id, journal["record_id"],
+                    journal["transaction_id"], attempt.board,
+                    attempt.journal["revision"], attempt.journal["phase"],
+                    "restore_intent", {"observation": observation,
+                                       "transcript_refs": refs(result)}), ack=True)
+            enable_send = self._issue_continuation(attempt, "enable_send")
+            phase = "restore_intent"
+            initiating = True
+        if phase == "restore_intent":
+            if enable_send is None:
+                observation, result, unused = self._verification_read(attempt)
+                if observation["state"] == "enabled":
+                    self._event(attempt, "relinquished", {
+                        "observation": observation, "transcript_refs": refs(result)})
+                    return 0
+                self._event(attempt, "indeterminate", {
+                    "observation": observation,
+                    "error": error("reconciliation_required", "restore intent cannot be replayed"),
+                    "transcript_refs": refs(result)})
+                return 3
+            self._consume_continuation(
+                attempt, enable_send, "enable_send")
+            result, enable_context = self._command(
+                attempt, "verification_enable", _VERIFY_ENABLE, 45)
+            if not self._transport_ok(result) or _get(result, "error_category"):
+                self._event(attempt, "error", {"error": error(
+                    _get(result, "error_category") or "unsupported_response",
+                    "verification enable did not complete"),
+                    "transcript_refs": refs(result)})
+                return 4
+            observation, read_result, unused = self._verification_read(attempt)
+            combined = refs(read_result)
+            if observation["state"] != "enabled":
+                self._event(attempt, "error", {"error": error(
+                    "readback_mismatch", "verification enable readback was not enabled"),
+                    "transcript_refs": combined})
+                return 4
+            evidence = {"observation": observation, "transcript_refs": combined}
+            restore_result = self._issue_continuation(
+                attempt, "restore_result")
+            self._consume_continuation(
+                attempt, restore_result, "restore_result")
+            capability = deployment_records._issue_iox_capability(
+                self.controller_id, attempt.attempt_id, journal["record_id"],
+                journal["transaction_id"], attempt.board,
+                attempt.journal["revision"], attempt.journal["phase"],
+                "restored", evidence)
+            self._event(attempt, "restored", evidence, capability=capability)
+            return 0
+        if phase == "disable_intent":
+            observation, result, unused = self._verification_read(attempt)
+            if observation["state"] == "enabled":
+                self._event(attempt, "relinquished", {
+                    "observation": observation, "transcript_refs": refs(result)})
+                return 0
+            self._event(attempt, "indeterminate", {
+                "observation": observation,
+                "error": error("reconciliation_required", "disable effect cannot be inferred"),
+                "transcript_refs": refs(result)})
+            return 3
+        return 0
+
+    def _recover_obligations(self, attempt):
+        try:
+            # This fresh strict store-derived scan occurs under the physical
+            # board lock.  The precontact scan can reject early but never
+            # authorizes mutation after contact.
+            try:
+                self.store.list(strict=True)
+            except TypeError:
+                self.store.list()
+            obligations = self._store_call(
+                "iox_obligations", (attempt.board,), attempt=attempt)
+        except _ControllerFailure:
+            raise
+        except Exception:
+            raise _ControllerFailure(
+                "journal_unreadable", "IOx journal is unreadable", 5)
+        if len(obligations) > 1:
+            raise _ControllerFailure("reconciliation_required",
+                                     "conflicting board verification obligations", 3)
+        if not obligations:
+            return None
+        if any(not isinstance(journal, dict) or
+               journal.get("controller_id") != self.controller_id
+               for journal in obligations):
+            raise _ControllerFailure(
+                "authority_mismatch", "foreign IOx journal authority", 5)
+        if (attempt.operation == "uninstall" and
+                _get(attempt.request, "teardown_mode") ==
+                "force_agent_only" and
+                obligations[0].get("phase") == "restore_intent"):
+            raise _ControllerFailure(
+                "reconciliation_required",
+                "recovered restore intent has no live continuation", 3)
+        code = self._recover_journal(attempt, obligations[0], initiating=False)
+        attempt.recovery_code = code
+        if code:
+            raise _ControllerFailure("reconciliation_required" if code == 3 else
+                                     "readback_unknown", "predecessor recovery failed", code)
+        return obligations[0]
+
+    def _strict_recovery_binding(self, attempt, journal):
+        try:
+            try:
+                record = self.store.get(journal["record_id"], strict=True)
+            except TypeError:
+                record = self.store.get(journal["record_id"])
+        except Exception:
+            raise _ControllerFailure(
+                "journal_unreadable", "IOx recovery record is unreadable", 5)
+        if (not isinstance(record, dict) or
+                record.get("iox_verification") != journal):
+            raise _ControllerFailure(
+                "authority_mismatch", "IOx recovery binding changed", 5)
+        validated = self._record_target(record, attempt.target, "recover")
+        if (validated.get("host") != attempt.target.get("host") or
+                validated.get("device_identity") not in
+                (None, journal["board_identity"])):
+            raise _ControllerFailure(
+                "authority_mismatch", "IOx recovery target changed", 5)
+        attempt.target = validated
+        return record
+
+    def _record_target(self, record, seed, action):
+        resolved = record.get("resolved") or {}
+        projected = {}
+        aliases = {"host": "device_ip", "vlan": "iris_vlan",
+                   "bt_listen_port": "swarm_port"}
+        for key in _TARGET_KEYS:
+            value = resolved.get(aliases.get(key, key))
+            if value in (None, "") and key in resolved:
+                value = resolved.get(key)
+            if value not in (None, ""):
+                projected[key] = copy.deepcopy(value)
+        projected["host"] = resolved.get("device_ip", "")
+        projected.setdefault("platform", "iox")
+        if resolved.get("pkg") in (None, "") and resolved.get("model"):
+            projected["pkg"] = ("iris-amd64.tar" if re.match(
+                r"^C9", resolved["model"], re.I) else "iris-arm64.tar")
+        projected["resources"] = copy.deepcopy(record.get("resources") or [])
+        validated = self._validate_target(projected, action)
+        # Inventory/request values select the durable record; they never
+        # retarget it.  The controller uses this closed projection of the
+        # record and later compares a fresh strict reread with the preliminary
+        # record before device mutation.
+        return validated
+
+    def _revalidate_known_identity(self, attempt, journal):
+        result, unused = self._command(
+            attempt, "identity_revalidation", _IDENTITY, 75)
+        identity = self._identity_from_result(result)
+        model = attempt.target.get("model")
+        if (identity["board_identity"] != journal["board_identity"] or
+                identity["os_family"] != "xe" or
+                (model and model.upper() != identity["model"].upper())):
+            raise _ControllerFailure(
+                "identity_mismatch", "recovery device identity mismatch", 2)
+        attempt.identity = identity
+
+    def _precheck_target_authority(self, attempt):
+        board = _get(attempt.target, "device_identity")
+        if board is None:
+            return
+        if not isinstance(board, str) or not _BOARD_ID.fullmatch(board):
+            raise _ControllerFailure(
+                "identity_mismatch", "invalid recorded board identity", 2)
+        try:
+            obligations = self._store_call(
+                "iox_obligations", (board,), attempt=attempt)
+        except _ControllerFailure:
+            raise
+        except Exception:
+            raise _ControllerFailure(
+                "journal_unreadable", "IOx journal is unreadable", 5)
+        if any(not isinstance(journal, dict) or
+               journal.get("controller_id") != self.controller_id
+               for journal in obligations):
+            raise _ControllerFailure(
+                "authority_mismatch", "foreign IOx journal authority", 5)
+        attempt.prechecked_obligations[board] = obligations
+
+    def _ordinary_install_preflight(self, attempt):
+        """Run collision checks through the already-custodied transport."""
+        result, unused = self._command(
+            attempt, "preflight",
+            b"show app-hosting list\nshow running-config",
+            90, ordinary=True, record=False)
+        if (not self._transport_ok(result) or
+                _get(result, "error_category")):
+            raise _ControllerFailure(
+                _get(result, "error_category") or "rejected",
+                "IOx preflight could not read collision state", 4)
+        # Both read-only command bodies share one bounded, supervised session.
+        # Collision and app-state patterns are anchored, so they remain
+        # unambiguous in the combined normalized output.
+        running = _get(result, "stdout", b"").decode("utf-8", "replace")
+        apps = running
+        appid = str(_get(attempt.target, "iox_appid",
+                         self.config.get("application_id", "iris")))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", appid):
+            raise _ControllerFailure(
+                "unsupported_syntax_local", "invalid IOx application id", 2)
+        match = re.search(
+            r"(?im)^[ \t]*%s[ \t]+(\S+)" % re.escape(appid), apps)
+        app_state = match.group(1).upper() if match else ""
+        stanza = r"(?m)^app-hosting appid %s\s*$" % re.escape(appid)
+        resumable = (re.search(stanza, running) is not None and
+                     app_state in ("DEPLOYED", "ACTIVATED"))
+        collisions = list(_IRIS_NAMED_COLLISIONS)
+        if not resumable:
+            collisions.insert(0, (stanza,
+                                  "the %s app-hosting config" % appid))
+        for pattern, description in collisions:
+            if resumable and description in _IOX_RETRY_REINSTATED:
+                continue
+            if re.search(pattern, running):
+                raise _ControllerFailure(
+                    "rejected", "%s already exists" % description, 2)
+        attempt.identity["status"] = "passed"
+        if resumable:
+            attempt.identity["resumable_app_state"] = app_state
+
+    def _validate_request(self, request, action):
+        if not isinstance(request, dict):
+            raise ValueError("invalid IOx request")
+        allowed = {"action", "device_id", "job_id", "target",
+                   "credential_ref", "record_id", "teardown_mode",
+                   "wrapper_path"}
+        extras = set(request) - allowed
+        if extras and not (action == "uninstall" and
+                           _get(request, "teardown_mode") ==
+                           "force_agent_only" and extras == {"vlan"} and
+                           request.get("vlan") is None):
+            raise ValueError("invalid IOx request fields")
+        if _get(request, "action") != action:
+            raise ValueError("request action mismatch")
+        device_id = _get(request, "device_id")
+        if (not isinstance(device_id, str) or
+                not _BOARD_ID.fullmatch(device_id)):
+            raise ValueError("invalid device_id")
+        job_id = _get(request, "job_id")
+        if not isinstance(job_id, str) or not _HEX16.fullmatch(job_id):
+            raise ValueError("invalid job_id")
+        for forbidden in ("iox_verification", "verification_state", "ownership"):
+            if _has(request, forbidden):
+                raise ValueError("caller cannot supply %s" % forbidden)
+        mode = _get(request, "teardown_mode")
+        record_id = _get(request, "record_id")
+        wrapper = _get(request, "wrapper_path")
+        if action == "install":
+            if mode != "none" or record_id is not None or not wrapper:
+                raise ValueError("invalid install authority tuple")
+        elif mode == "recorded":
+            if (not isinstance(record_id, str) or
+                    not _RECORD_ID.fullmatch(record_id) or wrapper):
+                raise ValueError("invalid recorded uninstall tuple")
+        elif mode == "force_agent_only":
+            if record_id is not None or wrapper:
+                raise ValueError("invalid forced uninstall tuple")
+        else:
+            raise ValueError("invalid uninstall authority tuple")
+        self._validate_target(_get(request, "target"), action)
+        credential_ref = _get(request, "credential_ref")
+        if (not isinstance(credential_ref, str) or not credential_ref or
+                len(credential_ref.encode("utf-8")) > 256 or
+                any(ord(character) < 32 for character in credential_ref)):
+            raise ValueError("invalid credential reference")
+
+    def _validate_target(self, target, action):
+        if not isinstance(target, dict) or set(target) - _TARGET_KEYS:
+            raise ValueError("invalid IOx target fields")
+        for key in target:
+            lowered = key.lower()
+            if any(fragment in lowered for fragment in _SECRET_TARGET_FRAGMENTS):
+                raise ValueError("secret-like IOx target field")
+        if target.get("platform") != "iox":
+            raise ValueError("invalid IOx target platform")
+        host = _ascii_value(target.get("host"), _SAFE_HOST, "host")
+        port = target.get("port", 22)
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise ValueError("invalid IOx target port")
+        normalized = dict((key, copy.deepcopy(value))
+                          for key, value in target.items()
+                          if value is not None and value != "")
+        normalized["host"], normalized["port"] = host, port
+        normalized["platform"] = "iox"
+        if "device_ip" in normalized:
+            _ascii_value(normalized["device_ip"], _SAFE_HOST, "device_ip")
+            if normalized["device_ip"] != host:
+                raise ValueError("IOx target address binding changed")
+        for key in ("model", "device_identity"):
+            if key in normalized:
+                _ascii_value(normalized[key], _SAFE_WORD, key)
+        if "device_identity" in normalized and not _BOARD_ID.fullmatch(
+                normalized["device_identity"]):
+            raise ValueError("invalid IOx target device_identity")
+        if "os_family" in normalized and normalized["os_family"] != "xe":
+            raise ValueError("invalid IOx target os_family")
+        mode = normalized.get("management_type", "routed")
+        if mode == "legacy_routed":
+            mode = "routed"
+        if mode not in ("routed", "inband"):
+            raise ValueError("invalid IOx target management_type")
+        normalized["management_type"] = mode
+        appid = normalized.get("iox_appid", self.application_id)
+        if appid != self.application_id:
+            raise ValueError("IOx application authority changed")
+        normalized["iox_appid"] = self.application_id
+        for key in ("package_fs", "target_fs"):
+            value = normalized.get(key)
+            if value is not None and re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_-]{0,31}:", value) is None:
+                raise ValueError("invalid IOx target %s" % key)
+        normalized.setdefault("package_fs", "flash:")
+        normalized.setdefault("target_fs", "sdflash:")
+        default_pkg = ("iris-amd64.tar" if re.match(
+            r"^C9", normalized.get("model", ""), re.I) else
+            "iris-arm64.tar")
+        pkg = normalized.get("pkg", default_pkg)
+        if (not isinstance(pkg, str) or
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", pkg) is None):
+            raise ValueError("invalid IOx target pkg")
+        normalized["pkg"] = pkg
+        app_intf = normalized.get("app_intf", "AppGigabitEthernet1/1")
+        if (not isinstance(app_intf, str) or
+                re.fullmatch(r"[A-Za-z][A-Za-z0-9./_-]{0,127}", app_intf) is None):
+            raise ValueError("invalid IOx target app_intf")
+        normalized["app_intf"] = app_intf
+        vlan_key = "inband_vlan" if mode == "inband" else "vlan"
+        vlan = normalized.get(vlan_key)
+        if vlan is not None:
+            if isinstance(vlan, str) and vlan.isdigit():
+                vlan = int(vlan)
+            if type(vlan) is not int or not 1 <= vlan <= 4094:
+                raise ValueError("invalid IOx target %s" % vlan_key)
+            normalized[vlan_key] = vlan
+        if mode == "inband" and vlan is not None:
+            normalized["vlan"] = vlan
+        ipv4_fields = ("svi_ip", "guest_ip", "app_ip", "app_gateway",
+                       "ios_ssh_host")
+        for key in ipv4_fields:
+            if key in normalized:
+                _ipv4_value(normalized[key], key)
+        for key in ("svi_mask", "app_mask"):
+            if key in normalized:
+                _ipv4_value(normalized[key], key)
+                if normalized[key] not in _NETMASKS:
+                    raise ValueError("invalid IOx target %s" % key)
+        if mode == "routed":
+            if "svi_mask" in normalized:
+                normalized.setdefault("app_mask", normalized["svi_mask"])
+            if "guest_ip" in normalized:
+                normalized.setdefault("app_ip", normalized["guest_ip"])
+            if "svi_ip" in normalized:
+                normalized.setdefault("app_gateway", normalized["svi_ip"])
+                normalized.setdefault("ios_ssh_host", normalized["svi_ip"])
+        else:
+            if "app_mask" in normalized:
+                normalized.setdefault("svi_mask", normalized["app_mask"])
+            if "app_ip" in normalized:
+                normalized.setdefault("guest_ip", normalized["app_ip"])
+        for key, low, high in (("vpg_number", 0, 4096),
+                               ("bt_listen_port", 1, 65535)):
+            if key in normalized:
+                value = normalized[key]
+                if isinstance(value, str) and value.isdigit():
+                    value = int(value)
+                if type(value) is not int or not low <= value <= high:
+                    raise ValueError("invalid IOx target %s" % key)
+                normalized[key] = value
+        if "nat_interface" in normalized:
+            _ascii_value(normalized["nat_interface"],
+                         re.compile(r"^[A-Za-z][A-Za-z0-9./_-]{0,127}$"),
+                         "nat_interface")
+        if "nat_outside_owned" in normalized:
+            value = normalized["nat_outside_owned"]
+            if value in ("0", "1"):
+                value = value == "1"
+            if type(value) is not bool:
+                raise ValueError("invalid IOx target nat_outside_owned")
+            normalized["nat_outside_owned"] = value
+        share_host = normalized.get("share_host_path")
+        share_ios = normalized.get("share_ios_path")
+        if (share_host is None) != (share_ios is None):
+            raise ValueError("incomplete IOx share binding")
+        if share_host is not None:
+            if (not isinstance(share_host, str) or
+                    re.fullmatch(r"/[A-Za-z0-9._/-]{1,255}", share_host) is None or
+                    any(part in ("", ".", "..")
+                        for part in share_host.split("/")[1:])):
+                raise ValueError("invalid IOx target share_host_path")
+            if (not isinstance(share_ios, str) or re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_-]{0,31}:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*",
+                    share_ios) is None):
+                raise ValueError("invalid IOx target share_ios_path")
+        resources = normalized.get("resources")
+        if resources is not None:
+            if (not isinstance(resources, list) or resources != [{
+                    "kind": "iox-app", "ownership": "iris-created"}]):
+                raise ValueError("invalid IOx target resources")
+        for key in ("telemetry", "telemetry_stream", "log"):
+            normalized[key] = _boolean_word(
+                normalized.get(key, "on" if key == "telemetry" else "off"),
+                key)
+        required = {"model", vlan_key, "resources", "pkg", "target_fs",
+                    "package_fs", "app_intf",
+                    "app_ip", "app_mask", "app_gateway", "ios_ssh_host"}
+        if mode == "routed":
+            required.update(("svi_ip", "svi_mask", "guest_ip"))
+        if self._strict_target and not required.issubset(normalized):
+            raise ValueError("incomplete IOx target plan")
+        return normalized
+
+    def _preselect(self, request, action):
+        if action == "install" or _get(request, "teardown_mode") == "force_agent_only":
+            try:
+                self.store.list(strict=True)
+            except TypeError:
+                self.store.list()
+            return self._validate_target(_get(request, "target"), action), None
+        record_id = _get(request, "record_id")
+        try:
+            record = self.store.get(record_id, strict=True)
+        except TypeError:
+            record = self.store.get(record_id)
+        if record is None:
+            raise ValueError("recorded uninstall record is unavailable")
+        resolved = record.get("resolved") or {}
+        if resolved.get("platform") != "iox" or not resolved.get("device_ip"):
+            raise ValueError("recorded uninstall target is incomplete")
+        target = self._record_target(
+            record, self._validate_target(_get(request, "target"), action),
+            action)
+        return target, copy.deepcopy(record)
+
+    def _base_result(self, attempt, code=0, category=None, detail=""):
+        return {
+            "result_code": code, "returncode": attempt.recipe_returncode,
+            "recovery_code": attempt.recovery_code,
+            "record_id": attempt.record_id,
+            "iox_verification": _public_journal(attempt.journal),
+            "iox_session": _session_summary(attempt.fence) if attempt.fence else None,
+            "error_category": category,
+            "detail": _bounded_text(detail or attempt.notice) if
+                      (detail or attempt.notice) else "",
+        }
+
+    def _finalize(self, attempt, primary=None):
+        if primary is not None and attempt.primary is None:
+            attempt.primary = primary
+        reaped = True
+        if attempt.transport is not None:
+            try:
+                transport_reaped = attempt.transport.cancel_and_reap(
+                    min(self._monotonic() + _SUPERVISOR_REAP_SECONDS,
+                        attempt.session_deadline))
+            except Exception:
+                transport_reaped = False
+            reaped = reaped and transport_reaped
+        if attempt.supervisor is not None:
+            deadline = min(self._monotonic() + _SUPERVISOR_REAP_SECONDS,
+                           attempt.session_deadline)
+            supervisor_reaped = attempt.supervisor.reap_all(deadline)
+            reaped = reaped and supervisor_reaped
+            if reaped and attempt.fence_owned:
+                try:
+                    self._fence_barrier(attempt, state="reaped")
+                except Exception:
+                    reaped = False
+                    if attempt.primary is None:
+                        attempt.primary = _ControllerFailure(
+                            "journal_durability",
+                            "unable to persist IOx reap acknowledgement", 5)
+            if (reaped and attempt.fence_owned and
+                    attempt.fence is not None and
+                    attempt.fence.get("state") == "reaped" and
+                    attempt.retire_device_on_success and
+                    attempt.primary is None and attempt.finished_protocol and
+                    attempt.recipe_returncode == 0 and
+                    attempt.recovery_code in (None, 0)):
+                attempt.retire_device_on_success = False
+                try:
+                    self._store_call(
+                        "retire_device", (
+                            _get(attempt.request, "device_id"),
+                            "forced agent-only teardown; the record no longer describes this device"),
+                        attempt=attempt, mutation=True,
+                        required_completion=True)
+                except _ControllerFailure as exc:
+                    attempt.primary = exc
+                except Exception:
+                    attempt.primary = _ControllerFailure(
+                        "journal_durability",
+                        "forced teardown record retirement failed", 5)
+            if supervisor_reaped:
+                try:
+                    reaped = attempt.supervisor.release(deadline) and reaped
+                except Exception:
+                    reaped = False
+            else:
+                attempt.supervisor.abandon(deadline)
+        if not reaped:
+            attempt.recovery_code = 5
+            if attempt.primary is None:
+                attempt.primary = _ControllerFailure(
+                    "descendant_unreaped",
+                    "device-capable descendants were not reaped", 5)
+        try:
+            deployment_records._invalidate_iox_capabilities(attempt.attempt_id)
+        except Exception:
+            pass
+        attempt.invalidate_continuations()
+        if attempt.lock_fd is not None:
+            try:
+                fcntl.flock(attempt.lock_fd, fcntl.LOCK_UN)
+                os.close(attempt.lock_fd)
+            except OSError:
+                pass
+        with self._active_lock:
+            self._active.discard(attempt)
+        failure = attempt.primary
+        return self._base_result(attempt, failure.code if failure else 0,
+                                 failure.category if failure else None,
+                                 failure.detail if failure else "")
+
+    def run_install(self, request, prepare, preflight, on_output, cancel):
+        execution_started = self._monotonic()
+        self._validate_request(request, "install")
+        target, unused = self._preselect(request, "install")
+        attempt = None
+        try:
+            attempt = self._new_attempt(
+                "install", request, cancel, started=execution_started)
+            attempt.target = target
+            self._precheck_target_authority(attempt)
+            self._resolve_credentials(attempt)
+            self._discover_and_lock(attempt)
+            self._recover_obligations(attempt)
+            attempt.check()
+            # Production collision evidence is always collected through the
+            # supervised IOx transport.  Frozen in-process transport doubles
+            # expose only the older callback seam and cannot classify the
+            # combined read-only command without treating it as a mutation.
+            import iox_transport
+            if isinstance(attempt.transport, iox_transport.IoxTransport):
+                self._ordinary_install_preflight(attempt)
+            evidence = preflight(request, copy.deepcopy(attempt.identity))
+            if evidence is None:
+                raise ValueError("IOx preflight returned no evidence")
+            with iox_transport.admit_wrapper(
+                    _get(request, "wrapper_path"), self.snapshot_dir,
+                    min(self._monotonic() + 120, attempt.session_deadline),
+                    attempt.is_cancelled, monotonic_fn=self._monotonic) as snapshot:
+                attempt.snapshot = snapshot
+                record_id = prepare(request, copy.deepcopy(attempt.identity))
+                if (not isinstance(record_id, str) or
+                        not _RECORD_ID.fullmatch(record_id)):
+                    raise ValueError("prepare returned invalid record_id")
+                attempt.record_id = record_id
+                self._fence_barrier(attempt, record_id=record_id)
+                minter = self.config.get("enrollment_token_minter")
+                if callable(minter):
+                    token = minter(_get(request, "device_id"))
+                    if (not isinstance(token, str) or not token or
+                            len(token) > 4096 or re.fullmatch(
+                                r"[A-Za-z0-9._~+/-]+=*", token) is None):
+                        raise ValueError("invalid enrollment token")
+                    self._bind_catalog_token(attempt, token)
+                observation, result, unused = self._verification_read(attempt)
+                binding = {"wrapper_sha256": snapshot.sha256,
+                           "package_sign_present": snapshot.package_sign_present,
+                           "package_cert_present": snapshot.package_cert_present}
+                try:
+                    attempt.journal = self._store_call(
+                        "iox_begin", (
+                            record_id, self.controller_id, attempt.board,
+                            binding, observation,
+                            _get(result, "transcript_ref")),
+                        attempt=attempt, mutation=True)
+                except _ControllerFailure:
+                    raise
+                except Exception:
+                    raise _ControllerFailure(
+                        "journal_durability",
+                        "IOx journal creation failed", 5)
+                return self._run_recipe(attempt, "install", on_output)
+        except _ControllerFailure as exc:
+            if attempt is None:
+                dummy = _Attempt(self, "install", request, cancel)
+                dummy.record_id = None
+                return self._base_result(dummy, exc.code, exc.category, exc.detail)
+            return self._finalize(attempt, exc)
+        except Exception as exc:
+            if attempt is None:
+                raise
+            supplied_category = getattr(exc, "category", None)
+            category = supplied_category or "rejected"
+            return self._finalize(attempt, _ControllerFailure(
+                category, "IOx install controller failed",
+                _RESULT_CODES.get(category, 2) if supplied_category else 2))
+
+    def run_uninstall(self, request, prepare, preflight, on_output, cancel):
+        execution_started = self._monotonic()
+        self._validate_request(request, "uninstall")
+        target, preliminary = self._preselect(request, "uninstall")
+        attempt = None
+        try:
+            attempt = self._new_attempt(
+                "uninstall", request, cancel, started=execution_started)
+            attempt.target = target
+            self._precheck_target_authority(attempt)
+            if (preliminary is not None and
+                    not (preliminary.get("resolved") or {}).get(
+                        "device_identity")):
+                attempt.notice = (
+                    "historical identity unavailable; authorization used two "
+                    "matching live identity reads")
+            self._resolve_credentials(attempt)
+            self._discover_and_lock(attempt)
+            operation_record_id = attempt.record_id
+            operation_journal = attempt.journal
+            authorized_preliminary = preliminary
+            try:
+                recovered_obligation = self._recover_obligations(attempt)
+                if (recovered_obligation is not None and
+                        operation_record_id is not None and
+                        recovered_obligation.get("record_id") ==
+                        operation_record_id):
+                    if (not isinstance(preliminary, dict) or
+                            preliminary.get("iox_verification") !=
+                            recovered_obligation):
+                        raise _ControllerFailure(
+                            "authority_mismatch",
+                            "recorded recovery binding changed", 5)
+                    authorized_preliminary = copy.deepcopy(preliminary)
+                    authorized_preliminary["iox_verification"] = \
+                        copy.deepcopy(attempt.journal)
+            finally:
+                # A predecessor obligation is recovered under this board lock,
+                # but it is not the uninstall operation's authority.  Restore
+                # the selected recorded binding (or the force operation's null
+                # binding) before admitting the recipe or forming a result.
+                attempt.record_id = operation_record_id
+                attempt.journal = operation_journal
+            attempt.check()
+            preflight(request, copy.deepcopy(attempt.identity))
+            authorized = prepare(request, copy.deepcopy(attempt.identity))
+            mode = _get(request, "teardown_mode")
+            if mode == "recorded":
+                if authorized != attempt.record_id:
+                    raise ValueError("recorded teardown authorization changed")
+                try:
+                    current = self.store.get(attempt.record_id, strict=True)
+                except TypeError:
+                    current = self.store.get(attempt.record_id)
+                if current != authorized_preliminary:
+                    raise ValueError("recorded teardown binding changed")
+            elif authorized is not None:
+                raise ValueError("force must remain recordless")
+            if mode == "force_agent_only":
+                attempt.retire_device_on_success = True
+            result = self._run_recipe(attempt, "uninstall", on_output)
+            return result
+        except _ControllerFailure as exc:
+            if attempt is None:
+                dummy = _Attempt(self, "uninstall", request, cancel)
+                return self._base_result(dummy, exc.code, exc.category, exc.detail)
+            return self._finalize(attempt, exc)
+        except Exception as exc:
+            if attempt is None:
+                raise
+            supplied_category = getattr(exc, "category", None)
+            category = supplied_category or "rejected"
+            return self._finalize(attempt, _ControllerFailure(
+                category, "IOx uninstall controller failed",
+                _RESULT_CODES.get(category, 2) if supplied_category else 2))
+
+    def recover_board(self, board_identity, cancel):
+        execution_started = self._monotonic()
+        if (not isinstance(board_identity, str) or
+                not _BOARD_ID.fullmatch(board_identity)):
+            raise ValueError("invalid board_identity")
+        try:
+            obligations = self._store_call(
+                "iox_obligations", (board_identity,),
+                deadline=execution_started + self.session_seconds)
+        except _ControllerFailure as exc:
+            dummy = _Attempt(
+                self, "recover", None, cancel, True,
+                started=execution_started)
+            return self._base_result(
+                dummy, exc.code, exc.category, exc.detail)
+        except Exception:
+            dummy = _Attempt(
+                self, "recover", None, cancel, True,
+                started=execution_started)
+            return self._base_result(
+                dummy, 5, "journal_unreadable", "IOx journal is unreadable")
+        if not obligations:
+            dummy = _Attempt(self, "recover", None, cancel, True)
+            session_path = os.path.join(
+                self.session_dir, _board_key(board_identity) + ".json")
+            if os.path.lexists(session_path):
+                try:
+                    fence = _read_json_strict(
+                        session_path, _SESSION_FILE_BYTES)
+                    self._validate_fence(fence, session_path)
+                except Exception:
+                    return self._base_result(
+                        dummy, 5, "journal_unreadable",
+                        "IOx session fence is unreadable")
+                dummy.fence = fence
+                if (fence["state"] == "active" and
+                        fence["boot_id"] == _boot_id()):
+                    return self._base_result(
+                        dummy, 5, "descendant_unreaped",
+                        "active same-boot IOx session fence")
+            return self._base_result(dummy, 0)
+        if any(not isinstance(journal, dict) or
+               journal.get("controller_id") != self.controller_id
+               for journal in obligations):
+            dummy = _Attempt(self, "recover", None, cancel, True)
+            return self._base_result(
+                dummy, 5, "authority_mismatch",
+                "foreign IOx journal authority")
+        if len(obligations) != 1:
+            dummy = _Attempt(self, "recover", None, cancel, True)
+            return self._base_result(dummy, 3, "reconciliation_required",
+                                     "conflicting board obligations")
+        journal = obligations[0]
+        try:
+            record = self.store.get(journal["record_id"], strict=True)
+        except TypeError:
+            record = self.store.get(journal["record_id"])
+        if (not isinstance(record, dict) or
+                record.get("iox_verification") != journal):
+            dummy = _Attempt(self, "recover", None, cancel, True)
+            dummy.record_id = journal["record_id"]
+            return self._base_result(
+                dummy, 5, "authority_mismatch",
+                "IOx recovery authority changed")
+        recorded_credential = (record.get("resolved") or {}).get(
+            "credential_profile_id")
+        job_id, device_id, credential_ref = _service_job_context(
+            cancel, record.get("device_id", "recovery"),
+            recorded_credential)
+        request = {"device_id": device_id,
+                   "job_id": job_id, "record_id": journal["record_id"],
+                   "teardown_mode": "none",
+                   "target": self._record_target(record, {}, "recover")}
+        request["credential_ref"] = credential_ref
+        attempt = None
+        cancellation_reported = _cancelled(cancel)
+        recovery_cancel = (lambda: False) if cancellation_reported else cancel
+        try:
+            attempt = self._new_attempt(
+                "recover", request, recovery_cancel, True,
+                started=execution_started)
+            if cancellation_reported:
+                attempt.primary = _ControllerFailure(
+                    "cancelled", "operation cancelled", 130)
+            attempt.target = self._validate_target(request["target"], "recover")
+            attempt.board = board_identity
+            attempt.record_id = journal["record_id"]
+            attempt.journal = journal
+            self._resolve_credentials(attempt)
+            # Recovery already has a durable physical identity; lock/fence first.
+            self._acquire_known_board_lock(attempt)
+            self._start_supervisor(attempt)
+            self._admit_fence(attempt)
+            attempt.transport = self._make_transport(attempt, attempt.supervisor)
+            self._strict_recovery_binding(attempt, journal)
+            self._revalidate_known_identity(attempt, journal)
+            code = self._recover_journal(attempt, journal, initiating=False)
+            attempt.recovery_code = code
+            if code:
+                category = "reconciliation_required" if code == 3 else "readback_unknown"
+                attempt.primary = _ControllerFailure(category, "recovery unresolved", code)
+            return self._finalize(attempt)
+        except _ControllerFailure as exc:
+            if attempt is None:
+                dummy = _Attempt(self, "recover", request, cancel, True)
+                dummy.record_id = journal["record_id"]
+                dummy.journal = journal
+                return self._base_result(dummy, exc.code, exc.category, exc.detail)
+            return self._finalize(attempt, exc)
+        except Exception:
+            if attempt is None:
+                raise
+            return self._finalize(attempt, _ControllerFailure(
+                "journal_durability", "IOx recovery controller failed", 5))
+
+    def reconcile_enabled(self, record_id, transaction_id, expected_revision,
+                          acknowledge_external_resolution, cancel):
+        execution_started = self._monotonic()
+        if (not isinstance(record_id, str) or
+                _RECORD_ID.fullmatch(record_id) is None or
+                not isinstance(transaction_id, str) or
+                _HEX32.fullmatch(transaction_id) is None or
+                type(expected_revision) is not int or
+                not 0 <= expected_revision <= _MAX_INT):
+            raise ValueError("invalid reconciliation binding")
+        if acknowledge_external_resolution is not True:
+            raise ValueError("acknowledge_external_resolution is required")
+        try:
+            record = self.store.get(record_id, strict=True)
+        except TypeError:
+            record = self.store.get(record_id)
+        if record is None:
+            raise ValueError("unknown record")
+        journal = record.get("iox_verification")
+        if (journal is not None and
+                (not isinstance(journal, dict) or
+                 journal.get("controller_id") != self.controller_id)):
+            dummy = _Attempt(self, "reconcile_enabled", None, cancel, True)
+            dummy.record_id = record_id
+            dummy.journal = journal if isinstance(journal, dict) else None
+            return self._base_result(
+                dummy, 5, "authority_mismatch",
+                "foreign IOx journal authority")
+        if (journal is None or journal.get("transaction_id") != transaction_id or
+                journal.get("revision") != expected_revision or
+                journal.get("phase") != "indeterminate"):
+            raise ValueError("stale reconciliation binding")
+        recorded_credential = (record.get("resolved") or {}).get(
+            "credential_profile_id")
+        job_id, device_id, credential_ref = _service_job_context(
+            cancel, record["device_id"], recorded_credential)
+        request = {"device_id": device_id, "job_id": job_id,
+                   "record_id": record_id, "teardown_mode": "none",
+                   "target": self._record_target(
+                       record, {}, "reconcile_enabled")}
+        request["credential_ref"] = credential_ref
+        attempt = None
+        try:
+            attempt = self._new_attempt(
+                "reconcile_enabled", request, cancel, True,
+                started=execution_started)
+            attempt.target = request["target"]
+            attempt.board = journal["board_identity"]
+            attempt.record_id = record_id
+            attempt.journal = journal
+            self._resolve_credentials(attempt)
+            self._acquire_known_board_lock(attempt)
+            self._start_supervisor(attempt)
+            self._admit_fence(attempt)
+            attempt.transport = self._make_transport(attempt, attempt.supervisor)
+            self._strict_recovery_binding(attempt, journal)
+            self._revalidate_known_identity(attempt, journal)
+            observation, result, unused = self._verification_read(attempt)
+            if observation["state"] != "enabled":
+                attempt.primary = _ControllerFailure(
+                    "reconciliation_required", "fresh read did not establish enabled", 3)
+            else:
+                refs = [_get(result, "transcript_ref")]
+                self._event(attempt, "reconcile_enabled", {
+                    "observation": observation,
+                    "acknowledge_external_resolution": True,
+                    "transcript_refs": refs})
+            return self._finalize(attempt)
+        except _ControllerFailure as exc:
+            if attempt is None:
+                dummy = _Attempt(self, "reconcile_enabled", request, cancel, True)
+                dummy.record_id, dummy.journal = record_id, journal
+                return self._base_result(dummy, exc.code, exc.category, exc.detail)
+            return self._finalize(attempt, exc)
+        except Exception:
+            if attempt is None:
+                raise
+            return self._finalize(attempt, _ControllerFailure(
+                "journal_durability", "IOx reconciliation controller failed", 5))
+
+    def _render_command(self, attempt, name):
+        if name not in _COMMANDS:
+            raise _ControllerFailure("unsupported_syntax", "unknown IOx command", 2)
+        target = attempt.target
+        appid = self.application_id
+        mode = target.get("management_type", "routed")
+        package_fs = target.get("package_fs", "flash:")
+        target_fs = target.get("target_fs", "sdflash:")
+        app_intf = target.get("app_intf", "AppGigabitEthernet1/1")
+        vlan = target.get("inband_vlan" if mode == "inband" else "vlan", 666)
+        guest_ip = target.get("app_ip" if mode == "inband" else "guest_ip",
+                              "192.0.2.2")
+        mask = target.get("app_mask" if mode == "inband" else "svi_mask",
+                          "255.255.255.252")
+        gateway = target.get("app_gateway" if mode == "inband" else "svi_ip",
+                             "192.0.2.1")
+        ios_ssh_host = target.get("ios_ssh_host", gateway)
+        share_host = target.get("share_host_path")
+        share_ios = target.get("share_ios_path")
+        transaction = attempt.journal.get("transaction_id") if attempt.journal else None
+        wrapper = (package_fs + "iris-" + transaction + ".tar"
+                   if transaction else package_fs + target.get(
+                       "pkg", "iris-arm64.tar"))
+        if not wrapper.startswith(package_fs):
+            raise _ControllerFailure(
+                "unsupported_syntax", "wrapper filesystem changed", 2)
+        wrapper_name = wrapper[len(package_fs):]
+        if _SAFE_BASENAME.fullmatch(wrapper_name) is None:
+            raise _ControllerFailure(
+                "unsupported_syntax", "invalid IOS wrapper filename", 2)
+        wrapper_pattern = re.escape(wrapper_name)
+        certificate = package_fs + "iris-ca.pem"
+        stage_dir = target_fs + "guest-share/iris"
+        cleanup_common = [
+            "no app-hosting appid %s" % appid,
+            "no event manager applet IRIS-AGENT",
+            "no event manager applet IRIS-COPYROOT",
+            "no event manager applet IRIS-RECLAIM",
+            "no event manager applet IRIS-RECLAIM-BUNDLE"]
+        cleanup_named = [
+            "no logging buffered discriminator IRISQ",
+            "no logging console discriminator IRISQ",
+            "no logging monitor discriminator IRISQ",
+            "no logging discriminator IRISQ",
+            "no ip http client secure-trustpoint IRIS",
+            "no crypto pki trustpoint IRIS"]
+        if name == "iox_status":
+            lines = ["show iox"]
+        elif name == "app_list":
+            lines = ["show app-hosting list"]
+        elif name == "routing_prereq":
+            lines = (["show running-config | include no ip routing",
+                      "show ip route | include Gateway|Default gateway"]
+                     if mode == "routed" else ["show ip interface brief"])
+        elif name == "storage_prereq":
+            lines = (["show sdflash: filesys"] if target_fs == "sdflash:"
+                     else ["dir %s" % target_fs])
+        elif name == "clock":
+            lines = ["show clock"]
+        elif name == "prepare_iox_scp":
+            lines = ["configure terminal", "iox", "file prompt quiet",
+                     "ip scp server enable", "end"]
+        elif name == "configure_network":
+            lines = ["configure terminal", "iox"]
+            if mode == "routed":
+                lines.extend([
+                    "vlan %s" % vlan,
+                    "interface %s" % app_intf,
+                    " switchport mode trunk",
+                    " switchport trunk allowed vlan %s" % vlan,
+                    "interface Vlan%s" % vlan,
+                    " description IRIS IOx app inline",
+                    " ip address %s %s" % (gateway, mask),
+                    " no shutdown"])
+            else:
+                lines.extend([
+                    "interface %s" % app_intf,
+                    " switchport mode trunk",
+                    " switchport trunk allowed vlan add %s" % vlan])
+            lines.extend(["file prompt quiet", "ip scp server enable", "end"])
+        elif name == "mkdir_share":
+            lines = (["mkdir %s" % share_ios] if share_ios
+                     else ["dir %s" % target_fs])
+        elif name in ("app_stop", "app_deactivate", "app_uninstall",
+                      "app_activate", "app_start"):
+            verb = name.split("_", 1)[1]
+            lines = ["app-hosting %s appid %s" % (verb, appid)]
+        elif name == "remove_app_config":
+            lines = ["configure terminal", "no app-hosting appid %s" % appid,
+                     "end"]
+        elif name == "configure_app":
+            catalog_url = self.config.get("catalog_url")
+            if catalog_url is None:
+                if self._strict_target:
+                    raise _ControllerFailure(
+                        "unsupported_syntax_local",
+                        "trusted IOx catalog URL is not configured", 2)
+                # Compatibility for injected, non-production transport
+                # doubles.  The real transport never receives this value.
+                catalog_url = "https://iris.invalid:8443"
+            ssh_user = attempt.credentials.get("device_user", "")
+            ssh_password = attempt.credentials.get("device_pass", "")
+            token = attempt.credentials.get("catalog_token", "")
+            if (_SAFE_USER.fullmatch(ssh_user) is None or not token or
+                    re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is None):
+                raise _ControllerFailure(
+                    "unsupported_syntax_local",
+                    "IOx application credentials are invalid", 2)
+            lines = [
+                "configure terminal",
+                "app-hosting appid %s" % appid,
+                " app-vnic AppGigabitEthernet trunk",
+                "  vlan %s guest-interface 0" % vlan,
+                "   guest-ipaddress %s netmask %s" % (guest_ip, mask),
+                " app-default-gateway %s guest-interface 0" % gateway,
+                " app-resource profile custom",
+                "  cpu 400", "  memory 768", "  persist-disk 2048",
+                "  vcpu 1", " app-resource docker",
+                '  run-opts 1 "-e IRIS_DEVICE_ID=%s"' %
+                    _get(attempt.request, "device_id"),
+                '  run-opts 2 "-e IRIS_DEVICE_SSH_PASS=%s"' % ssh_password,
+                '  run-opts 3 "-e IRIS_CATALOG_TOKEN=%s"' % token,
+                '  run-opts 4 "-e IRIS_CATALOG_URL=%s"' % catalog_url,
+                '  run-opts 5 "-e IRIS_DEVICE_SSH_HOST=%s"' % ios_ssh_host,
+                '  run-opts 6 "-e IRIS_DEVICE_SSH_USER=%s"' % ssh_user,
+                '  run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"',
+                '  run-opts 8 "-e IRIS_TARGET_FS=%s"' % target_fs,
+                '  run-opts 9 "-e IRIS_TELEMETRY=%s"' % target["telemetry"],
+                '  run-opts 10 "-e IRIS_TELEMETRY_STREAM=%s"' %
+                    target["telemetry_stream"],
+                '  run-opts 11 "-e IRIS_LOG=%s"' % target["log"]]
+            if share_host:
+                lines.extend([
+                    '  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"',
+                    '  run-opts 13 "-e IRIS_SHARE_IOS_PATH=%s"' % share_ios,
+                    '  run-opts 14 "-v %s:/mnt/share"' % share_host])
+            lines.append("end")
+        elif name == "app_install":
+            if transaction is None:
+                raise _ControllerFailure(
+                    "unsupported_syntax", "missing wrapper transaction", 2)
+            lines = ["app-hosting install appid %s package %s" %
+                     (appid, wrapper)]
+        elif name == "copy_certificate":
+            lines = ["app-hosting data appid %s copy %s iris-catalog.pem" %
+                     (appid, certificate)]
+        elif name == "save":
+            if (_get(attempt.request, "teardown_mode") ==
+                    "force_agent_only"):
+                raise _ControllerFailure(
+                    "unsupported_syntax", "force teardown cannot save config", 2)
+            lines = ["write memory"]
+        elif name == "remove_wrapper":
+            lines = ["delete /force %s" % wrapper,
+                     "dir %s | include %s" %
+                     (package_fs, wrapper_pattern)]
+        elif name == "remove_certificate":
+            lines = ["delete /force %s" % certificate,
+                     "dir %s | include iris-ca.pem" % package_fs]
+        elif name == "cleanup_config":
+            lines = ["configure terminal"] + cleanup_common
+            if (mode == "inband" or
+                    _get(attempt.request, "teardown_mode") ==
+                    "force_agent_only"):
+                lines.extend(cleanup_named)
+            else:
+                lines.extend(["no interface Vlan%s" % vlan,
+                              "no vlan %s" % vlan,
+                              "no ip http client secure-trustpoint IRIS",
+                              "no crypto pki trustpoint IRIS"])
+            lines.append("end")
+        elif name == "cleanup_files":
+            lines = ["delete /force %s" % certificate,
+                     "delete /force %siris-catalog.pem" % package_fs]
+            if wrapper:
+                lines.insert(0, "delete /force %s" % wrapper)
+            if share_ios:
+                lines.extend([
+                    "delete /force %s/iris-staged.bin" % share_ios,
+                    "delete /force %s/iris-staged.bin.part" % share_ios,
+                    "delete /force %s/iris-probe.txt" % share_ios,
+                    "delete /force /recursive %s/iris" % share_ios])
+            lines.append("delete /force /recursive %s" % stage_dir)
+        elif name == "cleanup_config_probe":
+            include = ("app-hosting appid %s|applet IRIS-|crypto pki "
+                       "trustpoint IRIS|discriminator IRISQ" % appid)
+            if mode == "routed" and _get(
+                    attempt.request, "teardown_mode") != "force_agent_only":
+                include += "|interface Vlan%s|^vlan %s$" % (vlan, vlan)
+            lines = ["show app-hosting list",
+                     "show running-config | include %s" % include]
+        elif name == "cleanup_stage_probe":
+            lines = [
+                "dir %s | include %s|iris-ca\\.pem|iris-catalog\\.pem" %
+                (package_fs, wrapper_pattern),
+                "dir %s" % stage_dir]
+            if share_ios:
+                lines.append(
+                    "dir %s | include iris-staged.bin|iris-probe.txt|iris" %
+                    share_ios)
+        else:
+            raise _ControllerFailure(
+                "unsupported_syntax", "unrendered IOx command", 2)
+        return _command_bytes(lines)
+
+    def _upload(self, attempt, descriptor, purpose, remote):
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "upload blocked after durability failure", 5)
+        context = attempt.next_context(purpose, kind="scp")
+        config = getattr(attempt.transport, "_iris_config", None) or getattr(attempt.transport, "config", None)
+        if config is not None:
+            config["command_contexts"][context["command_id"]] = context
+        if attempt.upload_deadline is None:
+            attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+        result = attempt.transport.upload(descriptor, remote,
+                                          attempt.upload_deadline)
+        self._validate_transport_result(result)
+        self._adopt_synthetic_result(
+            attempt, result, context, attempt.transport)
+        self._fence_barrier(attempt)
+        if not self._transport_ok(result):
+            raise _ControllerFailure(_get(result, "error_category") or "transport",
+                                     "%s failed" % purpose)
+        return result
+
+    def _begin_install(self, attempt):
+        journal = attempt.journal
+        refs = lambda result: [_get(result, "transcript_ref")]
+        if journal["package_sign_present"] or journal["package_cert_present"]:
+            self._event(attempt, "unchanged", {"reason": "marker_present",
+                "observation": None, "transcript_refs": []})
+            return
+        if journal["prior_state"] == "disabled":
+            self._event(attempt, "unchanged", {"reason": "initially_disabled",
+                "observation": None, "transcript_refs": []})
+            return
+        if journal["prior_state"] == "unknown":
+            self._event(attempt, "unchanged", {"reason": "initial_read_unknown",
+                "observation": None, "transcript_refs": []})
+            raise _ControllerFailure("readback_unknown", "initial verification read unknown", 4)
+        observation, result, unused = self._verification_read(attempt)
+        if observation["state"] != "enabled":
+            self._event(attempt, "unchanged", {"reason": "pre_disable_changed",
+                "observation": observation, "transcript_refs": refs(result)})
+            raise _ControllerFailure("readback_unknown", "pre-disable verification changed", 4)
+        retry = None
+        for send_index in range(3):
+            # Verification is restored at ``deployed`` before activate/start;
+            # only disable, disabled readback and the bounded install wait can
+            # consume time while the device remains disabled.
+            required = (45 + 45 + self.config["install_timeout"] +
+                        self.reserve_seconds)
+            if attempt.remaining() < required:
+                raise _ControllerFailure(
+                    "timeout", "insufficient restoration reserve", 4)
+            evidence = {"observation": observation, "retry_command": retry,
+                        "transcript_refs": refs(result)}
+            capability = None
+            if retry is not None:
+                capability = deployment_records._issue_iox_capability(
+                    self.controller_id, attempt.attempt_id,
+                    journal["record_id"], journal["transaction_id"],
+                    attempt.board, attempt.journal["revision"],
+                    attempt.journal["phase"], "disable_intent", evidence)
+            self._event(attempt, "disable_intent", evidence,
+                        capability=capability, ack=True)
+            disable_send = self._issue_continuation(
+                attempt, "disable_send")
+            self._consume_continuation(
+                attempt, disable_send, "disable_send")
+            disabled_result, disabled_context = self._command(
+                attempt, "verification_disable", _VERIFY_DISABLE, 45)
+            category = _get(disabled_result, "error_category")
+            if category == "caf_transient":
+                if send_index == 2:
+                    raise _ControllerFailure(
+                        "caf_transient", "CAF retry budget exhausted")
+                retry = {
+                    "transcript_id": _get(disabled_result,
+                                           "transcript_ref")["id"],
+                    "command_id": disabled_context["command_id"],
+                }
+                observation, result, unused = self._verification_read(attempt)
+                if observation["state"] != "enabled":
+                    raise _ControllerFailure("reconciliation_required",
+                                             "CAF retry state is not enabled", 3)
+                continue
+            if category or not self._transport_ok(disabled_result):
+                raise _ControllerFailure(category or "unsupported_response",
+                                         "verification disable failed")
+            disabled, read_result, read_context = self._verification_read(attempt)
+            if disabled["state"] != "disabled":
+                raise _ControllerFailure("readback_mismatch", "disable readback mismatch")
+            confirmation = {"confirmed_at": disabled["observed_at"],
+                "pre_disable_command_id": observation["command_id"],
+                "disable_command_id": disabled_context["command_id"],
+                "disabled_readback_command_id": read_context["command_id"],
+                "transition_response": "disabled_successfully"}
+            event_evidence = {"confirmation": confirmation,
+                              "transcript_refs": refs(read_result)}
+            disable_result = self._issue_continuation(
+                attempt, "disable_result")
+            self._consume_continuation(
+                attempt, disable_result, "disable_result")
+            capability = deployment_records._issue_iox_capability(
+                self.controller_id, attempt.attempt_id, journal["record_id"],
+                journal["transaction_id"], attempt.board,
+                attempt.journal["revision"], attempt.journal["phase"],
+                "disable_confirmed", event_evidence)
+            self._event(attempt, "disable_confirmed", event_evidence,
+                        capability=capability)
+            self._event(attempt, "installing", {})
+            return
+
+    def _ipc_result(self, sequence, code=0, attempt=None, result=None,
+                    category=None, detail="", stdout_truncated=False,
+                    stderr_truncated=False):
+        journal = attempt.journal if attempt else None
+        wire_category = ("unsupported_syntax" if
+                         category == "unsupported_syntax_local" else category)
+        return {"version": 1, "type": "result", "sequence": sequence,
+            "ok": code == 0, "operation_code": code,
+            "revision": journal.get("revision") if journal else None,
+            "phase": journal.get("phase") if journal else None,
+            "returncode": _get(result, "returncode") if result is not None else None,
+            "timed_out": bool(_get(result, "timed_out", False)) if result is not None else False,
+            "stdout_truncated": bool(stdout_truncated or (_get(result, "stdout_truncated", False) if result else False)),
+            "stderr_truncated": bool(stderr_truncated or (_get(result, "stderr_truncated", False) if result else False)),
+            "framing_complete": bool(_get(result, "framing_complete", True)) if result is not None else True,
+            "error_category": wire_category, "detail": _bounded_text(detail),
+            "transcript_ref": _get(result, "transcript_ref") if result is not None else
+                              (attempt.transcript.reference() if attempt else None),
+            "recipe_returncode": None,
+            "recovery_code": attempt.recovery_code if attempt else None}
+
+    def _send_response(self, peer, sequence, attempt, result, outputs):
+        for stream in ("stdout", "stderr"):
+            body = outputs.get(stream, b"")
+            truncated = len(body) > 32768
+            body = body[:32768]
+            for index, offset in enumerate(range(0, len(body), 4096)):
+                peer.sendall(_encode_frame({"version": 1, "type": "output",
+                    "sequence": sequence, "stream": stream, "index": index,
+                    "data_b64": base64.b64encode(body[offset:offset+4096]).decode("ascii")}))
+            if stream == "stdout" and truncated:
+                result["stdout_truncated"] = True
+            if stream == "stderr" and truncated:
+                result["stderr_truncated"] = True
+        peer.sendall(_encode_frame(result))
+
+    def _admit_recipe_step(self, attempt, action, operation, arguments,
+                           protocol):
+        """Advance the closed recipe language before any selected device I/O."""
+        if protocol["finished"]:
+            raise _ControllerFailure("rejected", "operation after recipe finish", 4)
+        if protocol["cleanup"]:
+            if operation != "finish" or set(arguments) != {"exit_intent"}:
+                raise _ControllerFailure(
+                    "rejected", "operation after recipe cleanup", 4)
+            protocol["finished"] = True
+            return
+        if operation == "cleanup":
+            intent = arguments.get("exit_intent")
+            declared_failure = (type(intent) is int and
+                                not isinstance(intent, bool) and
+                                1 <= intent <= 255)
+            if (set(arguments) != {"reason", "exit_intent"} or
+                    (attempt.primary is None and
+                     not protocol["terminal_ready"] and
+                     not declared_failure)):
+                raise _ControllerFailure("rejected", "premature recipe cleanup", 4)
+            protocol["cleanup"] = True
+            return
+        if operation == "finish":
+            if (set(arguments) != {"exit_intent"} or
+                    (attempt.primary is None and not protocol["terminal_ready"])):
+                raise _ControllerFailure("rejected", "premature recipe finish", 4)
+            protocol["finished"] = True
+            return
+        if attempt.primary is not None:
+            raise _ControllerFailure(
+                "rejected", "ordinary operation after recipe failure", 4)
+        name = arguments.get("name") if operation == "command" else operation
+        if not isinstance(name, str):
+            raise _ControllerFailure("rejected", "invalid recipe operation", 4)
+        seen = protocol["seen"]
+        if action == "install":
+            if not protocol["begun"]:
+                allowed = {"upload_wrapper", "upload_certificate",
+                           "routing_prereq", "storage_prereq", "clock",
+                           "prepare_iox_scp", "iox_status"}
+                if name == "begin_install":
+                    if "upload_wrapper" not in protocol["completed"]:
+                        raise _ControllerFailure(
+                            "rejected", "begin before wrapper upload", 4)
+                    protocol["begun"] = True
+                    seen.add(name)
+                    return
+                if name not in allowed:
+                    raise _ControllerFailure(
+                        "rejected", "application mutation before admission", 4)
+                if name == "iox_status":
+                    deadline = protocol["phase_deadlines"].setdefault(
+                        "iox", min(attempt.ordinary_deadline,
+                                   self._monotonic() + 180))
+                    if protocol["iox_polls"]:
+                        self._wait_poll(
+                            attempt, deadline, protocol["iox_polls"], 24)
+                    protocol["iox_polls"] += 1
+                    if protocol["iox_polls"] > 24:
+                        raise _ControllerFailure("rejected", "excess IOx polling", 4)
+                    return
+                if name in seen:
+                    raise _ControllerFailure("rejected", "replayed recipe step", 4)
+                seen.add(name)
+                return
+            ranks = {
+                "app_stop": 1, "app_deactivate": 2, "app_uninstall": 3,
+                "remove_app_config": 4, "configure_network": 5,
+                "mkdir_share": 6, "configure_app": 7, "app_install": 8,
+                "deployed": 9, "app_activate": 10,
+                "upload_certificate": 11, "copy_certificate": 12,
+                "remove_certificate": 13, "remove_wrapper": 14,
+                "app_start": 15, "save": 16,
+            }
+            if name == "app_list":
+                if protocol["rank"] not in (8, 10, 15):
+                    raise _ControllerFailure("rejected", "poll outside lifecycle wait", 4)
+                key = "install-%d" % protocol["rank"]
+                count = protocol["polls"].get(key, 0)
+                deadline = protocol["phase_deadlines"].get(key)
+                if deadline is None:
+                    raise _ControllerFailure(
+                        "rejected", "missing lifecycle poll authority", 4)
+                if self._monotonic() >= deadline:
+                    raise _ControllerFailure(
+                        "timeout", "lifecycle polling deadline elapsed", 4)
+                if count:
+                    self._wait_poll(attempt, deadline, count, 24)
+                protocol["polls"][key] = count + 1
+                if protocol["polls"][key] > 24:
+                    raise _ControllerFailure("rejected", "excess application polling", 4)
+                return
+            if name not in ranks or name in seen:
+                raise _ControllerFailure("rejected", "replayed or unknown install step", 4)
+            rank = ranks[name]
+            current = protocol["rank"]
+            required = {
+                1: 0, 2: 1, 3: 2, 4: 3,
+                5: 4, 6: 4, 7: 4, 8: 1, 9: 8,
+                10: 9, 11: 10, 12: 10, 13: 12, 14: 13,
+                15: 10, 16: 15,
+            }[rank]
+            if current < required or rank < current:
+                raise _ControllerFailure("rejected", "out-of-order install step", 4)
+            if name == "deployed":
+                deadline = protocol["phase_deadlines"].get("install-8")
+                if deadline is None or self._monotonic() >= deadline:
+                    raise _ControllerFailure(
+                        "timeout", "application install deadline elapsed", 4)
+            if rank == 7 and current not in (4, 5, 6):
+                raise _ControllerFailure("rejected", "out-of-order app config", 4)
+            if rank == 11 and "upload_certificate" in seen:
+                raise _ControllerFailure("rejected", "replayed certificate upload", 4)
+            if (rank in (12, 13, 14, 15) and
+                    "upload_certificate" not in protocol["completed"]):
+                raise _ControllerFailure("rejected", "certificate was not uploaded", 4)
+            if rank == 15 and current not in (10, 11, 14):
+                raise _ControllerFailure(
+                    "rejected", "incomplete certificate cleanup", 4)
+            seen.add(name)
+            protocol["rank"] = max(current, rank)
+            if name == "deployed":
+                # The frozen minimal recipe intentionally stops after the
+                # controller has proved DEPLOYED and restored verification.
+                protocol["terminal_ready"] = True
+            if name in ("app_stop", "app_activate", "app_start"):
+                phase_rank = {"app_stop": 8, "app_activate": 10,
+                              "app_start": 15}[name]
+                key = "install-%d" % phase_rank
+                budget = {"app_stop": self.config["install_timeout"],
+                          "app_activate": self.config["activate_timeout"],
+                          "app_start": self.config["start_timeout"]}[name]
+                protocol["phase_deadlines"][key] = min(
+                    attempt.ordinary_deadline, self._monotonic() + budget)
+            if name == "save":
+                protocol["terminal_ready"] = True
+            return
+        ranks = {
+            "app_stop": 1, "app_deactivate": 2, "app_uninstall": 3,
+            "remove_app_config": 4, "cleanup_config": 4,
+            "remove_wrapper": 5, "remove_certificate": 6,
+            "cleanup_files": 7, "cleanup_config_probe": 8,
+            "cleanup_stage_probe": 9, "save": 10,
+        }
+        if name == "app_list":
+            if protocol["rank"] != 3:
+                raise _ControllerFailure("rejected", "poll outside uninstall wait", 4)
+            count = protocol["polls"].get("uninstall", 0)
+            deadline = protocol["phase_deadlines"].get("uninstall")
+            if deadline is None:
+                raise _ControllerFailure(
+                    "rejected", "missing uninstall poll authority", 4)
+            if self._monotonic() >= deadline:
+                raise _ControllerFailure(
+                    "timeout", "lifecycle polling deadline elapsed", 4)
+            if count:
+                self._wait_poll(attempt, deadline, count, 24,
+                                fixed_interval=self.config["state_poll"])
+            protocol["polls"]["uninstall"] = count + 1
+            if protocol["polls"]["uninstall"] > 24:
+                raise _ControllerFailure("rejected", "excess application polling", 4)
+            return
+        if name not in ranks or name in seen:
+            raise _ControllerFailure("rejected", "replayed or unknown uninstall step", 4)
+        rank = ranks[name]
+        current = protocol["rank"]
+        required = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4,
+                    6: 4, 7: 4, 8: 4, 9: 8, 10: 9}[rank]
+        if current < required or rank <= current:
+            raise _ControllerFailure("rejected", "out-of-order uninstall step", 4)
+        seen.add(name)
+        protocol["rank"] = rank
+        if name == "app_uninstall":
+            protocol["phase_deadlines"]["uninstall"] = min(
+                attempt.ordinary_deadline,
+                self._monotonic() + self.config["state_poll"] * 23)
+        if name in ("cleanup_stage_probe", "save"):
+            protocol["terminal_ready"] = True
+
+    def _wait_poll(self, attempt, phase_deadline, completed, maximum,
+                   fixed_interval=None):
+        now = self._monotonic()
+        remaining_slots = maximum - completed
+        if remaining_slots <= 0 or now >= phase_deadline:
+            raise _ControllerFailure(
+                "timeout", "lifecycle polling deadline elapsed", 4)
+        delay = (fixed_interval if fixed_interval is not None else
+                 max(float(self.config["state_poll"]),
+                     (phase_deadline - now) / remaining_slots))
+        poll_at = min(phase_deadline, now + delay)
+        while self._monotonic() < poll_at:
+            attempt.check()
+            select.select([], [], [], min(
+                0.01, max(0.0, poll_at - self._monotonic())))
+        if self._monotonic() >= phase_deadline:
+            raise _ControllerFailure(
+                "timeout", "lifecycle polling deadline elapsed", 4)
+
+    def _cleanup_remote_artifacts(self, attempt, protocol):
+        """Remove and verify this attempt's admitted transient uploads."""
+        previous = attempt.safety_recovery
+        attempt.safety_recovery = True
+        try:
+            completed = protocol["completed"]
+            admitted = protocol["seen"]
+            for upload, removal, basename in (
+                    ("upload_certificate", "remove_certificate", "iris-ca.pem"),
+                    ("upload_wrapper", "remove_wrapper",
+                     "iris-%s.tar" % attempt.journal["transaction_id"])):
+                if upload not in admitted or removal in completed:
+                    continue
+                result, unused = self._command(
+                    attempt, removal, self._render_command(attempt, removal), 45)
+                if (not self._transport_ok(result) or
+                        _get(result, "error_category") or
+                        re.search(br"(?mi)^.*%s.*$" %
+                                  re.escape(basename.encode("ascii")),
+                                  _get(result, "stdout", b""))):
+                    raise _ControllerFailure(
+                        _get(result, "error_category") or "rejected",
+                        "IOx transient cleanup could not be verified", 4)
+                completed.add(removal)
+        finally:
+            attempt.safety_recovery = previous
+
+    def _run_recipe(self, attempt, action, on_output):
+        # Cancellation observed after board-scoped revalidation wins over any
+        # later local recipe admission failure.  This also lets a waiter leave
+        # promptly once it acquires a contended physical-board lock.
+        attempt.check()
+        argv = (self.config.get("recipe_argv_by_action") or {}).get(action)
+        if not argv:
+            raise _ControllerFailure("rejected", "IOx recipe is not configured", 4)
+        parent, child = socket.socketpair()
+        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8",
+               "LC_ALL": "C.UTF-8", "IRIS_IOX_CONTROL_FD": str(child.fileno())}
+        if attempt.supervisor is None:
+            raise _ControllerFailure(
+                "descendant_unreaped", "missing IOx supervisor custody", 5)
+        process = attempt.supervisor.popen(list(argv), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            pass_fds=(child.fileno(),), close_fds=True,
+            start_new_session=True, role="recipe",
+            timeout=attempt.remaining())
+        child.close()
+        capture_secrets = [value.encode("utf-8") for value in
+                           attempt.transport._iris_config["credentials"].values()
+                           if value]
+        recipe_capture = _RecipeCapture(process, capture_secrets)
+        sequence = 1
+        expected_exit = None
+        protocol_failure = None
+        protocol = {"seen": set(), "completed": set(),
+                    "rank": 0, "begun": False,
+                    "iox_polls": 0, "polls": {}, "cleanup": False,
+                    "finished": False, "terminal_ready": False,
+                    "phase_deadlines": {}, "scp_prepared": False}
+        try:
+            while True:
+                attempt.check()
+                ready = {"version": 1, "type": "ready", "next_sequence": sequence,
+                    "attempt_id": attempt.attempt_id, "action": action,
+                    "teardown_mode": _get(attempt.request, "teardown_mode"),
+                    "record_id": attempt.record_id,
+                    "transaction_id": attempt.journal["transaction_id"] if action == "install" else None,
+                    "expected_revision": attempt.journal["revision"] if action == "install" else None,
+                    "board_identity": attempt.board,
+                    "wrapper_sha256": attempt.journal["wrapper_sha256"] if action == "install" else None}
+                parent.sendall(_encode_frame(ready))
+                request = _read_frame_socket(parent, attempt.session_deadline,
+                                             attempt.is_cancelled, self._monotonic)
+                expected_keys = set("version sequence attempt_id action teardown_mode record_id transaction_id expected_revision board_identity wrapper_sha256 operation arguments".split())
+                if not isinstance(request, dict) or set(request) != expected_keys:
+                    raise _ControllerFailure("rejected", "invalid recipe request")
+                for key in ("version", "sequence", "attempt_id", "action",
+                            "teardown_mode", "record_id", "transaction_id",
+                            "expected_revision", "board_identity", "wrapper_sha256"):
+                    expected = ready["next_sequence"] if key == "sequence" else ready[key]
+                    if (type(request[key]) is not type(expected) or
+                            request[key] != expected):
+                        raise _ControllerFailure("rejected", "recipe binding mismatch")
+                operation = request["operation"]
+                arguments = request["arguments"]
+                if not isinstance(operation, str) or type(arguments) is not dict:
+                    raise _ControllerFailure("rejected", "invalid recipe operation")
+                self._admit_recipe_step(
+                    attempt, action, operation, arguments, protocol)
+                outputs = {"stdout": b"", "stderr": b""}
+                transport_result = None
+                operation_result_start = len(attempt.operation_results)
+                try:
+                    if operation == "upload_wrapper" and arguments == {} and action == "install":
+                        import iox_transport
+                        if (not protocol["scp_prepared"] and
+                                isinstance(attempt.transport,
+                                           iox_transport.IoxTransport)):
+                            prepared, unused = self._command(
+                                attempt, "prepare_iox_scp",
+                                self._render_command(
+                                    attempt, "prepare_iox_scp"),
+                                45, ordinary=True)
+                            if (not self._transport_ok(prepared) or
+                                    _get(prepared, "error_category")):
+                                raise _ControllerFailure(
+                                    _get(prepared, "error_category") or
+                                    "rejected",
+                                    "IOx SCP preparation failed", 4)
+                            protocol["scp_prepared"] = True
+                        package_fs = str(_get(attempt.target, "package_fs", "flash:"))
+                        if not package_fs.endswith((":", "/")): package_fs += "/"
+                        remote = package_fs + "iris-" + attempt.journal["transaction_id"] + ".tar"
+                        transport_result = self._upload(attempt, attempt.snapshot.fd,
+                                                        "upload_wrapper", remote)
+                    elif operation == "upload_certificate" and arguments == {} and action == "install":
+                        certificate = self.config.get("catalog_certificate_path")
+                        fd = _open_public_certificate(
+                            certificate, self._strict_target)
+                        try:
+                            package_fs = attempt.target.get(
+                                "package_fs", "flash:")
+                            transport_result = self._upload(attempt, fd, "upload_certificate",
+                                                            package_fs + "iris-ca.pem")
+                        finally:
+                            os.close(fd)
+                    elif operation == "begin_install" and arguments == {} and action == "install":
+                        self._begin_install(attempt)
+                    elif operation == "deployed" and arguments == {} and action == "install":
+                        install_deadline = protocol["phase_deadlines"][
+                            "install-8"]
+                        remaining = install_deadline - self._monotonic()
+                        if remaining <= 0:
+                            raise _ControllerFailure(
+                                "timeout", "application install deadline elapsed", 4)
+                        transport_result, unused = self._command(
+                            attempt, "app_list",
+                            self._render_command(attempt, "app_list"),
+                            min(remaining, 180), ordinary=True)
+                        if (not self._transport_ok(transport_result) or
+                                not re.search(br"(?mi)^iris\s+DEPLOYED\s*$",
+                                              _get(transport_result, "stdout", b""))):
+                            raise _ControllerFailure(_get(transport_result, "error_category") or
+                                                     "rejected", "IRIS application not DEPLOYED")
+                        code = self._recover_journal(attempt, attempt.journal, initiating=True)
+                        if code:
+                            attempt.recovery_code = code
+                            raise _ControllerFailure("readback_unknown", "verification restoration failed", code)
+                    elif operation == "command" and isinstance(arguments, dict) and set(arguments) == {"name"}:
+                        name = arguments["name"]
+                        if action == "uninstall" and name not in _UNINSTALL_COMMANDS:
+                            raise _ControllerFailure("unsupported_syntax", "command not permitted for uninstall", 2)
+                        if (name == "storage_prereq" and
+                                attempt.target.get("target_fs") != "sdflash:"):
+                            transport_result = {
+                                "returncode": 0, "timed_out": False,
+                                "stdout": b"IOx Partition Exists (not required)\n",
+                                "stderr": b"", "stdout_truncated": False,
+                                "stderr_truncated": False,
+                                "framing_complete": True,
+                                "error_category": None,
+                                "transcript_ref": attempt.transcript.reference()}
+                        elif (name == "prepare_iox_scp" and
+                              protocol["scp_prepared"]):
+                            transport_result = {
+                                "returncode": 0, "timed_out": False,
+                                "stdout": b"", "stderr": b"",
+                                "stdout_truncated": False,
+                                "stderr_truncated": False,
+                                "framing_complete": True,
+                                "error_category": None,
+                                "transcript_ref":
+                                    attempt.transcript.reference()}
+                        else:
+                            body = self._render_command(attempt, name)
+                            timeout = {
+                                "app_install": self.config["install_timeout"],
+                                "app_activate": self.config["activate_timeout"],
+                                "app_start": self.config["start_timeout"],
+                            }.get(name, 45)
+                            if name == "app_list":
+                                timeout = min(timeout, 180)
+                            phase_key = None
+                            if action == "install":
+                                if name == "iox_status":
+                                    phase_key = "iox"
+                                elif name in (
+                                        "app_stop", "app_deactivate",
+                                        "app_uninstall", "remove_app_config",
+                                        "configure_network", "mkdir_share",
+                                        "configure_app", "app_install"):
+                                    phase_key = "install-8"
+                                elif protocol["rank"] in (8, 10, 15):
+                                    phase_key = "install-%d" % protocol["rank"]
+                            elif action == "uninstall" and name == "app_list":
+                                phase_key = "uninstall"
+                            if phase_key is not None:
+                                phase_deadline = protocol[
+                                    "phase_deadlines"].get(phase_key)
+                                remaining = (phase_deadline - self._monotonic()
+                                             if phase_deadline is not None else 0)
+                                if remaining <= 0:
+                                    raise _ControllerFailure(
+                                        "timeout",
+                                        "lifecycle operation deadline elapsed", 4)
+                                timeout = min(timeout, remaining)
+                            transport_result, unused = self._command(
+                                attempt, name, body, timeout, ordinary=True)
+                            if name == "prepare_iox_scp":
+                                protocol["scp_prepared"] = True
+                        if not self._transport_ok(transport_result) or _get(transport_result, "error_category"):
+                            raise _ControllerFailure(_get(transport_result, "error_category") or "rejected",
+                                                     "IOx command failed")
+                        if name in ("remove_wrapper", "remove_certificate"):
+                            if name == "remove_certificate":
+                                basename = "iris-ca.pem"
+                            else:
+                                remote = self._render_command(
+                                    attempt, "remove_wrapper").split(
+                                        b"\n", 1)[0].split(b" ")[-1].decode(
+                                            "ascii")
+                                basename = os.path.basename(
+                                    remote.rsplit(":", 1)[-1])
+                            if re.search(br"(?mi)^.*%s.*$" % re.escape(
+                                    basename.encode("ascii")),
+                                    _get(transport_result, "stdout", b"")):
+                                raise _ControllerFailure(
+                                    "rejected",
+                                    "IOx transient cleanup left residue", 4)
+                        if action == "uninstall" and name == "app_stop":
+                            outputs["stdout"] += (
+                                "IRIS-READY-MODE:%s\n" %
+                                _get(attempt.request, "teardown_mode")).encode("ascii")
+                    elif operation == "cleanup" and isinstance(arguments, dict) and set(arguments) == {"reason", "exit_intent"}:
+                        if arguments["reason"] not in ("success", "error", "term", "int", "hup", "cancel"):
+                            raise _ControllerFailure("rejected", "invalid cleanup reason")
+                        intent = arguments["exit_intent"]
+                        if (intent is not None and
+                                (type(intent) is not int or
+                                 not 0 <= intent <= 255)):
+                            raise _ControllerFailure(
+                                "rejected", "invalid cleanup exit intent")
+                        if (attempt.journal and
+                                attempt.journal["unresolved"] and
+                                not attempt.durability_uncertain):
+                            attempt.recovery_code = self._recover_journal(
+                                attempt, attempt.journal, initiating=True)
+                    elif operation == "finish" and isinstance(arguments, dict) and set(arguments) == {"exit_intent"}:
+                        intent = arguments["exit_intent"]
+                        if type(intent) is not int or not 0 <= intent <= 255:
+                            raise _ControllerFailure("rejected", "invalid exit intent")
+                        finish_failure = None
+                        try:
+                            if (attempt.journal and
+                                    attempt.journal["unresolved"] and
+                                    not attempt.durability_uncertain):
+                                attempt.recovery_code = self._recover_journal(
+                                    attempt, attempt.journal, initiating=True)
+                            if (action == "install" and
+                                    attempt.journal is not None and
+                                    not attempt.journal["unresolved"] and
+                                    not attempt.durability_uncertain):
+                                self._cleanup_remote_artifacts(
+                                    attempt, protocol)
+                        except _ControllerFailure as exc:
+                            finish_failure = exc
+                            if attempt.primary is None:
+                                attempt.primary = exc
+                        code = (finish_failure.code if finish_failure else
+                                (attempt.recovery_code or 0))
+                        for operation_result in attempt.operation_results[
+                                operation_result_start:]:
+                            outputs["stdout"] += _get(
+                                operation_result, "stdout", b"")
+                            outputs["stderr"] += _get(
+                                operation_result, "stderr", b"")
+                        response = self._ipc_result(
+                            sequence, code, attempt,
+                            category=(finish_failure.category if
+                                      finish_failure else None),
+                            detail=(finish_failure.detail if
+                                    finish_failure else ""))
+                        self._send_response(parent, sequence, attempt, response, outputs)
+                        expected_exit = intent if intent else code
+                        attempt.finished_protocol = True
+                        break
+                    else:
+                        raise _ControllerFailure("rejected", "operation is not permitted")
+                    completed_name = (arguments.get("name") if
+                                      operation == "command" else operation)
+                    if completed_name in protocol["seen"]:
+                        protocol["completed"].add(completed_name)
+                    operation_results = attempt.operation_results[
+                        operation_result_start:]
+                    for operation_result in operation_results:
+                        outputs["stdout"] += _get(
+                            operation_result, "stdout", b"")
+                        outputs["stderr"] += _get(
+                            operation_result, "stderr", b"")
+                    if (transport_result is not None and
+                            not operation_results):
+                        outputs["stdout"] += _get(transport_result, "stdout", b"")
+                        outputs["stderr"] += _get(transport_result, "stderr", b"")
+                    response = self._ipc_result(sequence, 0, attempt,
+                                                result=transport_result)
+                except _ControllerFailure as exc:
+                    if attempt.primary is None:
+                        attempt.primary = exc
+                    response = self._ipc_result(sequence, exc.code, attempt,
+                                                result=transport_result,
+                                                category=exc.category,
+                                                detail=exc.detail)
+                self._send_response(parent, sequence, attempt, response, outputs)
+                sequence += 1
+        except _ControllerFailure as exc:
+            protocol_failure = exc
+            if attempt.primary is None:
+                attempt.primary = exc
+        except Exception:
+            protocol_failure = _ControllerFailure(
+                "rejected", "invalid private recipe protocol", 4)
+            if attempt.primary is None:
+                attempt.primary = protocol_failure
+        finally:
+            parent.close()
+        if (attempt.journal is not None and attempt.journal.get("unresolved") and
+                not attempt.finished_protocol and
+                not attempt.durability_uncertain):
+            try:
+                recovery_code = self._recover_journal(
+                    attempt, attempt.journal, initiating=False)
+                if recovery_code:
+                    attempt.recovery_code = recovery_code
+            except _ControllerFailure as recovery_failure:
+                attempt.recovery_code = recovery_failure.code
+            except Exception:
+                attempt.recovery_code = 5
+        if (action == "install" and attempt.journal is not None and
+                not attempt.journal.get("unresolved") and
+                not attempt.finished_protocol and
+                not attempt.durability_uncertain):
+            try:
+                self._cleanup_remote_artifacts(attempt, protocol)
+            except _ControllerFailure as cleanup_failure:
+                if attempt.primary is None:
+                    attempt.primary = cleanup_failure
+        natural_deadline = min(
+            attempt.session_deadline, self._monotonic() + 1.0)
+        while self._monotonic() < natural_deadline:
+            try:
+                remaining = natural_deadline - self._monotonic()
+                if remaining <= 0 or process.poll(timeout=remaining) is not None:
+                    break
+            except Exception:
+                break
+            select.select([], [], [], min(
+                0.01, max(0.0, natural_deadline - self._monotonic())))
+        recipe_reaped = attempt.supervisor.reap_process(
+            process, attempt.session_deadline)
+        attempt.recipe_returncode = process.returncode
+        drain_complete, captured = recipe_capture.finish(
+            recipe_reaped, attempt.session_deadline, self._monotonic)
+        recipe_reaped = recipe_reaped and drain_complete
+        if not recipe_reaped:
+            attempt.recovery_code = 5
+            if attempt.primary is None:
+                attempt.primary = _ControllerFailure(
+                    "descendant_unreaped",
+                    "recipe descendants were not reaped", 5)
+        for stream in ("stdout", "stderr"):
+            if captured[stream]:
+                on_output(stream, captured[stream])
+        if not attempt.finished_protocol or process.returncode != expected_exit:
+            if attempt.primary is None:
+                attempt.primary = _ControllerFailure("rejected", "incomplete recipe protocol", 4)
+        elif process.returncode != 0 and attempt.primary is None:
+            attempt.primary = _ControllerFailure("rejected", "recipe exited nonzero", 4)
+        return self._finalize(attempt)
+
+    def summary_for_device(self, device_id):
+        obligations = self.store.iox_summary(device_id)
+        boards = set(item["board_identity"] for item in obligations)
+        try:
+            records = self.store.list(device_id, strict=True)
+        except TypeError:
+            records = self.store.list(device_id)
+        for record in records:
+            journal = record.get("iox_verification")
+            if (journal is not None and
+                    (not isinstance(journal, dict) or
+                     journal.get("controller_id") != self.controller_id)):
+                raise ValueError("foreign IOx journal authority")
+            board = (journal or {}).get("board_identity")
+            board = board or (record.get("resolved") or {}).get("device_identity")
+            if board:
+                boards.add(board)
+        sessions = []
+        for path in self._scan_directory(self.session_dir, ".lock.json",
+                                         self.limits["session_files"],
+                                         _SESSION_FILE_BYTES):
+            fence = _read_json_strict(path, _SESSION_FILE_BYTES)
+            self._validate_fence(fence, path)
+            if fence["device_id"] == device_id or fence["board_identity"] in boards:
+                sessions.append(_session_summary(fence))
+        sessions.sort(key=lambda value: (value["board_identity"], value["attempt_id"]))
+        return {"iox_verification_obligations": obligations,
+                "iox_sessions": sessions}
+
+    def close(self):
+        with self._admission_lock:
+            with self._active_lock:
+                self._closed = True
+                attempts = list(self._active)
+        for attempt in attempts:
+            attempt.shutdown.set()
+            attempt.invalidate_continuations()
+            deployment_records._invalidate_iox_capabilities(attempt.attempt_id)
+        started_close = self._monotonic()
+        deadlines = dict((attempt, min(attempt.session_deadline,
+                                      started_close +
+                                      _SUPERVISOR_REAP_SECONDS))
+                         for attempt in attempts)
+        # A controller call that unwound on this thread without reaching
+        # `_finalize` has no live caller left to perform cleanup.
+        abandoned = [attempt for attempt in attempts
+                     if (attempt.owner_thread is threading.current_thread() or
+                         not attempt.owner_thread.is_alive())]
+        for attempt in abandoned:
+            deadline = deadlines[attempt]
+            clean = False
+            if attempt.supervisor is not None:
+                children_reaped = attempt.supervisor.reap_all(deadline)
+                fence_reaped = children_reaped
+                if children_reaped and attempt.fence_owned:
+                    try:
+                        self._fence_barrier(attempt, state="reaped")
+                    except Exception:
+                        fence_reaped = False
+                if fence_reaped:
+                    clean = attempt.supervisor.release(deadline)
+                else:
+                    attempt.supervisor.abandon(deadline)
+            elif attempt.lock_fd is not None:
+                try:
+                    fcntl.flock(attempt.lock_fd, fcntl.LOCK_UN)
+                    os.close(attempt.lock_fd)
+                    attempt.lock_fd = None
+                    clean = True
+                except OSError:
+                    clean = False
+            if clean:
+                with self._active_lock:
+                    self._active.discard(attempt)
+        duration = max([max(0.0, deadline - started_close)
+                        for attempt, deadline in deadlines.items()
+                        if attempt not in abandoned] or [0.0])
+        wall_deadline = time.monotonic() + duration
+        while time.monotonic() < wall_deadline:
+            with self._active_lock:
+                remaining_attempts = list(self._active)
+            if not remaining_attempts:
+                return
+            select.select([], [], [], min(0.02,
+                max(0.0, wall_deadline - time.monotonic())))
+        with self._active_lock:
+            remaining_attempts = list(self._active)
+        for attempt in remaining_attempts:
+            if attempt.supervisor is not None:
+                attempt.supervisor.disconnect(
+                    deadlines.get(attempt, self._monotonic()))
+        with self._active_lock:
+            if self._active:
+                raise RuntimeError(
+                    "IOx controller closed with retained active session fences")
+
+
+def _encode_frame(value):
+    body = _canonical(value)
+    if not 1 <= len(body) <= 65536:
+        raise ValueError("local-control frame size is invalid")
+    return struct.pack("!I", len(body)) + body
+
+
+def _read_frame_socket(peer, deadline, cancel, monotonic_fn=time.monotonic):
+    def exact(size):
+        value = b""
+        while len(value) < size:
+            if _cancelled(cancel):
+                raise _ControllerFailure("cancelled", "operation cancelled", 130)
+            remaining = deadline - monotonic_fn()
+            if remaining <= 0:
+                raise _ControllerFailure("timeout", "frame deadline elapsed")
+            readable, unused, unused2 = select.select([peer], [], [], remaining)
+            if not readable:
+                raise _ControllerFailure("timeout", "frame deadline elapsed")
+            chunk = peer.recv(size - len(value))
+            if not chunk:
+                raise EOFError("partial frame")
+            value += chunk
+        return value
+    size = struct.unpack("!I", exact(4))[0]
+    if not 1 <= size <= 65536:
+        raise ValueError("invalid frame size")
+    return json.loads(exact(size).decode("utf-8"), object_pairs_hook=_pairs,
+                      parse_constant=lambda value: (_ for _ in ()).throw(
+                          ValueError("non-finite JSON")))
+
+
+def _control_peer_credentials(connection):
+    raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                struct.calcsize("3i"))
+    return struct.unpack("3i", raw)
+
+
+class IoxControlServer(object):
+    def __init__(self, state_dir, controller_id, dispatch):
+        self.state_dir = _safe_state_root(state_dir)
+        if (not isinstance(controller_id, str) or
+                not _HEX32.fullmatch(controller_id)):
+            raise ValueError("invalid controller_id")
+        if not callable(dispatch):
+            raise ValueError("invalid IOx control dispatch")
+        self.controller_id = controller_id
+        self.dispatch = dispatch
+        self.path = os.path.join(self.state_dir, "iox", "control.sock")
+        self.listener = None
+        self.thread = None
+        self.stop = threading.Event()
+        self.connections = set()
+        self.workers = set()
+        self.connection_lock = threading.Lock()
+        self.connection_slots = threading.BoundedSemaphore(16)
+        self.inode = None
+
+    def _endpoint_metadata(self):
+        directory = os.path.dirname(self.path)
+        descriptor = _open_directory_anchor(directory, required_mode=0o700)
+        try:
+            metadata = os.stat(os.path.basename(self.path), dir_fd=descriptor,
+                               follow_symlinks=False)
+            if (not stat.S_ISSOCK(metadata.st_mode) or
+                    stat.S_IMODE(metadata.st_mode) != 0o600 or
+                    metadata.st_uid != os.geteuid() or
+                    metadata.st_nlink != 1 or
+                    (self.inode is not None and self.inode !=
+                     (metadata.st_dev, metadata.st_ino))):
+                raise ValueError("unsafe IOx control endpoint")
+            return metadata
+        finally:
+            os.close(descriptor)
+
+    def start(self):
+        iox_directory = os.path.dirname(self.path)
+        _safe_directory(iox_directory, create=True)
+        if os.path.lexists(self.path):
+            raise ValueError("IOx control endpoint already exists")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        directory_fd = _open_directory_anchor(
+            iox_directory, required_mode=0o700)
+        name = os.path.basename(self.path)
+        anchored = "/proc/self/fd/%d/%s" % (directory_fd, name)
+        try:
+            listener.bind(anchored)
+            first = os.stat(name, dir_fd=directory_fd,
+                            follow_symlinks=False)
+            os.chmod(name, 0o600, dir_fd=directory_fd,
+                     follow_symlinks=False)
+            metadata = os.stat(name, dir_fd=directory_fd,
+                               follow_symlinks=False)
+            if ((first.st_dev, first.st_ino) !=
+                    (metadata.st_dev, metadata.st_ino) or
+                    not stat.S_ISSOCK(metadata.st_mode) or
+                    stat.S_IMODE(metadata.st_mode) != 0o600 or
+                    metadata.st_uid != os.geteuid() or
+                    metadata.st_nlink != 1):
+                raise ValueError("unsafe IOx control endpoint")
+            os.fsync(directory_fd)
+            listener.listen(16)
+            self.inode = (metadata.st_dev, metadata.st_ino)
+            self._endpoint_metadata()
+            # Prove that the currently anchored directory entry routes to this
+            # listener before publishing the accept loop.
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(1.0)
+                listener.settimeout(1.0)
+                probe.connect(anchored)
+                accepted, unused = listener.accept()
+                try:
+                    unused_pid, uid, unused_gid = _control_peer_credentials(
+                        accepted)
+                    if uid != os.geteuid():
+                        raise ValueError("foreign IOx control endpoint")
+                finally:
+                    accepted.close()
+            finally:
+                probe.close()
+            self._endpoint_metadata()
+            listener.settimeout(0.1)
+            self.listener = listener
+            self.thread = threading.Thread(target=self._serve)
+            self.thread.daemon = True
+            self.thread.start()
+        except Exception:
+            listener.close()
+            if self.inode is not None:
+                try:
+                    metadata = os.lstat(self.path)
+                    if (self.inode == (metadata.st_dev, metadata.st_ino) and
+                            stat.S_ISSOCK(metadata.st_mode) and
+                            metadata.st_uid == os.geteuid()):
+                        os.unlink(self.path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            os.close(directory_fd)
+
+    def _serve(self):
+        while not self.stop.is_set():
+            try:
+                connection, unused = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not self.connection_slots.acquire(False):
+                connection.close()
+                continue
+            with self.connection_lock:
+                self.connections.add(connection)
+            thread = threading.Thread(target=self._one, args=(connection,))
+            thread.daemon = True
+            with self.connection_lock:
+                self.workers.add(thread)
+            thread.start()
+
+    def _one(self, connection):
+        try:
+            connection.settimeout(0.2)
+            self._endpoint_metadata()
+            unused_pid, uid, unused_gid = _control_peer_credentials(connection)
+            request = _read_frame_socket(connection, time.monotonic() + 1,
+                                         self.stop, time.monotonic)
+            if uid != os.geteuid():
+                return
+            if set(request) != {"schema_version", "controller_id", "request"}:
+                return
+            if (type(request["schema_version"]) is not int or
+                    request["schema_version"] != 1 or
+                    request["controller_id"] != self.controller_id):
+                return
+            response = self.dispatch(request["request"])
+            self._endpoint_metadata()
+            connection.sendall(_encode_frame({"schema_version": 1,
+                "controller_id": self.controller_id, "response": response}))
+        except Exception:
+            pass
+        finally:
+            with self.connection_lock:
+                self.connections.discard(connection)
+                self.workers.discard(threading.current_thread())
+            connection.close()
+            self.connection_slots.release()
+
+    def close(self):
+        self.stop.set()
+        if self.listener is not None:
+            self.listener.close()
+        with self.connection_lock:
+            connections = list(self.connections)
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        if self.thread is not None:
+            self.thread.join(0.8)
+        deadline = time.monotonic() + 1.0
+        while True:
+            with self.connection_lock:
+                workers = list(self.workers)
+            if not workers:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for worker in workers:
+                worker.join(min(remaining, 0.1))
+        try:
+            metadata = self._endpoint_metadata()
+            if self.inode == (metadata.st_dev, metadata.st_ino):
+                directory_fd = _open_directory_anchor(
+                    os.path.dirname(self.path), required_mode=0o700)
+                try:
+                    current = os.stat(
+                        os.path.basename(self.path), dir_fd=directory_fd,
+                        follow_symlinks=False)
+                    if self.inode == (current.st_dev, current.st_ino):
+                        os.unlink(os.path.basename(self.path),
+                                  dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except (OSError, ValueError):
+            pass
+        with self.connection_lock:
+            if self.workers:
+                raise RuntimeError(
+                    "IOx control server retained active dispatch workers")
+
+
+class _ControlClient(object):
+    def __init__(self, state_dir=None):
+        raw_state = state_dir if state_dir is not None else os.environ.get(
+            "IRIS_STATE", "")
+        self.state_dir = _safe_state_root(raw_state)
+        iox_directory = os.path.join(self.state_dir, "iox")
+        _safe_directory(iox_directory)
+        authority = _read_json_strict(
+            os.path.join(iox_directory, "authority.json"), 16384)
+        if (not isinstance(authority, dict) or set(authority) != {
+                "schema_version", "controller_id", "record_store"} or
+                type(authority.get("schema_version")) is not int or
+                authority.get("schema_version") != 1 or
+                not isinstance(authority.get("controller_id"), str) or
+                not _HEX32.fullmatch(authority["controller_id"]) or
+                not isinstance(authority.get("record_store"), str) or
+                not os.path.isabs(authority["record_store"])):
+            raise ValueError("invalid IOx authority")
+        self.controller_id = authority["controller_id"]
+        self.path = os.path.join(self.state_dir, "iox", "control.sock")
+
+    def request(self, request):
+        directory = os.path.dirname(self.path)
+        name = os.path.basename(self.path)
+        directory_fd = _open_directory_anchor(directory, required_mode=0o700)
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISSOCK(before.st_mode) or
+                stat.S_IMODE(before.st_mode) != 0o600 or
+                before.st_uid != os.geteuid() or before.st_nlink != 1):
+            os.close(directory_fd)
+            raise ValueError("unsafe IOx control endpoint")
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            peer.settimeout(1.0)
+            peer.connect("/proc/self/fd/%d/%s" % (directory_fd, name))
+            after = os.stat(name, dir_fd=directory_fd,
+                            follow_symlinks=False)
+            if ((before.st_dev, before.st_ino) !=
+                    (after.st_dev, after.st_ino) or
+                    not stat.S_ISSOCK(after.st_mode) or
+                    stat.S_IMODE(after.st_mode) != 0o600 or
+                    after.st_uid != os.geteuid() or after.st_nlink != 1):
+                raise ValueError("IOx control endpoint changed")
+            unused_pid, uid, unused_gid = _control_peer_credentials(peer)
+            if uid != os.geteuid():
+                raise ValueError("foreign IOx control peer")
+            peer.sendall(_encode_frame({"schema_version": 1,
+                "controller_id": self.controller_id, "request": request}))
+            peer.settimeout(None)
+            try:
+                response = _read_frame_socket(peer, time.monotonic() + 7200,
+                                              None, time.monotonic)
+            except (EOFError, _ControllerFailure):
+                raise RuntimeError("IOx control response unavailable")
+            if (set(response) != {"schema_version", "controller_id", "response"} or
+                    type(response["schema_version"]) is not int or
+                    response["schema_version"] != 1 or
+                    response["controller_id"] != self.controller_id):
+                raise ValueError("foreign IOx control response")
+            return response["response"]
+        finally:
+            peer.close()
+            os.close(directory_fd)
+
+    def close(self):
+        pass
+
+
+def main(argv=None, client_factory=None, stdout=None):
+    parser = argparse.ArgumentParser(prog="iox-verification")
+    sub = parser.add_subparsers(dest="operation")
+    for name in ("submit-install", "submit-uninstall", "recover"):
+        command = sub.add_parser(name)
+        command.add_argument("--device-id", required=True)
+        command.add_argument("--wait", action="store_true")
+        command.add_argument("--wait-timeout", type=int, default=7200)
+        if name == "submit-uninstall":
+            command.add_argument("--force-agent-only", action="store_true")
+        else:
+            command.add_argument("--force-agent-only", action="store_true",
+                                 help=argparse.SUPPRESS)
+    reconcile = sub.add_parser("reconcile-enabled")
+    reconcile.add_argument("--record-id", required=True)
+    reconcile.add_argument("--transaction-id", required=True)
+    reconcile.add_argument("--revision", required=True, type=int)
+    reconcile.add_argument("--acknowledge-external-resolution", action="store_true")
+    reconcile.add_argument("--wait", action="store_true")
+    reconcile.add_argument("--wait-timeout", type=int, default=7200)
+    reconcile.add_argument("--force-agent-only", action="store_true", help=argparse.SUPPRESS)
+    job = sub.add_parser("job")
+    job.add_argument("--job-id", required=True)
+    job.add_argument("--wait", action="store_true")
+    job.add_argument("--wait-timeout", type=int, default=7200)
+    args = parser.parse_args(argv)
+    if args.operation is None:
+        parser.error("an operation is required")
+    if getattr(args, "force_agent_only", False) and args.operation != "submit-uninstall":
+        parser.error("force is valid only for submit-uninstall")
+    if args.wait and not 1 <= args.wait_timeout <= 7200:
+        parser.error("wait timeout must be from 1 through 7200")
+    if args.operation == "reconcile-enabled" and not args.acknowledge_external_resolution:
+        parser.error("reconciliation acknowledgement is required")
+    request = {"operation": args.operation, "wait": bool(args.wait)}
+    if args.wait:
+        request["wait_timeout"] = args.wait_timeout
+    if args.operation in ("submit-install", "submit-uninstall", "recover"):
+        request["device_id"] = args.device_id
+    if args.operation == "submit-uninstall" and args.force_agent_only:
+        request["force_agent_only"] = True
+    if args.operation == "job":
+        request["job_id"] = args.job_id
+    if args.operation == "reconcile-enabled":
+        request.update({"record_id": args.record_id,
+                        "transaction_id": args.transaction_id,
+                        "revision": args.revision,
+                        "acknowledge_external_resolution": True})
+    client = (client_factory or _ControlClient)()
+    try:
+        response = client.request(request)
+    finally:
+        client.close()
+    output = stdout or sys.stdout
+    output.write(json.dumps(response, sort_keys=True) + "\n")
+    if response.get("error"):
+        return 2
+    if response.get("wait_timed_out"):
+        return 4
+    if response.get("terminal"):
+        return response.get("result_code", 4)
+    return 0
+
+
+if __name__ == "__main__":
+    if (len(sys.argv) == 5 and
+            sys.argv[1] == "--_iris-iox-supervisor"):
+        try:
+            supervisor_control = int(sys.argv[2])
+            supervisor_lock = int(sys.argv[3])
+            supervisor_deadline = float(sys.argv[4])
+            if (supervisor_control < 3 or supervisor_lock < -1 or
+                    not math.isfinite(supervisor_deadline) or
+                    supervisor_deadline <= 0):
+                raise ValueError("invalid supervisor descriptors")
+        except ValueError:
+            sys.exit(110)
+        sys.exit(_supervisor_main(
+            supervisor_control, supervisor_lock, supervisor_deadline))
+    sys.exit(main())
