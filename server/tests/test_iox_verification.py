@@ -2018,6 +2018,35 @@ def test_successful_predecessor_recovery_restores_recorded_uninstall_binding(
     assert result["iox_verification"] is None
 
 
+def test_same_record_recovery_is_the_only_allowed_recorded_binding_change(
+        tmp_path):
+    journal = _journal(
+        record_id="selected-r1", phase="disable_intent", state="enabled",
+        revision=2, unresolved=True)
+    record = _record(record_id="selected-r1", journal=journal)
+    store = _StatefulStore(
+        tmp_path, records=[record], obligations=[journal])
+    factory = _TransportFactory(verification="enabled")
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    prepare, preflight, on_output = _callbacks(
+        [], record_id="selected-r1")
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="recorded",
+                     record_id="selected-r1"),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 0
+    assert result["record_id"] == "selected-r1"
+    recovered = store.records["selected-r1"]["iox_verification"]
+    assert recovered["phase"] == "relinquished"
+    assert recovered["unresolved"] is False
+
+
 def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
         tmp_path):
     module = _module()
@@ -2116,6 +2145,42 @@ def test_force_on_replacement_board_retires_only_after_acknowledged_success(
             separators=(",", ":")).encode("utf-8")
         assert after == before
         assert store.records["r1"]["iox_verification"] == old_journal
+
+
+def test_failed_reaped_fence_write_keeps_public_session_active(
+        tmp_path, monkeypatch):
+    module = _module()
+    original = module._durable_json
+    failed = []
+
+    def fail_reaped(path, value, *args, **kwargs):
+        if (not failed and isinstance(value, dict) and
+                value.get("state") == "reaped" and
+                str(path).endswith(".lock.json")):
+            failed.append(str(path))
+            raise OSError("injected reaped fence durability failure")
+        return original(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(module, "_durable_json", fail_reaped)
+    recipe = _write_recipe_peer(tmp_path)
+    store = _StatefulStore(tmp_path)
+    factory = _TransportFactory()
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only",
+                     record_id=None),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert failed
+    assert result["result_code"] == 5
+    assert result["error_category"] == "journal_durability"
+    assert result["iox_session"]["state"] == "active"
+    assert result["iox_session"]["mutation_blocked"] is True
 
 
 def test_private_recipe_accepts_the_exact_force_null_tuple(tmp_path):
@@ -2467,6 +2532,30 @@ def test_transcript_quota_check_and_creation_share_the_store_lock(
         controller._active.discard(attempt)
     controller.close()
     assert observed == [True]
+
+
+@pytest.mark.parametrize("category,timed_out,expected_code", [
+    ("timeout", True, 4),
+    ("cancelled", False, 130),
+])
+def test_failed_transport_result_allows_no_process_returncode(
+        category, timed_out, expected_code):
+    module = _module()
+    result = _transport_result(
+        returncode=None, error_category=category, timed_out=timed_out,
+        framing_complete=False)
+    module.IoxController._validate_transport_result(result)
+    assert module.IoxController._transport_ok(result) is False
+    assert module._ControllerFailure(category, "transport failed").code == \
+        expected_code
+
+
+def test_no_process_returncode_cannot_describe_a_clean_transport_result():
+    module = _module()
+    result = _transport_result(returncode=None)
+    with pytest.raises(module._ControllerFailure) as failed:
+        module.IoxController._validate_transport_result(result)
+    assert failed.value.category == "unsupported_response"
 
 
 def test_authority_scan_refuses_capacity_without_materializing_directory(

@@ -676,6 +676,39 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
     return controller, factory
 
 
+def _concurrent_fence_admission_worker(
+        root, board, attempt_id, barrier, results):
+    from pathlib import Path
+
+    module = _verification_module()
+    tmp_path = Path(root)
+    store = _FakeStore(tmp_path, existing=True)
+    controller, unused_factory = _controller(
+        tmp_path, store, _FakeTransport(_Device("enabled"), []),
+        test_limits={
+            "session_files": 4, "transcript_files": 4,
+            "ordinary_transcripts": 4, "active_fences": 1,
+        })
+    request = _AttrDict(
+        action="uninstall", device_id=_DEVICE, job_id=_JOB,
+        teardown_mode="force_agent_only", record_id=None)
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.attempt_id = attempt_id
+    attempt.board = board
+    attempt.transcript = _Transcript(attempt_id)
+    attempt.supervisor = _AttrDict(
+        pid=os.getpid(), start_ticks=module._supervisor_start(os.getpid()))
+    try:
+        barrier.wait(10)
+        controller._admit_fence(attempt)
+        results.put("admitted")
+    except BaseException as exc:
+        results.put(getattr(exc, "category", type(exc).__name__))
+    finally:
+        controller.close()
+
+
 def _host_boot_id():
     with open("/proc/sys/kernel/random/boot_id") as stream:
         return stream.read().strip()
@@ -1164,6 +1197,49 @@ def test_supervisor_reap_limits_term_phase_to_five_seconds(monkeypatch):
     assert now[0] <= 10.0
 
 
+def test_truncated_supervisor_packet_closes_all_received_descriptors():
+    import socket
+    import struct
+
+    module = _verification_module()
+    sender, receiver = socket.socketpair(
+        socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    source = os.open(os.devnull, os.O_RDONLY)
+    before = len(os.listdir("/proc/self/fd"))
+    try:
+        rights = struct.pack("20i", *([source] * 20))
+        sender.sendmsg(
+            [b"{}"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)])
+        with pytest.raises(ValueError, match="truncated supervisor message"):
+            module._supervisor_receive(receiver)
+        assert len(os.listdir("/proc/self/fd")) == before
+    finally:
+        os.close(source)
+        sender.close()
+        receiver.close()
+
+
+def test_unexpected_supervisor_ancillary_closes_prior_rights():
+    import socket
+    import struct
+
+    module = _verification_module()
+    descriptor = os.open(os.devnull, os.O_RDONLY)
+
+    class Peer(object):
+        def recvmsg(self, *unused):
+            return (b"{}", [
+                (socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                 struct.pack("i", descriptor)),
+                (999, 999, b"unexpected"),
+            ], 0, None)
+
+    with pytest.raises(ValueError, match="unexpected supervisor ancillary"):
+        module._supervisor_receive(Peer())
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
 @pytest.mark.parametrize("path", ["discover", "known"])
 def test_post_flock_revalidation_failure_never_leaks_board_lock(
         tmp_path, monkeypatch, path):
@@ -1414,6 +1490,38 @@ def test_active_fence_limit_counts_recordless_sessions(tmp_path):
             controller.summary_for_device(_DEVICE)
         finally:
             controller.close()
+
+
+def test_active_fence_capacity_is_reserved_across_processes(tmp_path):
+    import multiprocessing
+
+    _seed_phase(tmp_path, None)
+    attempts = ("8" * 32, "9" * 32)
+    _authority_layout(tmp_path, dict(
+        (attempt, _Transcript(attempt).bytes()) for attempt in attempts))
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [context.Process(
+        target=_concurrent_fence_admission_worker,
+        args=(str(tmp_path), "FENCE-BOARD-%d" % index, attempt,
+              barrier, results))
+        for index, attempt in enumerate(attempts)]
+    for process in processes:
+        process.start()
+    outcomes = [results.get(timeout=20) for unused in processes]
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    assert outcomes.count("admitted") == 1
+    assert outcomes.count("journal_durability") == 1
+    session_dir = tmp_path / "iox" / "sessions"
+    fences = [
+        _read_json(os.path.join(str(session_dir), name))
+        for name in os.listdir(str(session_dir))
+        if name.endswith(".lock.json")]
+    assert len([fence for fence in fences
+                if fence["state"] == "active"]) == 1
 
 
 def test_crash_results_keep_raw_recipe_recovery_and_custody_fields_distinct(
