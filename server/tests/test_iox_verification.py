@@ -2469,7 +2469,8 @@ class _PrivateClient(object):
 
 
 @pytest.mark.parametrize("fault", [
-    "valid", "peer", "request_domain", "extra_key", "oversized"])
+    "valid", "peer", "request_domain", "boolean_schema", "extra_key",
+    "oversized"])
 def test_control_server_authenticates_raw_peer_and_domain_before_dispatch(
         tmp_path, monkeypatch, fault):
     module = _module()
@@ -2505,7 +2506,7 @@ def test_control_server_authenticates_raw_peer_and_domain_before_dispatch(
             module, "_control_peer_credentials", foreign_credentials)
 
     request = {
-        "schema_version": 1,
+        "schema_version": True if fault == "boolean_schema" else 1,
         "controller_id": ("d" * 32 if fault == "request_domain" else
                           controller_id),
         "request": {"operation": "job", "job_id": job_id,
@@ -2721,7 +2722,8 @@ def test_control_server_close_preserves_a_replacement_endpoint(tmp_path):
 
 @pytest.mark.parametrize("fault", [
     "valid", "owner", "mode", "symlink", "nonsocket", "peer",
-    "request_domain", "response_domain",
+    "request_domain", "response_domain", "authority_boolean_schema",
+    "response_boolean_schema",
 ])
 def test_default_cli_client_uses_authenticated_controller_domain_socket(
         tmp_path, monkeypatch, fault):
@@ -2741,7 +2743,8 @@ def test_default_cli_client_uses_authenticated_controller_domain_socket(
     record_store.chmod(0o600)
     authority_path = iox_dir / "authority.json"
     authority = {
-        "schema_version": 1, "controller_id": controller_id,
+        "schema_version": (True if fault == "authority_boolean_schema" else 1),
+        "controller_id": controller_id,
         "record_store": os.path.realpath(str(record_store)),
     }
     authority_path.write_text(json.dumps(
@@ -2816,7 +2819,8 @@ def test_default_cli_client_uses_authenticated_controller_domain_socket(
             }
             response_id = (other_controller if fault == "response_domain" else
                            controller_id)
-            response = {"schema_version": 1,
+            response = {"schema_version": (
+                            True if fault == "response_boolean_schema" else 1),
                         "controller_id": response_id,
                         "response": logical}
             body = json.dumps(
@@ -2825,7 +2829,7 @@ def test_default_cli_client_uses_authenticated_controller_domain_socket(
             peer.sendall(struct.pack("!I", len(body)) + body)
         except (EOFError, OSError, socket.timeout):
             if fault not in ("owner", "mode", "symlink", "nonsocket",
-                              "peer"):
+                              "peer", "authority_boolean_schema"):
                 server_error.append("unexpected peer close")
         except BaseException as exc:
             server_error.append("%s: %s" % (type(exc).__name__, exc))
@@ -2933,7 +2937,7 @@ def test_default_cli_client_uses_authenticated_controller_domain_socket(
             output.getvalue()).get("accepted", False)
         if fault == "request_domain":
             assert events[-1] == "request_domain_rejected"
-        elif fault == "response_domain":
+        elif fault in ("response_domain", "response_boolean_schema"):
             assert events[-1] == "dispatched"
         else:
             assert "request_valid" not in events
