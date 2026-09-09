@@ -11,6 +11,7 @@ BaseHTTPRequestHandler, and TLS pattern and remains stdlib-only.
 """
 import email.utils
 import http.cookies
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -19,6 +20,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import ssl
 import sys
 import tempfile
@@ -44,6 +46,8 @@ import gui_onboard
 import gui_tls
 import instruction_keys
 import instruction_stamper
+import iox_transport
+import iox_verification
 import live_samples
 import origin_qos
 import otlp
@@ -974,11 +978,464 @@ class _ConsoleServer(bounded_pool.BoundedThreadingMixin, ThreadingHTTPServer):
         super().process_request_thread(request, client_address)
 
 
+class _OnboardSubmissionAdapter(object):
+    """One admission path for browser and authenticated local submissions."""
+
+    _HEX16 = re.compile(r"^[0-9a-f]{16}$")
+    _HEX32 = re.compile(r"^[0-9a-f]{32}$")
+    _RECORD_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+    _TERMINAL = frozenset(("done", "error", "cancelled"))
+
+    def __init__(self, fleet, creds, record_store, onboard, iox_controller,
+                 plan_fn, apply_preflight_fn, owned_resources_fn,
+                 teardown_resolved_fn, audit_path, now_fn):
+        self.fleet = fleet
+        self.creds = creds
+        self.record_store = record_store
+        self.onboard = onboard
+        self.iox_controller = iox_controller
+        self._plan = plan_fn
+        self._apply_preflight = apply_preflight_fn
+        self._owned_resources = owned_resources_fn
+        self._teardown_resolved = teardown_resolved_fn
+        self.audit_path = audit_path
+        self._now = now_fn
+
+    @staticmethod
+    def _bounded_identifier(value, limit):
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            raw = value.encode("utf-8")
+        except UnicodeError:
+            return False
+        return (len(raw) <= limit and
+                not any(ord(character) < 32 or 127 <= ord(character) <= 159
+                        for character in value))
+
+    def _audit(self, event, category, action=None, target=None, detail=None,
+               actor=None, result="ok"):
+        if self.audit_path is None:
+            return
+        try:
+            audit.append_event(
+                self.audit_path, event, actor=actor, category=category,
+                action=action, target=target, detail=detail, result=result)
+        except Exception:
+            pass
+
+    def prevalidate_device(self, device_id, action, actor=None, audit_fn=None):
+        audit_emit = audit_fn or self._audit
+
+        def reject(status, error):
+            audit_emit(
+                "%s_start" % action, "onboard", action="start",
+                target=device_id, actor=actor, result="fail", detail=error)
+            return status, {"error": error}
+
+        if self.onboard is None:
+            return 404, {"error": "not found"}
+        if action not in ("onboard", "undeploy"):
+            return reject(400, "invalid action")
+        if not self._bounded_identifier(device_id, 128):
+            return reject(400, "bad device id")
+        if self.fleet is None or self.fleet.get_device(device_id) is None:
+            return reject(404, "no such device")
+        return None
+
+    def submit_device(self, device_id, action, body, actor=None, audit_fn=None,
+                      require_iox=False):
+        """Validate authority, prepare callbacks, and enqueue exactly once.
+
+        The returned pair is the existing HTTP status and JSON body. Local
+        control uses the same pair and only changes its wire projection.
+        """
+        audit_emit = audit_fn or self._audit
+
+        def reject(status, error):
+            audit_emit(
+                "%s_start" % action, "onboard", action="start",
+                target=device_id, actor=actor, result="fail", detail=error)
+            return status, {"error": error}
+
+        invalid = self.prevalidate_device(
+            device_id, action, actor=actor, audit_fn=audit_emit)
+        if invalid is not None:
+            return invalid
+        device = self.fleet.get_device(device_id)
+        if not isinstance(body, dict):
+            return reject(400, "request body must be an object")
+
+        if "force" in body and type(body["force"]) is not bool:
+            return reject(400, "force must be a bool")
+        force = body.get("force", False) is True
+        if action == "onboard" and force:
+            return reject(400, "force is valid only for undeploy")
+        telemetry = body.get("telemetry", True) is not False
+        stream = body.get("telemetry_stream", False) is True
+        env_extra = {
+            "TELEMETRY": "on" if telemetry else "off",
+            "TELEMETRY_STREAM": "on" if stream else "off",
+        }
+        env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
+        env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
+        undeploy_env = None
+        resolved = None
+        record_ref = {}
+        selected_record_id = None
+        prepare = None
+        pre_apply = None
+        on_success = None
+
+        if action == "onboard":
+            if self.record_store is not None:
+                try:
+                    plan = self._plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                if require_iox and plan["resolved"].get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                if plan["resolved"].get("platform") == "router":
+                    try:
+                        existing = self.record_store.recoverable_for_device(
+                            device_id, strict=True)
+                    except deployment_records.RecordStoreUnreadable as exc:
+                        return reject(
+                            503, "%s; the console cannot safely inspect "
+                            "deployment authority" % exc)
+                    except ValueError as exc:
+                        return reject(409, str(exc))
+                    if existing is not None:
+                        return reject(
+                            409, "router already has a %s deployment record; "
+                            "undeploy it before onboarding again — if this "
+                            "device was replaced, undeploy with force, or "
+                            "delete and re-add it" %
+                            existing.get("state", "recorded"))
+                resolved = plan["resolved"]
+
+                def prepare():
+                    record_id = self.record_store.create({
+                        "controller_id": "iris", "device_id": device_id,
+                        "inventory_revision": self.fleet.revision(),
+                        "plan_hash": plan["plan_hash"],
+                        "resolved": plan["resolved"],
+                        "preflight": {"status": "pending"},
+                        "resources": self._owned_resources(
+                            plan["resolved"]),
+                    })["record_id"]
+                    record_ref["id"] = record_id
+                    return record_id
+
+                def pre_apply(evidence):
+                    final_plan = self._apply_preflight(plan, evidence)
+                    record_id = record_ref.get("id")
+                    if not record_id:
+                        raise ValueError("planned record is unavailable")
+                    self.record_store.update_planned(
+                        record_id, plan_hash=final_plan["plan_hash"],
+                        resolved=final_plan["resolved"], preflight=evidence,
+                        resources=self._owned_resources(
+                            final_plan["resolved"]))
+                    return final_plan["resolved"]
+            else:
+                try:
+                    degraded_plan = self._plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                if require_iox and degraded_plan["resolved"].get(
+                        "platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                if degraded_plan["resolved"].get("platform") == "router":
+                    return reject(
+                        503, "router onboarding requires the deployment "
+                        "record store")
+        elif self.record_store is not None:
+            if force:
+                try:
+                    degraded_plan = self._plan(device_id, device)
+                except ValueError as exc:
+                    return reject(409, str(exc))
+                resolved = degraded_plan["resolved"]
+                if require_iox and resolved.get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+                undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
+                if resolved.get("platform") != "iox":
+                    def on_success():
+                        self.record_store.retire_device(
+                            device_id,
+                            "forced agent-only teardown; the record no longer "
+                            "describes this device")
+                audit_emit(
+                    "undeploy_forced", "onboard", action="start",
+                    target=device_id, actor=actor, result="ok",
+                    detail="forced agent-footprint teardown; VPG/NAT left "
+                           "untouched, any deployment record abandoned once "
+                           "the teardown succeeds")
+            else:
+                try:
+                    record = self.record_store.recoverable_for_device(
+                        device_id, strict=True)
+                except deployment_records.RecordStoreUnreadable as exc:
+                    return reject(
+                        503, "%s; the console cannot tell whether this device "
+                        "has a deployment until the file is repaired" % exc)
+                except ValueError as exc:
+                    return reject(
+                        409, "%s; retry with force to remove the agent "
+                        "footprint only" % exc)
+                if record is None:
+                    return reject(
+                        409, "no deployment record for this device; adopt it "
+                        "first, then undeploy, or retry with force to remove "
+                        "the agent footprint only")
+                selected_record_id = record["record_id"]
+                try:
+                    resolved = self._teardown_resolved(record)
+                except ValueError as exc:
+                    try:
+                        self.record_store.transition(
+                            record["record_id"], "needs-reconcile")
+                    except ValueError:
+                        pass
+                    return reject(409, str(exc))
+                if require_iox and resolved.get("platform") != "iox":
+                    return reject(409, "device is not an IOx target")
+
+                def prepare():
+                    record_ref["id"] = record["record_id"]
+                    return record["record_id"]
+        else:
+            try:
+                degraded_plan = self._plan(device_id, device)
+            except ValueError as exc:
+                return reject(409, str(exc))
+            if require_iox and degraded_plan["resolved"].get(
+                    "platform") != "iox":
+                return reject(409, "device is not an IOx target")
+            if degraded_plan["resolved"].get("platform") == "router":
+                return reject(
+                    503, "router undeploy requires an active deployment "
+                    "record")
+
+        try:
+            job_id = self.onboard.start(
+                device_id, action=action, resolved=resolved, prepare=prepare,
+                pre_apply=pre_apply, on_success=on_success,
+                record_id=selected_record_id,
+                teardown_mode=(
+                    "none" if action == "onboard" else
+                    "force_agent_only" if force else "recorded"),
+                env_extra=(env_extra if action == "onboard" else undeploy_env))
+        except ValueError as exc:
+            if record_ref.get("id") and action == "onboard":
+                try:
+                    self.record_store.transition(
+                        record_ref["id"], "needs-reconcile")
+                except ValueError:
+                    pass
+            return reject(409, str(exc))
+        audit_emit(
+            "%s_start" % action, "onboard", action="start",
+            target=device_id, actor=actor, detail="job %s" % job_id)
+        return 200, {"job_id": job_id}
+
+    def _credential_ref(self, device_id):
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            raise ValueError("no such device")
+        reference = device.get("credential_profile_id") or ""
+        profiles = self.creds.list_profiles() if self.creds is not None else []
+        if (not self._bounded_identifier(reference, 256) or
+                not any(isinstance(profile, dict) and
+                        profile.get("id") == reference for profile in profiles)):
+            raise ValueError("device has no credential profile")
+        return reference
+
+    @staticmethod
+    def _job_response(job, accepted=False, timed_out=False):
+        if job["state"] in _OnboardSubmissionAdapter._TERMINAL:
+            result_code = job.get("result_code")
+            allowed = frozenset((0, 2, 3, 4, 5, 130))
+            recovery_code = job.get("recovery_code")
+            returncode = job.get("returncode")
+            if (type(result_code) is not int or result_code not in allowed or
+                    (job["state"] == "done") != (result_code == 0) or
+                    (job["state"] == "cancelled") != (result_code == 130) or
+                    (returncode is not None and type(returncode) is not int) or
+                    (recovery_code is not None and
+                     (type(recovery_code) is not int or
+                      recovery_code not in allowed))):
+                raise ValueError("invalid terminal job result")
+            return {
+                "terminal": True, "state": job["state"],
+                "job_id": job["id"], "record_id": job.get("record_id"),
+                "result_code": result_code,
+                "returncode": returncode,
+                "recovery_code": recovery_code,
+            }
+        response = {
+            "job_id": job["id"], "state": job["state"],
+            "terminal": False, "record_id": job.get("record_id"),
+            "result_code": None,
+        }
+        if accepted:
+            response = {"accepted": True, **response}
+        if timed_out:
+            response["wait_timed_out"] = True
+        return response
+
+    def _observe_job(self, job_id, wait, timeout, accepted=False):
+        deadline = time.monotonic() + timeout
+        while True:
+            job = self.onboard.get_job(job_id) if self.onboard else None
+            if job is None:
+                return {"error": "job not found", "job_id": job_id}
+            if job["state"] in self._TERMINAL:
+                return self._job_response(job)
+            if not wait:
+                return self._job_response(job, accepted=accepted)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._job_response(job, timed_out=True)
+            time.sleep(min(0.05, remaining))
+
+    def _validate_control_request(self, request):
+        if not isinstance(request, dict):
+            raise ValueError("invalid request")
+        operation = request.get("operation")
+        required = {"operation", "wait"}
+        optional = set()
+        if operation in ("submit-install", "submit-uninstall", "recover"):
+            required.add("device_id")
+            if operation == "submit-uninstall":
+                optional.add("force_agent_only")
+        elif operation == "job":
+            required.add("job_id")
+        elif operation == "reconcile-enabled":
+            required.update(("record_id", "transaction_id", "revision",
+                             "acknowledge_external_resolution"))
+        else:
+            raise ValueError("unknown operation")
+        if request.get("wait") is True:
+            optional.add("wait_timeout")
+        if set(request) - required - optional or required - set(request):
+            raise ValueError("invalid request shape")
+        if type(request["wait"]) is not bool:
+            raise ValueError("invalid wait flag")
+        if "wait_timeout" in request:
+            value = request["wait_timeout"]
+            if type(value) is not int or not 1 <= value <= 7200:
+                raise ValueError("invalid wait timeout")
+        if "device_id" in request and not self._bounded_identifier(
+                request["device_id"], 128):
+            raise ValueError("invalid device id")
+        if "job_id" in request and (not isinstance(request["job_id"], str)
+                or not self._HEX16.fullmatch(request["job_id"])):
+            raise ValueError("invalid job id")
+        if "record_id" in request and (not isinstance(request["record_id"], str)
+                or not self._RECORD_ID.fullmatch(request["record_id"])):
+            raise ValueError("invalid record id")
+        if "transaction_id" in request and (
+                not isinstance(request["transaction_id"], str) or
+                not self._HEX32.fullmatch(request["transaction_id"])):
+            raise ValueError("invalid transaction id")
+        if "revision" in request and (
+                type(request["revision"]) is not int or
+                request["revision"] < 0):
+            raise ValueError("invalid revision")
+        if "force_agent_only" in request and request["force_agent_only"] is not True:
+            raise ValueError("invalid force flag")
+        if operation == "reconcile-enabled" and request[
+                "acknowledge_external_resolution"] is not True:
+            raise ValueError("reconciliation acknowledgement is required")
+        return operation
+
+    def dispatch(self, request):
+        """Validate one closed local request and return its exact projection."""
+        try:
+            operation = self._validate_control_request(request)
+            wait = request["wait"]
+            timeout = request.get("wait_timeout", 7200)
+            if operation == "job":
+                return self._observe_job(
+                    request["job_id"], wait, timeout, accepted=False)
+            if operation in ("submit-install", "submit-uninstall"):
+                action = ("onboard" if operation == "submit-install" else
+                          "undeploy")
+                status, response = self.submit_device(
+                    request["device_id"], action,
+                    {"force": request.get("force_agent_only", False)},
+                    actor="local-control", require_iox=True)
+                if status != 200:
+                    return {"error": response.get("error", "request rejected")}
+                return self._observe_job(
+                    response["job_id"], wait, timeout, accepted=not wait)
+            if operation == "recover":
+                device_id = request["device_id"]
+                credential_ref = self._credential_ref(device_id)
+                authority = self.iox_controller.summary_for_device(device_id)
+                sources = (authority.get("iox_verification_obligations", []) +
+                           authority.get("iox_sessions", []))
+                boards = {
+                    item.get("board_identity") for item in sources
+                    if isinstance(item, dict) and item.get("board_identity")}
+                if len(boards) != 1:
+                    raise ValueError("recovery target board is ambiguous")
+                board = next(iter(boards))
+                historical_records = set()
+                for item in sources:
+                    if (not isinstance(item, dict) or
+                            item.get("board_identity") != board):
+                        continue
+                    value = item.get("record_id")
+                    if value is None:
+                        continue
+                    if (not isinstance(value, str) or
+                            self._RECORD_ID.fullmatch(value) is None):
+                        raise ValueError("invalid recovery record")
+                    historical_records.add(value)
+                if len(historical_records) > 1:
+                    raise ValueError("recovery target record is ambiguous")
+                historical_record = (next(iter(historical_records))
+                                     if historical_records else None)
+                job_id = self.onboard.start_iox_recovery(
+                    device_id, credential_ref, board,
+                    record_id=historical_record)
+            else:
+                record = self.record_store.get(request["record_id"], strict=True)
+                if record is None:
+                    raise ValueError("unknown record")
+                journal = record.get("iox_verification")
+                if (not isinstance(journal, dict) or
+                        journal.get("record_id") != request["record_id"] or
+                        journal.get("controller_id") != getattr(
+                            self.iox_controller, "controller_id", None) or
+                        journal.get("transaction_id") != request["transaction_id"] or
+                        journal.get("revision") != request["revision"] or
+                        journal.get("phase") != "indeterminate"):
+                    raise ValueError("stale reconciliation binding")
+                device_id = record.get("device_id")
+                credential_ref = self._credential_ref(device_id)
+                board = journal.get("board_identity")
+                if not self._bounded_identifier(board, 128):
+                    raise ValueError("invalid reconciliation board")
+                job_id = self.onboard.start_iox_reconciliation(
+                    device_id, credential_ref, board, request["record_id"],
+                    request["transaction_id"], request["revision"], True)
+            return self._observe_job(job_id, wait, timeout, accepted=not wait)
+        except (KeyError, TypeError, ValueError,
+                deployment_records.RecordStoreUnreadable):
+            return {"error": "request rejected"}
+        except Exception:
+            return {"error": "authority unavailable"}
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time, keyfile=None,
                  management_token_file=None,
-                 management_previous_token_file=None):
+                 management_previous_token_file=None, iox_controller=None):
     login_limiter = gui_auth.LoginRateLimiter()
     # A bounded, process-local replay ledger for legacy POST operations that
     # create an asynchronous job or an auditable resource mutation. Durable
@@ -1446,6 +1903,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             directory. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
+            if resolved.get("platform") == "iox":
+                return [{"kind": "iox-app", "ownership": "iris-created"}]
             management_type = resolved["management_type"]
             if management_type == "xr-host":
                 # Sidecar files (*.torrent/*.aria2/*.peers.json at harddisk:
@@ -1518,6 +1977,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             """Authorize router teardown strictly from record-owned resources."""
             resolved = dict(record.get("resolved") or {})
             if resolved.get("platform") != "router":
+                if resolved.get("platform") == "iox":
+                    # The controller's final recorded-uninstall authorization
+                    # compares this immutable ownership binding after live
+                    # board discovery and predecessor recovery.
+                    resolved["resources"] = copy.deepcopy(
+                        record.get("resources") or [])
                 return resolved
             # A raw KeyError here would escape do_POST as an unhandled 500
             # instead of the clean 409 + needs-reconcile transition the
@@ -2067,21 +2532,60 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if record_store is None:
                     self._json(404, {"error": "records unavailable"}); return
                 did = unquote(path[len("/api/devices/"):-len("/deployment")])
-                records = record_store.list(did)
-                # The record that best describes the device: the active one,
-                # else the recoverable teardown-authorizing one — both can
-                # raise on ambiguity (duplicate records), and this is a
-                # read-only visibility panel, so fall back to the newest
-                # record rather than erroring it.
+                if iox_controller is None:
+                    self._json(503, {
+                        "error": "IOx authority is unavailable"}); return
                 try:
-                    record = record_store.recoverable_for_device(did)
-                except ValueError:
-                    record = None
+                    authority = iox_controller.summary_for_device(did)
+                    if (not isinstance(authority, dict) or
+                            set(authority) != {
+                                "iox_verification_obligations",
+                                "iox_sessions"} or
+                            not isinstance(
+                                authority["iox_verification_obligations"],
+                                list) or
+                            not isinstance(authority["iox_sessions"], list)):
+                        raise ValueError("invalid IOx authority projection")
+                    records = record_store.list(did, strict=True)
+                    # The record that best describes the device: the active
+                    # one, else the recoverable teardown-authorizing one.
+                    # Duplicate valid candidates retain the established
+                    # read-only fallback to the newest record; unreadable
+                    # authority is handled by the outer 503 path.
+                    try:
+                        record = record_store.recoverable_for_device(
+                            did, strict=True)
+                    except ValueError:
+                        record = None
+                except Exception:
+                    # Authority errors can contain private paths or transport
+                    # detail. The browser receives only this bounded fault;
+                    # operators can use the server log for diagnosis.
+                    self._json(503, {
+                        "error": "IOx authority is unreadable"}); return
                 if record is None and records:
                     record = max(records,
                                  key=lambda r: (r.get("timestamps") or {})
                                  .get("planned_at") or 0)
-                self._json(200, {"record": record, "total": len(records)})
+                try:
+                    public_record = copy.deepcopy(record)
+                    if (public_record is not None and
+                            public_record.get("iox_verification") is not None):
+                        public_record["iox_verification"] = (
+                            deployment_records.DeploymentRecordStore
+                            ._iox_safe_summary(
+                                public_record["iox_verification"]))
+                except Exception:
+                    self._json(503, {
+                        "error": "IOx authority is unreadable"}); return
+                self._json(200, {
+                    "record": public_record,
+                    "total": len(records),
+                    "iox_verification_obligations": copy.deepcopy(
+                        authority["iox_verification_obligations"]),
+                    "iox_sessions": copy.deepcopy(
+                        authority["iox_sessions"]),
+                })
                 return
             if path == "/api/credentials":
                 if app.session_info(self._sid()) is None:
@@ -4416,8 +4920,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 if body.get("acknowledge_adopt") is not True:
                     self._json(400, {"error": "adoption acknowledgement is required"}); return
                 try:
-                    if record_store.active_for_device(did) is not None:
+                    if record_store.active_for_device(
+                            did, strict=True) is not None:
                         self._json(409, {"error": "device already has an active deployment record"}); return
+                except deployment_records.RecordStoreUnreadable:
+                    self._json(503, {
+                        "error": "deployment authority is unreadable"}); return
                 except ValueError as exc:
                     # duplicate actives (legacy store not yet healed) — surface
                     # the reason like the undeploy branch, not a dropped request
@@ -4444,267 +4952,17 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self._json(404, {"error": "not found"}); return
                 act = "undeploy" if path.endswith("/undeploy") else "onboard"
                 did = unquote(path[len("/api/devices/"):-len("/" + act)])
-                if not did.strip():
-                    self._json(400, {"error": "bad device id"}); return
-
-                def _reject(status, error):
-                    # Every submission refusal from here on is audited under
-                    # the SAME event a successful start uses below (varying
-                    # only result), so the trail never goes quiet after an
-                    # operator hits onboard/undeploy: a rejected router
-                    # preflight, a busy-device conflict, an unreachable
-                    # device, etc. all leave a result=fail onboard_start /
-                    # undeploy_start record naming this device -- never a
-                    # "create" (or a click) followed by nothing.
-                    self._audit("%s_start" % act, "onboard", action="start",
-                               target=did, actor=actor, result="fail",
-                               detail=error)
-                    self._json(status, {"error": error})
-
-                # Reject unknown devices HERE, before start() creates a job +
-                # parked worker thread — junk ids must not accumulate either.
-                if fleet is not None and fleet.get_device(did) is None:
-                    _reject(404, "no such device"); return
-                resolved = None
-                record_ref = {}
-                prepare = None
-                pre_apply = None
-                on_success = None
-                # Telemetry flags from the onboard form (spec 8.1): reports
-                # default on, streaming default off — both installer-style and
-                # IOx-style env names so every platform recipe picks them up.
+                invalid = submission_adapter.prevalidate_device(
+                    did, act, actor=actor, audit_fn=self._audit)
+                if invalid is not None:
+                    self._json(invalid[0], invalid[1]); return
                 body_flags = self._json_body(raw)
                 if body_flags is None:
                     return
-                # Force teardown: an onboard that died after enabling the
-                # agent but before its record was written leaves a router that
-                # cannot be undeployed (no record), cannot be adopted (routers
-                # never can) and cannot be re-onboarded (preflight refuses the
-                # existing Guest Shell). Force removes ONLY the agent footprint.
-                force = body_flags.get("force", False) is True
-                t_on = body_flags.get("telemetry", True) is not False
-                s_on = body_flags.get("telemetry_stream", False) is True
-                env_extra = {"TELEMETRY": "on" if t_on else "off",
-                             "TELEMETRY_STREAM": "on" if s_on else "off"}
-                env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
-                env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
-                # Undeploy carries its own env: the telemetry flags above are
-                # onboard-only, but the force flag below MUST reach the
-                # teardown recipe. env_extra is the only channel into it.
-                undeploy_env = None
-                if act == "onboard":
-                    # With a record store (always in production via main()), an
-                    # onboard resolves an immutable plan and persists a record.
-                    # Without one (embedded/degraded), it stays one-click legacy.
-                    if record_store is not None:
-                        device = fleet.get_device(did)
-                        try:
-                            plan = self._plan(did, device)
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if plan["resolved"].get("platform") == "router":
-                            try:
-                                # Any record IRIS already applied blocks a
-                                # re-onboard, not just an active one: the box is
-                                # configured either way, so preflight would fail
-                                # with a confusing "guestshell is already
-                                # enabled" instead of naming the real fix.
-                                existing = record_store.recoverable_for_device(did)
-                            except ValueError as exc:
-                                _reject(409, str(exc)); return
-                            if existing is not None:
-                                _reject(409, "router already has a %s "
-                                        "deployment record; undeploy it before "
-                                        "onboarding again — if this device was "
-                                        "replaced, undeploy with force, or "
-                                        "delete and re-add it"
-                                        % existing.get("state", "recorded")); return
-                        resolved = plan["resolved"]
-
-                        def prepare():
-                            # Runs under the onboard job lock only when a genuinely
-                            # new job is registered, so a concurrent double-onboard
-                            # cannot leave an orphan planned record.
-                            rid = record_store.create({"controller_id": "iris",
-                                "device_id": did, "inventory_revision": fleet.revision(),
-                                "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
-                                # EVERY platform's preflight runs in the bounded
-                                # worker pool, not synchronously in this HTTP
-                                # request (a large selected batch shows queued
-                                # progress immediately), and pre_apply below
-                                # replaces this with the evidence it returns.
-                                # Non-router records used to be created as
-                                # "not-required" and never updated, so they
-                                # misdescribed a check that had in fact run.
-                                "preflight": {"status": "pending"},
-                                "resources": self._owned_resources(plan["resolved"])})["record_id"]
-                            record_ref["id"] = rid
-                            return rid
-
-                        def pre_apply(evidence):
-                            # The job may have waited in the queue. Bind the
-                            # live evidence (board ID, model, router
-                            # ownership) immediately before apply, then
-                            # atomically replace the planned record inputs.
-                            # This is what lets a later undeploy render from
-                            # the record alone: DEVICE_IP and
-                            # EXPECTED_DEVICE_IDENTITY for Guest Shell and IOx
-                            # teardowns come from here, not the live fleet row.
-                            final_plan = self._apply_preflight(plan, evidence)
-                            rid = record_ref.get("id")
-                            if not rid:
-                                raise ValueError("planned record is unavailable")
-                            record_store.update_planned(
-                                rid, plan_hash=final_plan["plan_hash"],
-                                resolved=final_plan["resolved"],
-                                preflight=evidence,
-                                resources=self._owned_resources(
-                                    final_plan["resolved"]))
-                            return final_plan["resolved"]
-                    else:
-                        try:
-                            degraded_plan = self._plan(did, fleet.get_device(did))
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if degraded_plan["resolved"].get("platform") == "router":
-                            _reject(503, "router onboarding requires the "
-                                    "deployment record store"); return
-                else:
-                    # Undeploy renders exclusively from an active record so a
-                    # post-deploy inventory edit cannot retarget cleanup. Without
-                    # a record store, fall back to legacy fleet-driven teardown.
-                    if record_store is not None:
-                        # FORCE is decided BEFORE the record is read, because a
-                        # forced teardown never uses a record as authority: it
-                        # strips only what is identifiably IRIS's by name and
-                        # leaves the operator's network exactly as it is. Force
-                        # used to be consulted only on the no-record branch,
-                        # which defeated the one case it exists for — a record
-                        # that describes a device no longer there. A rebuilt VM
-                        # keeps its id and address but gets a new board ID, so
-                        # the teardown recipe's identity guard refused it every
-                        # time, while onboard kept naming that same teardown as
-                        # the fix. Force could not be reached from either end.
-                        if force:
-                            try:
-                                degraded_plan = self._plan(
-                                    did, fleet.get_device(did))
-                            except ValueError as exc:
-                                _reject(409, str(exc)); return
-                            resolved = degraded_plan["resolved"]
-                            undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
-
-                            # Retired only once the box is actually clean (see
-                            # OnboardService.start's on_success). EVERY
-                            # non-terminal record goes, which is also the only
-                            # exit from "multiple recoverable records" — that
-                            # state refuses onboard, undeploy and adopt alike,
-                            # and nothing else in the product resolves it.
-                            def on_success(_did=did):
-                                record_store.retire_device(
-                                    _did, "forced agent-only teardown; the "
-                                    "record no longer describes this device")
-
-                            self._audit("undeploy_forced", "onboard",
-                                        action="start", target=did,
-                                        actor=actor, result="ok",
-                                        detail="forced agent-footprint teardown;"
-                                               " VPG/NAT left untouched, any "
-                                               "deployment record abandoned "
-                                               "once the teardown succeeds")
-                        else:
-                            try:
-                                # Not just the ACTIVE record: a controller
-                                # restart during an onboard leaves the record
-                                # "unknown" while the device is already
-                                # configured, and that record still records
-                                # what IRIS created. Teardown must accept it, or
-                                # the device is stranded — a router cannot be
-                                # adopted and its preflight refuses a re-onboard.
-                                # strict: an unreadable store must NOT read as
-                                # "no record for this device" — see the
-                                # RecordStoreUnreadable branch below.
-                                record = record_store.recoverable_for_device(
-                                    did, strict=True)
-                            except deployment_records.RecordStoreUnreadable as exc:
-                                # The records exist, we just cannot read them.
-                                # Reporting that as "no record" sent the
-                                # operator to adopt a device IRIS may already
-                                # own, writing an unverified record on top of a
-                                # repairable file. Server-state fault -> 503,
-                                # like the other record-store outages here.
-                                _reject(503, "%s; the console cannot tell "
-                                        "whether this device has a deployment "
-                                        "until the file is repaired" % exc)
-                                return
-                            except ValueError as exc:
-                                # duplicate actives should be impossible
-                                # (activation supersedes siblings; startup
-                                # collapses legacy dupes) — but surface the
-                                # reason instead of a 500 if not, and name the
-                                # way out rather than leaving the operator with
-                                # a state the console cannot resolve.
-                                _reject(409, "%s; retry with force to remove "
-                                        "the agent footprint only" % exc); return
-                            if record is None:
-                                _reject(409, "no deployment record for this "
-                                        "device; adopt it first, then undeploy, "
-                                        "or retry with force to remove the "
-                                        "agent footprint only"); return
-                            try:
-                                resolved = self._router_teardown_resolved(record)
-                            except ValueError as exc:
-                                # Best effort: the record may already BE
-                                # needs-reconcile, from an earlier attempt at
-                                # this same broken teardown, and that self-edge
-                                # is not a legal transition. Letting it raise
-                                # turned every retry after the first into an
-                                # unhandled 500 with no JSON body to explain it.
-                                try:
-                                    record_store.transition(record["record_id"],
-                                                        "needs-reconcile")
-                                except ValueError:
-                                    pass
-                                _reject(409, str(exc)); return
-
-                            def prepare():
-                                record_ref["id"] = record["record_id"]
-                                return record["record_id"]
-                    else:
-                        try:
-                            degraded_plan = self._plan(did, fleet.get_device(did))
-                        except ValueError as exc:
-                            _reject(409, str(exc)); return
-                        if degraded_plan["resolved"].get("platform") == "router":
-                            _reject(503, "router undeploy requires an "
-                                    "active deployment record"); return
-                try:
-                    jid = onboard.start(
-                        did, action=act, resolved=resolved, prepare=prepare,
-                        pre_apply=pre_apply, on_success=on_success,
-                        env_extra=(env_extra if act == "onboard"
-                                   else undeploy_env))
-                except ValueError as exc:
-                    if record_ref.get("id") and act == "onboard":
-                        # Best effort, for the same reason as the teardown-
-                        # resolve handler above: start() retires the record
-                        # itself when the work queue is full, so this would be
-                        # removed -> needs-reconcile, which is not a legal edge.
-                        # An illegal transition raised from inside an except
-                        # handler escapes do_POST entirely — the operator gets a
-                        # dropped request instead of the 409 that explains why.
-                        try:
-                            record_store.transition(record_ref["id"],
-                                                "needs-reconcile")
-                        except ValueError:
-                            pass
-                    # the device is busy with the OPPOSITE action
-                    _reject(409, str(exc)); return
-                # Emitted AFTER start() so the job id correlates this start with
-                # its *_finished event when jobs run concurrently.
-                self._audit("%s_start" % act, "onboard", action="start",
-                           target=did, actor=actor, detail="job %s" % jid)
-                self._json(200, {"job_id": jid}); return
+                status, response = submission_adapter.submit_device(
+                    did, act, body_flags, actor=actor, audit_fn=self._audit)
+                self._json(status, response)
+                return
             if path.startswith("/api/onboard/jobs/") and path.endswith("/abort"):
                 if onboard is None:
                     self._json(404, {"error": "not found"}); return
@@ -4981,7 +5239,16 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         def log_message(self, *args):
             pass
 
+    submission_adapter = _OnboardSubmissionAdapter(
+        fleet, creds, record_store, onboard, iox_controller,
+        plan_fn=lambda device_id, device: Handler._plan(
+            None, device_id, device),
+        apply_preflight_fn=Handler._apply_preflight,
+        owned_resources_fn=Handler._owned_resources,
+        teardown_resolved_fn=Handler._router_teardown_resolved,
+        audit_path=audit_path, now_fn=now_fn)
     srv = _ConsoleServer((host, port), Handler)
+    srv.onboard_submission = submission_adapter
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the
@@ -5091,6 +5358,71 @@ def _log_peer_policy_startup(state_dir):
           file=sys.stderr, flush=True)
 
 
+class _TerminationRequested(BaseException):
+    """Internal unwind used to route container SIGTERM through cleanup."""
+
+
+class _SigtermLatch(object):
+    """Install TERM protection before local admission can begin."""
+
+    def __init__(self):
+        self.pending = False
+        self.armed = False
+        self.previous = None
+        self.installed = False
+
+    def _handle(self, _signum, _frame):
+        self.pending = True
+        if self.armed:
+            # Disarm before raising so a second TERM in the tiny unwind window
+            # is latched instead of interrupting the cleanup finally block.
+            self.armed = False
+            raise _TerminationRequested()
+
+    def install(self):
+        if not self.installed:
+            self.previous = signal.signal(signal.SIGTERM, self._handle)
+            self.installed = True
+
+    def restore(self):
+        if self.installed:
+            signal.signal(signal.SIGTERM, self.previous)
+            self.installed = False
+
+
+def _serve_with_shutdown(server, cleanup, latch=None, start_admission=None):
+    """Serve until return, interruption, or SIGTERM, then drain exactly once.
+
+    ``BaseServer.shutdown()`` cannot be called from the serve_forever thread.
+    Raising a private base exception from Python's main-thread signal handler
+    unwinds that loop directly and guarantees the ordered cleanup callback.
+    A second TERM is ignored while cleanup restores device/controller custody;
+    the container runtime's eventual KILL remains its external hard ceiling.
+    """
+    latch = latch or _SigtermLatch()
+    latch.install()
+    try:
+        if latch.pending:
+            raise _TerminationRequested()
+        if start_admission is not None:
+            start_admission()
+        latch.armed = True
+        if latch.pending:
+            latch.armed = False
+            raise _TerminationRequested()
+        server.serve_forever()
+    except _TerminationRequested:
+        pass
+    finally:
+        latch.armed = False
+        latch.pending = True
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            cleanup()
+        finally:
+            latch.restore()
+
+
 def main():
     import gui_images
     import gui_fleet
@@ -5109,6 +5441,14 @@ def main():
     token_file = os.environ.get("IRIS_MANAGEMENT_API_TOKEN_FILE", "").strip()
     previous_token_file = os.environ.get(
         "IRIS_MANAGEMENT_API_PREVIOUS_TOKEN_FILE", "").strip() or None
+    if (not isinstance(state_dir, str) or not state_dir or
+            not os.path.isabs(state_dir) or
+            len(state_dir.encode("utf-8", "surrogatepass")) > 4096 or
+            any(ord(character) < 32 or 127 <= ord(character) <= 159
+                for character in state_dir)):
+        print("iris-management: invalid state root; refusing to start",
+              file=sys.stderr, flush=True)
+        sys.exit(2)
     if not certfile or not os.path.isfile(certfile):
         print("iris-management: management TLS certificate unavailable; "
               "refusing to start", file=sys.stderr, flush=True)
@@ -5159,20 +5499,93 @@ def main():
         state_dir, images_dir, audit_fn=_bg_audit,
         verification_fn=lambda _entry: bulkhash_refresh.run_refresh(
             "manual", state_dir, catalog, audit_fn=_bg_audit, wait=True))
-    record_store = deployment_records.DeploymentRecordStore(state_dir)
-    record_store.recover_interrupted()
-    onboard = gui_onboard.OnboardService(
-        fleet, creds, audit_fn=_bg_audit,
-        clear_state_fn=catalog.forget_device, record_store=record_store,
-        log_dir=os.path.join(state_dir, "deploy-logs"))
+    term_latch = _SigtermLatch()
+    term_latch.install()
+    iox_controller = None
+    control_server = None
+    srv = None
+    onboard = None
     try:
+        record_store = deployment_records.DeploymentRecordStore(state_dir)
+        record_store.recover_interrupted()
+        server_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(server_dir)
+        controller_id = iox_verification._load_or_create_controller_id(
+            record_store, state_dir)
+        catalog_certificate = (
+            os.environ.get("IRIS_CRT_PUBLIC") or
+            os.path.join(os.environ.get("IRIS_CONFIG") or "/etc/iris",
+                         "tls", "crt.pem"))
+        catalog_host = os.environ.get("IRIS_HOST_IP", "")
+        catalog_url = os.environ.get("IRIS_CATALOG_URL") or (
+            "https://%s:8443" % catalog_host if catalog_host else "")
+        iox_controller = iox_verification.IoxController(
+            record_store,
+            {
+                "state_dir": state_dir,
+                "controller_id": controller_id,
+                "record_store": os.path.realpath(record_store.path),
+                "session_seconds": 7200,
+                "restoration_reserve_seconds": 180,
+                "application_id": "iris",
+                "credential_resolver": creds.get_secrets,
+                "enrollment_token_minter": lambda device_id:
+                    gui_onboard._default_mint(device_id, server_dir),
+                "catalog_url": catalog_url,
+                "catalog_certificate_path": catalog_certificate,
+                "recipe_argv_by_action": {
+                    "install": [
+                        "/bin/bash",
+                        os.path.join(repo_root, "device", "iox", "install.sh")],
+                    "uninstall": [
+                        "/bin/bash",
+                        os.path.join(repo_root, "device", "iox", "uninstall.sh")],
+                },
+            },
+            iox_transport.IoxTransport, time.time, time.monotonic)
+        onboard = gui_onboard.OnboardService(
+            fleet, creds, audit_fn=_bg_audit,
+            clear_state_fn=catalog.forget_device, record_store=record_store,
+            log_dir=os.path.join(state_dir, "deploy-logs"),
+            iox_controller=iox_controller, crt_public=catalog_certificate,
+            host_ip=catalog_host, catalog_url=catalog_url)
         srv = make_server(
             host, port, app, images, fleet, creds, catalog, onboard, None,
             certfile=certfile, keyfile=keyfile, audit_path=audit_path,
             record_store=record_store, management_token_file=token_file,
-            management_previous_token_file=previous_token_file)
-    except ConsoleTLSError as exc:
-        print("iris-management: %s" % exc, file=sys.stderr, flush=True)
+            management_previous_token_file=previous_token_file,
+            iox_controller=iox_controller)
+        def control_dispatch(request):
+            if term_latch.pending:
+                return {"error": "service shutting down"}
+            return srv.onboard_submission.dispatch(request)
+
+        control_server = iox_verification.IoxControlServer(
+            state_dir, controller_id, control_dispatch)
+    except Exception:
+        if control_server is not None:
+            try:
+                control_server.close()
+            except Exception:
+                pass
+        if srv is not None:
+            try:
+                srv.server_close()
+            except Exception:
+                pass
+        if onboard is not None:
+            try:
+                onboard.shutdown()
+            except Exception:
+                pass
+        if iox_controller is not None:
+            try:
+                iox_controller.close()
+            except Exception:
+                pass
+        term_latch.restore()
+        print("iris-management: controller initialization failed; refusing "
+              "to start", file=sys.stderr, flush=True)
         sys.exit(2)
     # Hourly instruction-key custody refresh. This is an in-process daemon
     # thread like the maintenance loops below, never another entrypoint process.
@@ -5216,7 +5629,24 @@ def main():
               % _PLAINTEXT_OPT_IN_ENV, file=sys.stderr, flush=True)
     print("iris-management on %s://%s:%d/internal/v1" %
           (scheme, host, port), flush=True)
-    srv.serve_forever()
+    def shutdown_management():
+        for stop in (custody_stop, instruction_stop, ca_stop, bulkhash_stop,
+                     export_stop):
+            stop.set()
+        try:
+            control_server.close()
+        finally:
+            try:
+                srv.server_close()
+            finally:
+                try:
+                    onboard.shutdown()
+                finally:
+                    iox_controller.close()
+
+    _serve_with_shutdown(
+        srv, shutdown_management, latch=term_latch,
+        start_admission=control_server.start)
 
 
 if __name__ == "__main__":
