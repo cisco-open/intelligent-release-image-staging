@@ -162,7 +162,8 @@ aria2's retained peer list. Applied verified device deny lists may
 cooperatively disconnect matching peers. To request containment, unassign every
 image from the affected device; its agent removes torrents only after the next
 successful due policy poll and successful aria2 policy apply. Signed logical
-cadence and catalog/RPC failures can delay removal, so this is not immediate
+`catalog_tick_s`, mechanical scheduling, and catalog/RPC failures can delay
+removal, so this is not immediate
 isolation. This remains a staging operation and never installs, activates,
 reloads, or changes boot state.
 
@@ -355,6 +356,7 @@ A committed rotation can report incomplete restamping. After fixing producer
 state, run `iris-instr-key restamp <device_id>`; do not repeatedly rotate.
 For retirement or compromise, use `iris-revoke <device_id>` instead. Durable
 revocation wins over an agent-reported LKG and must not be avoided by rotation.
+`iris-instr-key rotate` refuses a revoked device.
 
 ## F3 offline bootstrap-envelope redelivery
 

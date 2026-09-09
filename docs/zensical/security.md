@@ -249,7 +249,8 @@ or quarantined device retains this recovery path. Recovery artifacts are
 separate from OS-image torrent staging; instruction-body fetch/verification failure stops the
 instruction step only; heartbeat/staging continue with verified fallback or
 defaults when policy apply succeeds. An aria2 RPC apply failure still sends
-heartbeat but skips staging for that tick. Tracker/origin policy remains authoritative for its own controls.
+heartbeat but skips staging for that tick. Tracker and origin enforcement
+remains authoritative for those server controls.
 
 ### Device administrator trust boundary
 
@@ -264,16 +265,18 @@ and the [platform comparison](device-agents.md#instruction-trust-by-platform).
 ### Encrypted instruction envelope
 
 Phase 1 serves a bounded, per-device envelope on authenticated catalog HTTPS.
-The 256 KiB response cap applies before parsing. SP800-108/HMAC-SHA-256 derives
-separate encryption, MAC and nonce keys with per-device context; a deterministic
+A response over 256 KiB is rejected before parsing or cryptographic work.
+SP800-108/HMAC-SHA-256 derives separate encryption, MAC and nonce keys with
+per-device audience context; a deterministic
 16-byte nonce binds device ID, key ID, epoch and instruction serial. An
 HMAC-SHA-256 counter keystream encrypts the private device part. A separate
 HMAC authenticates the PAE-bound envelope, including header, signed role body,
 nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
 from reaching the policy parser. This construction is not AES-GCM.
 
-The agent also verifies the OpenSSH role signature and signer revocation list,
-checks device/platform audience and the role binding, and applies monotonic
+The agent verifies the OpenSSH role signature and envelope MAC before
+decrypting or applying either part. It also checks the signer revocation list,
+device/platform audience and role binding, and applies monotonic
 `(epoch, instr_serial)` replay floors. Reusing an identity with different bytes
 is rejected. An authenticated server clock anchors expiry; a wall-clock change
 cannot silently extend validity. Signed role intent is public within the

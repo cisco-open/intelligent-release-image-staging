@@ -99,6 +99,10 @@ remain disabled. The origin reconciler applies global and per-image upload
 limits and its peer cap. These server controls remain authoritative; per-role
 origin shaping is not expressible in one shared torrent.
 
+Tracker and origin enforcement remains authoritative for those server
+controls. Device accepted identity, LKG and QoS evidence is separate
+agent-reported state.
+
 Phase 1 adds a server stamper and device verifier to this path. The stamper
 signs immutable role intent and records per-device serials and policy revision.
 The catalog seals a per-device envelope and serves it, plus the root-signed

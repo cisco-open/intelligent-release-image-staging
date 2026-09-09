@@ -318,20 +318,21 @@ server-observed; it does not prove device compliance.
 | Valid fresh envelope: `applied` | Verified QoS and peer posture | Normal cadence; accepted identity is reported. |
 | Valid cached instructions during catalog loss: `lkg` fallback | Locally re-encrypted verified LKG | LKG survives instruction-key rotations. A request-error state may override the raw `lkg` label while this accepted identity/posture is retained; retry on a later ordinary tick. |
 | Instruction expires: `stale_expired` | Role `on_stale: keep` retains verified QoS; `defaults` restores defaults | Restore authenticated catalog time and fresh instructions. Peer expiry is independent. |
-| Attribution expires: `allowlist_expired` | Expired allow-list falls back to tracker-only; a deny-list remains in force | Refresh endpoint attribution/instructions. Never turn an expired allow-list into open access. |
+| Attribution expires: `allowlist_expired` | Expired allow-list falls back to tracker-only; an expired deny-list remains effective independently of `on_stale` | Refresh endpoint attribution/instructions. Never turn an expired allow-list into open access. |
 | Older identity: `rollback_rejected`; authenticated reset: `floor_reset` | Reject older candidate; a validated reset adopts its new floor | Repair server epoch/stamp through the recovery runbook; do not delete local replay state. |
 | Wrong device/platform: `audience_mismatch` | Retain usable LKG/defaults | Redeliver the envelope for the exact inventory device/platform. |
-| Unknown per-device key: `key_rejected`, reason `unknown_key` | Retain usable LKG/defaults | At most one refresh in the tick, bounded by unknown key ID; retry a later tick. |
-| Known-key bad MAC: `key_rejected`, reason `bad_mac` | Retain usable LKG/defaults | Reject evidence and inspect integrity; bad MAC does not trigger key refresh. |
+| Unknown per-device key: `key_rejected`, reason `unknown_key` | Retain usable LKG/defaults | At most one unscheduled refresh in the tick, latched by unknown key ID; retry a later tick. |
+| Known-key bad MAC: `key_rejected`, reason `bad_mac` | Retain usable LKG/defaults | Record a violation and inspect integrity; bad MAC does not trigger key refresh. |
 | Bad/revoked signer, invalid envelope or equal identity/different bytes: `tamper_rejected` | Retain only independently usable LKG/defaults | Repair signer/keylist or envelope provenance; never bypass verification. |
 | Missing verifier: `verifier_missing` | Tracker-only peers, with verified/default QoS | Supply a supported verifier through the agent package; Guest Shell availability is probed at runtime. |
 | Rejected/unreadable local cache: `lkg_rejected`, `lkg_unreadable` | Defaults and tracker-only peers when no usable LKG exists | Obtain a fresh envelope; preserve evidence for diagnosis. |
-| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer/transport; never raise the 256 KiB cap as a recovery shortcut. |
+| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer/transport and retry on a later tick; never raise the 256 KiB cap as a recovery shortcut. |
 | aria2 session restart: `reasserted`; same-session drift correction | Unconditionally reapply verified/default global and active-GID options before reconciliation | Inspect agent-asserted `qos_drift_count`; every future `addTorrent` uses the same verified/default policy. |
-| Instructions 404, 429, 5xx or transport failure: `instr_unavailable`; 409: `instr_pending` | Retain usable LKG/defaults | Later-tick retry; investigate stamp/state and bounded retry hints. No in-tick sleep/retry loop. |
-| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One-shot authenticated token refresh, then later-tick retry; durable revocation cannot be healed by rotation. |
+| Instructions 404, 429, 5xx or transport failure: `instr_unavailable` | Retain usable LKG/defaults | Later-tick retry; investigate stamp/state and bounded retry hints. No in-tick sleep/retry loop. |
+| Instructions 409 `stale_pointer`: `instr_pending` | Retain usable LKG/defaults | Later-tick retry; inspect producer convergence. No in-tick sleep/retry loop. |
+| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One-shot authenticated token refresh, then later-tick retry with no in-tick retry loop; durable revocation cannot be healed by rotation. |
 | Durable revoked principal: display `revoked` (server-observed) | Underlying agent LKG/state remains visible as agent-asserted evidence | Resolve the retirement/compromise decision on the server; do not rotate to spare the device. |
-| Pointer/body race | A valid higher body serial applies; a lower-but-fresh body above the accepted floor applies with `pointer_skew`; a candidate below the floor rejects | After three skew observations, report the latch and inspect producer convergence. At the floor, identical envelope bytes are idempotent; equal identity with different bytes rejects. |
+| Pointer/body race | A valid higher body serial applies; a lower-but-fresh body above the accepted floor applies with `pointer_skew`; a candidate below the accepted floor reports `rollback_rejected` | After three skew observations, report the latch and inspect producer convergence. At equal identity, identical envelope bytes are accepted idempotently; different bytes report `tamper_rejected`. |
 | Explicit `tracker-only` peer posture | Tracker supplies peers under server policy | No device peer-list enforcement is claimed. |
 
 The closed raw state list and the separate display classifications are in

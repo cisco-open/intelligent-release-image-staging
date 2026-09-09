@@ -253,13 +253,16 @@ def test_docs_state_phase_zero_role_and_qos_contract():
         "`confirm_token`",
         "independent quarantine",
         "not sufficient",
-        "unassign every image",
     ])
-    _require("architecture.md", [
-        "server-side cadence",
-        "server-side peer selection",
-        "Per-role origin shaping is not expressible",
-    ])
+    _assert_unit(_page("operations.md"),
+                 ("unassign", "every", "image", "containment"),
+                 "containment must require removing every image assignment")
+    _assert_section_terms(
+        _page("architecture.md"),
+        "Roles, encrypted instructions and traffic controls",
+        ("tracker applies role ACLs", "announce cadence", "candidate ceilings",
+         "origin reconciler", "per-role origin shaping is not expressible"),
+        "architecture must retain tracker and origin traffic controls")
     _require("observability.md", [
         "count-only",
         "`enforcement.mutual_origin.mode = preflight`",
@@ -279,10 +282,10 @@ def test_docs_state_phase_zero_recovery_and_interface_boundaries():
     """The Phase 0 operator contract must keep recovery monotonic, describe
     partial writes honestly, and use the exact public Problem fragments."""
     _require("security.md", [
-        "cooperative and tamper-evident, never tamper-proof",
+        "tamper-evidence rather than tamper-proofing",
         "one full release of preflight observation",
         "union of current self-evaluation and mutual-origin evaluation",
-        "current Phase 0 structural guards",
+        "Phase 1 does not complete that tagged-release dwell",
         "`degraded` because prior role state was lost",
         "`server/pack-agent-bundle.sh`",
     ])
@@ -775,7 +778,8 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
                          (re.escape(component), responsibility),
                          architecture_lower)
     _assert_phase1_enforcement_boundary(architecture)
-    assert "no new service" in architecture_lower
+    _assert_unit(architecture, ("five processes", "not another service"),
+                 "Phase 1 must not add a sixth service")
     assert "no new listener" in architecture_lower
     for line in architecture_lower.splitlines():
         assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
@@ -785,8 +789,10 @@ def test_workstream_a_docs_retain_existing_topology_and_drop_obsolete_cadence_cl
     for port in ("6969", "8443", "9443"):
         assert re.search(r"\|\s*%s\s*\|" % port, network_lower)
     _assert_phase1_network_relationship(network)
-    assert "tracker https flow on 6969" in network_lower
-    assert "console-to-management flow on 9443" in network_lower
+    _assert_unit(network, ("6969", "tracker", "Authenticated HTTPS"),
+                 "the tracker must remain on authenticated HTTPS 6969")
+    _assert_unit(network, ("9443", "Console", "management API"),
+                 "9443 must remain the Console management flow")
     for line in network_lower.splitlines():
         assert not re.search(r"(?:adds?|introduces?|uses?)\s+(?:a\s+)?"
                              r"(?:new|additional)\s+(?:process|listener|service|flow|port)", line)
@@ -925,6 +931,14 @@ def _section(text, heading):
     return remainder[:boundary.start()] if boundary else remainder
 
 
+def _assert_section_terms(text, heading, terms, message):
+    """Require related facts within one named section, including subsections."""
+    section = _compact(_section(text, heading)).lower()
+    missing = [term for term in terms
+               if _compact(term).lower() not in section]
+    assert not missing, "%s; missing: %s" % (message, missing)
+
+
 def _assert_phase1_network_relationship(text):
     """One canonical topology assertion shared by all three network guards."""
     lower = text.lower()
@@ -940,10 +954,14 @@ def _assert_phase1_network_relationship(text):
 
 
 def _assert_phase1_enforcement_boundary(text):
-    _assert_unit(text, ("tracker", "origin", "enforce"),
-                 "server-side tracker/origin enforcement must remain authoritative")
-    _assert_unit(text, ("device", "accepted", "LKG", "QoS"),
-                 "device accepted/LKG/QoS state must not be described as server state")
+    heading = "Roles, encrypted instructions and traffic controls"
+    _assert_section_terms(
+        text, heading, ("tracker", "origin", "enforcement", "authoritative"),
+        "server-side tracker/origin enforcement must remain authoritative")
+    _assert_section_terms(
+        text, heading, ("device", "accepted identity", "LKG", "QoS",
+                        "agent-reported"),
+        "device accepted/LKG/QoS state must remain agent-reported")
 
 
 def _assert_phase1_rollup_relationship(text):
@@ -992,45 +1010,50 @@ def test_docs_phase1_honest_guarantee_and_admin_boundary():
 def test_docs_phase1_envelope_custody_and_failure_contract():
     """Envelope, key placement, credential widths, and failures are relational."""
     security = _page("security.md")
-    _assert_unit(security, ("SP800-108", "HMAC-SHA-256", "per-device",
-                            "audience"),
+    envelope = _section(security, "Encrypted instruction envelope")
+    _assert_unit(envelope, ("SP800-108", "HMAC-SHA-256", "per-device",
+                            "audience context"),
                  "the named per-device KDF must bind the audience")
-    _assert_unit(security, ("epoch", "instruction serial", "replay"),
+    _assert_unit(envelope, ("epoch", "instr_serial", "replay"),
                  "epoch and serial must explain replay rejection")
-    _assert_unit(security, ("MAC", "before", "decrypt"),
+    _assert_unit(envelope, ("MAC", "before", "decrypt"),
                  "authentication must precede decryption")
-    _assert_unit(security, ("MAC", "signature", "before", "apply"),
+    _assert_unit(envelope, ("MAC", "signature", "before", "apply"),
                  "authentication and signature checks must precede apply")
-    _assert_unit(security, ("256 KiB", "reject", "before", "cryptograph"),
+    _assert_unit(envelope, ("256 KiB", "reject", "before", "cryptograph"),
                  "the envelope cap must reject before cryptographic work")
-    _assert_unit(security, ("exactly two", "distinct", "offline roots"),
+
+    custody = _section(security, "Two-root trust and custody")
+    _assert_unit(custody, ("exactly two", "distinct", "offline-root",
+                           "trust set"),
                  "the trust set must contain exactly two distinct roots")
-    _assert_unit(security, ("instruction key", "excluded", "platform configuration"),
-                 "instruction private material must be excluded from platform config")
-    _assert_unit(security, ("private keys", "instruction keys", "LKG key",
-                            "never", "platform configuration"),
+    _assert_unit(custody, ("No current/prior instruction key", "LKG key",
+                           "offline-root private key",
+                           "device platform configuration"),
                  "all private instruction material must stay out of platform config")
-    _assert_unit(security, ("IOx", "enrollment token", "SSH-to-self password",
-                            "run-opts"),
+    _assert_unit(custody, ("enrollment bearer", "IOx", "run-opts", "XR",
+                           "docker-run-opts", "SSH-to-self password"),
                  "IOx bootstrap credential exceptions must be stated together")
-    _assert_unit(security, ("XR", "enrollment token", "docker-run-opts"),
-                 "XR bootstrap credential exception must be explicit")
-    enrollment_units = [unit.lower() for unit in _units(security)
+    enrollment_units = [unit.lower() for unit in _units(custody)
                         if "enrollment" in unit.lower() and
                         ("3,600" in unit or "3600" in unit) and
                         "120" in unit and "overlap" in unit.lower()]
     assert enrollment_units, "enrollment lifetime and overlap must be related"
-    _assert_unit(security, ("bearer", "128", "key material", "256"),
+    _assert_unit(custody, ("128-bit bearer", "256-bit cryptographic"),
                  "bearer and cryptographic-key widths must be distinguished")
-    _assert_unit(security, ("unknown", "width", "reject", "before mint"),
+    _assert_unit(custody, ("unsupported", "mismatched", "widths",
+                           "fail before minting"),
                  "unknown/mismatched widths must fail before minting")
 
     operations = _page("operations.md")
-    _assert_unit(operations, ("leaked", "honest device", "rotate --no-overlap"),
+    response = _section(operations, "Instruction failure and key response")
+    _assert_section_terms(operations, "Instruction failure and key response",
+                          ("leaked instruction key", "honest device",
+                           "iris-instr-key rotate --no-overlap"),
                  "leaked key on an honest device must map to no-overlap rotation")
-    _assert_unit(operations, ("compromised", "retired", "iris-revoke"),
+    _assert_unit(response, ("retirement", "compromise", "iris-revoke"),
                  "compromised or retired devices must map to revocation")
-    _assert_unit(operations, ("revoked", "rotation", "refused"),
+    _assert_unit(response, ("rotation", "refuses", "revoked device"),
                  "rotation must never spare a revoked device")
 
     problems = _page("problems.md")
@@ -1042,57 +1065,63 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
 
     failures = _page("device-agents.md") + "\n\n" + _page("reference.md")
     for state, action in (
-            ("none", "defaults"), ("applied", "serial"), ("lkg", "keep"),
+            ("none", "defaults"), ("applied", "accepted identity"),
+            ("lkg", "retained"),
             ("stale_expired", "on_stale"),
             ("allowlist_expired", "tracker-only"),
-            ("rollback_rejected", "keep"), ("floor_reset", "floor"),
-            ("audience_mismatch", "keep"),
-            ("tamper_rejected", "keep"), ("verifier_missing", "defaults"),
+            ("rollback_rejected", "Reject older candidate"),
+            ("floor_reset", "new floor"),
+            ("audience_mismatch", "Retain usable"),
+            ("tamper_rejected", "Retain only"),
+            ("verifier_missing", "verified/default"),
             ("lkg_rejected", "defaults"), ("lkg_unreadable", "defaults"),
-            ("oversize", "next tick"), ("reasserted", "aria2 session"),
-            ("instr_unavailable", "next tick"),
-            ("instr_pending", "next tick"),
-            ("instr_forbidden", "refresh"), ("tracker-only", "no instruction")):
+            ("oversize", "later tick"), ("reasserted", "aria2 session"),
+            ("instr_unavailable", "Later-tick"),
+            ("instr_pending", "Later-tick"),
+            ("instr_forbidden", "refresh"),
+            ("tracker-only", "No device peer-list enforcement")):
         _assert_unit(failures, (state, action),
                      "%s lacks its operator action/status relationship" % state)
-    _assert_unit(failures, ("fetch", "verify", "LKG", "heartbeat", "staging continue"),
+    _assert_unit(failures, ("fetch/verification", "LKG", "heartbeat/staging",
+                            "continue"),
                  "fetch/verify fallback must retain heartbeat and staging")
-    _assert_unit(failures, ("RPC apply", "heartbeat", "staging", "skipped", "tick"),
+    _assert_unit(failures, ("RPC apply", "heartbeat", "staging", "skips", "tick"),
                  "RPC apply failure must send heartbeat and skip staging that tick")
     _assert_unit(failures, ("key_rejected", "unknown_key", "one",
-                            "unscheduled", "refresh", "latched key id"),
+                            "unscheduled", "refresh", "latched by unknown key ID"),
                  "unknown keys must trigger one latched unscheduled refresh")
     _assert_unit(failures, ("key_rejected", "bad_mac", "no", "refresh",
                             "violation"),
                  "known-key bad MAC must be a violation without refresh")
     _assert_unit(failures, ("401", "403", "instr_forbidden", "one",
-                            "refresh", "no in-tick", "loop"),
+                            "refresh", "no in-tick retry loop"),
                  "forbidden responses need one refresh without an in-tick loop")
-    _assert_unit(failures, ("404", "instr_unavailable", "next tick"),
+    _assert_unit(failures, ("404", "instr_unavailable", "Later-tick"),
                  "instruction 404 must wait until the next tick")
     _assert_unit(failures, ("409", "stale_pointer", "instr_pending",
-                            "next tick", "no", "sleep"),
+                            "Later-tick", "No in-tick sleep"),
                  "stale pointers must remain pending without an in-tick sleep")
     _assert_unit(failures, ("429", "5xx", "transport", "instr_unavailable",
-                            "next tick"),
+                            "Later-tick"),
                  "rate/server/transport failures must remain unavailable")
-    _assert_unit(failures, ("deny", "expired", "remain", "effective"),
+    _assert_unit(failures, ("expired deny-list", "remain", "effective",
+                            "independently", "on_stale"),
                  "expired deny posture must remain restrictive")
-    _assert_unit(failures, ("allow", "expired", "tracker-only",
+    _assert_unit(failures, ("expired allow-list", "tracker-only",
                             "independent", "on_stale"),
                  "expired allow posture must fail to tracker-only")
-    _assert_unit(failures, ("on_stale=keep", "QoS", "retain"),
+    _assert_unit(failures, ("on_stale: keep", "QoS", "retain"),
                  "stale keep must retain verified QoS")
-    _assert_unit(failures, ("on_stale=defaults", "QoS", "defaults"),
+    _assert_unit(failures, ("on_stale: keep", "defaults", "restores defaults"),
                  "stale defaults must restore fixed QoS defaults")
-    _assert_unit(failures, ("body serial", "higher", "pointer", "apply"),
+    _assert_unit(failures, ("body serial", "higher", "pointer", "applies"),
                  "a body ahead of its pointer must still apply")
     _assert_unit(failures, ("body serial", "lower", "pointer", "fresh",
-                            "pointer_skew", "apply"),
+                            "pointer_skew", "applies"),
                  "a fresh body below its pointer must apply with skew evidence")
     _assert_unit(failures, ("below", "accepted floor", "rollback_rejected"),
                  "a body below the replay floor must be rejected as rollback")
-    _assert_unit(failures, ("equal identity", "identical bytes", "accepted"),
+    _assert_unit(failures, ("equal identity", "identical", "accepted idempotently"),
                  "an identical replay at the accepted identity must remain safe")
     _assert_unit(failures, ("equal identity", "different bytes",
                             "tamper_rejected"),
@@ -1103,9 +1132,9 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
     reference = _page("reference.md")
     _assert_unit(reference, ("max_peers", "parsed", "ignored", "MAX-PEERS-IGNORED"),
                  "legacy max_peers must be parse-only with one notice")
-    _assert_unit(reference, ("IRIS_MAX_PEERS", "IRIS_MAX_CONCURRENT",
-                             "provisional", "first successful tick"),
-                 "legacy env values need their bounded launch interval")
+    for variable in ("IRIS_MAX_PEERS", "IRIS_MAX_CONCURRENT"):
+        _assert_unit(reference, (variable, "provisional", "first successful tick"),
+                     "%s needs its bounded launch interval" % variable)
     _assert_unit(reference, ("IRIS_TICK_SECONDS", "mechanical", "catalog_tick_s",
                              "logical"),
                  "mechanical and signed logical cadence must be distinct")
@@ -1114,21 +1143,23 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
     assert rows and all("65535" not in row for row in rows)
 
     agents = _page("device-agents.md")
-    for terms in (("Guest Shell", "runtime probe", "tracker-only"),
-                  ("Guest Shell", "replaceable bundle", "tamper-evidence"),
-                  ("Guest Shell", "IOS-owned", "60"),
-                  ("IOx", "XR", "signed image", "pinned")):
+    assert "| Property | Unified IOx/XR image | Guest Shell |" in agents
+    for terms in (("Signature verifier", "runtime probe", "tracker-only"),
+                  ("Two distinct public roots", "replaceable bundle",
+                   "tamper-evidence"),
+                  ("Mechanical tick", "IOS-owned", "60-second"),
+                  ("Two distinct public roots", "image pin",
+                   "enforced package signature")):
         _assert_unit(agents, terms, "Guest Shell divergence row is incomplete")
-    _assert_unit(_page("security.md"),
-                 ("Guest Shell", "RPC secret", "mode-0600", "conf-path",
-                  "command line"),
+    _assert_unit(agents, ("Guest Shell", "RPC secret", "mode-0600",
+                          "config path", "process arguments"),
                  "Guest Shell RPC-secret argv mitigation is missing")
     _assert_unit(_page("containers.md"),
                  ("mechanical tick", "reassert", "heartbeat", "signed"),
                  "each mechanical tick must reassert and heartbeat")
     operations = _page("operations.md")
-    _assert_unit(operations, ("unassignment", "quarantine", "next successful",
-                              "due policy poll", "aria2 apply"),
+    _assert_unit(operations, ("containment", "unassign", "next successful",
+                              "due policy poll", "aria2 policy apply"),
                  "torrent removal must use the due-policy/apply boundary")
     _assert_unit(operations, ("removal", "delay", "catalog_tick_s",
                               "mechanical scheduling", "failures"),
@@ -1147,24 +1178,36 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
 
 def test_docs_phase1_iox_verification_transaction():
     iox = _page("iox.md")
-    transaction = _section(iox, "App-hosting verification transaction")
-    _assert_unit(transaction, ("device-global", "app-hosting verification"),
+    transaction = _section(iox, "Device-global package verification")
+    _assert_section_terms(iox, "Device-global package verification",
+                          ("device-global", "verification"),
                  "the IOx control scope must be named")
-    _assert_unit(transaction, ("signed wrapper", "no", "state change"),
+    _assert_unit(transaction, ("Signed marker", "No verification-state change",
+                               "not cryptographic validation"),
                  "signed wrappers must leave verification unchanged")
-    _assert_ordered(transaction, ("initially enabled", "record", "disable",
-                                  "install", "restore", "read-back", "activate"),
-                    "enabled-state transaction order is incomplete", 400)
-    _assert_unit(transaction, ("initially disabled", "unchanged"),
+    _assert_unit(transaction, ("Unsigned / `enabled`", "record", "disable",
+                               "installation", "restore", "read-back",
+                               "activation"),
+                 "enabled-state transaction order is incomplete")
+    enabled_rows = [line for line in transaction.splitlines()
+                    if re.match(r"\|\s*Unsigned / `enabled`\s*\|", line)]
+    assert len(enabled_rows) == 1
+    _assert_ordered(enabled_rows[0],
+                    ("record", "disable", "installation", "restore",
+                     "read-back", "activation"),
+                    "enabled-state transaction order is reversed", 300)
+    _assert_unit(transaction, ("Unsigned / `disabled`", "Leave disabled",
+                               "no unowned enable"),
                  "pre-disabled state must remain disabled")
     _assert_unit(transaction, ("unknown", "refuse", "mutation", "install"),
                  "unknown state must refuse mutation and installation")
-    _assert_unit(transaction, ("crash", "resume", "durable", "obligation"),
-                 "crash recovery must use the durable obligation")
-    _assert_unit(transaction,
-                 ("uninstall", "IRIS-owned", "never", "blindly enable"),
+    _assert_unit(transaction, ("Interruption/resume", "uninstall recovery",
+                               "durable obligations"),
+                 "interruption recovery must use the durable obligation")
+    _assert_unit(transaction, ("uninstall recovery", "durable obligations",
+                               "not blindly enable"),
                  "uninstall may recover only owned obligations")
-    _assert_unit(transaction, ("signature marker", "not", "cryptographic"),
+    _assert_unit(transaction, ("marker presence", "not cryptographic"),
                  "package markers must not be presented as verification")
 
     first = ("https://www.cisco.com/c/en/us/td/docs/switches/lan/"
@@ -1175,40 +1218,54 @@ def test_docs_phase1_iox_verification_transaction():
               "catalyst-9000.html")
     assert first in transaction and second in transaction
 
-    for name, terms in (
-            ("getting-started.md", ("before onboarding", "device-global", "verification")),
-            ("security.md", ("IOx", "signed", "verification enabled", "container")),
-            ("operations.md", ("IOx", "verification obligation", "recover", "uninstall")),
-            ("console.md", ("IOx", "verification obligation", "recover"))):
-        _assert_unit(_page(name), terms, "%s omits its IOx operator consequence" % name)
+    for name, heading, terms in (
+            ("getting-started.md", "IOx verification prerequisite",
+             ("Before IOx onboarding", "device-global", "verification")),
+            ("security.md", "IOx verification and Guest Shell bundle boundary",
+             ("IOx verification", "signed wrapper",
+              "verification-state change")),
+            ("operations.md", "Guest Shell fleet bundle drop",
+             ("IOx recovery", "device-global verification",
+              "uninstall recovery", "never blindly enables")),
+            ("console.md", "IOx onboarding verification",
+             ("IOx verification", "uninstall recovery",
+              "never blindly enables"))):
+        _assert_section_terms(
+            _page(name), heading, terms,
+            "%s omits its IOx operator consequence" % name)
 
 
 def test_docs_phase1_network_process_and_state_topology():
     _assert_phase1_network_relationship(_page("network-ports.md"))
     server = _page("server.md")
-    for path, custody in (
-            ("$IRIS_CONFIG/instr/signing-key.age", "encrypted"),
-            ("$IRIS_RUN/instr/signing-key", "plaintext runtime"),
-            ("$IRIS_CONFIG/instr/signing-key.pub", "public"),
-            ("$IRIS_CONFIG/instr/signing-key-cert.pub", "public"),
-            ("$IRIS_CONFIG/instr/roots.d/", "public"),
-            ("$IRIS_RUN/instr/signing-key-cert.pub", "public runtime"),
-            ("$IRIS_STATE/instructions-epoch.json", "durable"),
-            ("$IRIS_STATE/instructions-epoch.json.lock", "lock"),
-            ("$IRIS_STATE/instructions/keylist.current", "durable"),
-            ("$IRIS_STATE/instructions/keylist-state.json", "durable"),
-            ("$IRIS_STATE/instructions/keylist.lock", "lock"),
-            ("$IRIS_STATE/instructions/roles.d/", "durable"),
-            ("$IRIS_STATE/instructions/role-state.json", "durable"),
-            ("$IRIS_STATE/instructions/activation.json", "durable"),
-            ("$IRIS_STATE/instructions/producer.lock", "lock"),
-            ("$IRIS_STATE/instructions/admitted-devices.json", "durable"),
-            ("$IRIS_STATE/instructions/serial-history.json", "durable"),
-            ("$IRIS_STATE/instructions/roles.lock", "lock"),
-            ("$IRIS_STATE/instruction-key-status.json", "status"),
-            ("$IRIS_STATE/instruction-stamper-status.json", "status")):
-        _assert_unit(server, (path, custody),
-                     "%s lacks its custody classification" % path)
+    _assert_unit(server, ("$IRIS_CONFIG/instr/", "signing-key.age",
+                          "encrypted online private key", "signing-key.pub",
+                          "signing-key-cert.pub", "roots.d/",
+                          "public roots only"),
+                 "configured signing custody must remain encrypted/public")
+    _assert_unit(server, ("$IRIS_RUN/instr/", "signing-key",
+                          "runtime plaintext only", "signing-key-cert.pub",
+                          "runtime certificate cache"),
+                 "runtime signing custody must remain plaintext/runtime-only")
+    for base, names in (
+            ("$IRIS_STATE/", ("instructions-epoch.json",
+                              "instructions-epoch.json.lock",
+                              "instruction-key-status.json",
+                              "instruction-stamper-status.json")),
+            ("$IRIS_STATE/instructions/", ("keylist.current",
+                                           "keylist-state.json", "keylist.lock",
+                                           "roles.d/", "role-state.json",
+                                           "activation.json", "producer.lock",
+                                           "admitted-devices.json",
+                                           "serial-history.json", "roles.lock"))):
+        _assert_unit(server, (base,) + names,
+                     "%s lacks its complete state-path inventory" % base)
+    _assert_section_terms(
+        server, "Instruction state and processes",
+        ("encrypted online private key", "public roots only",
+         "runtime plaintext only", "runtime certificate cache",
+         "durable instruction state", "server host"),
+        "instruction path custody classifications are incomplete")
     _assert_unit(server, ("stamper", "daemon thread", "management process",
                           "five", "not", "sixth service"),
                  "stamper process topology is missing")
@@ -1222,15 +1279,17 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
     _assert_unit(kubernetes, ("no new", "Secret", "port", "Service",
                               "NetworkPolicy"),
                  "Phase 1 must add no Kubernetes topology object")
-    _assert_unit(kubernetes, ("instruction", "single writer", "no cross-pod",
-                              "replicas: 1"),
+    _assert_section_terms(kubernetes, "Topology",
+                          ("replicas: 1", "instruction", "single-writer",
+                           "no cross-pod"),
                  "instruction single-writer state must explain replica one")
 
     split = _page("docker-hosts.md")
-    _assert_unit(split, ("server host only", "signing-key.age", "age identity",
-                         "runtime signing key", "instruction state"),
+    _assert_unit(split, ("Only the server host", "signing-key.age",
+                         "age identity", "runtime plaintext", "instruction state"),
                  "private custody material must remain on the server host")
-    _assert_unit(split, ("public roots", "not secrets"),
+    _assert_unit(split, ("offline-root public keys", "public material",
+                         "private keys", "offline custodians"),
                  "public trust material must not be called secret")
 
     validation = _page("validation.md")
@@ -1238,45 +1297,51 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
             ("single-host Compose", ("custody", "stamp", "LKG", "drift",
                                      "artifact provenance", "8443", "9443")),
             ("split-host Compose", ("custody", "stamp", "LKG", "drift",
-                                    "artifact provenance", "server host",
+                                    "artifact checks", "server host",
                                     "Console")),
             ("single-replica Kubernetes", ("custody", "stamp", "LKG",
-                                            "drift", "artifact provenance",
+                                            "drift", "artifact checks",
                                             "PVC", "NetworkPolicy")),
             ("multi-replica server tier", ("not covered", "unsupported"))):
         _assert_unit(validation, (layout,) + terms,
                      "%s validation is not operationally meaningful" % layout)
-    _assert_unit(validation, ("single-host Compose", "depends_on",
-                              "healthy server", "initial fallback certificate",
-                              "prerequisite", "cannot cold-start"),
+    _assert_unit(validation, ("single-host Compose", "default cold startup",
+                              "healthy server", "initial browser TLS"),
                  "combined Compose must name its Console startup dependencies")
-    _assert_unit(validation, ("split-host Compose", "independent browser certificate",
-                              "cold-start", "server outage"),
+    _assert_unit(validation, ("split-host Compose", "independent default TLS",
+                              "server is unavailable"),
                  "split-host Console must retain server-outage cold start")
-    _assert_unit(validation, ("single-replica Kubernetes", "iris-console-tls",
-                              "cold-start", "server outage"),
+    _assert_unit(validation, ("single-replica Kubernetes",
+                              "independently provisioned TLS",
+                              "server is unavailable"),
                  "Kubernetes Console must retain server-outage cold start")
 
 
 def test_docs_phase1_operations_root_and_offline_runbooks():
     operations = _page("operations.md")
-    _assert_unit(operations, ("quarterly", "two roots", "custodians", "sites",
-                              "fingerprint"),
+    _assert_section_terms(operations, "Instruction-root ceremony and recovery",
+                          ("quarterly two-root ceremony", "two distinct public roots",
+                           "custodians", "sites", "fingerprints"),
                  "quarterly two-root ceremony is incomplete")
-    _assert_ordered(operations, ("one-root loss", "surviving root",
-                                 "online certificate", "unchanged trust"),
-                    "one-root failover must leave device trust unchanged")
-    _assert_ordered(operations, ("both-roots-lost", "two new roots",
-                                 "online certificate", "keylist", "Guest Shell",
-                                 "OCI", "both IOx", "XR", "fleet reprovision"),
-                    "both-root recovery must rebuild all package families", 220)
-    _assert_unit(operations, ("offline", "bootstrap envelope", "ciphertext",
-                              "not", "key"),
+    _assert_section_terms(operations, "One-root loss",
+                          ("surviving offline custodian", "next online certificate",
+                           "keylist", "No device trust change"),
+                          "one-root failover must leave device trust unchanged")
+    break_glass = _section(operations, "Both-roots-lost break glass")
+    _assert_ordered(break_glass,
+                    ("two new independent roots", "online certificate/keylist",
+                     "Guest Shell bundles", "both IOx tars", "XR RPM",
+                     "Re-onboard every device"),
+                    "both-root recovery must rebuild all package families", 3000)
+    _assert_unit(operations, ("F3 transports", "ciphertext bootstrap envelope",
+                              "not a secret key"),
                  "offline payload must be identified as ciphertext, not a key")
-    _assert_ordered(operations, ("sidecar", "before", "archive", "mismatch",
-                                 "previous runnable bundle"),
-                    "Guest Shell rollout must order evidence and retain rollback")
-    _assert_unit(operations, ("authenticated refresh", "next", "self-heal"),
+    bundle_drop = _section(operations, "Guest Shell fleet bundle drop")
+    _assert_unit(bundle_drop, ("sidecar before archive", "mismatched evidence",
+                               "prior runnable bundle"),
+                 "Guest Shell rollout must order evidence and retain rollback")
+    _assert_unit(operations, ("Authenticated refresh", "self-heal",
+                              "key availability"),
                  "offline bootstrap must converge through authenticated refresh")
 
 
@@ -1287,20 +1352,23 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
                  "legacy protocol absence must map to pre-instructions")
     _assert_unit(observability, ("instr_protocol", "invalid", "unknown"),
                  "invalid protocol evidence must map to unknown")
-    _assert_unit(observability, ("revoked", "server-observed", "precedence",
-                                 "underlying"),
+    _assert_unit(observability, ("Durable `revoked`", "overrides",
+                                 "underlying", "agent"),
                  "durable revocation must override but retain device evidence")
-    _assert_unit(observability, ("stale", "server-observed", "underlying",
-                                 "agent-asserted"),
+    _assert_section_terms(observability, "Instruction evidence and custody",
+                          ("receipt age", "server-observed", "stale",
+                           "underlying", "agent assertion"),
                  "receipt-age stale state must retain underlying evidence")
-    _assert_unit(observability, ("unavailable", "unknown", "not", "zero"),
+    _assert_unit(observability, ("Missing/corrupt", "null/unknown",
+                                 "never become healthy zero"),
                  "unavailable evidence must not be rendered as healthy zero")
     _assert_unit(observability, ("violation = 0", "does not mean compliant"),
                  "zero violation is not proof of compliance")
     _assert_unit(observability, ("announce", "uploaded", "downloaded",
                                  "device-authored"),
                  "announce counters must be labeled device-authored")
-    _assert_unit(observability, ("heartbeat", "instruction", "agent-asserted"),
+    _assert_section_terms(observability, "Instruction evidence and custody",
+                          ("heartbeat", "instruction", "agent-asserted"),
                  "heartbeat instruction facts must be labeled agent-asserted")
     _assert_unit(observability, ("policy_revision", "server-issued", "intent"),
                  "policy revision meaning is missing")
@@ -1311,10 +1379,10 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
                  "blocklist revision must be separated from policy/serial")
 
     reference = _page("reference.md")
-    _assert_unit(reference, ("raw", "instr_state", "agent-asserted"),
+    _assert_unit(reference, ("raw state", "accepted identity", "agent-asserted"),
                  "raw device states must be labeled as agent evidence")
     _assert_unit(reference, (
-        "raw states", "none", "applied", "lkg", "stale_expired",
+        "raw agent states", "none", "applied", "lkg", "stale_expired",
         "allowlist_expired", "rollback_rejected", "floor_reset",
         "audience_mismatch", "key_rejected", "tamper_rejected",
         "verifier_missing", "lkg_rejected", "lkg_unreadable", "oversize",
@@ -1322,13 +1390,14 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
         "instr_forbidden", "tracker-only"),
         "the closed raw-state vocabulary must be identified as one contract")
     _assert_unit(reference, (
-        "display classes", "applied", "lkg", "stale", "rejected",
+        "server display vocabulary", "applied", "lkg", "stale", "rejected",
         "unavailable", "tracker-only", "pending", "forbidden",
         "floor_reset", "none", "pre-instructions", "revoked", "unknown",
         "server"),
         "server display classes must be separate from raw states")
     console = _page("console.md")
-    _assert_unit(console, ("label", "server-created", "exact", "integer"),
+    _assert_section_terms(console, "Instruction status and custody",
+                          ("server-created", "exact label", "i63", "strings"),
                  "Console labels must preserve exact i63 identity")
     _assert_unit(console, ("stale", "revoked", "underlying", "evidence"),
                  "Console overrides must preserve underlying evidence")
@@ -1340,8 +1409,9 @@ def test_docs_phase1_changelog_and_release_boundary():
     parts = changelog.split("## [Unreleased]", 1)
     assert len(parts) == 2
     unreleased = parts[1].split("\n## ", 1)[0]
-    _assert_unit(unreleased, ("encrypted instructions", "key custody",
-                              "Guest Shell", "IOx verification"),
+    _assert_section_terms(unreleased, "Phase 1 instructions",
+                          ("encrypted instruction", "custody", "Guest Shell",
+                           "IOx", "verification"),
                  "Unreleased must summarize the Phase 1 operator change")
     _assert_unit(unreleased, ("server-observed", "agent-asserted", "Console"),
                  "Unreleased must identify the evidence-aware Console")
@@ -1353,10 +1423,10 @@ def test_docs_phase1_changelog_and_release_boundary():
             r"\blive fleet\s+(?:is\s+|was\s+)?verified\b",
             unit, re.IGNORECASE)
 
-    boundary = (_page("security.md") + "\n" + _page("operations.md") +
-                "\n" + _page("observability.md"))
-    _assert_unit(boundary, ("mutual-origin", "preflight only", "issue #153"),
+    _assert_section_terms(_page("observability.md"),
+                          "Role-policy status and privacy",
+                          ("mutual-origin", "preflight", "Issue #153"),
                  "the open mutual-origin boundary must remain explicit")
-    _assert_unit(boundary, ("one full tagged release", "dwell",
-                            "separately authorized activation"),
+    _assert_unit(_page("architecture.md"), ("one full tagged-release dwell",
+                                             "separately authorized activation"),
                  "the activation gate must retain release dwell and authority")

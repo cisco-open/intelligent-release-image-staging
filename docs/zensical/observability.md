@@ -77,7 +77,7 @@ Read these fields literally:
 | `enforcement.state`, `applied_revision`, `stale` | Tracker blocklist reconciliation result and freshness. An old `enforced` value becomes stale after five minutes. |
 | `enforcement.mutual_origin.mode = preflight` | Issue #153 is observation only. `newly_denied_device_count` predicts a future mutual-origin block; those devices are not added to the applied origin blocklist by this phase. |
 | `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the global/per-torrent origin options reached every active origin GID. These are counts, not per-role throughput. |
-| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | Current issued policy revision or null; accepted identity counts grouped by decimal policy revision, never instruction serial. Unavailable heartbeat evidence must not be inferred as zero application. |
+| `fleet_rollup.issued_revision`, `fleet_rollup.applied` | Nullable current issued policy revision; accepted identity counts grouped by decimal policy revision, never instruction serial. Unavailable heartbeat evidence must not be inferred as zero application. |
 | `fleet_rollup.states.pre-instructions` | Inventory devices whose heartbeat lacks the instruction protocol capability marker; IOS software version alone is not capability evidence. |
 | `GET /api/v1/devices/<id>/effective-qos` `delivery_state = pre-instructions` | Deprecated legacy Phase 0 sentinel. The required canonical `instruction` object reports current evidence; `qos` values/sources explain compilation. |
 
@@ -113,8 +113,13 @@ reports (claims created on the device), and agent-asserted instruction facts
 administrator can bypass the agent; absence of a reported violation proves
 only that the available evidence contains no violation.
 
+Tracker announce `uploaded` and `downloaded` counters are device-authored;
+they are not independent server measurements.
+
 Heartbeat `instr_protocol: 1` is the capability marker; `version` remains IOS
-software. Accepted identity is the complete `instr_epoch`, `instr_serial`,
+software. An absent protocol marker displays `pre-instructions`; a present
+invalid or future marker displays `unknown`. Accepted identity is the complete
+`instr_epoch`, `instr_serial`,
 `instr_policy_revision` triple. `policy_revision` names server-issued intent;
 `instr_serial` plus `instr_epoch` names sealed per-device freshness.
 `enforcement.applied_revision` and `iris_peer_enforcement_applied_revision`

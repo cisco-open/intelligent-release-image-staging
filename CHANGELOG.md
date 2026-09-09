@@ -99,10 +99,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   onboarding, interruption and uninstall; prefer signed wrappers without state
   mutation. Verify Guest Shell bundle SHA-256 sidecars and both public-root
   files, retaining the prior runnable bundle on refusal.
-- Show instruction state, exact accepted identity, policy-revision rollups,
-  evidence age, drift, pointer skew, missing stamps and custody alarms in the
-  Console/API. Unavailable evidence remains null/unknown; violation = 0 does
-  not mean compliant.
+- Show server-observed and agent-asserted instruction evidence, exact accepted
+  identity, policy-revision rollups, evidence age, drift, pointer skew, missing
+  stamps and custody alarms in the Console/API. Unavailable evidence remains
+  null/unknown; violation = 0 does not mean compliant.
 - Document Compose, split-host and single-replica Kubernetes custody/network
   checks. Five supervised processes and existing ports remain; multi-replica
   server operation is unsupported. The next package build must propagate the

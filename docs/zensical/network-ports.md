@@ -65,11 +65,11 @@ See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
 
-Phase 1 adds **no new listener, port, network path or firewall flow**.
+Phase 1 adds **no new listener, port, network path, or firewall flow**.
 `GET /v1/devices/{device_id}/instructions` and
 `GET /v1/devices/{device_id}/instruction-keylist` are new authenticated
-application traffic on the existing device-to-catalog HTTPS connection, TCP
-8443. TCP 9443 remains Console-to-server management-only and never serves device
+application traffic on the existing device-to-catalog HTTPS connection on TCP
+port 8443. TCP 9443 remains Console-to-server management-only and never serves device
 instructions. Tracker policy uses existing 6969; origin QoS uses loopback-only
 aria2 RPC. No Kubernetes Secret, Service or NetworkPolicy rule is added.
 
