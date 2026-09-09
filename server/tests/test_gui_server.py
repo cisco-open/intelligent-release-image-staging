@@ -491,8 +491,10 @@ def test_devices_toolbar_regrouped():
     devices_thead = html.split('id="devices"')[1].split('</thead>')[0]
     # '<th' alone also matches the '<thead>' tag itself; use '<th>' to count
     # only real header cells.
-    assert devices_thead.count('<th>') == 12, "declared Role column added without row action links"
+    assert devices_thead.count('<th>') == 13, \
+        "declared Role and Instructions columns added without row action links"
     assert devices_thead.count('<th>Role</th>') == 1
+    assert devices_thead.count('<th>Instructions</th>') == 1
 
     with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
         js = f.read()
