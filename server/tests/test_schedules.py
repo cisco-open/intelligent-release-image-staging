@@ -389,6 +389,7 @@ def test_receipt_intent_submission_terminal_are_monotonic_across_restart(tmp_pat
                              expected_status="intent", expected_rev=intent["rev"], job_id="job-1", record_id="record-1", now=NOW + 1)
     restarted = schedules.ReceiptStore(tmp_path)
     assert restarted.get(oid, "edge-1") == submitted
+    assert "fleet_registration_id" not in submitted
     assert restarted.begin(oid, "edge-1", now=NOW + 2) == submitted
     with pytest.raises(schedules.ScheduleConflict):
         restarted.record(oid, "edge-1", status="submitted", reason="queued",

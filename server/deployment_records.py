@@ -872,6 +872,9 @@ class DeploymentRecordStore:
         if ("fleet_registered_at" in record
                 and record["fleet_registered_at"] is not None):
             _integer(record["fleet_registered_at"], "fleet_registered_at")
+        if "fleet_registration_id" in record:
+            _matching_string(record["fleet_registration_id"], _LOWER_HEX_32,
+                             "fleet_registration_id")
         if "recovery" in record:
             recovery = record["recovery"]
             _closed_object(recovery, _RECOVERY_KEYS, "record recovery")
@@ -920,11 +923,14 @@ class DeploymentRecordStore:
             if "predecessor_record_id" in record:
                 predecessor_id = record["predecessor_record_id"]
                 predecessor = records.get(predecessor_id)
+                predecessor_states = ({"abandoned", "unknown"}
+                                      if record.get("state") == "removed"
+                                      else {"abandoned"})
                 if (not isinstance(predecessor, dict) or predecessor_id == record_id or
                         predecessor_id in predecessors or
                         predecessor.get("device_id") != record["device_id"] or
                         predecessor.get("schedule_provenance") != record["schedule_provenance"] or
-                        predecessor.get("state") != "abandoned" or
+                        predecessor.get("state") not in predecessor_states or
                         "recovery" not in predecessor):
                     raise ValueError("invalid scheduled record predecessor lineage")
                 journal = predecessor.get("iox_verification")
@@ -1458,6 +1464,16 @@ class DeploymentRecordStore:
             if record.get("state") != "planned":
                 return copy.deepcopy(record)
             previous_size = _record_payload_size(record)
+            predecessor_id = record.get("predecessor_record_id")
+            if predecessor_id is not None:
+                predecessor = data["records"].get(predecessor_id)
+                if (not isinstance(predecessor, dict) or
+                        predecessor.get("state") != "abandoned"):
+                    raise ValueError(
+                        "invalid scheduled record predecessor lineage")
+                predecessor["state"] = "unknown"
+                predecessor.setdefault("timestamps", {})[
+                    "finished_at"] = int(self._now())
             record["state"] = "removed"
             record.setdefault("timestamps", {})["finished_at"] = int(
                 self._now())

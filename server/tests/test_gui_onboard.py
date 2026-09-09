@@ -4135,6 +4135,59 @@ def test_iox_prepare_is_deferred_inside_controller(tmp_path):
     assert job["record_id"] == "record-after-recovery"
 
 
+def test_iox_preapply_failure_restores_recovered_predecessor_authority(
+        tmp_path):
+    import test_deployment_records as records_spec
+
+    ref, observation = records_spec._iox_transcript(
+        tmp_path, state="disabled")
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    provenance = records_spec._provenance(device_id="d1")
+    store.create(records_spec._record(
+        record_id="old", device_id="d1",
+        controller_id=records_spec._IOX_CONTROLLER,
+        schedule_provenance=provenance,
+        resolved={"platform": "iox", "device_identity":
+                  records_spec._IOX_BOARD}))
+    journal = store.iox_begin(
+        "old", records_spec._IOX_CONTROLLER, records_spec._IOX_BOARD,
+        records_spec._iox_wrapper(), observation, ref)
+    store.recover_interrupted()
+    store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    successor = {}
+
+    def prepare():
+        admitted = store.admit_scheduled(
+            records_spec._record(
+                record_id="new", device_id="d1",
+                controller_id=records_spec._IOX_CONTROLLER,
+                resolved={"platform": "iox", "device_identity":
+                          records_spec._IOX_BOARD}),
+            provenance=provenance, attempt=1,
+            authorize=lambda *_args: None, resume_record_id="old")
+        successor.update(admitted["record"])
+        return admitted["record"]["record_id"]
+
+    controller = _FrozenIoxController()
+    service = _iox_controller_service(tmp_path, controller)
+    service.record_store = store
+    try:
+        job = _wait(service, service.start(
+            "d1", prepare=prepare,
+            pre_apply=lambda _evidence: (_ for _ in ()).throw(
+                ValueError("bind failed"))))
+        assert job["state"] == "error"
+        assert store.get(successor["record_id"])["state"] == "removed"
+        assert store.get("old")["state"] == "unknown"
+        assert store.recoverable_for_device("d1")["record_id"] == "old"
+    finally:
+        service.shutdown()
+
+
 def test_same_action_iox_submission_deduplicates_while_controller_is_running(
         tmp_path):
     entered = threading.Event()

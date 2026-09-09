@@ -527,6 +527,10 @@ def test_onboard_queue_to_terminal_receipt_keeps_occurrence_provenance(tmp_path)
         assert receipt["status"] == "ok"
         record = records.get(receipt["record_id"], strict=True)
         assert record["state"] == "active"
+        assert receipt["fleet_registration_id"] == fleet.get_device(
+            "edge-1")["registration_id"]
+        assert record["fleet_registration_id"] == receipt[
+            "fleet_registration_id"]
         assert record["schedule_provenance"] == {
             "schema_version": 1, "schedule_id": "nightly",
             "schedule_rev": 1, "occurrence_id": occurrence["id"],
@@ -741,6 +745,57 @@ def test_queued_onboard_authority_refuses_plan_drift_but_not_role_drift(
         onboard.shutdown()
 
 
+def test_queued_onboard_refuses_same_second_replacement_and_identifies_legacy(
+        tmp_path, monkeypatch):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    fleet.upsert(_routed_device())
+    fleet._devices.update("edge-1", lambda row: {
+        key: value for key, value in row.items()
+        if key != "registration_id"})
+    assert "registration_id" not in fleet.get_device("edge-1")
+    policy = _Policy()
+    onboard, records, submission = _onboard_components(tmp_path, fleet, clock)
+    ran = []
+    onboard._run = lambda *_args: ran.append(True) or 0
+    monkeypatch.setattr(onboard, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(onboard, "_ensure_maintenance", lambda: None)
+    store = _make_schedule(
+        tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
+    occurrence = _claim(store, ["edge-1"])
+    prior = schedules.ReceiptStore(tmp_path).begin(
+        occurrence["id"], "edge-1", now=NOW)
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
+        submission=submission, onboard=onboard, records=records, clock=clock)
+    try:
+        result = executor._dispatch_onboard(
+            occurrence["schedule"], occurrence, "edge-1", prior)
+        assert result["status"] == "submitted"
+        original = fleet.get_device("edge-1")
+        assert len(original["registration_id"]) == 32
+        record = records.get(result["record_id"], strict=True)
+        assert record["fleet_registration_id"] == original[
+            "registration_id"]
+        assert result["fleet_registration_id"] == original[
+            "registration_id"]
+
+        fleet.delete("edge-1")
+        fleet.upsert(_routed_device())
+        replacement = fleet.get_device("edge-1")
+        assert replacement["registered_at"] == original["registered_at"]
+        assert replacement["registration_id"] != original[
+            "registration_id"]
+
+        onboard._work_queue.get_nowait()()
+        job = onboard.get_job(result["job_id"])
+        assert job["state"] == "cancelled"
+        assert job["admission_reason"] == "conflict"
+        assert ran == []
+    finally:
+        onboard.shutdown()
+
+
 @pytest.mark.parametrize("mutation", ("plan", "registration"))
 def test_interrupted_applying_onboard_never_retargets_from_fresh_plan(
         tmp_path, mutation):
@@ -763,6 +818,8 @@ def test_interrupted_applying_onboard_never_retargets_from_fresh_plan(
     candidate = {
         "controller_id": "iris", "device_id": "edge-1",
         "fleet_registered_at": fleet.get_device("edge-1")["registered_at"],
+        "fleet_registration_id": fleet.get_device(
+            "edge-1")["registration_id"],
         "inventory_revision": plan["inventory_revision"],
         "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
         "preflight": {"status": "pending"},
@@ -775,9 +832,12 @@ def test_interrupted_applying_onboard_never_retargets_from_fresh_plan(
     if mutation == "plan":
         fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.99"})
     else:
+        original = fleet.get_device("edge-1")
         fleet.delete("edge-1")
-        clock.now += 1
         fleet.upsert(_routed_device())
+        replacement = fleet.get_device("edge-1")
+        assert replacement["registered_at"] == original["registered_at"]
+        assert replacement["registration_id"] != original["registration_id"]
     try:
         result = executor._dispatch_onboard(
             occurrence["schedule"], occurrence, "edge-1", prior)

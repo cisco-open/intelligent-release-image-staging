@@ -29,6 +29,25 @@ def test_create_persists_non_secret_planned_record(tmp_path):
     assert store.get("r1") == created
 
 
+def test_registration_id_is_optional_for_legacy_records_and_validated_when_bound(
+        tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    legacy = store.create(_record(record_id="legacy"))
+    assert "fleet_registration_id" not in legacy
+    assert deployment_records.DeploymentRecordStore(
+        str(tmp_path)).get("legacy", strict=True) == legacy
+
+    bound = store.create(_record(
+        record_id="bound", device_id="edge-02",
+        fleet_registration_id="1" * 32))
+    assert bound["fleet_registration_id"] == "1" * 32
+    for invalid in (None, "A" * 32, "1" * 31, True):
+        with pytest.raises(ValueError, match="fleet_registration_id"):
+            store.create(_record(
+                record_id="bad", device_id="edge-bad",
+                fleet_registration_id=invalid))
+
+
 def test_transitions_and_active_lookup(tmp_path):
     store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
     store.create(_record(record_id="r1"))
@@ -1562,6 +1581,43 @@ def test_schedule_iox_resume_requires_controller_recovery_then_fresh_lineage(tmp
     with pytest.raises(ValueError, match="already"):
         store.iox_begin("old", _IOX_CONTROLLER, _IOX_BOARD, _iox_wrapper(), observation, ref)
     assert _scheduled(store, record_id="third", resume_record_id="old")["status"] == "refused"
+    store.transition(result["record"]["record_id"], "applying")
+    store.transition(result["record"]["record_id"], "active")
+    assert store.get("old")["state"] == "abandoned"
+    assert store.recoverable_for_device("edge-01")["record_id"] == \
+        result["record"]["record_id"]
+
+
+def test_retiring_untouched_iox_successor_restores_predecessor_authority(
+        tmp_path):
+    ref, observation = _iox_transcript(tmp_path, state="disabled")
+    store = deployment_records.DeploymentRecordStore(
+        str(tmp_path), now_fn=lambda: 100)
+    store.create(_record(
+        record_id="old", controller_id=_IOX_CONTROLLER,
+        schedule_provenance=_provenance(), resolved={"platform": "iox"}))
+    journal = store.iox_begin(
+        "old", _IOX_CONTROLLER, _IOX_BOARD, _iox_wrapper(), observation, ref)
+    store.recover_interrupted()
+    terminal = store.iox_event(
+        "old", journal["transaction_id"], journal["revision"],
+        journal["phase"], "unchanged", {
+            "reason": "initially_disabled", "observation": None,
+            "transcript_refs": []})
+    result = _scheduled(
+        store, resume_record_id="old", controller_id=_IOX_CONTROLLER,
+        resolved={"platform": "iox"})
+    successor_id = result["record"]["record_id"]
+    assert store.get("old")["state"] == "abandoned"
+
+    retired = store.retire_planned(successor_id)
+
+    assert retired["state"] == "removed"
+    predecessor = store.get("old", strict=True)
+    assert predecessor["state"] == "unknown"
+    assert predecessor["iox_verification"] == terminal
+    assert store.recoverable_for_device("edge-01", strict=True)[
+        "record_id"] == "old"
 
 
 @pytest.mark.parametrize("extra", [

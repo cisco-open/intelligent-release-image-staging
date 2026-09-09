@@ -2382,7 +2382,8 @@ class _ScheduledExecutor(object):
 
     def _onboard_callbacks(self, schedule, occurrence, device_id, prior,
                            provenance, plan, resume_record_id,
-                           fleet_registered_at):
+                           fleet_registered_at,
+                           fleet_registration_id=_UNBOUND):
         local = threading.local()
         record_ref = {}
 
@@ -2417,7 +2418,8 @@ class _ScheduledExecutor(object):
                 self._check_live(
                         schedule, occurrence, device_id, prior["attempt"],
                         policy, revoked, expected_plan=plan,
-                        expected_registered_at=fleet_registered_at)
+                        expected_registered_at=fleet_registered_at,
+                        expected_registration_id=fleet_registration_id)
             except schedule_runner.ExecutionRefused as exc:
                 raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
             local.checked = True
@@ -2442,6 +2444,9 @@ class _ScheduledExecutor(object):
             "preflight": {"status": "pending"},
             "resources": self.submission._owned_resources(plan["resolved"]),
         }
+        if fleet_registration_id is not self._UNBOUND \
+                and fleet_registration_id is not None:
+            candidate["fleet_registration_id"] = fleet_registration_id
 
         def prepare():
             admitted = self.record_store.admit_scheduled(
@@ -2488,6 +2493,10 @@ class _ScheduledExecutor(object):
         device = self.fleet.get_device(device_id) if self.fleet else None
         if device is None:
             return None, None, "vanished"
+        ensure_registration_id = getattr(
+            self.fleet, "ensure_registration_id", None)
+        if callable(ensure_registration_id):
+            device = ensure_registration_id(device_id)
         if device.get("management_type", "legacy_routed") == "legacy_routed":
             return device, None, "unclassified_management_type"
         own_jobs = (self.onboard.jobs_for_occurrence(
@@ -2522,8 +2531,12 @@ class _ScheduledExecutor(object):
             reason = self._map_exception(exc)
             return self._terminal(reason, error=True)
         if owned is not None and owned.get("state") == "active":
-            return {"status": "ok", "reason": "onboarded",
-                    "record_id": owned["record_id"]}
+            result = {"status": "ok", "reason": "onboarded",
+                      "record_id": owned["record_id"]}
+            for field in ("fleet_registered_at", "fleet_registration_id"):
+                if field in owned:
+                    result[field] = owned[field]
+            return result
         if self.onboard is None or self.submission is None \
                 or self.record_store is None:
             return self._terminal("onboarding_service_unavailable", error=True)
@@ -2537,8 +2550,26 @@ class _ScheduledExecutor(object):
                             owned.get("state") in ("planned", "unknown")
                             else None)
         fleet_registered_at = device.get("registered_at")
+        fleet_registration_id = device.get("registration_id")
+        receipt_registration_id = prior.get(
+            "fleet_registration_id", self._UNBOUND)
+        record_registration_id = (owned or {}).get(
+            "fleet_registration_id", self._UNBOUND)
+        for bound_registration_id in (
+                receipt_registration_id, record_registration_id):
+            if (bound_registration_id is not self._UNBOUND and
+                    bound_registration_id != fleet_registration_id):
+                return self._terminal("conflict")
+        expected_registration_id = (
+            receipt_registration_id
+            if receipt_registration_id is not self._UNBOUND else
+            record_registration_id
+            if record_registration_id is not self._UNBOUND else
+            fleet_registration_id
+            if fleet_registration_id is not None else self._UNBOUND)
         if resume_record_id is not None:
-            if (owned.get("fleet_registered_at", self._UNBOUND) !=
+            if (expected_registration_id is self._UNBOUND and
+                    owned.get("fleet_registered_at", self._UNBOUND) !=
                     fleet_registered_at):
                 return self._terminal("conflict")
             interrupted_from = (owned.get("recovery") or {}).get(
@@ -2554,7 +2585,8 @@ class _ScheduledExecutor(object):
                 plan = admitted_plan
         callbacks = self._onboard_callbacks(
             schedule, occurrence, device_id, prior, provenance, plan,
-            resume_record_id, fleet_registered_at)
+            resume_record_id, fleet_registered_at,
+            expected_registration_id)
         authority_guard, authority_check, prepare, pre_apply, record_ref = callbacks
         try:
             job_id = self.onboard.start(
@@ -2593,6 +2625,9 @@ class _ScheduledExecutor(object):
                     "retry_at": int(self._now()) + 1}
         if record_ref.get("predecessor"):
             result["predecessor_record_id"] = record_ref["predecessor"]
+        result["fleet_registered_at"] = fleet_registered_at
+        if fleet_registration_id is not None:
+            result["fleet_registration_id"] = fleet_registration_id
         return result
 
     def dispatch(self, schedule, occurrence, device_id, prior_receipt):
@@ -2628,8 +2663,13 @@ class _ScheduledExecutor(object):
         if owned is not None:
             state = owned.get("state")
             if state == "active":
-                return {"status": "ok", "reason": "onboarded",
-                        "record_id": owned["record_id"]}
+                result = {"status": "ok", "reason": "onboarded",
+                          "record_id": owned["record_id"]}
+                for field in (
+                        "fleet_registered_at", "fleet_registration_id"):
+                    if field in owned:
+                        result[field] = owned[field]
+                return result
             if state in ("planned", "unknown"):
                 if (state == "unknown" and
                         owned.get("resolved", {}).get("platform") == "router"):
