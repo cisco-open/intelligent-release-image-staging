@@ -1527,6 +1527,36 @@ def test_transient_removal_rejects_residue_from_authenticated_directory_payload(
     peer.assert_reaped()
 
 
+@pytest.mark.parametrize("purpose,commands", [
+    ("remove_wrapper", [
+        "delete /force flash:iris-%s.tar" % ("d" * 32),
+        "dir flash: | include iris-%s\\.tar" % ("d" * 32),
+    ]),
+    ("remove_certificate", [
+        "delete /force flash:iris-ca.pem",
+        "dir flash: | include iris-ca.pem",
+    ]),
+    ("remove_instructions", [
+        "delete /force flash:iris-instructions-%s.envelope" % ("d" * 32),
+        "dir flash: | include iris-instructions-%s\\.envelope" % ("d" * 32),
+    ]),
+])
+def test_transient_removal_accepts_absent_final_probe_after_delete_not_found(
+        tmp_path, peer_factory, purpose, commands):
+    missing = commands[0].split(" ", 2)[-1]
+    peer = peer_factory(
+        commands=commands,
+        payload=["%%Error deleting %s (No such file or directory)\n" % missing,
+                 ""])
+    transport, unused = _transport(tmp_path, peer, purpose=purpose)
+
+    result = _command(transport, "\n".join(commands).encode("ascii"))
+
+    assert _value(result, "error_category") is None
+    assert _value(result, "framing_complete") is True
+    peer.assert_reaped()
+
+
 @pytest.mark.parametrize("hang", ["login", "command"])
 def test_phase_timeout_covers_dialogue_and_reaps_before_return(tmp_path, peer_factory, hang):
     peer = peer_factory(hang=hang)
