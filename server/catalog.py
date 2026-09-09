@@ -192,6 +192,13 @@ class _InstructionResult:
         self.retry = retry
 
 
+class InstructionBootstrapUnavailable(RuntimeError):
+    """A fire-time instruction envelope could not be produced safely."""
+
+    def __init__(self):
+        super().__init__("instruction bootstrap unavailable")
+
+
 def _audit_id(value):
     """Derive a short, non-secret correlation id from a token value.
 
@@ -2182,6 +2189,49 @@ class Catalog:
         return instruction_stamper, instruction_stamper.StamperPaths(
             self.instruction_paths.state_dir, self.instruction_paths.config_dir,
             self.instruction_paths.run_dir, self.secrets_path)
+
+    def materialize_bootstrap_instruction(self, device_id):
+        """Stamp and seal one bounded onboarding envelope at execution time.
+
+        The ordinary authenticated instruction resource remains the sole
+        envelope implementation.  Retrying one key-lineage race is enough:
+        either the stamper reports that its key was superseded or the resource
+        observes a stale pointer after stamping.  Every other failure is
+        reduced to one fixed message so ciphertext and custody detail cannot
+        escape into an onboarding log.
+        """
+        try:
+            stamper, paths = self._stamper_paths()
+            producer = stamper.InstructionStamper(
+                paths=paths, catalog_store=self.store)
+        except Exception as exc:
+            raise InstructionBootstrapUnavailable() from exc
+
+        for attempt in range(2):
+            try:
+                producer.stamp_device(device_id)
+            except stamper.StamperError as exc:
+                if exc.code == "key_superseded" and attempt == 0:
+                    continue
+                raise InstructionBootstrapUnavailable() from exc
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+
+            try:
+                result = self._instruction_resource(device_id, "instructions")
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+            try:
+                status, body = result.status, result.body
+            except Exception as exc:
+                raise InstructionBootstrapUnavailable() from exc
+            if status == 409 and attempt == 0:
+                continue
+            if status != 200 or type(body) is not bytes \
+                    or not body or len(body) > instructions.INSTR_RESPONSE_MAX:
+                raise InstructionBootstrapUnavailable()
+            return body
+        raise InstructionBootstrapUnavailable()
 
     @staticmethod
     def _etag(body):

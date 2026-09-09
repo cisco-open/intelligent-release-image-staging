@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Write one fire-time encrypted instruction envelope for manual onboarding.
+
+Usage:
+  iris-instruction-bootstrap <device_id> --output <path>
+
+The output contains ciphertext only.  This command has no instruction-key
+argument and emits no envelope or key bytes on stdout.
+"""
+
+import argparse
+import os
+import tempfile
+
+import catalog
+import instructions
+
+
+def _atomic_private(path, body):
+    if type(body) is not bytes or not body \
+            or len(body) > instructions.INSTR_RESPONSE_MAX:
+        raise catalog.InstructionBootstrapUnavailable()
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".instruction-bootstrap-", suffix=".tmp")
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _parser():
+    parser = argparse.ArgumentParser(
+        description="write an encrypted instruction bootstrap envelope")
+    parser.add_argument("device_id")
+    parser.add_argument("--output", required=True)
+    return parser
+
+
+def main(argv=None):
+    args = _parser().parse_args(argv)
+    if instructions.DEVICE_ID.fullmatch(args.device_id) is None:
+        _parser().error("invalid device id")
+    state_dir = os.environ.get("IRIS_STATE", "/var/lib/iris")
+    secrets_path = os.environ.get("IRIS_SECRETS", "/run/iris/secrets.json")
+    try:
+        store = catalog.CatalogStore(state_dir)
+        producer = catalog.Catalog(store, secrets_path)
+        body = producer.materialize_bootstrap_instruction(args.device_id)
+        _atomic_private(args.output, body)
+        return 0
+    except Exception:
+        _parser().exit(1, "iris-instruction-bootstrap: "
+                       "instruction bootstrap unavailable\n")
+
+
+if __name__ == "__main__":
+    main()

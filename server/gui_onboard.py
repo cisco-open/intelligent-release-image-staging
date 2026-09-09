@@ -25,7 +25,9 @@ import queue
 import re
 import secrets
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -64,6 +66,62 @@ _LOG_TRUNCATED = "[additional job output truncated: retention limit reached]"
 # finished job's log is also written there so an operator can read yesterday's
 # failure. Bounded: the directory is pruned to the newest N files.
 _MAX_PERSISTED_LOGS = 200
+_INSTRUCTION_BOOTSTRAP_MAX = 256 * 1024
+_STAGING_CAPABILITY = re.compile(r"^[0-9a-f]{32}$")
+_BOOTSTRAP_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _write_private_snapshot(path, body):
+    """Atomically publish bounded ciphertext and return its inode identity."""
+    if type(body) is not bytes or not body \
+            or len(body) > _INSTRUCTION_BOOTSTRAP_MAX:
+        raise ValueError("instruction bootstrap unavailable")
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    directory_stat = os.lstat(directory)
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise ValueError("instruction bootstrap unavailable")
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".instruction-bootstrap-", suffix=".tmp")
+    installed_identity = None
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        installed = os.lstat(path)
+        installed_identity = (installed.st_dev, installed.st_ino)
+        if not stat.S_ISREG(installed.st_mode) \
+                or installed.st_mode & 0o777 != 0o600 \
+                or installed.st_size != len(body):
+            raise ValueError("instruction bootstrap unavailable")
+        return installed_identity
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        if installed_identity is not None:
+            _unlink_snapshot(path, installed_identity)
+        raise
+
+
+def _unlink_snapshot(path, identity=None):
+    """Remove only the expected private inode (or an exact capability leaf)."""
+    try:
+        current = os.lstat(path)
+        if identity is not None and (current.st_dev, current.st_ino) != identity:
+            return
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _fmt_dur(secs):
@@ -961,7 +1019,7 @@ class OnboardService:
                  max_concurrent=None, clear_state_fn=None, record_store=None,
                  preflight_fn=None, iox_preflight_fn=None, log_dir=None,
                  guestshell_preflight_fn=None, xr_preflight_fn=None,
-                 iox_controller=None):
+                 iox_controller=None, instruction_bootstrap_fn=None):
         self.fleet = fleet
         self.creds = creds
         self.server_dir = server_dir or os.path.dirname(os.path.abspath(__file__))
@@ -1006,6 +1064,10 @@ class OnboardService:
         # controller.  It is injected so the Console+controller handoff can be
         # exercised without opening a device connection.
         self._iox_controller = iox_controller
+        # A production callback stamps and seals one ciphertext envelope after
+        # the enrollment key has been durably minted.  It is optional for old
+        # embedded/test callers; management_api always injects it.
+        self._instruction_bootstrap = instruction_bootstrap_fn
         # Directory for persisted per-job logs (None disables persistence —
         # unit tests and legacy callers keep the purely in-memory behavior).
         self.log_dir = log_dir
@@ -1033,6 +1095,48 @@ class OnboardService:
         # and it retires itself once no job is left (see _maintenance_loop).
         self._maintenance = None
         self._maintenance_stop = threading.Event()
+
+    def _prepare_instruction_bootstrap(self, device_id, platform, env):
+        """Create the platform's private fire-time snapshot and cleanup set."""
+        if self._instruction_bootstrap is None:
+            return []
+        try:
+            body = self._instruction_bootstrap(device_id)
+        except Exception as exc:
+            raise ValueError("instruction bootstrap unavailable") from exc
+        if type(body) is not bytes or not body \
+                or len(body) > _INSTRUCTION_BOOTSTRAP_MAX:
+            raise ValueError("instruction bootstrap unavailable")
+
+        staging = os.path.join(self.artifacts_dir, "staging")
+        if platform in ("guestshell", "router"):
+            if not _BOOTSTRAP_DEVICE_ID.fullmatch(device_id):
+                raise ValueError("instruction bootstrap unavailable")
+            capability = env.get("IRIS_STAGING_CAPABILITY")
+            if capability in (None, ""):
+                capability = secrets.token_hex(16)
+            if not isinstance(capability, str) \
+                    or _STAGING_CAPABILITY.fullmatch(capability) is None:
+                raise ValueError("invalid staging capability")
+            env["IRIS_STAGING_CAPABILITY"] = capability
+            envelope = os.path.join(
+                staging, "iris-instructions-%s-%s.envelope"
+                % (device_id, capability))
+            identity = _write_private_snapshot(envelope, body)
+            digest = os.path.join(staging, "bundle-sha256-" + capability)
+            return [(envelope, identity), (digest, None)]
+        if platform == _XR_PLATFORM:
+            snapshot = os.path.join(
+                staging, ".instruction-bootstrap-%s" % secrets.token_hex(16))
+            identity = _write_private_snapshot(snapshot, body)
+            env["IRIS_INSTRUCTION_BOOTSTRAP_FILE"] = snapshot
+            return [(snapshot, identity)]
+        raise ValueError("instruction bootstrap unavailable")
+
+    @staticmethod
+    def _cleanup_instruction_bootstrap(paths):
+        for path, identity in paths:
+            _unlink_snapshot(path, identity)
 
     def _worker_loop(self):
         while True:
@@ -1958,20 +2062,34 @@ class OnboardService:
                     result.get("returncode") if result is not None else None)
                 self._finish(job_id, terminal_state, observed_returncode)
                 return
-            try:
-                record_id = j.get("record_id")
-                if not self._transition_or_note(job_id, record_id, "applying"):
-                    # The bound record is no longer usable (a newer action
-                    # superseded it). Running a script rendered from a STALE
-                    # record would act on a box someone else just changed —
-                    # abort before touching the device.
-                    self._append(job_id, "ERROR: the job's record is no "
-                                 "longer active; aborting without touching "
-                                 "the device")
+            record_id = j.get("record_id")
+            bootstrap_paths = []
+            if action == "onboard":
+                try:
+                    env["CATALOG_TOKEN"] = self._mint(device_id)
+                    bootstrap_paths = self._prepare_instruction_bootstrap(
+                        device_id, platform, env)
+                except Exception as exc:
+                    self._cleanup_instruction_bootstrap(bootstrap_paths)
+                    self._transition_or_note(job_id, record_id, "removed")
+                    diagnostic = ("invalid staging capability"
+                                  if str(exc) == "invalid staging capability"
+                                  else "instruction bootstrap unavailable")
+                    self._append(job_id, "ERROR: " + diagnostic)
                     self._finish(job_id, "error", None)
                     return
-                if action == "onboard":
-                    env["CATALOG_TOKEN"] = self._mint(device_id)
+            if not self._transition_or_note(job_id, record_id, "applying"):
+                self._cleanup_instruction_bootstrap(bootstrap_paths)
+                # The bound record is no longer usable (a newer action
+                # superseded it). Running a script rendered from a STALE
+                # record would act on a box someone else just changed —
+                # abort before touching the device.
+                self._append(job_id, "ERROR: the job's record is no "
+                             "longer active; aborting without touching "
+                             "the device")
+                self._finish(job_id, "error", None)
+                return
+            try:
                 if self._run_supports_proc:
                     rc = self._run(script, env,
                                    lambda line: self._append(job_id, line),
@@ -1983,6 +2101,8 @@ class OnboardService:
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
+            finally:
+                self._cleanup_instruction_bootstrap(bootstrap_paths)
             # A successful undeploy wiped the box: forget its stored heartbeat
             # so the console stops calling it 'deployed' from stale state. Only
             # on success — a failed undeploy may have left it partly deployed.

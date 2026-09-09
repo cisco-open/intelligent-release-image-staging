@@ -5489,6 +5489,8 @@ def main():
         state_dir, audit_path=audit_path,
         seeder_remove_fn=publish_mod.remove_torrent_rpc,
         seeder_add_fn=publish_mod.resume_torrent_rpc)
+    instruction_catalog = catalog_mod.Catalog(
+        catalog, secrets_path, audit_path=audit_path)
     # A Console publish does not become terminal until Cisco Bulk Hash
     # reconciliation has covered the newly catalogued image. Use the fully
     # wired CatalogStore above (not ImageService's lightweight write store),
@@ -5531,6 +5533,8 @@ def main():
                 "credential_resolver": creds.get_secrets,
                 "enrollment_token_minter": lambda device_id:
                     gui_onboard._default_mint(device_id, server_dir),
+                "instruction_bootstrap_materializer":
+                    instruction_catalog.materialize_bootstrap_instruction,
                 "catalog_url": catalog_url,
                 "catalog_certificate_path": catalog_certificate,
                 "recipe_argv_by_action": {
@@ -5548,7 +5552,9 @@ def main():
             clear_state_fn=catalog.forget_device, record_store=record_store,
             log_dir=os.path.join(state_dir, "deploy-logs"),
             iox_controller=iox_controller, crt_public=catalog_certificate,
-            host_ip=catalog_host, catalog_url=catalog_url)
+            host_ip=catalog_host, catalog_url=catalog_url,
+            instruction_bootstrap_fn=(
+                instruction_catalog.materialize_bootstrap_instruction))
         srv = make_server(
             host, port, app, images, fleet, creds, catalog, onboard, None,
             certfile=certfile, keyfile=keyfile, audit_path=audit_path,
