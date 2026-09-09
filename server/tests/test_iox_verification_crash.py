@@ -677,7 +677,7 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
 
 
 def _concurrent_fence_admission_worker(
-        root, board, attempt_id, barrier, results):
+        root, board, attempt_id, limits, barrier, results):
     from pathlib import Path
 
     module = _verification_module()
@@ -685,10 +685,7 @@ def _concurrent_fence_admission_worker(
     store = _FakeStore(tmp_path, existing=True)
     controller, unused_factory = _controller(
         tmp_path, store, _FakeTransport(_Device("enabled"), []),
-        test_limits={
-            "session_files": 4, "transcript_files": 4,
-            "ordinary_transcripts": 4, "active_fences": 1,
-        })
+        test_limits=limits)
     request = _AttrDict(
         action="uninstall", device_id=_DEVICE, job_id=_JOB,
         teardown_mode="force_agent_only", record_id=None)
@@ -1155,7 +1152,9 @@ def test_supervisor_eof_reap_uses_only_the_original_absolute_deadline():
                 pass
 
 
-def test_supervisor_reap_limits_term_phase_to_five_seconds(monkeypatch):
+@pytest.mark.parametrize("timeout,term_end", [(3.0, 3.0), (10.0, 5.0)])
+def test_supervisor_reap_limits_term_phase_to_five_seconds(
+        monkeypatch, timeout, term_end):
     import signal
 
     module = _verification_module()
@@ -1187,14 +1186,15 @@ def test_supervisor_reap_limits_term_phase_to_five_seconds(monkeypatch):
             process.returncode = -signal.SIGKILL
 
     monkeypatch.setattr(module, "_supervisor_signal", capture_signal)
-    reaped, remaining = module._supervisor_reap(entries, ["token"], 10.0)
+    reaped, remaining = module._supervisor_reap(
+        entries, ["token"], timeout)
     assert reaped is True
     assert remaining == 0
     assert signals[0] == (signal.SIGTERM, 0.0)
     kill_at = [at for sent, at in signals if sent == signal.SIGKILL]
     assert len(kill_at) == 1
-    assert kill_at[0] <= 5.01
-    assert now[0] <= 10.0
+    assert term_end <= kill_at[0] <= term_end + 0.01
+    assert now[0] <= timeout
 
 
 def test_truncated_supervisor_packet_closes_all_received_descriptors():
@@ -1492,7 +1492,13 @@ def test_active_fence_limit_counts_recordless_sessions(tmp_path):
             controller.close()
 
 
-def test_active_fence_capacity_is_reserved_across_processes(tmp_path):
+@pytest.mark.parametrize("limits", [
+    {"session_files": 4, "transcript_files": 4,
+     "ordinary_transcripts": 4, "active_fences": 1},
+    {"session_files": 1, "transcript_files": 4,
+     "ordinary_transcripts": 4, "active_fences": 4},
+])
+def test_fence_capacity_is_reserved_across_processes(tmp_path, limits):
     import multiprocessing
 
     _seed_phase(tmp_path, None)
@@ -1505,7 +1511,7 @@ def test_active_fence_capacity_is_reserved_across_processes(tmp_path):
     processes = [context.Process(
         target=_concurrent_fence_admission_worker,
         args=(str(tmp_path), "FENCE-BOARD-%d" % index, attempt,
-              barrier, results))
+              limits, barrier, results))
         for index, attempt in enumerate(attempts)]
     for process in processes:
         process.start()
