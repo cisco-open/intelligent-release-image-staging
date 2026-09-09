@@ -9,6 +9,7 @@ its import inside tests/helpers so pytest can collect this red suite before the
 implementation commit lands.
 """
 import copy
+import base64
 import importlib
 import io
 import json
@@ -695,7 +696,8 @@ def _callbacks(calls, record_id="new-r1"):
 
 
 def _write_recipe_peer(tmp_path, fault=None, operations=None,
-                       cleanup_on_error=False, event_path=None):
+                       cleanup_on_error=False, event_path=None,
+                       prefix_chunks=()):
     """Write a tiny recipe peer that speaks the real length-prefixed protocol."""
     if operations is None:
         operations = [
@@ -709,13 +711,16 @@ def _write_recipe_peer(tmp_path, fault=None, operations=None,
             ("command", {"name": "cleanup_stage_probe"}),
             ("finish", {"exit_intent": 0}),
         ]
-    program = r'''import json
+    program = r'''import base64
+import json
 import os
 import socket
 import struct
 import sys
 
 sock = socket.socket(fileno=int(os.environ["IRIS_IOX_CONTROL_FD"]))
+for chunk in json.loads(%(prefix_chunks)r):
+    os.write(1, base64.b64decode(chunk))
 
 def receive():
     header = sock.recv(4)
@@ -802,7 +807,9 @@ for operation, arguments in operations:
         sys.exit(intent if intent != 0 else result["operation_code"])
 sys.exit(4)
 ''' % {"operations": json.dumps(operations), "fault": fault,
-       "cleanup_on_error": cleanup_on_error, "event_path": event_path}
+       "cleanup_on_error": cleanup_on_error, "event_path": event_path,
+       "prefix_chunks": json.dumps([
+           base64.b64encode(chunk).decode("ascii") for chunk in prefix_chunks])}
     path = tmp_path / ("recipe-%s.sh" % (fault or "valid"))
     shell = "#!/bin/bash\nexec %s - <<'PY'\n%s\nPY\n" % (
         sys.executable, program)
@@ -919,13 +926,13 @@ def _install_operations():
 
 def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
                           cleanup_on_error=True, authority=None,
-                          prepare_hook=None):
+                          prepare_hook=None, prefix_chunks=()):
     timeline = factory.calls
     store = _StatefulStore(tmp_path, calls=timeline)
     wrapper_path = _write_wrapper(tmp_path, markers)
     recipe = _write_recipe_peer(
         tmp_path, operations=_install_operations(),
-        cleanup_on_error=cleanup_on_error)
+        cleanup_on_error=cleanup_on_error, prefix_chunks=prefix_chunks)
 
     def preflight(request, identity):
         timeline.append(("preflight", request, identity))
@@ -2238,6 +2245,211 @@ def test_summary_for_device_has_only_safe_obligations_and_session_projection(
     assert set(value) == {"iox_verification_obligations", "iox_sessions"}
     assert value["iox_verification_obligations"] == [safe]
     assert value["iox_sessions"] == []
+
+
+def test_verification_read_fence_durability_failure_stops_all_later_commands(
+        tmp_path, monkeypatch):
+    module = _module()
+    factory = _TransportFactory(verification="enabled")
+    original = module.IoxController._update_fence
+    failed = []
+
+    def fail_after_fresh_read(controller, attempt, *args, **kwargs):
+        if (not failed and attempt.record_id == "new-r1" and
+                attempt.command_id >= 3):
+            failed.append(attempt.command_id)
+            raise OSError("injected fence durability failure")
+        return original(controller, attempt, *args, **kwargs)
+
+    monkeypatch.setattr(module.IoxController, "_update_fence",
+                        fail_after_fresh_read)
+    result, unused_store, unused_timeline, unused_wrapper = \
+        _run_scripted_install(tmp_path, factory)
+    assert failed
+    assert result["result_code"] != 0
+    assert _command_calls(factory, "verification_disable") == []
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_transcript", "attempt_mismatch", "incomplete_transcript",
+    "boolean_schema", "zero_supervisor_pid",
+])
+def test_reaped_fence_requires_closed_bound_committed_transcript(
+        tmp_path, fault):
+    reference = _write_header_transcript(tmp_path, "4" * 32)
+    fence_path = _write_active_fence(tmp_path, reference)
+    fence = json.loads(fence_path.read_text())
+    fence["state"] = "reaped"
+    transcript = (tmp_path / "iox" / "transcripts" /
+                  (reference["id"] + ".transcript"))
+    if fault == "missing_transcript":
+        transcript.unlink()
+    elif fault == "attempt_mismatch":
+        fence["attempt_id"] = "5" * 32
+    elif fault == "incomplete_transcript":
+        transcript.write_bytes(b"\x00\x00\x00\x10{")
+        fence["transcript_ref"]["stored_bytes"] = 5
+    elif fault == "boolean_schema":
+        fence["schema_version"] = True
+    else:
+        fence["supervisor_pid"] = 0
+    fence_path.write_text(json.dumps(fence, sort_keys=True))
+    fence_path.chmod(0o600)
+    with pytest.raises((ValueError, OSError)):
+        _controller(tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+
+
+def test_transcript_quota_check_and_creation_share_the_store_lock(
+        tmp_path, monkeypatch):
+    module = _module()
+    import iox_transport
+    held = [False]
+    observed = []
+
+    class Lock(object):
+        def __enter__(self):
+            assert not held[0]
+            held[0] = True
+        def __exit__(self, *unused):
+            held[0] = False
+
+    class LockedStore(_StatefulStore):
+        def _store_lock(self):
+            return Lock()
+
+    original = iox_transport._TranscriptWriter
+
+    def checked_writer(*args, **kwargs):
+        observed.append(held[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(iox_transport, "_TranscriptWriter", checked_writer)
+    controller = _controller(tmp_path, LockedStore(tmp_path),
+                             _TransportFactory())
+    try:
+        controller._new_attempt("install", _request(), _Cancel())
+    finally:
+        controller.close()
+    assert observed == [True]
+
+
+def test_authority_scan_refuses_capacity_without_materializing_directory(
+        tmp_path, monkeypatch):
+    controller = _controller(tmp_path, _StatefulStore(tmp_path),
+                             _TransportFactory())
+    _write_header_transcript(tmp_path, "6" * 32)
+    _write_header_transcript(tmp_path, "7" * 32)
+    real_scandir = os.scandir
+    consumed = []
+
+    class Entries(object):
+        def __init__(self, entries):
+            self.entries = entries
+        def __iter__(self):
+            return self
+        def __next__(self):
+            value = next(self.entries)
+            consumed.append(value.name)
+            if len(consumed) > 2:
+                pytest.fail("authority scan consumed beyond limit plus one")
+            return value
+        def close(self):
+            self.entries.close()
+        def __enter__(self):
+            return self
+        def __exit__(self, *unused):
+            self.close()
+
+    monkeypatch.setattr(os, "listdir", lambda *args, **kwargs:
+                        pytest.fail("authority scan materialized os.listdir"))
+    monkeypatch.setattr(os, "scandir", lambda *args, **kwargs:
+                        Entries(real_scandir(*args, **kwargs)))
+    try:
+        with pytest.raises(ValueError, match="capacity"):
+            controller._scan_directory(
+                str(tmp_path / "iox" / "transcripts"), ".transcript", 1,
+                1024 * 1024)
+    finally:
+        controller.close()
+    assert len(consumed) == 2
+
+
+def test_minted_catalog_token_is_stream_redacted_before_recipe_output(
+        tmp_path):
+    token = b"fixture-catalog-token-SECRET"
+    factory = _TransportFactory(verification="enabled")
+    result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, prefix_chunks=(token[:11], token[11:]))
+    rendered = b"".join(
+        call[2].encode("utf-8") if isinstance(call[2], str) else call[2]
+        for call in timeline if call[0] == "output")
+    assert result["result_code"] == 0
+    assert token not in rendered
+    assert b"<redacted>" in rendered
+    assert factory.created[-1].config["credentials"]["CATALOG_TOKEN"] == \
+        token.decode("ascii")
+
+
+@pytest.mark.parametrize("record_id,transaction_id,revision", [
+    ("r1\n", "d" * 32, 1),
+    ("r1", "d" * 31, 1),
+    ("r1", "d" * 32, True),
+    ("r1", "d" * 32, -1),
+])
+def test_reconcile_rejects_malformed_binding_before_attempt(
+        tmp_path, record_id, transaction_id, revision):
+    journal = _journal(phase="indeterminate", state="unknown", revision=1)
+    store = _StatefulStore(
+        tmp_path, records=[_record(journal=journal)], obligations=[journal])
+    factory = _TransportFactory(verification="enabled")
+    controller = _controller(tmp_path, store, factory)
+    try:
+        with pytest.raises(ValueError):
+            controller.reconcile_enabled(
+                record_id, transaction_id, revision, True, _Cancel())
+    finally:
+        controller.close()
+    assert factory.calls == []
+
+
+def test_force_retirement_runs_while_physical_board_lock_is_held(tmp_path):
+    import fcntl
+
+    checks = []
+
+    class LockedRetirementStore(_StatefulStore):
+        def retire_device(self, device_id, reason):
+            import hashlib
+            lock_name = hashlib.sha256(
+                b"IRIS-IOX-BOARD-v1\0" + _BOARD.encode("ascii")
+            ).hexdigest() + ".lock"
+            descriptor = os.open(
+                str(tmp_path / "iox" / "locks" /
+                    lock_name), os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                checks.append((device_id, reason))
+            finally:
+                os.close(descriptor)
+            return []
+
+    store = LockedRetirementStore(tmp_path)
+    factory = _TransportFactory(verification="enabled")
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only"),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 0
+    assert len(checks) == 1
     assert "controller_id" not in json.dumps(value)
     assert "wrapper_sha256" not in json.dumps(value)
     assert "transcript" not in json.dumps(value)
