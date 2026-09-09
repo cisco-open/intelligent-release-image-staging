@@ -2478,7 +2478,24 @@ def test_verification_read_fence_durability_failure_stops_all_later_commands(
     result, unused_store, unused_timeline, unused_wrapper = \
         _run_scripted_install(tmp_path, factory)
     assert failed
-    assert result["result_code"] != 0
+    assert result["result_code"] == 5
+    assert result["error_category"] == "journal_durability"
+    assert _command_calls(factory, "verification_disable") == []
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+def test_iox_begin_durability_failure_stops_all_later_commands(
+        tmp_path, monkeypatch):
+    factory = _TransportFactory(verification="enabled")
+
+    def fail_begin(unused_store, *unused_args, **unused_kwargs):
+        raise OSError("injected IOx journal creation failure")
+
+    monkeypatch.setattr(_StatefulStore, "iox_begin", fail_begin)
+    result, unused_store, unused_timeline, unused_wrapper = \
+        _run_scripted_install(tmp_path, factory)
+    assert result["result_code"] == 5
+    assert result["error_category"] == "journal_durability"
     assert _command_calls(factory, "verification_disable") == []
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
 
