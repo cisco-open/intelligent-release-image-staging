@@ -2560,18 +2560,34 @@ class _ScheduledExecutor(object):
             if (bound_registration_id is not self._UNBOUND and
                     bound_registration_id != fleet_registration_id):
                 return self._terminal("conflict")
+        receipt_registered_at = prior.get(
+            "fleet_registered_at", self._UNBOUND)
+        record_registered_at = (owned or {}).get(
+            "fleet_registered_at", self._UNBOUND)
+        if (receipt_registration_id is self._UNBOUND and
+                receipt_registered_at is not self._UNBOUND and
+                receipt_registered_at != fleet_registered_at):
+            return self._terminal("conflict")
+        if (owned is not None and
+                record_registration_id is self._UNBOUND and
+                record_registered_at != fleet_registered_at):
+            return self._terminal("conflict")
+        if (owned is None and
+                receipt_registration_id is self._UNBOUND and
+                receipt_registered_at is self._UNBOUND):
+            result = {
+                "status": "prepared", "reason": "onboard_prepared",
+                "fleet_registered_at": fleet_registered_at,
+            }
+            if fleet_registration_id is not None:
+                result["fleet_registration_id"] = fleet_registration_id
+            return result
         expected_registration_id = (
             receipt_registration_id
             if receipt_registration_id is not self._UNBOUND else
             record_registration_id
-            if record_registration_id is not self._UNBOUND else
-            fleet_registration_id
-            if fleet_registration_id is not None else self._UNBOUND)
+            if record_registration_id is not self._UNBOUND else self._UNBOUND)
         if resume_record_id is not None:
-            if (expected_registration_id is self._UNBOUND and
-                    owned.get("fleet_registered_at", self._UNBOUND) !=
-                    fleet_registered_at):
-                return self._terminal("conflict")
             interrupted_from = (owned.get("recovery") or {}).get(
                 "interrupted_from")
             if interrupted_from == "applying":

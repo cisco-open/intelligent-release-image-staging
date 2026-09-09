@@ -412,6 +412,8 @@ def _onboard_components(tmp_path, fleet, clock, platform="guestshell"):
     creds = _Creds()
     records = deployment_records.DeploymentRecordStore(
         str(tmp_path), now_fn=clock)
+    if platform == "iox":
+        (tmp_path / "iris-arm64.tar").write_bytes(b"test-package")
     onboard = gui_onboard.OnboardService(
         fleet, creds, device_install="/fake/device-install.sh",
         crt_public="/fake/crt.pem", host_ip="192.0.2.10",
@@ -420,7 +422,9 @@ def _onboard_components(tmp_path, fleet, clock, platform="guestshell"):
         probe_fn=lambda _device, _env: True,
         guestshell_preflight_fn=lambda _device, _env, _resolved: {
             "status": "passed", "device_identity": "FOC0000TEST"},
-        record_store=records, max_concurrent=2, now_fn=clock)
+        record_store=records, max_concurrent=2, now_fn=clock,
+        artifacts_dir=str(tmp_path),
+        iox_controller=object() if platform == "iox" else None)
 
     def plan(device_id, device):
         if platform == "xr-appmgr":
@@ -439,7 +443,7 @@ def _onboard_components(tmp_path, fleet, clock, platform="guestshell"):
                 "app_gateway": device["app_gateway"], "inband_vlan": "",
                 "vpg_number": "", "nat_interface": "", "swarm_port": "6881",
                 "ios_ssh_host": "", "model": device["model"],
-                "platform": "guestshell", "renderer": "v1",
+                "platform": platform, "renderer": "v1",
             }
         value = {"device_id": device_id,
                  "inventory_revision": fleet.revision(),
@@ -462,6 +466,9 @@ def _onboard_components(tmp_path, fleet, clock, platform="guestshell"):
     def resources(resolved):
         if resolved["platform"] == "xr-appmgr":
             return [{"kind": "xr-appmgr", "ownership": "iris-created",
+                     "id": "iris"}]
+        if resolved["platform"] == "iox":
+            return [{"kind": "iox-app", "ownership": "iris-created",
                      "id": "iris"}]
         return [
             {"kind": "vlan", "ownership": "iris-created",
@@ -515,6 +522,12 @@ def test_onboard_queue_to_terminal_receipt_keeps_occurrence_provenance(tmp_path)
         submission=submission, onboard=onboard, records=records, clock=clock)
     runner = _run_schedule(store, executor, policy, clock, ["edge-1"])
     try:
+        prepared = schedules.ReceiptStore(tmp_path).get(
+            schedules.OccurrenceStore(tmp_path).list()[0]["id"], "edge-1")
+        assert prepared["reason"] == "onboard_prepared"
+        assert not onboard.list_jobs()
+        clock.now += 1
+        runner.run_once()
         deadline = time.time() + 3
         while time.time() < deadline and not all(
                 job["state"] in ("done", "error", "cancelled")
@@ -769,6 +782,16 @@ def test_queued_onboard_refuses_same_second_replacement_and_identifies_legacy(
         tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
         submission=submission, onboard=onboard, records=records, clock=clock)
     try:
+        prepared = executor._dispatch_onboard(
+            occurrence["schedule"], occurrence, "edge-1", prior)
+        assert prepared["status"] == "prepared"
+        assert not onboard.list_jobs()
+        prior = schedules.ReceiptStore(tmp_path).record(
+            occurrence["id"], "edge-1", status="intent",
+            reason=prepared["reason"], now=NOW,
+            expected_rev=prior["rev"],
+            fleet_registered_at=prepared["fleet_registered_at"],
+            fleet_registration_id=prepared["fleet_registration_id"])
         result = executor._dispatch_onboard(
             occurrence["schedule"], occurrence, "edge-1", prior)
         assert result["status"] == "submitted"
@@ -794,6 +817,147 @@ def test_queued_onboard_refuses_same_second_replacement_and_identifies_legacy(
         assert ran == []
     finally:
         onboard.shutdown()
+
+
+def test_legacy_interrupted_onboard_uses_registered_at_for_replacement(
+        tmp_path):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    fleet.upsert(_routed_device())
+    original = fleet.get_device("edge-1")
+    policy = _Policy()
+    onboard, records, submission = _onboard_components(tmp_path, fleet, clock)
+    io_calls = []
+    onboard._run = lambda *_args: io_calls.append("installer") or 0
+    onboard._probe = lambda *_args: io_calls.append("probe") or True
+    store = _make_schedule(
+        tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
+    occurrence = _claim(store, ["edge-1"])
+    prior = schedules.ReceiptStore(tmp_path).begin(
+        occurrence["id"], "edge-1", now=NOW)
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
+        submission=submission, onboard=onboard, records=records, clock=clock)
+    provenance = executor._provenance(
+        occurrence["schedule"], occurrence, "edge-1")
+    plan = submission._plan("edge-1", original)
+    admitted = records.admit_scheduled({
+        "controller_id": "iris", "device_id": "edge-1",
+        "fleet_registered_at": original["registered_at"],
+        "inventory_revision": plan["inventory_revision"],
+        "plan_hash": plan["plan_hash"], "resolved": plan["resolved"],
+        "preflight": {"status": "pending"},
+        "resources": submission._owned_resources(plan["resolved"]),
+    }, provenance=provenance, attempt=prior["attempt"],
+        authorize=lambda *_args: None)
+    records.transition(admitted["record"]["record_id"], "applying")
+    records.recover_interrupted()
+
+    clock.now = NOW + 1
+    fleet.delete("edge-1")
+    fleet.upsert(_routed_device())
+    replacement = fleet.get_device("edge-1")
+    assert original["registered_at"] == NOW
+    assert replacement["registered_at"] == NOW + 1
+    try:
+        result = executor._dispatch_onboard(
+            occurrence["schedule"], occurrence, "edge-1", prior)
+        assert result == {"status": "skipped", "reason": "conflict"}
+        assert records.get(admitted["record"]["record_id"], strict=True)[
+            "state"] == "unknown"
+        assert not onboard.list_jobs()
+        assert io_calls == []
+    finally:
+        onboard.shutdown()
+
+
+def test_iox_restart_after_submitted_receipt_crash_refuses_replacement(
+        tmp_path, monkeypatch):
+    class SimulatedCrash(BaseException):
+        pass
+
+    class Controller:
+        def __init__(self):
+            self.calls = 0
+
+        def run_install(self, *_args):
+            self.calls += 1
+            raise AssertionError("replacement reached the IOx controller")
+
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    device = _routed_device()
+    device.update({"platform": "iox", "model": "IE-3400"})
+    fleet.upsert(device)
+    original = fleet.get_device("edge-1")
+    policy = _Policy()
+    onboard, records, submission = _onboard_components(
+        tmp_path, fleet, clock, platform="iox")
+    controller = Controller()
+    onboard._iox_controller = controller
+    installer_calls = []
+    onboard._run = lambda *_args: installer_calls.append(True) or 0
+    monkeypatch.setattr(onboard, "_ensure_workers", lambda: None)
+    monkeypatch.setattr(onboard, "_ensure_maintenance", lambda: None)
+    store = _make_schedule(
+        tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
+        submission=submission, onboard=onboard, records=records, clock=clock)
+    runner = _run_schedule(store, executor, policy, clock, ["edge-1"])
+    occurrence = schedules.OccurrenceStore(tmp_path).list()[0]
+    receipt_store = schedules.ReceiptStore(tmp_path)
+    prepared = receipt_store.get(occurrence["id"], "edge-1")
+    assert prepared["status"] == "intent"
+    assert prepared["reason"] == "onboard_prepared"
+    assert prepared["fleet_registration_id"] == original["registration_id"]
+    assert not onboard.list_jobs()
+
+    original_record = runner.receipts.record
+
+    def crash_before_submitted_receipt(*args, **kwargs):
+        if kwargs.get("status") == "submitted":
+            raise SimulatedCrash()
+        return original_record(*args, **kwargs)
+
+    runner.receipts.record = crash_before_submitted_receipt
+    clock.now += 1
+    with pytest.raises(SimulatedCrash):
+        runner.run_once()
+    assert [job["state"] for job in onboard.list_jobs()] == ["queued"]
+    assert receipt_store.get(occurrence["id"], "edge-1") == prepared
+    onboard.shutdown()
+
+    clock.now += 1
+    fleet.delete("edge-1")
+    fleet.upsert(device)
+    replacement = fleet.get_device("edge-1")
+    assert replacement["registration_id"] != original["registration_id"]
+    restarted_onboard, restarted_records, restarted_submission = \
+        _onboard_components(tmp_path, fleet, clock, platform="iox")
+    restarted_onboard._iox_controller = controller
+    restarted_onboard._run = lambda *_args: installer_calls.append(True) or 0
+    restarted_executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
+        submission=restarted_submission, onboard=restarted_onboard,
+        records=restarted_records, clock=clock)
+    restarted = schedule_runner.ScheduleRunner(
+        store, lambda _row: {
+            "revision": 2, "now": clock.now, "device_ids": ["edge-1"]},
+        executor=restarted_executor, role_guard=_role_guard(policy),
+        now_fn=clock, poll_interval=.01)
+    try:
+        restarted.run_once()
+        receipt = receipt_store.get(occurrence["id"], "edge-1")
+        assert receipt["status"] == "skipped"
+        assert receipt["reason"] == "conflict"
+        assert receipt["fleet_registration_id"] == original[
+            "registration_id"]
+        assert not restarted_onboard.list_jobs()
+        assert controller.calls == 0
+        assert installer_calls == []
+    finally:
+        restarted_onboard.shutdown()
 
 
 @pytest.mark.parametrize("mutation", ("plan", "registration"))
