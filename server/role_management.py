@@ -32,7 +32,6 @@ import time
 import assignment_service
 import gui_fleet
 import peer_policy
-import schedules
 import secrets_store
 
 
@@ -272,7 +271,6 @@ class RoleCoordinator:
             raise RoleManagementError(
                 "schedule authority unavailable",
                 code="schedule_state_unavailable", status=503)
-        definition = schedules.normalize_definition(definition)
         with self.schedule_role_guard(definition) as policy:
             resolved = resolve_target(definition["target"],
                                       role_policy=policy)
@@ -287,7 +285,6 @@ class RoleCoordinator:
             raise RoleManagementError(
                 "schedule authority unavailable",
                 code="schedule_state_unavailable", status=503)
-        definition = schedules.normalize_definition(definition)
         with self.schedule_role_guard(definition) as policy:
             resolved = resolve_target(definition["target"],
                                       role_policy=policy)
@@ -308,15 +305,6 @@ class RoleCoordinator:
             resolved = None
             preview = None
             if "target" in patch:
-                current = self.schedule_store.get(schedule_id)
-                if current is not None:
-                    candidate = {key: current[key] for key in
-                                 schedules.DEFINITION_KEYS if key in current}
-                    candidate.update(patch)
-                    if candidate.get("after", False) is None:
-                        candidate.pop("after")
-                    normalized = schedules.normalize_definition(candidate)
-                    patch = dict(patch, target=normalized["target"])
                 policy = self._load()
                 self._require_scheduled_role({"target": patch["target"]},
                                              policy)
