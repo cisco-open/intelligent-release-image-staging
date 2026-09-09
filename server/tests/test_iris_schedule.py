@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -57,7 +58,8 @@ def test_schedule_cli_is_executable_spdx_and_docker_installs_dependencies():
     assert "SPDX-License-Identifier: Apache-2.0" in text
     dockerfile = open(os.path.join(SERVER_DIR, "Dockerfile"),
                       encoding="utf-8").read()
-    assert " tzdata" in dockerfile
+    assert re.search(r"^ARG TZDATA_VERSION=[^\s]+$", dockerfile, re.MULTILINE)
+    assert '"tzdata=${TZDATA_VERSION}"' in dockerfile
     assert "/opt/iris/server/iris-schedule" in dockerfile
 
 
@@ -261,6 +263,34 @@ def test_schedule_csv_round_trips_target_above_default_field_limit(tmp_path):
     assert {key: restored[key] for key in schedules.DEFINITION_KEYS
             if key in restored} == definition
     assert _run_state(destination, "export").stdout == exported.stdout
+
+
+def test_schedule_csv_reimport_preserves_unchanged_early_binding(tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    definition = _definition()
+    definition["target"] = {"filters": {}, "device_ids": [], "bind": "early"}
+    source = tmp_path / "early.csv"
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=(
+        "id", "kind", "target", "payload", "when", "after", "state"))
+    writer.writeheader()
+    normalized = schedules.normalize_definition(definition)
+    writer.writerow({"id": "s-early", "kind": normalized["kind"],
+                     "target": json.dumps(normalized["target"]),
+                     "payload": json.dumps(normalized["payload"]),
+                     "when": json.dumps(normalized["when"]), "after": "",
+                     "state": normalized["state"]})
+    source.write_text(out.getvalue(), encoding="utf-8")
+    assert _run(tmp_path, "import", str(source)).returncode == 0
+    frozen = schedules.ScheduleStore(tmp_path).get("s-early")["preview"]
+    assert frozen["device_ids"] == ["edge-1"]
+
+    fleet.upsert({"device_id": "edge-2", "device_ip": "192.0.2.2"})
+    reimported = _run(tmp_path, "import", str(source))
+    assert reimported.returncode == 0, reimported.stderr
+    row = schedules.ScheduleStore(tmp_path).get("s-early")
+    assert row["preview"] == frozen
 
 
 def test_schedule_csv_prevalidates_references_and_all_target_authorities(

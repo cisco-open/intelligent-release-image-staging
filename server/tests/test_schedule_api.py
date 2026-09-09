@@ -111,11 +111,12 @@ def schedule_api(tmp_path, monkeypatch):
         thread.join(timeout=5)
 
 
-def test_all_eight_schedule_operations_are_registered_for_both_tiers():
+def test_all_nine_schedule_operations_are_registered_for_both_tiers():
     operations = {
         ("GET", "/schedules"), ("POST", "/schedules"),
         ("GET", "/schedules/{id}"), ("PUT", "/schedules/{id}"),
         ("PATCH", "/schedules/{id}"), ("DELETE", "/schedules/{id}"),
+        ("GET", "/schedules/{id}/occurrences"),
         ("GET", "/schedules/{id}/receipts"),
         ("POST", "/schedules/{id}/reaffirm"),
     }
@@ -241,6 +242,28 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     assert server._test_schedule_wakes == ["wake"] * 5
 
 
+def test_put_preserves_unchanged_early_target_preview(schedule_api):
+    server, _app, auth = schedule_api
+    definition = _definition()
+    definition["target"]["bind"] = "early"
+    status, headers, raw = _request(
+        server, "POST", "/api/schedules",
+        {"id": "s-early", **definition}, auth)
+    assert status == 201
+    frozen = json.loads(raw)["schedule"]["preview"]
+    assert frozen["device_ids"] == ["edge-1"]
+
+    gui_fleet.FleetStore(server.schedule_store.state_dir).upsert(
+        {"device_id": "edge-3", "device_ip": "192.0.2.3",
+         "model": "C9300", "role": "boat"})
+    definition["payload"] = {"image_ids": ["image-b"], "mode": "merge"}
+    changed_status, _, changed_raw = _request(
+        server, "PUT", "/api/schedules/s-early", definition,
+        dict(auth, **{"If-Match": headers["ETag"]}))
+    assert changed_status == 200
+    assert json.loads(changed_raw)["schedule"]["preview"] == frozen
+
+
 def test_schedule_runner_role_guard_translates_only_expected_refusals():
     @contextlib.contextmanager
     def refused(_schedule):
@@ -356,6 +379,61 @@ def test_cross_occurrence_receipts_are_visible_and_capped(schedule_api):
     assert page["receipts"][0]["schedule_id"] == "s-history"
     assert page["receipts"][0]["occurrence_id"]
     assert page["receipts"][0]["scheduled_at"] == NOW + 60
+
+
+def test_receiptless_occurrences_remain_visible_after_schedule_delete(
+        schedule_api):
+    server, _app, auth = schedule_api
+    status, headers, raw = _request(
+        server, "POST", "/api/schedules",
+        {"id": "s-evidence", **_definition(["edge-1"])}, auth)
+    assert status == 201
+    row = json.loads(raw)["schedule"]
+    row = {key: value for key, value in row.items()
+           if key not in ("etag", "creator_exists")}
+    occurrences = schedules.OccurrenceStore(server.schedule_store.state_dir)
+    slot = schedules.occurrence_slot(row, NOW + 60)
+    missed = occurrences.create(row, slot, None, now=slot["window_end"])
+    retry_slot = dict(slot, scheduled_at=slot["scheduled_at"] + 1,
+                      window_end=slot["window_end"] + 1,
+                      local_time=slot["local_time"] + "+empty")
+    empty = occurrences.create(
+        row, retry_slot,
+        {"revision": row["preview"]["revision"], "now": NOW + 61,
+         "device_ids": []}, now=NOW + 61)
+    occurrences.transition(empty["id"], "failed", now=NOW + 62,
+                           expected_state="pending")
+
+    deleted, _, _ = _request(
+        server, "DELETE", "/api/schedules/s-evidence", headers=dict(
+            auth, **{"If-Match": headers["ETag"]}))
+    assert deleted == 204
+    cookie = {"Cookie": auth["Cookie"]}
+    receipt_status, _, receipt_raw = _request(
+        server, "GET", "/api/schedules/s-evidence/receipts", headers=cookie)
+    assert receipt_status == 200
+    assert json.loads(receipt_raw)["total"] == 0
+
+    history_status, _, history_raw = _request(
+        server, "GET",
+        "/api/schedules/s-evidence/occurrences?limit=1&offset=0",
+        headers=cookie)
+    assert history_status == 200
+    history = json.loads(history_raw)
+    assert history["total"] == 2 and history["truncated"] is True
+    assert history["occurrences"][0]["id"] == missed["id"]
+    assert history["occurrences"][0]["state"] == "missed"
+    assert "target_snapshot" not in history["occurrences"][0]
+    _, _, second_raw = _request(
+        server, "GET",
+        "/api/schedules/s-evidence/occurrences?limit=1&offset=1",
+        headers=cookie)
+    second = json.loads(second_raw)["occurrences"][0]
+    assert second["state"] == "failed"
+    assert second["target_snapshot"]["device_ids"] == []
+    assert _request(
+        server, "GET", "/api/schedules/s-evidence/occurrences?limit=101",
+        headers=cookie)[0] == 422
 
 
 def test_role_delete_and_replace_include_schedule_references(tmp_path):

@@ -558,7 +558,7 @@ def test_schedule_closed_schemas_cover_stage_only_defaults_and_patch_replacement
                             schema.validate(example)
 
 
-def test_schedule_response_views_and_receipts_are_closed_and_bounded():
+def test_schedule_response_views_history_and_receipts_are_closed_and_bounded():
     document = _load()
     for prefix in ("/api/v1", "/internal/v1"):
         paths = document["paths"]
@@ -593,6 +593,32 @@ def test_schedule_response_views_and_receipts_are_closed_and_bounded():
         assert params["limit"]["schema"]["maximum"] == 1000
         assert params["limit"]["schema"]["default"] == 1000
         assert params["offset"]["schema"]["minimum"] == 0
+        occurrences = paths[prefix + "/schedules/{id}/occurrences"]["get"]
+        occurrence_media = occurrences["responses"]["200"]["content"][
+            "application/json"]
+        occurrence_schema = OAS32Validator(_local_schema(
+            occurrence_media["schema"], document))
+        occurrence_page = copy.deepcopy(_media_examples(occurrence_media)[0])
+        occurrence_schema.validate(occurrence_page)
+        occurrence = occurrence_page["occurrences"][0]
+        for field in ("schedule", "slot", "preview", "schedule_generation",
+                      "schedule_rev", "state", "created_at", "updated_at"):
+            broken = copy.deepcopy(occurrence_page)
+            broken["occurrences"][0].pop(field)
+            assert list(occurrence_schema.iter_errors(broken)), field
+        broken = copy.deepcopy(occurrence_page)
+        broken["occurrences"][0]["unexpected"] = True
+        assert list(occurrence_schema.iter_errors(broken))
+        missed = copy.deepcopy(occurrence_page)
+        missed["occurrences"][0]["state"] = "missed"
+        missed["occurrences"][0]["slot"]["status"] = "missed"
+        missed["occurrences"][0].pop("target_snapshot")
+        missed["occurrences"][0].pop("delta")
+        occurrence_schema.validate(missed)
+        occurrence_params = {p["name"]: p for p in occurrences["parameters"]}
+        assert occurrence_params["limit"]["schema"]["maximum"] == 100
+        assert occurrence_params["limit"]["schema"]["default"] == 100
+        assert occurrence_params["offset"]["schema"]["minimum"] == 0
         for method, nullable in (("post", False), ("put", False), ("patch", True)):
             suffix = "/schedules" if method == "post" else "/schedules/{id}"
             status = "201" if method == "post" else "200"

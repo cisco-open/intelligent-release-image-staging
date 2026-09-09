@@ -37,7 +37,7 @@
     "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
     "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses five static files and four high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
     "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
-    "pagination": "Devices, audit and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+    "pagination": "Devices, audit, schedule occurrences and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
     "compareAndSet": "Schedules require a singleton strong If-Match or * on existing-row mutations (428 missing, 412 stale or raced). Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
     "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
     "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying."
@@ -68891,6 +68891,721 @@
         }
       }
     },
+    "/api/v1/schedules/{id}/occurrences": {
+      "get": {
+        "operationId": "console_get_api_v1_schedules_id_occurrences",
+        "summary": "List schedule occurrences",
+        "description": "List schedule occurrences. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. Schedules only assign images or onboard staging agents; devices never evaluate schedule time. Each definition has its own revision, generation and strong ETag; occurrence progress does not change it. Creator existence comes from the current authoritative administrator record, not session expiry. An absent creator is marked but the schedule keeps firing as schedule:<id>.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+            },
+            "example": "s-boat"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum occurrences across this schedule",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            },
+            "example": 100
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Zero-based offset in scheduled_at and occurrence-id order",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807,
+              "default": 0
+            },
+            "example": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule-wide occurrence page, ordered by scheduled_at and occurrence id. It retains missed and empty-target outcomes even when they have no per-device receipts or the definition was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schedule_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+                    },
+                    "occurrences": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "$ref": "#/components/schemas/ScheduleOccurrence"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "schedule_id",
+                    "occurrences",
+                    "total",
+                    "offset",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schedule_id": "s-boat",
+                  "occurrences": [
+                    {
+                      "id": "11111111111111111111111111111111",
+                      "schedule_id": "s-boat",
+                      "schedule_generation": "00000000000000000000000000000000",
+                      "schedule_rev": 1,
+                      "schedule": {
+                        "kind": "assign",
+                        "target": {
+                          "filters": {
+                            "role": "boat"
+                          },
+                          "device_ids": [
+                            "edge-01"
+                          ],
+                          "bind": "late"
+                        },
+                        "payload": {
+                          "image_ids": [
+                            "image-a"
+                          ],
+                          "mode": "merge"
+                        },
+                        "when": {
+                          "kind": "once",
+                          "at": 1788883260,
+                          "tz": "UTC",
+                          "window_seconds": 3600
+                        },
+                        "state": "pending",
+                        "id": "s-boat",
+                        "generation": "00000000000000000000000000000000",
+                        "rev": 1,
+                        "created_by": "console:alice",
+                        "created_at": 1788883200,
+                        "preview": {
+                          "revision": 2,
+                          "now": 1788883200,
+                          "device_ids": [
+                            "edge-01"
+                          ]
+                        }
+                      },
+                      "actor": "schedule:s-boat",
+                      "slot": {
+                        "scheduled_at": 1788883260,
+                        "window_end": 1788886860,
+                        "status": "due",
+                        "resolution": "normal",
+                        "tz": "UTC",
+                        "local_time": "2026-09-09T00:01:00+00:00",
+                        "next_at": null
+                      },
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "state": "completed",
+                      "preview": {
+                        "revision": 2,
+                        "now": 1788883200,
+                        "device_ids": [
+                          "edge-01"
+                        ]
+                      },
+                      "target_snapshot": {
+                        "revision": 3,
+                        "now": 1788883260,
+                        "device_ids": [
+                          "edge-01"
+                        ]
+                      },
+                      "delta": {
+                        "added": 0,
+                        "removed": 0
+                      },
+                      "created_at": 1788883260,
+                      "updated_at": 1788883300
+                    }
+                  ],
+                  "total": 1,
+                  "offset": 0,
+                  "truncated": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid content length or Request body not supported",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 400
+                        },
+                        "code": {
+                          "const": "invalid-content-length"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 400
+                        },
+                        "code": {
+                          "const": "request-body-not-supported"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid content length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 401
+                        },
+                        "code": {
+                          "const": "console-session-required"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 401
+                        },
+                        "code": {
+                          "const": "management-authentication-required"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found or Schedule not found",
+            "x-iris-problem-codes": [
+              "route-not-found",
+              "schedule_not_found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 404
+                        },
+                        "code": {
+                          "const": "route-not-found"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_not_found"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 404
+                        },
+                        "code": {
+                          "const": "schedule_not_found"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  },
+                  "schedule_not_found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_not_found",
+                      "title": "Schedule not found",
+                      "status": 404,
+                      "code": "schedule_not_found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": 411
+                    },
+                    "code": {
+                      "const": "content-length-required"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": 413
+                    },
+                    "code": {
+                      "const": "payload-too-large"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid schedule",
+            "x-iris-problem-codes": [
+              "invalid_schedule"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_schedule"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": 422
+                    },
+                    "code": {
+                      "const": "invalid_schedule"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_schedule",
+                  "title": "Invalid schedule",
+                  "status": 422,
+                  "code": "invalid_schedule"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable or Management api unavailable or Schedule state unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable",
+              "management-api-unavailable",
+              "schedule_state_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "credential-store-unavailable"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "management-api-unavailable"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_state_unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "schedule_state_unavailable"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "service-unavailable"
+                        },
+                        "error": {
+                          "type": "string",
+                          "deprecated": true
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "credential-store-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                      "title": "Credential store unavailable",
+                      "status": 503,
+                      "code": "credential-store-unavailable"
+                    }
+                  },
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management api unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "schedule_state_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_state_unavailable",
+                      "title": "Schedule state unavailable",
+                      "status": 503,
+                      "code": "schedule_state_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/schedules/{id}/receipts": {
       "get": {
         "operationId": "console_get_api_v1_schedules_id_receipts",
@@ -68928,7 +69643,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Maximum receipts across all occurrences of this schedule",
+            "description": "Maximum receipts across this schedule",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -76173,6 +76888,537 @@
         }
       }
     },
+    "/internal/v1/schedules/{id}/occurrences": {
+      "get": {
+        "operationId": "management_get_internal_v1_schedules_id_occurrences",
+        "summary": "List schedule occurrences",
+        "description": "List schedule occurrences. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. Schedules only assign images or onboard staging agents; devices never evaluate schedule time. Each definition has its own revision, generation and strong ETag; occurrence progress does not change it. Creator existence comes from the current authoritative administrator record, not session expiry. An absent creator is marked but the schedule keeps firing as schedule:<id>.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Opaque resource identifier",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+            },
+            "example": "s-boat"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum occurrences across this schedule",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            },
+            "example": 100
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Zero-based offset in scheduled_at and occurrence-id order",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9223372036854775807,
+              "default": 0
+            },
+            "example": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule-wide occurrence page, ordered by scheduled_at and occurrence id. It retains missed and empty-target outcomes even when they have no per-device receipts or the definition was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "schedule_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+                    },
+                    "occurrences": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "$ref": "#/components/schemas/ScheduleOccurrence"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "schedule_id",
+                    "occurrences",
+                    "total",
+                    "offset",
+                    "truncated"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "schedule_id": "s-boat",
+                  "occurrences": [
+                    {
+                      "id": "11111111111111111111111111111111",
+                      "schedule_id": "s-boat",
+                      "schedule_generation": "00000000000000000000000000000000",
+                      "schedule_rev": 1,
+                      "schedule": {
+                        "kind": "assign",
+                        "target": {
+                          "filters": {
+                            "role": "boat"
+                          },
+                          "device_ids": [
+                            "edge-01"
+                          ],
+                          "bind": "late"
+                        },
+                        "payload": {
+                          "image_ids": [
+                            "image-a"
+                          ],
+                          "mode": "merge"
+                        },
+                        "when": {
+                          "kind": "once",
+                          "at": 1788883260,
+                          "tz": "UTC",
+                          "window_seconds": 3600
+                        },
+                        "state": "pending",
+                        "id": "s-boat",
+                        "generation": "00000000000000000000000000000000",
+                        "rev": 1,
+                        "created_by": "console:alice",
+                        "created_at": 1788883200,
+                        "preview": {
+                          "revision": 2,
+                          "now": 1788883200,
+                          "device_ids": [
+                            "edge-01"
+                          ]
+                        }
+                      },
+                      "actor": "schedule:s-boat",
+                      "slot": {
+                        "scheduled_at": 1788883260,
+                        "window_end": 1788886860,
+                        "status": "due",
+                        "resolution": "normal",
+                        "tz": "UTC",
+                        "local_time": "2026-09-09T00:01:00+00:00",
+                        "next_at": null
+                      },
+                      "scheduled_at": 1788883260,
+                      "window_end": 1788886860,
+                      "state": "completed",
+                      "preview": {
+                        "revision": 2,
+                        "now": 1788883200,
+                        "device_ids": [
+                          "edge-01"
+                        ]
+                      },
+                      "target_snapshot": {
+                        "revision": 3,
+                        "now": 1788883260,
+                        "device_ids": [
+                          "edge-01"
+                        ]
+                      },
+                      "delta": {
+                        "added": 0,
+                        "removed": 0
+                      },
+                      "created_at": 1788883260,
+                      "updated_at": 1788883300
+                    }
+                  ],
+                  "total": 1,
+                  "offset": 0,
+                  "truncated": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 401
+                        },
+                        "code": {
+                          "const": "console-session-required"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 401
+                        },
+                        "code": {
+                          "const": "management-authentication-required"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found or Schedule not found",
+            "x-iris-problem-codes": [
+              "route-not-found",
+              "schedule_not_found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 404
+                        },
+                        "code": {
+                          "const": "route-not-found"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_not_found"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 404
+                        },
+                        "code": {
+                          "const": "schedule_not_found"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "route-not-found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                      "title": "Route not found",
+                      "status": 404,
+                      "code": "route-not-found"
+                    }
+                  },
+                  "schedule_not_found": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_not_found",
+                      "title": "Schedule not found",
+                      "status": 404,
+                      "code": "schedule_not_found"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid schedule",
+            "x-iris-problem-codes": [
+              "invalid_schedule"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_schedule"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": 422
+                    },
+                    "code": {
+                      "const": "invalid_schedule"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "title",
+                    "status",
+                    "code"
+                  ],
+                  "additionalProperties": false
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_schedule",
+                  "title": "Invalid schedule",
+                  "status": 422,
+                  "code": "invalid_schedule"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Credential store unavailable or Schedule state unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "credential-store-unavailable",
+              "schedule_state_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "credential-store-unavailable"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_state_unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "schedule_state_unavailable"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "const": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": 503
+                        },
+                        "code": {
+                          "const": "service-unavailable"
+                        },
+                        "error": {
+                          "type": "string",
+                          "deprecated": true
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "title",
+                        "status",
+                        "code"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "examples": {
+                  "credential-store-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#credential-store-unavailable",
+                      "title": "Credential store unavailable",
+                      "status": 503,
+                      "code": "credential-store-unavailable"
+                    }
+                  },
+                  "schedule_state_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#schedule_state_unavailable",
+                      "title": "Schedule state unavailable",
+                      "status": 503,
+                      "code": "schedule_state_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/v1/schedules/{id}/receipts": {
       "get": {
         "operationId": "management_get_internal_v1_schedules_id_receipts",
@@ -76211,7 +77457,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Maximum receipts across all occurrences of this schedule",
+            "description": "Maximum receipts across this schedule",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -77985,6 +79231,785 @@
           }
         ],
         "description": "Closed stage-only definition: assign images or onboard the staging agent. Unknown fields at every level are rejected. No install, activation, boot-variable or reload operation exists. Empty target filters and IDs select the whole fleet; explicit IDs intersect filters. Late binding resolves at fire time; early binding retains preview device IDs. A referenced target role must exist. An after gate cannot reference this schedule itself."
+      },
+      "StoredSchedule": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "assign",
+              "onboard"
+            ]
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "filters": {
+                "type": "object",
+                "properties": {
+                  "cred": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "management_type": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "model_family": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "os_family": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "peer": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "platform": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "q": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "role": {
+                    "type": "string",
+                    "pattern": "^(?:|__none|[a-z0-9][a-z0-9._-]{0,31})(?![\\s\\S])"
+                  },
+                  "status": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  },
+                  "telemetry": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "minLength": 0,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)?(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 256,
+                    "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls."
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "device_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 0,
+                "maxItems": 20000,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                }
+              },
+              "bind": {
+                "type": "string",
+                "enum": [
+                  "late",
+                  "early"
+                ],
+                "default": "late"
+              }
+            },
+            "required": [
+              "filters",
+              "device_ids",
+              "bind"
+            ],
+            "additionalProperties": false
+          },
+          "payload": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "image_ids": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9._-]{1,128}(?![\\s\\S])"
+                    }
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "merge",
+                      "replace"
+                    ],
+                    "default": "merge"
+                  }
+                },
+                "required": [
+                  "image_ids",
+                  "mode"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "telemetry": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "telemetry_stream": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "mode": {
+                    "type": "string",
+                    "const": "new-only",
+                    "default": "new-only"
+                  },
+                  "max_devices": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20000
+                  }
+                },
+                "required": [
+                  "telemetry",
+                  "telemetry_stream",
+                  "mode",
+                  "max_devices"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "when": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 253370159999
+                  },
+                  "tz": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 128,
+                    "description": "IANA timezone available in server tzdata; defaults to UTC. Unknown names return invalid_schedule.",
+                    "default": "UTC"
+                  },
+                  "window_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 604800
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at",
+                  "window_seconds",
+                  "tz"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "recurring"
+                  },
+                  "weekday": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 6,
+                    "description": "Monday=0 through Sunday=6"
+                  },
+                  "hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  },
+                  "minute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59
+                  },
+                  "tz": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                    "x-iris-maxUtf8Bytes": 128,
+                    "description": "IANA timezone available in server tzdata; defaults to UTC. Unknown names return invalid_schedule.",
+                    "default": "UTC"
+                  },
+                  "window_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 604800
+                  }
+                },
+                "required": [
+                  "kind",
+                  "weekday",
+                  "hour",
+                  "minute",
+                  "window_seconds",
+                  "tz"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "description": "Server-side half-open window. A nonexistent local time resolves to the first valid instant after it; an ambiguous local time fires once at its first occurrence. Epoch fields remain integer seconds."
+          },
+          "after": {
+            "type": "object",
+            "properties": {
+              "schedule_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+              },
+              "condition": {
+                "type": "string",
+                "const": "min_staged_ratio"
+              },
+              "min_staged_ratio": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "max_errored_ratio": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "max_missing_ratio": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "deadline_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 604800
+              }
+            },
+            "required": [
+              "schedule_id",
+              "condition",
+              "min_staged_ratio",
+              "max_errored_ratio",
+              "max_missing_ratio",
+              "deadline_seconds"
+            ],
+            "additionalProperties": false
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "paused",
+              "completed"
+            ],
+            "default": "pending"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+          },
+          "rev": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "created_by": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+            "x-iris-maxUtf8Bytes": 256,
+            "description": "Server-supplied creator identity; ordinary edits preserve it. Reaffirm derives the current actor server-side.",
+            "allOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_-]{0,31}:.+"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 253370764799
+          },
+          "preview": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "now": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              "device_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 0,
+                "maxItems": 20000,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                }
+              }
+            },
+            "required": [
+              "revision",
+              "now",
+              "device_ids"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "kind",
+          "target",
+          "payload",
+          "when",
+          "state",
+          "id",
+          "generation",
+          "rev",
+          "created_by",
+          "created_at",
+          "preview"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "assign"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "image_ids": {
+                      "type": "array",
+                      "uniqueItems": true,
+                      "minItems": 1,
+                      "maxItems": 10,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9._-]{1,128}(?![\\s\\S])"
+                      }
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "merge",
+                        "replace"
+                      ],
+                      "default": "merge"
+                    }
+                  },
+                  "required": [
+                    "image_ids",
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "onboard"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "telemetry": {
+                      "type": "boolean",
+                      "default": true
+                    },
+                    "telemetry_stream": {
+                      "type": "boolean",
+                      "default": false
+                    },
+                    "mode": {
+                      "type": "string",
+                      "const": "new-only",
+                      "default": "new-only"
+                    },
+                    "max_devices": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 20000
+                    }
+                  },
+                  "required": [
+                    "telemetry",
+                    "telemetry_stream",
+                    "mode",
+                    "max_devices"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        ],
+        "description": "Closed stage-only definition: assign images or onboard the staging agent. Unknown fields at every level are rejected. No install, activation, boot-variable or reload operation exists. Empty target filters and IDs select the whole fleet; explicit IDs intersect filters. Late binding resolves at fire time; early binding retains preview device IDs. A referenced target role must exist. An after gate cannot reference this schedule itself."
+      },
+      "ScheduleOccurrence": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+          },
+          "schedule_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+          },
+          "schedule_generation": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}(?![\\s\\S])"
+          },
+          "schedule_rev": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/StoredSchedule"
+          },
+          "actor": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+            "x-iris-maxUtf8Bytes": 256,
+            "description": "Valid UTF-8, at most 256 bytes; no leading/trailing whitespace or C0/C1 controls.",
+            "allOf": [
+              {
+                "pattern": "^schedule:[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+              }
+            ]
+          },
+          "slot": {
+            "type": "object",
+            "properties": {
+              "scheduled_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              "window_end": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "future",
+                  "due",
+                  "missed"
+                ]
+              },
+              "resolution": {
+                "type": "string",
+                "enum": [
+                  "normal",
+                  "gap",
+                  "fold"
+                ]
+              },
+              "tz": {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                "x-iris-maxUtf8Bytes": 128,
+                "description": "Valid UTF-8, at most 128 bytes; no leading/trailing whitespace or C0/C1 controls."
+              },
+              "local_time": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^(?:[^\\s\\x00-\\x1f\\x7f-\\x9f](?:[^\\x00-\\x1f\\x7f-\\x9f]*[^\\s\\x00-\\x1f\\x7f-\\x9f])?)(?![\\s\\S])",
+                "x-iris-maxUtf8Bytes": 64,
+                "description": "Valid UTF-8, at most 64 bytes; no leading/trailing whitespace or C0/C1 controls."
+              },
+              "next_at": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 253370764799
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "scheduled_at",
+              "window_end",
+              "status",
+              "resolution",
+              "tz",
+              "local_time",
+              "next_at"
+            ],
+            "additionalProperties": false
+          },
+          "scheduled_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 253370764799
+          },
+          "window_end": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 253370764799
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "completed",
+              "failed",
+              "interrupted",
+              "missed",
+              "pending",
+              "running",
+              "stalled"
+            ]
+          },
+          "preview": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "now": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              "device_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 0,
+                "maxItems": 20000,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                }
+              }
+            },
+            "required": [
+              "revision",
+              "now",
+              "device_ids"
+            ],
+            "additionalProperties": false
+          },
+          "created_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 253370764799
+          },
+          "updated_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 253370764799
+          },
+          "target_snapshot": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "now": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              "device_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "minItems": 0,
+                "maxItems": 20000,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
+                  "not": {
+                    "const": "seeder"
+                  }
+                }
+              }
+            },
+            "required": [
+              "revision",
+              "now",
+              "device_ids"
+            ],
+            "additionalProperties": false
+          },
+          "delta": {
+            "type": "object",
+            "properties": {
+              "added": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              },
+              "removed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20000
+              }
+            },
+            "required": [
+              "added",
+              "removed"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "schedule_id",
+          "schedule_generation",
+          "schedule_rev",
+          "schedule",
+          "actor",
+          "slot",
+          "scheduled_at",
+          "window_end",
+          "state",
+          "preview",
+          "created_at",
+          "updated_at"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "missed"
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "target_snapshot"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "delta"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "required": [
+                "target_snapshot",
+                "delta"
+              ]
+            }
+          }
+        ],
+        "description": "Durable frozen occurrence authority and outcome. Missed occurrences have no target snapshot or delta; every other state retains both, including an empty target set. Slot resolution records normal, DST-gap or first-fold scheduling."
       },
       "ScheduleReceipt": {
         "type": "object",

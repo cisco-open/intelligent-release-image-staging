@@ -46,6 +46,7 @@ _CONSOLE_RESOURCES = (
     ("PUT", "/schedules/{id}", "Replace a schedule"),
     ("PATCH", "/schedules/{id}", "Update a schedule"),
     ("DELETE", "/schedules/{id}", "Delete a schedule"),
+    ("GET", "/schedules/{id}/occurrences", "List schedule occurrences"),
     ("GET", "/schedules/{id}/receipts", "List schedule receipts"),
     ("POST", "/schedules/{id}/reaffirm", "Reaffirm a schedule"),
     ("GET", "/session", "Read console session"),

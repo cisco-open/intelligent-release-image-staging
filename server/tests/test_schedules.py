@@ -258,6 +258,61 @@ def test_occurrences_and_per_device_receipts_survive_restart_and_read_caps(tmp_p
     assert occurrences.latest_slot(row) == slot["scheduled_at"]
 
 
+def test_occurrence_history_includes_receiptless_outcomes_and_is_capped(
+        tmp_path):
+    row = create(schedules.ScheduleStore(tmp_path))
+    occurrences = schedules.OccurrenceStore(tmp_path)
+    slot = schedules.occurrence_slot(row, NOW + 60)
+    missed = occurrences.create(row, slot, None, now=slot["window_end"])
+    retry_slot = dict(slot, scheduled_at=slot["scheduled_at"] + 1,
+                      window_end=slot["window_end"] + 1,
+                      local_time=slot["local_time"] + "+empty")
+    empty = occurrences.create(
+        row, retry_slot,
+        {"revision": 9, "now": NOW + 61, "device_ids": []},
+        now=NOW + 61)
+    occurrences.transition(empty["id"], "failed", now=NOW + 62,
+                           expected_state="pending")
+
+    page = schedules.list_schedule_occurrences(
+        tmp_path, "s-boat", limit=1, offset=0)
+    assert page["total"] == 2 and page["truncated"] is True
+    assert page["occurrences"] == [missed]
+    assert "target_snapshot" not in page["occurrences"][0]
+    second = schedules.list_schedule_occurrences(
+        tmp_path, "s-boat", limit=1, offset=1)
+    assert second["occurrences"][0]["state"] == "failed"
+    assert second["occurrences"][0]["target_snapshot"]["device_ids"] == []
+
+
+def test_unchanged_early_target_never_refreshes_its_frozen_preview(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    row = create(store, target={"filters": {"role": "boat"},
+                                "device_ids": [], "bind": "early"})
+    frozen = row["preview"]
+    definition = {key: row[key] for key in schedules.DEFINITION_KEYS
+                  if key in row}
+    definition["payload"] = {"image_ids": ["image-b"], "mode": "merge"}
+    changed = store.put(
+        row["id"], definition, expected_rev=row["rev"],
+        preview={"revision": 9, "now": NOW + 1,
+                 "device_ids": ["edge-1", "edge-2", "edge-3"]})
+    assert changed["preview"] == frozen
+    changed = store.patch(
+        row["id"], {"target": changed["target"]},
+        expected_rev=changed["rev"],
+        preview={"revision": 10, "now": NOW + 2,
+                 "device_ids": ["edge-4"]})
+    assert changed["preview"] == frozen
+
+    retargeted = dict(changed["target"], device_ids=["edge-4"])
+    changed = store.patch(
+        row["id"], {"target": retargeted}, expected_rev=changed["rev"],
+        preview={"revision": 11, "now": NOW + 3,
+                 "device_ids": ["edge-4"]})
+    assert changed["preview"]["device_ids"] == ["edge-4"]
+
+
 def test_schedule_wide_receipt_page_is_deterministic_and_globally_capped(tmp_path):
     row = create(schedules.ScheduleStore(tmp_path))
     occurrences = schedules.OccurrenceStore(tmp_path)

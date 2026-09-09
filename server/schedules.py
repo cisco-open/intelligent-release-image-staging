@@ -28,6 +28,7 @@ MAX_INTEGER = (1 << 63) - 1
 MAX_EPOCH = 253370764799
 MAX_WINDOW_SECONDS = 7 * 86400
 MAX_TARGETS = 20000
+MAX_OCCURRENCE_PAGE = 100
 MAX_RECEIPT_PAGE = 1000
 KINDS = frozenset(("assign", "onboard"))
 SCHEDULE_STATES = frozenset(("pending", "paused", "completed"))
@@ -317,12 +318,13 @@ class ScheduleStore:
     def put(self, schedule_id, definition, *, expected_rev, preview=None):
         normalized = normalize_definition(definition)
         def change(row):
-            if normalized["target"] != row["target"] and preview is None:
+            target_changed = normalized["target"] != row["target"]
+            if target_changed and preview is None:
                 raise ScheduleValidationError("retargeting requires a new server preview")
             for key in DEFINITION_KEYS:
                 row.pop(key, None)
             row.update(copy.deepcopy(normalized))
-            if preview is not None:
+            if target_changed:
                 row["preview"] = normalize_snapshot(preview)
         return self._edit(schedule_id, expected_rev, change)
 
@@ -335,12 +337,13 @@ class ScheduleStore:
             if definition.get("after", False) is None:
                 definition.pop("after")
             normalized = normalize_definition(definition)
-            if normalized["target"] != row["target"] and preview is None:
+            target_changed = normalized["target"] != row["target"]
+            if target_changed and preview is None:
                 raise ScheduleValidationError("retargeting requires a new server preview")
             for key in DEFINITION_KEYS:
                 row.pop(key, None)
             row.update(normalized)
-            if preview is not None:
+            if target_changed:
                 row["preview"] = normalize_snapshot(preview)
         return self._edit(schedule_id, expected_rev, change)
 
@@ -636,6 +639,19 @@ class OccurrenceStore:
     def latest_slot(self, schedule):
         slots = [row["scheduled_at"] for row in self.list(schedule["id"]) if row["schedule_generation"] == schedule["generation"]]
         return max(slots) if slots else None
+
+
+def list_schedule_occurrences(state_dir, schedule_id, *,
+                              limit=MAX_OCCURRENCE_PAGE, offset=0):
+    """Return a bounded history page, including occurrences with no receipts."""
+    _identifier(schedule_id, "schedule id")
+    _integer(limit, "occurrence limit", 1, MAX_OCCURRENCE_PAGE)
+    _integer(offset, "occurrence offset")
+    rows = OccurrenceStore(state_dir).list(schedule_id)
+    return {"schedule_id": schedule_id,
+            "occurrences": rows[offset:offset + limit],
+            "total": len(rows), "offset": offset,
+            "truncated": offset > 0 or offset + limit < len(rows)}
 
 
 _RECEIPT_REQUIRED = {"occurrence_id", "device_id", "rev", "attempt", "attempt_started_at",

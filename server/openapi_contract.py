@@ -367,6 +367,7 @@ def _schedule_resource(route):
     return (route.service in ("console", "management") and
             _resource_suffix(route) in (
                 "/schedules", "/schedules/{id}",
+                "/schedules/{id}/occurrences",
                 "/schedules/{id}/receipts", "/schedules/{id}/reaffirm"))
 
 
@@ -502,7 +503,7 @@ def _schedule_etag_header(description="Strong ETag of the returned schedule revi
             "example": '"iris-schedule-s-boat-1"'}
 
 
-def _schedule_view_schema():
+def _stored_schedule_schema():
     schema = _schedule_definition_schema(normalized=True)
     fields = {
         "id": _schedule_id_schema(),
@@ -515,6 +516,15 @@ def _schedule_view_schema():
         "preview": _schedule_object({
             "revision": _schedule_integer(), "now": _schedule_integer(0, schedules.MAX_EPOCH),
             "device_ids": _schedule_ids_schema()}),
+    }
+    schema["properties"].update(fields)
+    schema["required"].extend(fields)
+    return schema
+
+
+def _schedule_view_schema():
+    schema = _stored_schedule_schema()
+    fields = {
         "etag": dict(_schedule_etag_header()["schema"], readOnly=True),
         "creator_exists": {"type": "boolean", "readOnly": True, "description": "Response-only marker from the authoritative administrator record; an absent creator does not prevent firing."},
     }
@@ -574,6 +584,52 @@ def _schedule_receipt_schema(*, predecessor=False):
     return schema
 
 
+def _schedule_occurrence_schema():
+    epoch = _schedule_integer(0, schedules.MAX_EPOCH)
+    snapshot = _schedule_object({
+        "revision": _schedule_integer(), "now": epoch,
+        "device_ids": _schedule_ids_schema()})
+    slot = _schedule_object({
+        "scheduled_at": epoch, "window_end": epoch,
+        "status": {"type": "string", "enum": ["future", "due", "missed"]},
+        "resolution": {"type": "string", "enum": ["normal", "gap", "fold"]},
+        "tz": _schedule_text_schema(128),
+        "local_time": _schedule_text_schema(64),
+        "next_at": {"oneOf": [epoch, {"type": "null"}]},
+    })
+    properties = {
+        "id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "schedule_id": _schedule_id_schema(),
+        "schedule_generation": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
+        "schedule_rev": _schedule_integer(1),
+        "schedule": _ref("StoredSchedule"),
+        "actor": dict(_schedule_text_schema(), allOf=[{
+            "pattern": r"^schedule:[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])"}]),
+        "slot": slot, "scheduled_at": epoch, "window_end": epoch,
+        "state": {"type": "string", "enum": sorted(schedules.OCCURRENCE_TRANSITIONS)},
+        "preview": snapshot, "created_at": epoch, "updated_at": epoch,
+        "target_snapshot": snapshot,
+        "delta": _schedule_object({"added": _schedule_integer(0, schedules.MAX_TARGETS),
+                                    "removed": _schedule_integer(0, schedules.MAX_TARGETS)}),
+    }
+    required = tuple(key for key in properties
+                     if key not in ("target_snapshot", "delta"))
+    schema = _schedule_object(properties, required)
+    schema["allOf"] = [{
+        "if": {"required": ["state"],
+               "properties": {"state": {"const": "missed"}}},
+        "then": {"not": {"anyOf": [
+            {"required": ["target_snapshot"]}, {"required": ["delta"]}]}},
+        "else": {"required": ["target_snapshot", "delta"]},
+    }]
+    schema["description"] = (
+        "Durable frozen occurrence authority and outcome. Missed occurrences "
+        "have no target snapshot or delta; every other state retains both, "
+        "including an empty target set. Slot resolution records normal, DST-gap "
+        "or first-fold scheduling.")
+    return schema
+
+
 def _schedule_definition_example(kind="assign"):
     return {"kind": kind, "target": {"filters": {"role": "boat"}, "device_ids": ["edge-01"], "bind": "late"},
             "payload": {"image_ids": ["image-a"], "mode": "merge"} if kind == "assign" else
@@ -589,6 +645,26 @@ def _schedule_view_example():
                 created_by="console:alice", created_at=1788883200,
                 preview={"revision": 2, "now": 1788883200, "device_ids": ["edge-01"]},
                 etag='"iris-schedule-s-boat-1"', creator_exists=True)
+
+
+def _schedule_occurrence_example():
+    schedule = _schedule_view_example()
+    schedule.pop("etag")
+    schedule.pop("creator_exists")
+    return {
+        "id": "1" * 32, "schedule_id": "s-boat",
+        "schedule_generation": "0" * 32, "schedule_rev": 1,
+        "schedule": schedule, "actor": "schedule:s-boat",
+        "slot": {"scheduled_at": 1788883260, "window_end": 1788886860,
+                 "status": "due", "resolution": "normal", "tz": "UTC",
+                 "local_time": "2026-09-09T00:01:00+00:00", "next_at": None},
+        "scheduled_at": 1788883260, "window_end": 1788886860,
+        "state": "completed", "preview": schedule["preview"],
+        "target_snapshot": {"revision": 3, "now": 1788883260,
+                            "device_ids": ["edge-01"]},
+        "delta": {"added": 0, "removed": 0},
+        "created_at": 1788883260, "updated_at": 1788883300,
+    }
 
 
 def _schedule_request_body(route):
@@ -629,6 +705,21 @@ def _schedule_success(route):
         return "200", {"description": "Schedule-wide receipt page, ordered by scheduled_at, occurrence_id, device_id. total counts all receipts; truncated is true when offset is nonzero or more rows remain. The response cap never prunes durable evidence.",
                        "content": {"application/json": _media(schema, {
                            "schedule_id": "s-boat", "receipts": [receipt], "total": 1, "offset": 0, "truncated": False})}}
+    if suffix.endswith("/occurrences"):
+        schema = _schedule_object({
+            "schedule_id": _schedule_id_schema(),
+            "occurrences": {"type": "array",
+                            "maxItems": schedules.MAX_OCCURRENCE_PAGE,
+                            "items": _ref("ScheduleOccurrence")},
+            "total": _schedule_integer(), "offset": _schedule_integer(),
+            "truncated": {"type": "boolean"},
+        })
+        return "200", {
+            "description": "Schedule-wide occurrence page, ordered by scheduled_at and occurrence id. It retains missed and empty-target outcomes even when they have no per-device receipts or the definition was deleted.",
+            "content": {"application/json": _media(schema, {
+                "schedule_id": "s-boat",
+                "occurrences": [_schedule_occurrence_example()],
+                "total": 1, "offset": 0, "truncated": False})}}
     if suffix == "/schedules" and route.method == "GET":
         return "200", {"description": "All schedules; each row includes its own ETag, with no collection ETag",
                        "content": {"application/json": _media(_schedule_object({
@@ -1265,13 +1356,21 @@ def _query_parameters(route):
     path = route.path
     suffix = _resource_suffix(route)
     params = []
-    if _schedule_resource(route) and suffix.endswith("/receipts"):
+    if _schedule_resource(route) and suffix.endswith(("/occurrences",
+                                                      "/receipts")):
+        occurrence_page = suffix.endswith("/occurrences")
+        maximum = (schedules.MAX_OCCURRENCE_PAGE if occurrence_page else
+                   schedules.MAX_RECEIPT_PAGE)
         params.extend([
             {"name": "limit", "in": "query", "required": False,
-             "description": "Maximum receipts across all occurrences of this schedule",
-             "schema": dict(_schedule_integer(1, schedules.MAX_RECEIPT_PAGE), default=schedules.MAX_RECEIPT_PAGE), "example": 100},
+             "description": "Maximum %s across this schedule" %
+                            ("occurrences" if occurrence_page else "receipts"),
+             "schema": dict(_schedule_integer(1, maximum), default=maximum),
+             "example": 100},
             {"name": "offset", "in": "query", "required": False,
-             "description": "Zero-based offset in scheduled_at, occurrence_id, device_id order",
+             "description": ("Zero-based offset in scheduled_at and occurrence-id order"
+                             if occurrence_page else
+                             "Zero-based offset in scheduled_at, occurrence_id, device_id order"),
              "schema": dict(_schedule_integer(), default=0), "example": 0},
         ])
     if _policy_mutation(route):
@@ -2941,7 +3040,15 @@ def _description(route):
 
 def build_document():
     paths = {}
-    for route in api_routes.ROUTES:
+    # Keep newly introduced schedule resources together at the end of the
+    # generated path map. OpenAPI path order has no wire meaning, and this
+    # stable grouping avoids rewriting every established operation whenever
+    # the schedule family grows.
+    routes = tuple(route for route in api_routes.ROUTES
+                   if not _schedule_resource(route)) + tuple(
+                       route for route in api_routes.ROUTES
+                       if _schedule_resource(route))
+    for route in routes:
         item = paths.setdefault(route.path, {})
         method = route.method.lower()
         if method in item:
@@ -2980,7 +3087,7 @@ def build_document():
             "trackerTransport": "Port 6969 is HTTPS-only and uses the certificate pinned by device agents. IOx/XR agents use Bearer Authorization; Guest Shell uses query credentials. TLS protects both forms, and credentials are never logged.",
             "guestShellArtifacts": "IOS Guest Shell copy HTTPS uses five static files and four high-entropy staging filename forms. Staging files expire automatically. Explicit artifact API clients use resource-bound Basic authentication at /v1/devices/{device_id}/artifacts/{artifact_path}.",
             "resourcePaths": "Use the operation paths defined in this contract, including verb-based action paths.",
-            "pagination": "Devices, audit and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
+            "pagination": "Devices, audit, schedule occurrences and schedule receipts expose the documented paging shapes. Other collections are bounded by assignment or returned whole; they do not claim pagination.",
             "compareAndSet": "Schedules require a singleton strong If-Match or * on existing-row mutations (428 missing, 412 stale or raced). Peer policy exposes ETag/If-Match while accepting body if_revision through its Sunset. Device assignment uses expect_image_ids to compare the assigned set and returns the conflicting set when it differs.",
             "statusCodes": "Upsert and job operations return 200 with the documented response body. Operations declare a bounded set of error responses; conditional branches may use a subset.",
             "idempotency": "Only operations explicitly declaring Idempotency-Key have process-local 24-hour successful-response replay. Restart clears that replay ledger and in-memory jobs; inspect catalog state, deployment records, and persisted deployment logs before retrying.",
@@ -3031,6 +3138,8 @@ def build_document():
                            },
                            "additionalProperties": False},
                 "ScheduleView": _schedule_view_schema(),
+                "StoredSchedule": _stored_schedule_schema(),
+                "ScheduleOccurrence": _schedule_occurrence_schema(),
                 "ScheduleReceipt": _schedule_receipt_schema(),
                 "TrackerQosState": _tracker_qos_state_schema(),
                 "TrackerQosStateMap": _tracker_qos_state_map_schema(),

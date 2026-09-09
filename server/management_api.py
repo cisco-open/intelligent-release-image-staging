@@ -3094,27 +3094,40 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     views = self._schedule_views(rows)
                     self._json(200, {"schedules": views, "total": len(views)})
                     return
-                receipts_match = re.fullmatch(
-                    r"/api/schedules/([^/]+)/receipts", path)
-                if receipts_match:
-                    schedule_id = unquote(receipts_match.group(1))
+                history_match = re.fullmatch(
+                    r"/api/schedules/([^/]+)/(occurrences|receipts)", path)
+                if history_match:
+                    schedule_id = unquote(history_match.group(1))
+                    resource = history_match.group(2)
                     row = schedule_store.get(schedule_id)
-                    if row is None:
+                    # Definitions may be deleted while their occurrence and
+                    # receipt evidence is intentionally retained. History
+                    # stays readable until both authorities are absent.
+                    if (row is None and not
+                            schedule_occurrence_store.list(schedule_id)):
                         raise schedules.ScheduleNotFound("no such schedule")
                     query = parse_qs(urlsplit(self.path).query,
                                      keep_blank_values=True)
                     if set(query) - {"limit", "offset"} or any(
                             len(values) != 1 for values in query.values()):
                         raise schedules.ScheduleValidationError(
-                            "invalid receipt pagination")
-                    raw_limit = (query.get("limit") or ["1000"])[0]
+                            "invalid schedule history pagination")
+                    default_limit = (schedules.MAX_OCCURRENCE_PAGE
+                                     if resource == "occurrences" else
+                                     schedules.MAX_RECEIPT_PAGE)
+                    raw_limit = (query.get("limit") or
+                                 [str(default_limit)])[0]
                     raw_offset = (query.get("offset") or ["0"])[0]
                     if not raw_limit.isdecimal() or not raw_offset.isdecimal():
                         raise schedules.ScheduleValidationError(
-                            "invalid receipt pagination")
-                    self._json(200, schedules.list_schedule_receipts(
-                        schedule_store.state_dir, schedule_id,
-                        limit=int(raw_limit), offset=int(raw_offset)))
+                            "invalid schedule history pagination")
+                    history = (schedules.list_schedule_occurrences
+                               if resource == "occurrences" else
+                               schedules.list_schedule_receipts)
+                    self._json(200, history(schedule_store.state_dir,
+                                            schedule_id,
+                                            limit=int(raw_limit),
+                                            offset=int(raw_offset)))
                     return
                 item_match = re.fullmatch(r"/api/schedules/([^/]+)", path)
                 if item_match:

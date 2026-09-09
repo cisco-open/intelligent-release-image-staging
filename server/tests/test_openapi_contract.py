@@ -1265,6 +1265,7 @@ _SCHEDULE_OPERATIONS = (
     ("GET", "/schedules", "200"), ("POST", "/schedules", "201"),
     ("GET", "/schedules/{id}", "200"), ("PUT", "/schedules/{id}", "200"),
     ("PATCH", "/schedules/{id}", "200"), ("DELETE", "/schedules/{id}", "204"),
+    ("GET", "/schedules/{id}/occurrences", "200"),
     ("GET", "/schedules/{id}/receipts", "200"),
     ("POST", "/schedules/{id}/reaffirm", "200"),
 )
@@ -1310,7 +1311,8 @@ def test_schedule_contract_has_all_tier_routes_and_conditional_headers():
                 assert "412" not in operation["responses"]
                 assert "428" not in operation["responses"]
             response = operation["responses"][success]
-            if suffix == "/schedules" and method == "GET" or suffix.endswith("/receipts"):
+            if (suffix == "/schedules" and method == "GET" or
+                    suffix.endswith(("/occurrences", "/receipts"))):
                 assert "ETag" not in response.get("headers", {})
             else:
                 assert "ETag" in response["headers"]
@@ -1337,6 +1339,8 @@ def test_schedule_container_installs_timezone_data_and_executable_cli():
     dockerfile = (SPEC.parents[2] / "server" / "Dockerfile").read_text()
     logical = dockerfile.replace("\\\n", " ")
     apt = re.search(r"apt-get install[^\n]+", logical).group()
-    assert "tzdata" in apt.split()
+    assert '"tzdata=${TZDATA_VERSION}"' in apt.split()
+    assert re.search(r"^ARG TZDATA_VERSION=[^\s]+$", dockerfile,
+                     re.MULTILINE)
     chmod = re.search(r"RUN chmod \+x [^\n]+", logical).group()
     assert "/opt/iris/server/iris-schedule" in chmod.split()
