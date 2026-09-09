@@ -1965,12 +1965,12 @@ def test_force_does_not_select_a_record_or_create_a_dummy_journal(tmp_path):
 def test_successful_predecessor_recovery_does_not_bind_force_recipe_to_record(
         tmp_path):
     journal = _journal(
-        record_id="old-r1", phase="disabled_confirmed", state="disabled",
+        record_id="old-r1", phase="disable_intent", state="enabled",
         revision=2, unresolved=True)
     record = _record(record_id="old-r1", journal=journal)
     store = _StatefulStore(
         tmp_path, records=[record], obligations=[journal])
-    factory = _TransportFactory(verification="disabled")
+    factory = _TransportFactory(verification="enabled")
     recipe = _write_recipe_peer(tmp_path)
     controller = _controller(
         tmp_path, store, factory,
@@ -2008,7 +2008,7 @@ def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
         controller.close()
     first = rendered.splitlines()[0]
     assert first == (
-        "dir flash: | include iris-arm64.tar|iris-ca.pem|iris-catalog.pem")
+        r"dir flash: | include iris\-arm64\.tar|iris-ca\.pem|iris-catalog\.pem")
 
 
 @pytest.mark.parametrize("exit_intent,expected_code,expect_retirement", [
@@ -2485,7 +2485,8 @@ def test_minted_catalog_token_is_stream_redacted_before_recipe_output(
     token = b"fixture-catalog-token-SECRET"
     factory = _TransportFactory(verification="enabled")
     result, unused_store, timeline, unused_wrapper = _run_scripted_install(
-        tmp_path, factory, prefix_chunks=(token[:11], token[11:]))
+        tmp_path, factory, markers=("package.sign",),
+        prefix_chunks=(token[:11], token[11:]))
     rendered = b"".join(
         call[2].encode("utf-8") if isinstance(call[2], str) else call[2]
         for call in timeline if call[0] == "output")
@@ -2533,9 +2534,9 @@ def test_session_deadline_starts_before_strict_pre_attempt_store_reads(
         armed = False
         consumed = False
         def consume(self):
-            if self.armed and not self.consumed:
-                self.consumed = True
-                clock.advance(200)
+                if self.armed and not self.consumed:
+                    self.consumed = True
+                    clock.advance(400)
         def list(self, *args, **kwargs):
             if operation == "install":
                 self.consume()
@@ -2554,7 +2555,7 @@ def test_session_deadline_starts_before_strict_pre_attempt_store_reads(
     factory = _TransportFactory(verification="enabled", clock=clock)
     controller = _controller(
         tmp_path, store, factory, clock=clock,
-        session_seconds=100, restoration_reserve_seconds=10)
+        session_seconds=300, restoration_reserve_seconds=180)
     store.armed = True
     prepare, preflight, on_output = _callbacks([], record_id="r1")
     try:

@@ -1158,6 +1158,9 @@ def test_post_flock_revalidation_failure_never_leaks_board_lock(
         controller, "uninstall", request, _Cancel(), False)
     attempt.target = request.target
     attempt.board = _BOARD if path == "known" else None
+    import iox_transport
+    attempt.transcript = iox_transport._TranscriptWriter(
+        str(tmp_path), attempt.attempt_id, _CONTROLLER, created_at=1)
     try:
         with pytest.raises((ValueError, module._ControllerFailure)):
             if path == "known":
