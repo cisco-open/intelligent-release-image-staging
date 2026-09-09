@@ -49,7 +49,9 @@ def main(argv=None):
     device_id, *image_ids = args
     service = assignment_service.AssignmentService(
         store, gui_fleet.FleetStore(state_dir),
-        os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl"))
+        os.environ.get("IRIS_AUDIT", "/etc/iris/audit.jsonl"),
+        authority_path=os.path.join(
+            state_dir, "assignment-authority.sqlite3"))
     try:
         result = service.apply(device_id, image_ids, actor="cli:iris-assign",
                                mode="replace" if replace else "merge",
@@ -62,7 +64,8 @@ def main(argv=None):
         print("error: image '%s' is quarantined (%s)"
               % (exc.image_id, reason), file=sys.stderr)
         return 1
-    except (ValueError, catalog.PolicyConflict, gui_fleet.FleetStateError) as exc:
+    except (ValueError, catalog.PolicyConflict, gui_fleet.FleetStateError,
+            assignment_service.AssignmentAuthorityUnavailable) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 1
     print("assigned %s -> %s  (the device picks it up within ~60s)"

@@ -60,6 +60,7 @@ import peer_policy
 import peer_enforcement
 import role_management
 import schedule_runner
+import schedule_validation
 import secretfs
 import secrets_store
 import schedules
@@ -936,8 +937,8 @@ def _runner_schedule_role_guard(guard, schedule):
     if guard is None:
         raise schedule_runner.ExecutionRefused("role_authority_unavailable")
     try:
-        with guard(schedule):
-            yield
+        with guard(schedule) as policy:
+            yield policy
     except role_management.RoleManagementError as exc:
         reason = exc.code if isinstance(exc.code, str) and re.fullmatch(
             r"[a-z][a-z0-9_]{0,63}", exc.code) else "role_authority_unavailable"
@@ -2069,6 +2070,628 @@ class _OnboardSubmissionAdapter(object):
             return {"error": "authority unavailable"}
 
 
+class _ScheduledExecutor(object):
+    """Execute the two stage-only schedule verbs against live authorities."""
+
+    _ACTIVE_OCCURRENCES = frozenset(("pending", "running", "interrupted"))
+    _ACTIVE_JOBS = frozenset(("queued", "running"))
+    _TERMINAL_RECORDS = frozenset(("removed", "superseded", "abandoned"))
+    _UNBOUND = object()
+
+    def __init__(self, *, schedule_store, occurrence_store, receipt_store,
+                 role_guard, role_policy_snapshot, fleet, secrets_path,
+                 assignment_writer, submission, onboard, record_store,
+                 now_fn=time.time):
+        self.schedule_store = schedule_store
+        self.occurrences = occurrence_store
+        self.receipts = receipt_store
+        self.role_guard = role_guard
+        self.role_policy_snapshot = role_policy_snapshot
+        self.fleet = fleet
+        self.secrets_path = secrets_path
+        self.assignment_writer = assignment_writer
+        self.submission = submission
+        self.onboard = onboard
+        self.record_store = record_store
+        self._now = now_fn
+        self.local_validator = schedule_validation.LocalScheduleValidator(
+            fleet=fleet,
+            plan_fn=(submission._plan if submission is not None
+                     else lambda _device_id, _device: {}),
+            artifacts_dir=(getattr(onboard, "artifacts_dir", "")
+                           if onboard is not None else ""),
+            max_concurrent=(getattr(onboard, "max_concurrent", 0)
+                            if onboard is not None else 0),
+            service_available=(onboard is not None and submission is not None))
+
+    def _iox_artifact_reason(self, device_id, plan):
+        return self.local_validator._iox_artifact_reason(device_id, plan)
+
+    def _annotate_quarantine(self, schedule, snapshot, device_ids):
+        occurrence_id = snapshot.get("occurrence_id")
+        if not occurrence_id or not device_ids:
+            return
+        quarantined = set(snapshot.get("quarantined_ids") or ())
+        # Early-bound targets may no longer match the fire-time filter. Read
+        # the complete quarantine authority so their occurrence fact remains
+        # accurate too; per-device admission still rechecks under the role lock.
+        try:
+            policy = self.role_policy_snapshot()
+            quarantined = set(peer_policy.quarantine_device_ids(
+                policy.document))
+        except Exception:
+            pass
+        if set(device_ids) <= quarantined:
+            self.occurrences.annotate_all_targets_quarantined(
+                occurrence_id, len(device_ids), now=int(self._now()))
+
+    def validate(self, schedule, snapshot, phase):
+        """Validate local blast radius and artifacts without device I/O."""
+        device_ids = self.local_validator._ids(snapshot)
+        self._annotate_quarantine(schedule, snapshot, device_ids)
+        return self.local_validator.validate(schedule, snapshot, phase)
+
+    @staticmethod
+    def _provenance(schedule, occurrence, device_id):
+        return deployment_records.validate_schedule_provenance({
+            "schema_version": 1,
+            "schedule_id": schedule["id"],
+            "schedule_rev": occurrence["schedule_rev"],
+            "occurrence_id": occurrence["id"],
+            "device_id": device_id,
+        }, device_id)
+
+    def _strict_revocation(self):
+        try:
+            state = secrets_store.load(self.secrets_path)
+            revoked = _instruction_revoked_principals(state)
+        except (OSError, TypeError, ValueError, RecursionError,
+                OverflowError) as exc:
+            raise schedule_runner.ExecutionRefused(
+                "revocation_unavailable") from exc
+        if not isinstance(revoked, (set, frozenset)):
+            raise schedule_runner.ExecutionRefused(
+                "revocation_unavailable")
+        return frozenset(revoked)
+
+    @staticmethod
+    def _plan_authority_projection(plan):
+        return {key: copy.deepcopy(value) for key, value in plan.items()
+                if key not in ("inventory_revision", "plan_hash")}
+
+    @classmethod
+    def _same_authoritative_plan(cls, current, expected):
+        """Allow stored preflight evidence while binding every base input."""
+        current = cls._plan_authority_projection(current)
+        expected = cls._plan_authority_projection(expected)
+        for key, value in current.items():
+            if key == "resolved":
+                resolved = expected.get("resolved")
+                if not isinstance(value, dict) or not isinstance(resolved, dict):
+                    return False
+                if any(resolved.get(name) != item
+                       for name, item in value.items()):
+                    return False
+            elif expected.get(key) != value:
+                return False
+        return True
+
+    def _check_live(self, schedule, occurrence, device_id, attempt,
+                    policy, revoked, expected_plan=None,
+                    expected_registered_at=_UNBOUND):
+        now = int(self._now())
+        if now < occurrence["scheduled_at"]:
+            raise schedule_runner.ExecutionRefused("window_not_open")
+        if now >= occurrence["window_end"]:
+            raise schedule_runner.ExecutionRefused("window_closed")
+        live = self.schedule_store.get(schedule["id"])
+        if (live is None
+                or live["generation"] != occurrence["schedule_generation"]
+                or any(live.get(key) != schedule.get(key)
+                       for key in schedules.DEFINITION_KEYS)):
+            raise schedule_runner.ExecutionRefused("schedule_changed")
+        current = self.occurrences.get(occurrence["id"])
+        if (current is None or current["state"] not in self._ACTIVE_OCCURRENCES
+                or current["schedule_generation"] !=
+                    occurrence["schedule_generation"]
+                or device_id not in current["target_snapshot"]["device_ids"]):
+            raise schedule_runner.ExecutionRefused("schedule_changed")
+        receipt = self.receipts.get(occurrence["id"], device_id)
+        if (receipt is None or receipt["attempt"] != attempt
+                or receipt["status"] in schedules.TERMINAL_RECEIPT_STATES):
+            raise schedule_runner.ExecutionRefused("conflict")
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            raise schedule_runner.ExecutionRefused("vanished")
+        if "device:" + device_id in revoked:
+            raise schedule_runner.ExecutionRefused("device_revoked")
+        if (expected_registered_at is not self._UNBOUND
+                and device.get("registered_at") != expected_registered_at):
+            raise schedule_runner.ExecutionRefused("conflict")
+        if expected_plan is not None:
+            try:
+                current_plan = self.submission._plan(device_id, device)
+            except ValueError:
+                raise schedule_runner.ExecutionRefused("conflict") from None
+            if not self._same_authoritative_plan(current_plan, expected_plan):
+                raise schedule_runner.ExecutionRefused("conflict")
+            artifact_reason = self._iox_artifact_reason(
+                device_id, current_plan)
+            if artifact_reason is not None:
+                raise schedule_runner.ExecutionRefused(artifact_reason)
+        return device
+
+    @contextlib.contextmanager
+    def _authority(self, schedule, occurrence, device_id, attempt):
+        if self.role_guard is None or self.fleet is None or not self.secrets_path:
+            raise schedule_runner.ExecutionRefused(
+                "schedule_authority_unavailable")
+        with self.role_guard(schedule) as policy:
+            with assignment_service.membership_guard(self.fleet):
+                with secrets_store.store_lock(self.secrets_path):
+                    revoked = self._strict_revocation()
+                    yield policy, revoked
+
+    @staticmethod
+    def _map_exception(exc):
+        if isinstance(exc, schedule_runner.ExecutionRefused):
+            return exc.reason
+        if isinstance(exc, assignment_service.MissingFleetDevice):
+            return "vanished"
+        if isinstance(exc, assignment_service.AssignmentAuthorityUnavailable):
+            return "assignment_authority_unavailable"
+        if isinstance(exc, deployment_records.RecordStoreUnreadable):
+            return "deployment_authority_unavailable"
+        return "execution_failed"
+
+    @staticmethod
+    def _terminal(reason, *, error=False, **metadata):
+        return {"status": "error" if error else "skipped",
+                "reason": reason, **metadata}
+
+    @staticmethod
+    def _assignment_outcome(result, prior, *, peer_quarantined=False):
+        if isinstance(result, assignment_service.ScheduledAssignmentRefusal):
+            before = prior.get("before_image_ids", [])
+            return _ScheduledExecutor._terminal(
+                result.reason, error=result.reason == "execution_failed",
+                after_image_ids=result.after_ids,
+                removed_image_ids=sorted(
+                    set(before) - set(result.after_ids)))
+        return {
+            "status": "ok",
+            "reason": ("unchanged" if result.before_ids == result.after_ids
+                       else "assigned"),
+            "before_image_ids": result.before_ids,
+            "after_image_ids": result.after_ids,
+            "removed_image_ids": result.removed_ids,
+            **({"notes": ["peer_quarantined"]}
+               if peer_quarantined else {}),
+        }
+
+    def _dispatch_assignment(self, schedule, occurrence, device_id, prior):
+        actor = "schedule:" + schedule["id"]
+        if "manual_generation" not in prior:
+            try:
+                with self.role_guard(schedule) as policy:
+                    captured = self.assignment_writer.capture_schedule_state(
+                        device_id)
+                    peer_quarantined = device_id in set(
+                        peer_policy.quarantine_device_ids(policy.document))
+            except Exception as exc:
+                reason = self._map_exception(exc)
+                return self._terminal(
+                    reason, error=reason.endswith("unavailable"))
+            return {"status": "prepared", "reason": "assignment_prepared",
+                    "manual_generation": captured["manual_generation"],
+                    "fleet_registered_at": captured["fleet_registered_at"],
+                    "before_image_ids": captured["before_image_ids"],
+                    **({"notes": ["peer_quarantined"]}
+                       if peer_quarantined else {})}
+
+        policy_holder = {}
+
+        @contextlib.contextmanager
+        def commit_guard():
+            try:
+                with secrets_store.store_lock(self.secrets_path):
+                    revoked = self._strict_revocation()
+                    self._check_live(
+                        schedule, occurrence, device_id, prior["attempt"],
+                        policy_holder.get("policy"), revoked,
+                        expected_registered_at=prior.get(
+                            "fleet_registered_at"))
+                    yield
+            except schedule_runner.ExecutionRefused:
+                raise
+
+        context = assignment_service.ScheduledAssignmentContext(
+            schedule_id=schedule["id"], schedule_rev=occurrence["schedule_rev"],
+            occurrence_id=occurrence["id"],
+            expected_manual_generation=prior["manual_generation"],
+            fleet_registered_at=prior.get("fleet_registered_at"),
+            commit_guard=commit_guard,
+            require_existing_authority=True)
+        try:
+            with self.role_guard(schedule) as policy:
+                policy_holder["policy"] = policy
+                result = self.assignment_writer.apply(
+                    device_id, schedule["payload"]["image_ids"], actor=actor,
+                    mode=schedule["payload"]["mode"],
+                    expect_image_ids=prior.get("before_image_ids"),
+                    retry_conflict=True, plural=True,
+                    scheduled_context=context)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(
+                reason, error=reason.endswith("unavailable")
+                or reason == "execution_failed")
+        return self._assignment_outcome(
+            result, prior, peer_quarantined=(
+                "peer_quarantined" in prior.get("notes", ())))
+
+    def _job_result(self, job, *, closed_reason=None):
+        if job is None:
+            return None
+        metadata = {"job_id": job["id"]}
+        if job.get("record_id"):
+            metadata["record_id"] = job["record_id"]
+        state = job.get("state")
+        if state == "queued":
+            return {"status": "submitted", "reason": "queued", **metadata}
+        if state == "running":
+            return {"status": "running", "reason": "running", **metadata}
+        if state == "done":
+            return {"status": "ok", "reason": "onboarded", **metadata}
+        reason = job.get("admission_reason")
+        if not isinstance(reason, str) or not re.fullmatch(
+                r"[a-z][a-z0-9_]{0,63}", reason):
+            reason = closed_reason if state == "cancelled" and closed_reason \
+                else "cancelled" if state == "cancelled" \
+                else "onboarding_failed"
+        return {"status": "skipped" if state == "cancelled" else "error",
+                "reason": reason, **metadata}
+
+    def _records_for_provenance(self, provenance):
+        if self.record_store is None:
+            raise deployment_records.RecordStoreUnreadable(
+                "deployment record authority unavailable")
+        rows = self.record_store.list(provenance["device_id"], strict=True)
+        return [row for row in rows
+                if row.get("schedule_provenance") == provenance]
+
+    @staticmethod
+    def _current_owned_record(rows):
+        current = [row for row in rows if row.get("state") not in
+                   _ScheduledExecutor._TERMINAL_RECORDS]
+        if len(current) > 1:
+            raise ValueError("multiple occurrence-owned deployment records")
+        return current[0] if current else None
+
+    def _onboard_callbacks(self, schedule, occurrence, device_id, prior,
+                           provenance, plan, resume_record_id,
+                           fleet_registered_at):
+        local = threading.local()
+        record_ref = {}
+
+        @contextlib.contextmanager
+        def authority_guard(phase):
+            try:
+                with self._authority(
+                        schedule, occurrence, device_id,
+                        prior["attempt"]) as authority:
+                    local.phase = phase
+                    local.authority = authority
+                    local.checked = False
+                    yield
+            except schedule_runner.ExecutionRefused as exc:
+                raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
+            except gui_onboard.ScheduledAdmissionError:
+                raise
+            except Exception as exc:
+                raise gui_onboard.ScheduledAdmissionError(
+                    self._map_exception(exc)) from None
+            finally:
+                for name in ("phase", "authority", "checked"):
+                    if hasattr(local, name):
+                        delattr(local, name)
+
+        def authority_check(phase):
+            if getattr(local, "phase", None) != phase:
+                raise gui_onboard.ScheduledAdmissionError(
+                    "schedule_authority_unavailable")
+            policy, revoked = local.authority
+            try:
+                self._check_live(
+                        schedule, occurrence, device_id, prior["attempt"],
+                        policy, revoked, expected_plan=plan,
+                        expected_registered_at=fleet_registered_at)
+            except schedule_runner.ExecutionRefused as exc:
+                raise gui_onboard.ScheduledAdmissionError(exc.reason) from None
+            local.checked = True
+
+        def authorize(tag, attempt, existing):
+            if (not getattr(local, "checked", False)
+                    or tag != provenance or attempt != prior["attempt"]):
+                return "conflict"
+            if int(self._now()) >= occurrence["window_end"]:
+                return "window_closed"
+            if (resume_record_id is not None and
+                    (existing or {}).get("record_id") != resume_record_id):
+                return "conflict"
+            return None
+
+        candidate = {
+            "controller_id": "iris", "device_id": device_id,
+            "fleet_registered_at": fleet_registered_at,
+            "inventory_revision": plan["inventory_revision"],
+            "plan_hash": plan["plan_hash"],
+            "resolved": plan["resolved"],
+            "preflight": {"status": "pending"},
+            "resources": self.submission._owned_resources(plan["resolved"]),
+        }
+
+        def prepare():
+            admitted = self.record_store.admit_scheduled(
+                candidate, provenance=provenance, attempt=prior["attempt"],
+                authorize=authorize, resume_record_id=resume_record_id,
+                router=plan["resolved"].get("platform") == "router")
+            if admitted["status"] not in ("created", "resumed"):
+                raise gui_onboard.ScheduledAdmissionError(
+                    admitted.get("reason") or "record_recovery_required")
+            record = admitted["record"]
+            record_ref["id"] = record["record_id"]
+            if admitted.get("predecessor_record_id"):
+                record_ref["predecessor"] = admitted[
+                    "predecessor_record_id"]
+            return record["record_id"]
+
+        def pre_apply(evidence):
+            final_plan = self.submission._apply_preflight(plan, evidence)
+            record_id = record_ref.get("id")
+            if not record_id:
+                raise ValueError("planned record is unavailable")
+            self.record_store.update_planned(
+                record_id, plan_hash=final_plan["plan_hash"],
+                resolved=final_plan["resolved"], preflight=evidence,
+                resources=self.submission._owned_resources(
+                    final_plan["resolved"]))
+            return final_plan["resolved"]
+
+        return authority_guard, authority_check, prepare, pre_apply, record_ref
+
+    def _onboard_precondition(self, device_id, occurrence_id):
+        device = self.fleet.get_device(device_id) if self.fleet else None
+        if device is None:
+            return None, None, "vanished"
+        if device.get("management_type", "legacy_routed") == "legacy_routed":
+            return device, None, "unclassified_management_type"
+        own_jobs = (self.onboard.jobs_for_occurrence(
+            occurrence_id, device_id) if self.onboard else [])
+        if own_jobs:
+            return device, None, self._job_result(own_jobs[-1])
+        latest = (self.onboard.latest_jobs_by_device().get(device_id)
+                  if self.onboard else None)
+        if latest and latest.get("state") in self._ACTIVE_JOBS:
+            return device, None, "device_busy"
+        try:
+            plan = self.submission._plan(device_id, device)
+            self.submission._credential_ref(device_id)
+        except ValueError as exc:
+            reason = ("unclassified_management_type"
+                      if str(exc) == "unclassified_management_type"
+                      else "credential_unavailable"
+                      if "credential profile" in str(exc)
+                      else "invalid_onboard_target")
+            return device, None, reason
+        if not self.onboard.host_ip:
+            return device, None, "server_address_unconfigured"
+        reason = self._iox_artifact_reason(device_id, plan)
+        return device, plan, reason
+
+    def _dispatch_onboard(self, schedule, occurrence, device_id, prior):
+        provenance = self._provenance(schedule, occurrence, device_id)
+        try:
+            rows = self._records_for_provenance(provenance)
+            owned = self._current_owned_record(rows)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        if owned is not None and owned.get("state") == "active":
+            return {"status": "ok", "reason": "onboarded",
+                    "record_id": owned["record_id"]}
+        if self.onboard is None or self.submission is None \
+                or self.record_store is None:
+            return self._terminal("onboarding_service_unavailable", error=True)
+        device, plan, problem = self._onboard_precondition(
+            device_id, occurrence["id"])
+        if isinstance(problem, dict):
+            return problem
+        if problem is not None:
+            return self._terminal(problem)
+        resume_record_id = (owned["record_id"] if owned is not None and
+                            owned.get("state") in ("planned", "unknown")
+                            else None)
+        fleet_registered_at = device.get("registered_at")
+        if resume_record_id is not None:
+            if (owned.get("fleet_registered_at", self._UNBOUND) !=
+                    fleet_registered_at):
+                return self._terminal("conflict")
+            interrupted_from = (owned.get("recovery") or {}).get(
+                "interrupted_from")
+            if interrupted_from == "applying":
+                admitted_plan = copy.deepcopy(plan)
+                admitted_plan["inventory_revision"] = owned[
+                    "inventory_revision"]
+                admitted_plan["plan_hash"] = owned["plan_hash"]
+                admitted_plan["resolved"] = copy.deepcopy(owned["resolved"])
+                if not self._same_authoritative_plan(plan, admitted_plan):
+                    return self._terminal("conflict")
+                plan = admitted_plan
+        callbacks = self._onboard_callbacks(
+            schedule, occurrence, device_id, prior, provenance, plan,
+            resume_record_id, fleet_registered_at)
+        authority_guard, authority_check, prepare, pre_apply, record_ref = callbacks
+        try:
+            job_id = self.onboard.start(
+                device_id, action="onboard", resolved=plan["resolved"],
+                prepare=prepare, pre_apply=pre_apply,
+                env_extra={
+                    "TELEMETRY": ("on" if schedule["payload"]["telemetry"]
+                                  else "off"),
+                    "TELEMETRY_STREAM": (
+                        "on" if schedule["payload"]["telemetry_stream"]
+                        else "off"),
+                    "IRIS_TELEMETRY": (
+                        "on" if schedule["payload"]["telemetry"] else "off"),
+                    "IRIS_TELEMETRY_STREAM": (
+                        "on" if schedule["payload"]["telemetry_stream"]
+                        else "off"),
+                }, teardown_mode="none", schedule_context=provenance,
+                authority_guard=authority_guard,
+                authority_check=authority_check)
+        except gui_onboard.ScheduledAdmissionError as exc:
+            if exc.reason == "queue_full":
+                return {"status": "deferred", "reason": exc.reason,
+                        "retry_at": int(self._now()) + 1}
+            return self._terminal(
+                exc.reason, error=exc.reason.endswith("unavailable")
+                or exc.reason == "execution_failed")
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        context = self.onboard.get_schedule_context(job_id)
+        if context != provenance:
+            return self._terminal("device_busy")
+        result = self._job_result(self.onboard.get_job(job_id))
+        if result is None:
+            return {"status": "deferred", "reason": "job_state_unavailable",
+                    "retry_at": int(self._now()) + 1}
+        if record_ref.get("predecessor"):
+            result["predecessor_record_id"] = record_ref["predecessor"]
+        return result
+
+    def dispatch(self, schedule, occurrence, device_id, prior_receipt):
+        if schedule.get("kind") == "assign":
+            return self._dispatch_assignment(
+                schedule, occurrence, device_id, prior_receipt)
+        if schedule.get("kind") == "onboard":
+            return self._dispatch_onboard(
+                schedule, occurrence, device_id, prior_receipt)
+        raise schedule_runner.ExecutionRefused("invalid_schedule_kind")
+
+    def _closed_reason(self, occurrence):
+        now = int(self._now())
+        if now >= occurrence["window_end"]:
+            return "window_closed"
+        live = self.schedule_store.get(occurrence["schedule_id"])
+        if (live is None or
+                live["generation"] != occurrence["schedule_generation"] or
+                any(live.get(key) != occurrence["schedule"].get(key)
+                    for key in schedules.DEFINITION_KEYS)):
+            return "schedule_changed"
+        return None
+
+    def _reconcile_onboard(self, receipt, occurrence):
+        provenance = self._provenance(
+            occurrence["schedule"], occurrence, receipt["device_id"])
+        try:
+            rows = self._records_for_provenance(provenance)
+            owned = self._current_owned_record(rows)
+        except Exception as exc:
+            reason = self._map_exception(exc)
+            return self._terminal(reason, error=True)
+        if owned is not None:
+            state = owned.get("state")
+            if state == "active":
+                return {"status": "ok", "reason": "onboarded",
+                        "record_id": owned["record_id"]}
+            if state in ("planned", "unknown"):
+                if (state == "unknown" and
+                        owned.get("resolved", {}).get("platform") == "router"):
+                    return self._terminal("router_requires_undeploy")
+                return {"status": "retry", "reason": "resume_required",
+                        "manual_generation": 0,
+                        "predecessor_record_id": owned["record_id"]}
+            if state == "applying":
+                return {"status": "deferred", "reason": "record_in_progress",
+                        "retry_at": int(self._now()) + 1}
+            return self._terminal("existing_deployment")
+        foreign = [row for row in self.record_store.list(
+            receipt["device_id"], strict=True)
+            if row.get("state") not in self._TERMINAL_RECORDS]
+        if any(row.get("state") == "unknown" for row in foreign):
+            return self._terminal("foreign_interrupted_record")
+        if foreign:
+            return self._terminal("existing_deployment")
+        return {"status": "retry", "reason": "no_admitted_work",
+                "manual_generation": 0}
+
+    def poll(self, receipt):
+        occurrence = self.occurrences.get(receipt["occurrence_id"])
+        if occurrence is None:
+            return self._terminal("schedule_state_unavailable", error=True)
+        if occurrence["schedule"]["kind"] == "assign":
+            if ("manual_generation" not in receipt
+                    or "before_image_ids" not in receipt):
+                return self._terminal("conflict", error=True)
+            schedule = occurrence["schedule"]
+            context = assignment_service.ScheduledAssignmentContext(
+                schedule_id=schedule["id"],
+                schedule_rev=occurrence["schedule_rev"],
+                occurrence_id=occurrence["id"],
+                expected_manual_generation=receipt["manual_generation"],
+                fleet_registered_at=receipt.get("fleet_registered_at"),
+                require_existing_authority=True)
+            try:
+                result = self.assignment_writer.reconcile_schedule_result(
+                    receipt["device_id"], schedule["payload"]["image_ids"],
+                    mode=schedule["payload"]["mode"],
+                    expect_image_ids=receipt["before_image_ids"],
+                    retry_conflict=True, scheduled_context=context)
+            except Exception as exc:
+                reason = self._map_exception(exc)
+                return self._terminal(
+                    reason, error=reason.endswith("unavailable")
+                    or reason == "execution_failed")
+            if result is None:
+                # The runner supplies its exact closure/refusal reason when it
+                # handles this retry. No claim means no assignment was admitted.
+                return {"status": "retry", "reason": "no_admitted_work",
+                        "manual_generation": receipt["manual_generation"],
+                        "before_image_ids": receipt["before_image_ids"]}
+            return self._assignment_outcome(
+                result, receipt,
+                peer_quarantined=(
+                    "peer_quarantined" in receipt.get("notes", ())))
+        if occurrence["schedule"]["kind"] != "onboard":
+            return self._terminal("conflict", error=True)
+        job = self.onboard.get_job(receipt.get("job_id")) \
+            if self.onboard is not None and receipt.get("job_id") else None
+        if job is None and self.onboard is not None:
+            matches = self.onboard.jobs_for_occurrence(
+                receipt["occurrence_id"], receipt["device_id"])
+            job = matches[-1] if matches else None
+        if job is not None:
+            return self._job_result(
+                job, closed_reason=self._closed_reason(occurrence))
+        return self._reconcile_onboard(receipt, occurrence)
+
+    def cancel_queued(self, occurrence_id, job_ids):
+        if self.onboard is not None:
+            self.onboard.cancel_queued(
+                set(job_ids), occurrence_id=occurrence_id)
+
+    def acknowledge(self, receipt):
+        occurrence = self.occurrences.get(receipt["occurrence_id"])
+        if (occurrence is None or occurrence["schedule"]["kind"] != "assign"
+                or "manual_generation" not in receipt):
+            return
+        self.assignment_writer.acknowledge_schedule_result(
+            receipt["occurrence_id"], receipt["device_id"],
+            terminal_status=receipt["status"])
+
+
 def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=None,
                  onboard=None, swarm_fetch=None, certfile=None, audit_path=None,
                  record_store=None, now_fn=time.time, keyfile=None,
@@ -2110,6 +2733,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     schedule_store = schedules.ScheduleStore(policy_state_dir())
     schedule_occurrence_store = schedules.OccurrenceStore(policy_state_dir())
     schedule_receipt_store = schedules.ReceiptStore(policy_state_dir())
+    scheduled_executor = None
 
     def wake_schedule_runner():
         if schedule_wake is not None:
@@ -3183,9 +3807,20 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     coordinator = role_coordinator()
                     if coordinator is None:
                         raise ScheduleTargetError("fleet state is unavailable")
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
                     row, resolved = coordinator.create_schedule(
                         schedule_id, definition, actor=actor, now=int(now_fn()),
-                        resolve_target=schedule_target_resolver)
+                        resolve_target=validated_resolver)
                     wake_schedule_runner()
                     view = self._schedule_views([row])[0]
                     self._json(201, {
@@ -3216,7 +3851,11 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     return
 
                 if method == "DELETE" and item_match:
-                    schedule_store.delete(schedule_id, expected_rev=expected)
+                    coordinator = role_coordinator()
+                    if coordinator is None:
+                        raise ScheduleTargetError("fleet state is unavailable")
+                    coordinator.delete_schedule(
+                        schedule_id, expected_rev=expected)
                     wake_schedule_runner()
                     self._send(204, "application/json", b"",
                                (("ETag", schedules.schedule_etag(before)),))
@@ -3240,14 +3879,47 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     raise ScheduleTargetError("fleet state is unavailable")
                 if method == "PUT" and item_match:
                     definition = schedules.normalize_definition(body)
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
                     row, resolved = coordinator.put_schedule(
                         schedule_id, definition, expected_rev=expected,
-                        resolve_target=schedule_target_resolver)
+                        resolve_target=validated_resolver)
                 elif method == "PATCH" and item_match:
                     patch = self._normalized_schedule_patch(before, body)
+                    definition = {
+                        key: copy.deepcopy(before[key])
+                        for key in schedules.DEFINITION_KEYS if key in before}
+                    definition.update(copy.deepcopy(patch))
+                    if definition.get("after", False) is None:
+                        definition.pop("after")
+                    definition = schedules.normalize_definition(definition)
+
+                    def validated_resolver(target, role_policy=None):
+                        resolved = schedule_target_resolver(
+                            target, role_policy=role_policy)
+                        if scheduled_executor is None:
+                            raise ScheduleTargetError(
+                                "schedule executor is unavailable")
+                        scheduled_executor.validate(
+                            definition, resolved, "creation")
+                        return resolved
+
+                    # Force the coordinator's existing target-resolution path
+                    # for payload-only patches too; the identical target does
+                    # not reset the durable creation preview.
+                    patch.setdefault("target", copy.deepcopy(before["target"]))
                     row, resolved = coordinator.patch_schedule(
                         schedule_id, patch, expected_rev=expected,
-                        resolve_target=schedule_target_resolver)
+                        resolve_target=validated_resolver)
                 else:
                     self._schedule_problem(404, "route-not-found",
                                            "Route not found")
@@ -5842,7 +6514,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     image_id = str(body.get("image_id") or "")
                     ids = [image_id] if image_id else []
                 service = assignment_service.AssignmentService(
-                    catalog, fleet, audit_path)
+                    catalog, fleet, audit_path,
+                    authority_path=os.path.join(
+                        schedule_store.state_dir,
+                        "assignment-authority.sqlite3"))
                 try:
                     # API compatibility remains replacement semantics. The
                     # shared service holds fleet membership through the
@@ -5853,6 +6528,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                         plural=plural)
                 except assignment_service.MissingFleetDevice:
                     self._json(422, {"error": "no such fleet device"})
+                    return
+                except assignment_service.AssignmentAuthorityUnavailable:
+                    self._json(503, {
+                        "error": "assignment authority unavailable"})
                     return
                 except catalog_mod.PolicyConflict as exc:
                     self._json(409, {"error": "assignment_conflict",
@@ -6371,6 +7050,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         # its immutable record; only the established fallback needs this path.
         teardown_plan_fn=lambda device_id, device: Handler._plan(
             None, device_id, device, onboarding=False))
+    schedule_coordinator = role_coordinator()
+    schedule_role_guard = (schedule_coordinator.schedule_role_guard
+                           if schedule_coordinator is not None else None)
+    assignment_writer = assignment_service.AssignmentService(
+        catalog, fleet, audit_path,
+        authority_path=os.path.join(
+            schedule_store.state_dir, "assignment-authority.sqlite3"))
+    scheduled_executor = _ScheduledExecutor(
+        schedule_store=schedule_store,
+        occurrence_store=schedule_occurrence_store,
+        receipt_store=schedule_receipt_store,
+        role_guard=lambda schedule: _runner_schedule_role_guard(
+            schedule_role_guard, schedule),
+        role_policy_snapshot=role_policy_snapshot,
+        fleet=fleet, secrets_path=getattr(app, "secrets_path", None),
+        assignment_writer=assignment_writer,
+        submission=submission_adapter, onboard=onboard,
+        record_store=record_store, now_fn=now_fn)
     srv = _ConsoleServer((host, port), Handler)
     srv.onboard_submission = submission_adapter
     # Inert runner construction seams. They are the exact instances used by
@@ -6379,9 +7076,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
     srv.schedule_occurrence_store = schedule_occurrence_store
     srv.schedule_receipt_store = schedule_receipt_store
     srv.schedule_target_resolver = runner_schedule_target_resolver
-    schedule_coordinator = role_coordinator()
-    srv.schedule_role_guard = (schedule_coordinator.schedule_role_guard
-                               if schedule_coordinator is not None else None)
+    srv.schedule_role_guard = schedule_role_guard
+    srv.schedule_executor = scheduled_executor
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the
@@ -6699,6 +7395,7 @@ def main():
             schedule_wake=schedule_wake_event.set)
         schedule_service = schedule_runner.ScheduleRunner(
             srv.schedule_store, srv.schedule_target_resolver,
+            executor=srv.schedule_executor,
             role_guard=lambda schedule: _runner_schedule_role_guard(
                 srv.schedule_role_guard, schedule),
             wake_event=schedule_wake_event,

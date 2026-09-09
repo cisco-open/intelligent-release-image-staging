@@ -80176,6 +80176,18 @@
                   "minimum": 0,
                   "maximum": 9223372036854775807
                 },
+                "fleet_registered_at": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 253370764799
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "before_image_ids": {
                   "type": "array",
                   "uniqueItems": true,
@@ -80317,6 +80329,18 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 9223372036854775807
+          },
+          "fleet_registered_at": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 253370764799
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "before_image_ids": {
             "type": "array",

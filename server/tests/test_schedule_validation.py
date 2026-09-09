@@ -68,6 +68,15 @@ def test_max_devices_and_growth_boundaries_are_shared(tmp_path):
     zero = dict(_definition(max_devices=10), preview={"device_ids": []})
     assert validator.validate(
         zero, {"device_ids": ["edge-1"]}, "window_start") == {
+        "status": "skipped", "reason": "target_growth_exceeded"}
+    boundary = dict(_definition(max_devices=10),
+                    preview={"device_ids": ["a", "b", "c", "d"]})
+    assert validator.validate(
+        boundary, {"device_ids": ["a", "b", "c", "d", "e"]},
+        "window_start") is None
+    assert validator.validate(
+        boundary, {"device_ids": ["a", "b", "c", "d", "e", "f"]},
+        "window_start") == {
             "status": "skipped", "reason": "target_growth_exceeded"}
 
 
@@ -88,6 +97,21 @@ def test_iox_architecture_and_artifact_are_checked_locally(
         (tmp_path / filename).write_bytes(b"package")
         assert validator.validate(
             _definition(), {"device_ids": ["edge-1"]}, "creation") is None
+
+
+def test_iox_package_disappearance_is_refused_at_window_start(tmp_path):
+    row = {"device_id": "edge-1", "management_type": "inband",
+           "platform": "iox", "model": "C9300"}
+    package = tmp_path / "iris-amd64.tar"
+    package.write_bytes(b"package")
+    validator = _validator(tmp_path, (row,))
+    definition = _definition()
+    snapshot = {"device_ids": ["edge-1"]}
+    assert validator.validate(definition, snapshot, "creation") is None
+    package.unlink()
+    definition["preview"] = snapshot
+    assert validator.validate(definition, snapshot, "window_start") == {
+        "status": "skipped", "reason": "iox_package_missing"}
 
 
 def test_assignment_and_legacy_targets_do_not_require_onboarding_artifacts(

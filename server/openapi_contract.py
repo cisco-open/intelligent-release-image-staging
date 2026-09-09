@@ -564,6 +564,8 @@ def _schedule_receipt_schema(*, predecessor=False):
     properties.update({field: _schedule_id_schema() for field in (
         "job_id", "record_id", "predecessor_record_id")})
     properties["manual_generation"] = _schedule_integer()
+    properties["fleet_registered_at"] = {
+        "oneOf": [epoch, {"type": "null"}]}
     properties.update({field: _schedule_ids_schema(images=True) for field in (
         "before_image_ids", "after_image_ids", "removed_image_ids")})
     schema = _schedule_object(properties, required)

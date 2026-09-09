@@ -191,6 +191,52 @@ def test_definition_change_during_resolution_prevents_stale_claim(setup, mutatio
         assert store.get(original["id"])["generation"] != original["generation"]
 
 
+def test_role_guard_covers_target_resolution_through_durable_claim(
+        tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    clock = Clock()
+    executor = Executor()
+    create(store)
+    authority = threading.Lock()
+    resolving = threading.Event()
+    release = threading.Event()
+    writer_entered = threading.Event()
+    writer_saw_claim = []
+
+    @contextlib.contextmanager
+    def role_guard(_row):
+        with authority:
+            yield
+
+    def resolver(_row):
+        resolving.set()
+        assert release.wait(2)
+        return {"revision": 8, "now": clock.now,
+                "device_ids": ["edge-1"]}
+
+    runner = schedule_runner.ScheduleRunner(
+        store, resolver, executor=executor, role_guard=role_guard,
+        now_fn=clock)
+
+    def writer():
+        with authority:
+            writer_entered.set()
+            writer_saw_claim.extend(
+                schedules.OccurrenceStore(tmp_path).list())
+
+    runner_thread = threading.Thread(target=runner.run_once)
+    writer_thread = threading.Thread(target=writer)
+    runner_thread.start()
+    assert resolving.wait(2)
+    writer_thread.start()
+    assert not writer_entered.wait(.05)
+    release.set()
+    runner_thread.join(2)
+    writer_thread.join(2)
+    assert not runner_thread.is_alive() and not writer_thread.is_alive()
+    assert writer_entered.is_set() and len(writer_saw_claim) == 1
+
+
 def test_claim_cursor_failure_reuses_binding(setup, monkeypatch):
     store, clock, executor, reads, runner = setup
     create(store)

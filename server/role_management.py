@@ -250,15 +250,16 @@ class RoleCoordinator:
 
     @contextlib.contextmanager
     def schedule_role_guard(self, definition):
-        """Hold role authority across validation and a schedule claim.
+        """Hold role and fleet authority across resolution and schedule claim.
 
         The yielded policy is the exact snapshot validated. A runner claims the
         schedule inside this context and invokes executors only after leaving.
         """
         with secrets_store.store_lock(self.lock_path):
-            policy = self._load()
-            self._require_scheduled_role(definition, policy)
-            yield policy
+            with assignment_service.membership_guard(self.fleet):
+                policy = self._load()
+                self._require_scheduled_role(definition, policy)
+                yield policy
 
     @staticmethod
     def _schedule_preview(resolved):
@@ -302,18 +303,34 @@ class RoleCoordinator:
         # All definition writers take the same outer lock. Only a retarget
         # needs a policy/fleet read and a new preview.
         with secrets_store.store_lock(self.lock_path):
-            resolved = None
-            preview = None
-            if "target" in patch:
-                policy = self._load()
-                self._require_scheduled_role({"target": patch["target"]},
-                                             policy)
-                resolved = resolve_target(patch["target"],
-                                          role_policy=policy)
-                preview = self._schedule_preview(resolved)
-            row = self.schedule_store.patch(
-                schedule_id, patch, expected_rev=expected_rev, preview=preview)
+            with assignment_service.membership_guard(self.fleet):
+                resolved = None
+                preview = None
+                if "target" in patch:
+                    policy = self._load()
+                    self._require_scheduled_role({"target": patch["target"]},
+                                                 policy)
+                    resolved = resolve_target(patch["target"],
+                                              role_policy=policy)
+                    preview = self._schedule_preview(resolved)
+                row = self.schedule_store.patch(
+                    schedule_id, patch, expected_rev=expected_rev,
+                    preview=preview)
             return row, resolved
+
+    def delete_schedule(self, schedule_id, *, expected_rev):
+        """Delete under the role boundary without requiring a live role.
+
+        A missing/degraded role may prevent execution, but must never prevent
+        an operator from removing the schedule that refers to it.
+        """
+        if self.schedule_store is None:
+            raise RoleManagementError(
+                "schedule authority unavailable",
+                code="schedule_state_unavailable", status=503)
+        with secrets_store.store_lock(self.lock_path):
+            return self.schedule_store.delete(
+                schedule_id, expected_rev=expected_rev)
 
     def _validate_mapping(self, mapping, result, allow_missing=False,
                           allow_shadow=False):

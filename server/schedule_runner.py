@@ -46,7 +46,8 @@ import schedules
 
 _ACTIVE = frozenset(("pending", "running", "interrupted"))
 _METADATA = frozenset(("job_id", "record_id", "predecessor_record_id",
-    "manual_generation", "before_image_ids", "after_image_ids", "removed_image_ids", "notes"))
+    "manual_generation", "fleet_registered_at", "before_image_ids",
+    "after_image_ids", "removed_image_ids", "notes"))
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
@@ -72,6 +73,9 @@ class UnavailableExecutor:
         return {"status": "deferred", "reason": "executor_unavailable"}
 
     def cancel_queued(self, occurrence_id, job_ids):
+        return None
+
+    def acknowledge(self, receipt):
         return None
 
 
@@ -115,6 +119,7 @@ class ScheduleRunner:
         self._validated = set()
         self._facts = {}
         self._retry_at = {}
+        self._pending_acknowledgements = set()
         self._position = {}
         self._stop = threading.Event()
         self._external_stop = None
@@ -251,15 +256,25 @@ class ScheduleRunner:
         elif self._now() >= slot["window_end"]:
             snapshot = None
         else:
-            facts = self.resolve_target(copy.deepcopy(row))
-            snapshot = schedules.normalize_snapshot({key: facts[key] for key in ("revision", "now", "device_ids")})
-            # Target resolution can cross the end boundary; never publish a
-            # fabricated fired set for a slot that was missed before claim.
-            if self._now() >= slot["window_end"]:
-                snapshot = None
-        guard = self.role_guard(row) if snapshot is not None else contextlib.nullcontext()
-        with guard:
-            claimed = self.store.claim_occurrence(row["id"], expected_rev=row["rev"],
+            # Role authority must cover both target resolution and its durable
+            # claim. Otherwise a role/fleet writer could expose a target from
+            # one side of a coordinated edit and a claim from the other.
+            with self.role_guard(row):
+                facts = self.resolve_target(copy.deepcopy(row))
+                snapshot = schedules.normalize_snapshot({
+                    key: facts[key]
+                    for key in ("revision", "now", "device_ids")})
+                # Resolution can cross the end boundary; never publish a
+                # fabricated fired set for a slot already missed.
+                if self._now() >= slot["window_end"]:
+                    snapshot = None
+                claimed = self.store.claim_occurrence(
+                    row["id"], expected_rev=row["rev"],
+                    expected_generation=row["generation"], slot=slot,
+                    target_snapshot=snapshot, now=self._now())
+        if existing is not None or snapshot is None and facts is None:
+            claimed = self.store.claim_occurrence(
+                row["id"], expected_rev=row["rev"],
                 expected_generation=row["generation"], slot=slot,
                 target_snapshot=snapshot, now=self._now())
         if facts is not None and claimed["state"] in _ACTIVE:
@@ -325,11 +340,34 @@ class ScheduleRunner:
             self._retry_at[key] = max(self._now()+self.poll_interval, result.get("retry_at", 0))
         else:
             self._retry_at.pop(key, None)
+        if saved["status"] in schedules.TERMINAL_RECEIPT_STATES:
+            self._acknowledge(saved)
         return saved
 
+    def _acknowledge(self, receipt):
+        """Best-effort cleanup only after terminal evidence is durable.
+
+        A crash or transient cleanup failure leaves replay evidence in place.
+        Completed receipts retry this acknowledgement on later passes.
+        """
+        callback = getattr(self.executor, "acknowledge", None)
+        key = (receipt["occurrence_id"], receipt["device_id"])
+        if not callable(callback):
+            self._pending_acknowledgements.discard(key)
+            return True
+        try:
+            callback(copy.deepcopy(receipt))
+        except Exception:
+            self._pending_acknowledgements.add(key)
+            return False
+        self._pending_acknowledgements.discard(key)
+        return True
+
     def _finish_unsubmitted(self, occurrence, did, prior, reason, status="skipped"):
-        return self.receipts.record(occurrence["id"], did, status=status,
+        saved = self.receipts.record(occurrence["id"], did, status=status,
             reason=reason, now=self._now(), expected_rev=prior["rev"] if prior else None)
+        self._acknowledge(saved)
+        return saved
 
     def _retry(self, occurrence, did, prior, result, closed):
         if closed == "window_not_open":
@@ -415,8 +453,11 @@ class ScheduleRunner:
             if "after" in occurrence["schedule"]:
                 refusal = {"status":"skipped", "reason":"gate_unavailable"}
             elif oid not in self._validated:
+                validation_snapshot = copy.deepcopy(
+                    self._facts.get(oid, occurrence["target_snapshot"]))
+                validation_snapshot["occurrence_id"] = oid
                 refusal = self.executor.validate(copy.deepcopy(occurrence["schedule"]),
-                    copy.deepcopy(self._facts.get(oid, occurrence["target_snapshot"])), "window_start")
+                    validation_snapshot, "window_start")
                 if refusal is not None:
                     refusal = self._result(refusal)
                     if refusal["status"] not in ("skipped", "error"):
@@ -430,6 +471,9 @@ class ScheduleRunner:
             if self._stopping():
                 break
             if did in complete:
+                terminal = self.receipts.get(oid, did)
+                if terminal is not None:
+                    self._acknowledge(terminal)
                 continue
             prior = self.receipts.get(oid, did)
             closed = self._admission_reason(occurrence)
@@ -471,7 +515,9 @@ class ScheduleRunner:
             else:
                 self._save(occurrence, did, intent, result)
         done = self.receipts.completed_device_ids(oid)
-        if len(done) == len(targets):
+        acknowledgement_pending = any(
+            (oid, did) in self._pending_acknowledgements for did in targets)
+        if len(done) == len(targets) and not acknowledgement_pending:
             reasons = {refusal["reason"]} if refusal else set()
             statuses = {refusal["status"]} if refusal else set()
             for did in targets:

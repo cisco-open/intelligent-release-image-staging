@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Validated operator inventory, separate from applied deployment records."""
 import csv
+import functools
 import io
 import ipaddress
 import json
@@ -12,8 +13,18 @@ import tempfile
 import time
 
 import gui_onboard
+import fleet_authority
 import keyed_state
 import secrets_store
+
+
+def _membership_mutation(method):
+    """Serialize every fleet mutation with scheduled membership authority."""
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        with fleet_authority.membership_guard(self):
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class FleetStateError(RuntimeError):
@@ -720,6 +731,7 @@ class FleetStore:
     def revision(self):
         return self._read_revision()
 
+    @_membership_mutation
     def upsert(self, record):
         _validate_operator_fields(record)
         did = _text(record.get("device_id"))
@@ -739,6 +751,7 @@ class FleetStore:
         did = _text(record.get("device_id"))
         return self._merge_record(self.get_device(did), record)
 
+    @_membership_mutation
     def update_observation(self, device_id, *, model=None, os_family=None):
         """Persist model/OS values learned from a trusted device observation."""
         record = {"device_id": device_id}
@@ -769,6 +782,7 @@ class FleetStore:
         self._bump_revision()
         return normalized
 
+    @_membership_mutation
     def bulk_upsert(self, device_ids, fields):
         """Apply the SAME partial-record patch *fields* (e.g. a credential or
         platform reassignment) to every id in *device_ids* — the fix for
@@ -839,6 +853,7 @@ class FleetStore:
             self._bump_revision()
         return results
 
+    @_membership_mutation
     def bulk_set_roles(self, role_by_device):
         """Apply per-device role declarations in one grouped fleet mutation.
 
@@ -913,6 +928,7 @@ class FleetStore:
                                    "error": "fleet write failed"}
         return live
 
+    @_membership_mutation
     def delete(self, device_id):
         self._ensure_revision_readable()
         existed = self._devices.delete(device_id)
@@ -1071,6 +1087,7 @@ class FleetStore:
             normalized.append(self._merge_import_record(previous, record))
         return {"records": normalized, "skipped": skipped}
 
+    @_membership_mutation
     def import_parsed_csv(self, parsed):
         """Apply a :meth:`parse_csv` result, preserving non-CSV state.
 

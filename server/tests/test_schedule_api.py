@@ -264,6 +264,53 @@ def test_put_preserves_unchanged_early_target_preview(schedule_api):
     assert json.loads(changed_raw)["schedule"]["preview"] == frozen
 
 
+def test_all_http_schedule_writers_validate_before_atomic_mutation(
+        schedule_api, monkeypatch):
+    server, _app, auth = schedule_api
+    status, headers, raw = _request(
+        server, "POST", "/api/schedules",
+        {"id": "s-existing", **_definition(["edge-1"])}, auth)
+    assert status == 201
+    original = json.loads(raw)["schedule"]
+    calls = []
+
+    def refuse(definition, snapshot, phase):
+        calls.append((definition["payload"], snapshot["device_ids"], phase))
+        raise schedules.ScheduleValidationError("test_local_refusal")
+
+    monkeypatch.setattr(server.schedule_executor, "validate", refuse)
+    post_status, _, _ = _request(
+        server, "POST", "/api/schedules",
+        {"id": "s-refused", **_definition(["edge-1"])}, auth)
+    put_definition = _definition(["edge-1"])
+    put_definition["payload"] = {"image_ids": ["image-b"], "mode": "merge"}
+    put_status, _, _ = _request(
+        server, "PUT", "/api/schedules/s-existing", put_definition,
+        dict(auth, **{"If-Match": headers["ETag"]}))
+    patch_status, _, _ = _request(
+        server, "PATCH", "/api/schedules/s-existing",
+        {"payload": {"image_ids": ["image-c"], "mode": "merge"}},
+        dict(auth, **{"If-Match": headers["ETag"]}))
+
+    assert (post_status, put_status, patch_status) == (422, 422, 422)
+    assert server.schedule_store.get("s-refused") is None
+    retained = server.schedule_store.get("s-existing")
+    assert retained["rev"] == original["rev"] == 1
+    assert retained["payload"] == original["payload"]
+    assert len(calls) == 3
+    assert all(phase == "creation" for _payload, _ids, phase in calls)
+
+
+def test_server_wires_one_production_executor_and_shared_assignment_authority(
+        schedule_api):
+    server, _app, _auth = schedule_api
+    assert isinstance(server.schedule_executor,
+                      management_api._ScheduledExecutor)
+    assert server.schedule_executor.assignment_writer.authority_path == \
+        os.path.join(server.schedule_store.state_dir,
+                     "assignment-authority.sqlite3")
+
+
 def test_schedule_runner_role_guard_translates_only_expected_refusals():
     @contextlib.contextmanager
     def refused(_schedule):

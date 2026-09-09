@@ -529,8 +529,9 @@ def _validate_slot(slot):
 
 
 def _validate_occurrence(key, row):
-    keys = {"id", "schedule_id", "schedule_generation", "schedule_rev", "schedule", "actor", "slot", "scheduled_at", "window_end", "state", "preview", "target_snapshot", "delta", "created_at", "updated_at"}
-    _object(row, keys, "occurrence", keys - {"target_snapshot", "delta"})
+    keys = {"id", "schedule_id", "schedule_generation", "schedule_rev", "schedule", "actor", "slot", "scheduled_at", "window_end", "state", "preview", "target_snapshot", "delta", "annotations", "created_at", "updated_at"}
+    _object(row, keys, "occurrence",
+            keys - {"target_snapshot", "delta", "annotations"})
     _hex(key, "occurrence id")
     validate_schedule(row["schedule_id"], row["schedule"])
     if (row["id"] != key or occurrence_id(row["schedule"], row["scheduled_at"]) != key or
@@ -548,6 +549,13 @@ def _validate_occurrence(key, row):
     normalize_snapshot(row["preview"])
     _integer(row["created_at"], "occurrence created_at", maximum=MAX_EPOCH)
     _integer(row["updated_at"], "occurrence updated_at", row["created_at"], MAX_EPOCH)
+    if "annotations" in row:
+        annotations = row["annotations"]
+        _object(annotations, {"all_targets_quarantined"},
+                "occurrence annotations")
+        if "all_targets_quarantined" in annotations:
+            _integer(annotations["all_targets_quarantined"],
+                     "all_targets_quarantined", 1, MAX_TARGETS)
     if row["state"] == "missed":
         if ("target_snapshot" in row or "delta" in row or row["created_at"] < row["window_end"]
                 or row["slot"]["status"] != "missed"):
@@ -625,6 +633,35 @@ class OccurrenceStore:
             return row
         return self._rows.update(identifier, mutate)
 
+    def annotate_all_targets_quarantined(self, identifier, count, *, now):
+        """Record the window-start quarantine fact without changing outcome.
+
+        Quarantine controls peering, not assignment or agent distribution, so
+        this is visible occurrence evidence rather than a refusal state.
+        """
+        _hex(identifier, "occurrence id")
+        _integer(count, "all_targets_quarantined", 1, MAX_TARGETS)
+        _integer(now, "now", maximum=MAX_EPOCH)
+
+        def mutate(old):
+            if old is None:
+                raise ScheduleNotFound("no such occurrence")
+            if old["state"] == "missed":
+                raise ScheduleConflict("missed occurrence has no bound target")
+            existing = (old.get("annotations") or {}).get(
+                "all_targets_quarantined")
+            if existing is not None and existing != count:
+                raise ScheduleConflict("occurrence annotation changed")
+            if existing == count:
+                return old
+            row = copy.deepcopy(old)
+            row["annotations"] = {"all_targets_quarantined": count}
+            row["updated_at"] = max(now, row["updated_at"])
+            _validate_occurrence(identifier, row)
+            return row
+
+        return self._rows.update(identifier, mutate)
+
     def recover_interrupted(self, *, now):
         recovered = []
         for row in self.list():
@@ -657,7 +694,9 @@ def list_schedule_occurrences(state_dir, schedule_id, *,
 _RECEIPT_REQUIRED = {"occurrence_id", "device_id", "rev", "attempt", "attempt_started_at",
                      "predecessors", "status", "reason", "created_at", "updated_at", "completed_at", "notes"}
 _RECEIPT_OPTIONAL = {"job_id", "record_id", "predecessor_record_id", "manual_generation",
-                     "before_image_ids", "after_image_ids", "removed_image_ids"}
+                     "fleet_registered_at", "before_image_ids",
+                     "after_image_ids", "removed_image_ids"}
+_UNSET = object()
 
 
 def _validate_receipt(key, row, *, history=True):
@@ -689,6 +728,10 @@ def _validate_receipt(key, row, *, history=True):
             _identifier(row[field], field)
     if "manual_generation" in row:
         _integer(row["manual_generation"], "manual_generation")
+    if ("fleet_registered_at" in row
+            and row["fleet_registered_at"] is not None):
+        _integer(row["fleet_registered_at"], "fleet_registered_at",
+                 maximum=MAX_EPOCH)
     for field in ("before_image_ids", "after_image_ids", "removed_image_ids"):
         if field in row:
             _ids(row[field], "image_ids", maximum=10)
@@ -758,7 +801,8 @@ class ReceiptStore:
     def record(self, identifier, device_id, *, status, reason, now, notes=None,
                expected_status=None, expected_rev=None, job_id=None, record_id=None,
                predecessor_record_id=None, manual_generation=None, before_image_ids=None,
-               after_image_ids=None, removed_image_ids=None):
+               after_image_ids=None, removed_image_ids=None,
+               fleet_registered_at=_UNSET):
         self._admit(identifier, device_id)
         _integer(now, "now", maximum=MAX_EPOCH)
         if not isinstance(status, str) or status not in RECEIPT_STATES:
@@ -771,6 +815,8 @@ class ReceiptStore:
             "job_id": job_id, "record_id": record_id, "predecessor_record_id": predecessor_record_id,
             "manual_generation": manual_generation, "before_image_ids": before_image_ids,
             "after_image_ids": after_image_ids, "removed_image_ids": removed_image_ids}.items() if value is not None}
+        if fleet_registered_at is not _UNSET:
+            supplied["fleet_registered_at"] = fleet_registered_at
         def mutate(old):
             if old is not None and old["status"] in TERMINAL_RECEIPT_STATES:
                 return old
@@ -786,7 +832,9 @@ class ReceiptStore:
             if expected_status is not None and (old or {}).get("status") != expected_status:
                 raise ScheduleConflict("receipt state changed")
             if old is not None:
-                for field in ("job_id", "record_id", "predecessor_record_id", "manual_generation", "before_image_ids"):
+                for field in ("job_id", "record_id", "predecessor_record_id",
+                              "manual_generation", "fleet_registered_at",
+                              "before_image_ids"):
                     if field in old and field in supplied and old[field] != supplied[field]:
                         raise ScheduleConflict("receipt attempt ownership is immutable")
                 if status not in TERMINAL_RECEIPT_STATES:
@@ -830,6 +878,8 @@ class ReceiptStore:
                    "predecessors": copy.deepcopy(old["predecessors"]) + [{key: copy.deepcopy(value) for key, value in old.items() if key != "predecessors"}]}
             if predecessor is not None:
                 row["predecessor_record_id"] = predecessor
+            if "fleet_registered_at" in old:
+                row["fleet_registered_at"] = old["fleet_registered_at"]
             before = before_image_ids if before_image_ids is not None else old.get("before_image_ids")
             if before is not None:
                 row["before_image_ids"] = copy.deepcopy(before)

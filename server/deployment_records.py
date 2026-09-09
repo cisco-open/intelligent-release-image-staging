@@ -869,6 +869,9 @@ class DeploymentRecordStore:
             validate_schedule_provenance(record["schedule_provenance"], record["device_id"])
             if record["schedule_provenance"]["device_id"] != record["device_id"]:
                 raise ValueError("schedule provenance device_id mismatch")
+        if ("fleet_registered_at" in record
+                and record["fleet_registered_at"] is not None):
+            _integer(record["fleet_registered_at"], "fleet_registered_at")
         if "recovery" in record:
             recovery = record["recovery"]
             _closed_object(recovery, _RECOVERY_KEYS, "record recovery")

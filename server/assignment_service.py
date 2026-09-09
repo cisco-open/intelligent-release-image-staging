@@ -6,19 +6,22 @@
 
 Lock order is role coordinator outer lock -> membership_guard -> catalog's
 self-acquired image-policy lock -> shard locks. The membership guard is a
-NON-REENTRANT cross-process flock: never acquire it twice or hold an image-policy
-lock before calling apply/set_policy. Retirement must hold the same guard from
-fleet deletion through catalog purge. Direct CatalogStore.set_policy remains a
-low-level bootstrap operation and deliberately has no fleet prerequisite.
+cross-process flock with same-thread nesting for fleet methods that enforce it
+internally. Never hold an image-policy lock before calling apply/set_policy.
+Retirement must hold the same guard from fleet deletion through catalog purge.
+Direct CatalogStore.set_policy remains a low-level bootstrap operation and
+deliberately has no fleet prerequisite.
 """
 import contextlib
 from dataclasses import dataclass
 import json
 import math
+import os
 import sqlite3
 
 import audit
 import catalog
+import fleet_authority
 import secrets_store
 
 
@@ -44,7 +47,9 @@ class ScheduledAssignmentContext:
     schedule_rev: int
     occurrence_id: str
     expected_manual_generation: int
+    fleet_registered_at: object = None
     commit_guard: object = None
+    require_existing_authority: bool = False
 
     def __post_init__(self):
         for value in (self.schedule_id, self.occurrence_id):
@@ -57,6 +62,12 @@ class ScheduledAssignmentContext:
             raise ValueError("invalid manual generation")
         if self.commit_guard is not None and not callable(self.commit_guard):
             raise ValueError("invalid assignment commit guard")
+        if type(self.require_existing_authority) is not bool:
+            raise ValueError("invalid assignment authority requirement")
+        if (self.fleet_registered_at is not None
+                and (type(self.fleet_registered_at) is not int
+                     or self.fleet_registered_at < 0)):
+            raise ValueError("invalid fleet registration stamp")
 
 
 @dataclass(frozen=True)
@@ -70,8 +81,8 @@ class ScheduledAssignmentRefusal:
 
 
 def membership_guard(fleet):
-    """Return the non-reentrant fleet lifetime lock; see module lock order."""
-    return secrets_store.store_lock(fleet.path + ".membership")
+    """Return the fleet lifetime lock; see module lock order."""
+    return fleet_authority.membership_guard(fleet)
 
 
 def _safe(value, limit=256):
@@ -125,7 +136,7 @@ class AssignmentService:
         self.authority_path = authority_path
 
     @contextlib.contextmanager
-    def _authority(self):
+    def _authority(self, *, require_existing=False):
         """Open strict durable authority only inside the membership guard.
 
         SQLite commits each intent/result before proceeding. It does not make
@@ -136,6 +147,9 @@ class AssignmentService:
         if self.authority_path is None:
             raise AssignmentAuthorityUnavailable("assignment authority unavailable")
         try:
+            if require_existing and not os.path.isfile(self.authority_path):
+                raise AssignmentAuthorityUnavailable(
+                    "assignment authority unavailable")
             conn = sqlite3.connect(self.authority_path, isolation_level=None)
             try:
                 conn.execute("PRAGMA synchronous=FULL")
@@ -143,6 +157,9 @@ class AssignmentService:
                 schema = conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_master "
                                       "ORDER BY name").fetchall()
                 if version == 0 and not schema:
+                    if require_existing:
+                        raise AssignmentAuthorityUnavailable(
+                            "assignment authority unavailable")
                     # DDL and version commit together. A versioned database
                     # with missing tables is lost authority, never a new store.
                     conn.execute("BEGIN IMMEDIATE")
@@ -181,13 +198,15 @@ class AssignmentService:
         if self.fleet is None:
             raise MissingFleetDevice("no such fleet device")
         with membership_guard(self.fleet):
-            if self.fleet.get_device(device_id) is None:
+            device = self.fleet.get_device(device_id)
+            if device is None:
                 raise MissingFleetDevice("no such fleet device")
             with self._authority() as conn:
                 generation, pending = self._generation(conn, device_id)
                 if pending:
                     raise AssignmentAuthorityUnavailable("manual assignment outcome uncertain")
                 return {"manual_generation": generation,
+                        "fleet_registered_at": device.get("registered_at"),
                         "before_image_ids": self.store.get_policy(device_id)["approved_image_ids"]}
 
     def acknowledge_schedule_result(self, occurrence_id, device_id, *, terminal_status):
@@ -208,7 +227,7 @@ class AssignmentService:
         if self.fleet is None:
             raise AssignmentAuthorityUnavailable("assignment authority unavailable")
         with membership_guard(self.fleet):
-            with self._authority() as conn:
+            with self._authority(require_existing=True) as conn:
                 conn.execute("DELETE FROM claims WHERE occurrence_id=? AND device_id=?",
                              (occurrence_id, device_id))
                 return True
@@ -248,23 +267,87 @@ class AssignmentService:
                       context.occurrence_id, device_id))
         return result, False
 
+    @staticmethod
+    def _schedule_request(context, device_id, requested, mode,
+                          expect_image_ids, retry_conflict):
+        return json.dumps({"schema_version": 1,
+            "schedule_id": context.schedule_id,
+            "schedule_rev": context.schedule_rev,
+            "occurrence_id": context.occurrence_id,
+            "device_id": device_id,
+            "fleet_registered_at": context.fleet_registered_at,
+            "manual_generation": context.expected_manual_generation,
+            "mode": mode, "image_ids": requested,
+            "expect_image_ids": expect_image_ids,
+            "retry_conflict": retry_conflict}, sort_keys=True)
+
+    def reconcile_schedule_result(self, device_id, image_ids, *, mode,
+                                  expect_image_ids, retry_conflict,
+                                  scheduled_context):
+        """Read an existing occurrence claim without admitting new work.
+
+        Recovery may happen after the schedule window closes, when re-entering
+        the live commit guard would correctly refuse a new write but must not
+        hide a result already made durable immediately before a crash. An
+        unfinished claim remains conservative conflict evidence.
+        """
+        if not isinstance(scheduled_context, ScheduledAssignmentContext):
+            raise ValueError("invalid scheduled assignment context")
+        if (not isinstance(image_ids, list)
+                or not all(isinstance(value, str) and value
+                           for value in image_ids)
+                or not isinstance(expect_image_ids, list)
+                or not all(isinstance(value, str) and value
+                           for value in expect_image_ids)
+                or mode not in ("merge", "replace")
+                or type(retry_conflict) is not bool):
+            raise ValueError("invalid scheduled assignment recovery")
+        requested = list(image_ids)
+        expected = list(expect_image_ids)
+        request = self._schedule_request(
+            scheduled_context, device_id, requested, mode, expected,
+            retry_conflict)
+        if self.fleet is None:
+            raise AssignmentAuthorityUnavailable(
+                "assignment authority unavailable")
+        with membership_guard(self.fleet):
+            with self._authority(require_existing=True) as conn:
+                claim = conn.execute(
+                    "SELECT request_json, result_json FROM claims "
+                    "WHERE occurrence_id=? AND device_id=?",
+                    (scheduled_context.occurrence_id, device_id)).fetchone()
+                if claim is None:
+                    return None
+                if claim[1] is not None:
+                    saved = self._load_result(claim[1])
+                    if claim[0] != request:
+                        return ScheduledAssignmentRefusal(
+                            "conflict", saved.before_ids,
+                            saved.before_ids, [])
+                    return saved
+                current = self.store.get_policy(
+                    device_id)["approved_image_ids"]
+                return self._save_result(
+                    conn, scheduled_context, device_id,
+                    ScheduledAssignmentRefusal(
+                        "conflict", current, current, []))[0]
+
     def _apply_guarded(self, device_id, requested, mode, expect_image_ids,
                        retry_conflict, scheduled_context, before):
         # Legacy callers without a configured authority keep manual behavior;
         # scheduled work must never fall back to volatile authority.
-        authority = (self._authority() if self.authority_path is not None
+        authority = (self._authority(require_existing=bool(
+                        scheduled_context is not None and
+                        scheduled_context.require_existing_authority))
+                     if self.authority_path is not None
                      or scheduled_context is not None else contextlib.nullcontext(None))
         with authority as conn:
             generation, pending = self._generation(conn, device_id) if conn is not None else (0, 0)
             context = scheduled_context
             if context is not None:
-                request = json.dumps({"schema_version": 1,
-                    "schedule_id": context.schedule_id, "schedule_rev": context.schedule_rev,
-                    "occurrence_id": context.occurrence_id, "device_id": device_id,
-                    "manual_generation": context.expected_manual_generation,
-                    "mode": mode, "image_ids": requested,
-                    "expect_image_ids": expect_image_ids,
-                    "retry_conflict": retry_conflict}, sort_keys=True)
+                request = self._schedule_request(
+                    context, device_id, requested, mode, expect_image_ids,
+                    retry_conflict)
                 claim = conn.execute("SELECT request_json, result_json FROM claims "
                                      "WHERE occurrence_id=? AND device_id=?",
                                      (context.occurrence_id, device_id)).fetchone()
