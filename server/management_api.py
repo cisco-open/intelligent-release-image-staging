@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -46,6 +47,7 @@ import gui_onboard
 import gui_tls
 import instruction_keys
 import instruction_stamper
+import instructions
 import iox_transport
 import iox_verification
 import live_samples
@@ -183,6 +185,274 @@ _SECURITY_HEADERS = [
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 ]
+
+_INSTRUCTION_I63_MAX = (1 << 63) - 1
+_INSTRUCTION_DEVICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_INSTRUCTION_REJECTED_STATES = frozenset((
+    "rollback_rejected", "audience_mismatch", "key_rejected",
+    "tamper_rejected", "lkg_rejected", "oversize",
+))
+_INSTRUCTION_STALE_STATES = frozenset((
+    "stale_expired", "allowlist_expired",
+))
+_INSTRUCTION_UNAVAILABLE_LABELS = {
+    "verifier_missing": "verifier unavailable",
+    "lkg_unreadable": "LKG unavailable",
+    "instr_unavailable": "unavailable",
+}
+
+
+def _instruction_i63(value):
+    """Return one exact bounded wire integer, otherwise None."""
+    return value if type(value) is int and 0 <= value <= _INSTRUCTION_I63_MAX \
+        else None
+
+
+def _instruction_report_age(heartbeat, observed_at):
+    last_seen = heartbeat.get("last_seen") if isinstance(heartbeat, dict) else None
+    if (not isinstance(last_seen, (int, float)) or isinstance(last_seen, bool)
+            or not math.isfinite(last_seen)
+            or not isinstance(observed_at, (int, float))
+            or isinstance(observed_at, bool) or not math.isfinite(observed_at)):
+        return None
+    if last_seen > observed_at:
+        return None
+    age = int(observed_at - last_seen)
+    return age if age <= _INSTRUCTION_I63_MAX else None
+
+
+def _instruction_raw_state(heartbeat):
+    """Validate the closed state/reason unit again at the management edge."""
+    if not isinstance(heartbeat, dict):
+        return None, None
+    state = heartbeat.get("instr_state")
+    if not isinstance(state, str) or state not in instructions.INSTR_STATES:
+        return None, None
+    if state == "key_rejected":
+        reason = heartbeat.get("instr_reason")
+        return (state, reason) if reason in instructions.INSTR_REASONS \
+            else (None, None)
+    if "instr_reason" in heartbeat:
+        return None, None
+    return state, None
+
+
+def _instruction_qos_drift_count(heartbeat, supported):
+    if not supported or not isinstance(heartbeat, dict):
+        return None
+    clean = instructions.sanitize_instruction_attestation({
+        "qos_drift": heartbeat.get("qos_drift")}) \
+        if "qos_drift" in heartbeat else {}
+    drift = clean.get("qos_drift")
+    if drift is None:
+        return 0
+    return (len(drift.get("options", ()))
+            + int("blocklist_revision" in drift)
+            + int("blocklist_rules" in drift))
+
+
+def _instruction_device_projection(heartbeat, revoked, observed_at,
+                                   heartbeat_available=True):
+    """Return the bounded instruction status used by rows and roll-ups.
+
+    ``revoked`` is deliberately tri-state.  None means the durable revocation
+    snapshot was unavailable, so the primary classification is unknown while
+    the bounded underlying agent report remains visible.
+    """
+    heartbeat = heartbeat if isinstance(heartbeat, dict) else {}
+    marker_present = "instr_protocol" in heartbeat
+    marker = heartbeat.get("instr_protocol")
+    supported = type(marker) is int and marker == 1
+    state, reason = _instruction_raw_state(heartbeat)
+    serial = _instruction_i63(heartbeat.get("instr_serial"))
+    identity_values = (
+        _instruction_i63(heartbeat.get("instr_epoch")), serial,
+        _instruction_i63(heartbeat.get("instr_policy_revision")),
+    )
+    identity = None
+    if supported and all(value is not None for value in identity_values):
+        identity = {
+            "epoch": identity_values[0], "instr_serial": identity_values[1],
+            "policy_revision": identity_values[2],
+        }
+
+    if state in ("applied", "reasserted"):
+        underlying_display = "applied" if identity is not None else "unknown"
+        underlying_label = ("applied r%d" % identity["instr_serial"]
+                            if identity is not None else "unknown")
+    elif state == "lkg":
+        underlying_display = "lkg" if identity is not None else "unknown"
+        underlying_label = "lkg" if identity is not None else "unknown"
+    elif state in _INSTRUCTION_STALE_STATES:
+        underlying_display, underlying_label = "stale", "stale"
+    elif state in _INSTRUCTION_REJECTED_STATES:
+        underlying_display, underlying_label = "rejected", "rejected"
+    elif state in _INSTRUCTION_UNAVAILABLE_LABELS:
+        underlying_display = "unavailable"
+        underlying_label = _INSTRUCTION_UNAVAILABLE_LABELS[state]
+    elif state == "tracker-only":
+        underlying_display, underlying_label = "tracker-only", "tracker-only"
+    elif state == "instr_pending":
+        underlying_display, underlying_label = "pending", "pending"
+    elif state == "instr_forbidden":
+        underlying_display, underlying_label = "forbidden", "forbidden"
+    elif state == "floor_reset":
+        underlying_display, underlying_label = "floor_reset", "floor reset"
+    elif state == "none":
+        underlying_display, underlying_label = "none", "no accepted instruction"
+    else:
+        underlying_display, underlying_label = "unknown", "unknown"
+
+    age = _instruction_report_age(heartbeat, observed_at)
+    report_stale = age >= _HEARTBEAT_FRESH if age is not None else None
+    if revoked is True:
+        display, label, evidence = "revoked", "revoked", "server-observed"
+    elif revoked is None:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif not heartbeat_available:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif not marker_present:
+        display, label, evidence = (
+            "pre-instructions", "pre-instructions", "agent-asserted")
+    elif not supported:
+        display, label, evidence = "unknown", "unknown", "agent-asserted"
+    elif underlying_display == "stale":
+        display, label, evidence = (
+            underlying_display, underlying_label, "agent-asserted")
+    elif age is None:
+        display, label, evidence = "unknown", "unknown", "server-observed"
+    elif report_stale:
+        display = "stale"
+        label = "stale · last reported %s" % underlying_label
+        evidence = "server-observed"
+    else:
+        display, label, evidence = (
+            underlying_display, underlying_label, "agent-asserted")
+
+    pointer_skew = heartbeat.get("pointer_skew")
+    if not supported or not isinstance(pointer_skew, bool):
+        pointer_skew = None
+    verify_level = heartbeat.get("verify_level")
+    if verify_level not in ("sig", "none"):
+        verify_level = None
+    return {
+        "display_state": display, "label": label, "evidence": evidence,
+        "underlying_state": state, "underlying_label": underlying_label,
+        "underlying_evidence": "agent-asserted",
+        "reason": reason, "reported_instr_serial": serial,
+        "accepted_identity": identity, "verify_level": verify_level,
+        "pointer_skew": pointer_skew,
+        "qos_drift_count": _instruction_qos_drift_count(
+            heartbeat, supported),
+        "report_age_seconds": age, "report_stale": report_stale,
+        "revoked": revoked, "revocation_evidence": "server-observed",
+    }
+
+
+def _instruction_fleet_projection(inventory_rows, heartbeat_rows,
+                                  raw_policies, revoked_principals,
+                                  observed_at):
+    """Build one O(n), count-only fleet projection from bulk snapshots."""
+    heartbeat_available = isinstance(heartbeat_rows, list)
+    heartbeat_by_id = {}
+    if heartbeat_available:
+        for row in heartbeat_rows:
+            if isinstance(row, dict) and isinstance(row.get("device_id"), str):
+                heartbeat_by_id[row["device_id"]] = row
+    revocation_available = isinstance(revoked_principals, (set, frozenset))
+
+    states, applied = {}, {}
+    pointer_skew = 0 if heartbeat_available else None
+    inventory_ids = []
+    for inventory_row in inventory_rows if isinstance(inventory_rows, list) else ():
+        device_id = (inventory_row.get("device_id")
+                     if isinstance(inventory_row, dict) else None)
+        if (not isinstance(device_id, str)
+                or _INSTRUCTION_DEVICE_ID.fullmatch(device_id) is None):
+            continue
+        inventory_ids.append(device_id)
+        heartbeat = heartbeat_by_id.get(device_id, {})
+        revoked = ("device:%s" % device_id in revoked_principals
+                   if revocation_available and isinstance(device_id, str)
+                   else None)
+        projected = _instruction_device_projection(
+            heartbeat, revoked, observed_at,
+            heartbeat_available=heartbeat_available)
+        key = projected["display_state"]
+        states[key] = states.get(key, 0) + 1
+        identity = projected["accepted_identity"]
+        if identity is not None:
+            revision = str(identity["policy_revision"])
+            applied[revision] = applied.get(revision, 0) + 1
+        if pointer_skew is not None and projected["pointer_skew"] is True:
+            pointer_skew += 1
+
+    issued_revision = None
+    instr_stamp_missing = None
+    if isinstance(raw_policies, dict):
+        missing = 0
+        valid = True
+        for device_id in inventory_ids:
+            row = raw_policies.get(device_id)
+            if row is None:
+                missing += 1
+                continue
+            if not isinstance(row, dict):
+                valid = False
+                break
+            if "instr" not in row:
+                missing += 1
+                continue
+            try:
+                stamp = instructions.validate_stamp(row["instr"])
+            except (instructions.InstructionError, TypeError, ValueError,
+                    RecursionError, OverflowError):
+                valid = False
+                break
+            revision = stamp["policy_revision"]
+            issued_revision = revision if issued_revision is None \
+                else max(issued_revision, revision)
+        if valid:
+            instr_stamp_missing = missing
+        else:
+            issued_revision = None
+
+    return {
+        "fleet_rollup": {
+            "issued_revision": issued_revision,
+            "applied": {key: applied[key] for key in sorted(
+                applied, key=lambda value: int(value))},
+            "states": {key: states[key] for key in sorted(states)},
+        },
+        "instruction_status": {
+            "observed_at": observed_at,
+            "instr_stamp_missing": instr_stamp_missing,
+            "pointer_skew": pointer_skew,
+            "issued_revision_label": ("r%d" % issued_revision
+                                      if issued_revision is not None else None),
+        },
+    }
+
+
+def _instruction_revoked_principals(store):
+    """Validate the durable snapshot before the canonical revocation rule."""
+    if not isinstance(store, dict):
+        return None
+    devices = store.get("devices")
+    if not isinstance(devices, dict) or len(devices) > 20000:
+        return None
+    for device_id, records in devices.items():
+        if (not isinstance(device_id, str)
+                or _INSTRUCTION_DEVICE_ID.fullmatch(device_id) is None
+                or not isinstance(records, dict) or len(records) > 16):
+            return None
+        for secret_name, record in records.items():
+            if (not isinstance(secret_name, str) or len(secret_name) > 64
+                    or not isinstance(record, dict)
+                    or ("revoked" in record
+                        and not isinstance(record["revoked"], bool))):
+                return None
+    return secrets_store.revoked_device_principals(store)
 
 
 def instruction_custody_view(state_dir):
@@ -1482,6 +1752,40 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             fleet, auth_path, lkg_path, now_fn=now_fn,
             acked_revision_fn=acked_revision)
 
+    def instruction_heartbeat_snapshot(unavailable_ok=True):
+        if catalog is None:
+            return None
+        if not unavailable_ok:
+            return catalog.list_devices()
+        try:
+            return catalog.list_devices()
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return None
+
+    def instruction_raw_policy_snapshot(unavailable_ok=True):
+        if catalog is None:
+            return None
+        reader = getattr(catalog, "list_raw_policies", None)
+        if not unavailable_ok:
+            return reader() if callable(reader) else catalog.list_policies()
+        try:
+            # list_raw_policies is the Task 19 public bulk seam.  The fallback
+            # keeps this isolated commit usable before the producer commit is
+            # integrated; the final tree always takes the raw branch.
+            return reader() if callable(reader) else catalog.list_policies()
+        except (catalog_mod.StateFileError, OSError, TypeError, ValueError,
+                RecursionError, OverflowError):
+            return None
+
+    def instruction_revocation_snapshot():
+        try:
+            return _instruction_revoked_principals(
+                secrets_store.load(app.secrets_path))
+        except (secrets_store.StoreCorruptError, OSError, TypeError,
+                ValueError, RecursionError, OverflowError):
+            return None
+
     def policy_view():
         """Return the GUI-safe, count-only policy and tracker-status view."""
         auth_path, lkg_path, enforcement_path = policy_paths()
@@ -1566,11 +1870,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         role_members = {name: len(compiled_roles.members_by_role[name])
                         for name in sorted(compiled_roles.members_by_role)}
         rows = fleet.snapshot()[1] if fleet is not None else []
-        drift = (role_management.drift_report(fleet, result) if fleet is not None
+        drift = (role_management.drift_report(fleet, result, rows=rows)
+                 if fleet is not None
                  else {"count": 0, "device_ids": [], "truncated": False})
         acked = peer_policy.effective_acked(doc, status)
         pending = sum(event["revision"] > acked
                       for event in doc.get("operation_outbox", []))
+        heartbeat_rows = instruction_heartbeat_snapshot()
+        raw_policies = instruction_raw_policy_snapshot()
+        revoked_principals = instruction_revocation_snapshot()
+        custody = instruction_custody_view(policy_state_dir())
+        observed_at = now_fn()
+        instruction = _instruction_fleet_projection(
+            rows, heartbeat_rows, raw_policies, revoked_principals, observed_at)
         return {"schema": doc.get("schema"), "revision": doc.get("revision"),
                 "degraded": result.degraded, "fail_closed": result.fail_closed,
                 "quarantine": {"reserved": True,
@@ -1585,13 +1897,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "role_drift": drift,
                 "outbox": {"unacknowledged": pending,
                            "capacity": peer_policy.OUTBOX_CAP},
-                "fleet_rollup": {"issued_revision": None, "applied": {},
-                    "states": {"pre-instructions": sum(
-                        isinstance(row, dict) and bool(row.get("device_id"))
-                        for row in rows)}},
+                "fleet_rollup": instruction["fleet_rollup"],
+                "instruction_status": instruction["instruction_status"],
                 "enforcement": enforcement, "origin_qos": origin_view,
-                "instruction_keys": instruction_custody_view(
-                    policy_state_dir())}
+                "instruction_keys": custody}
 
     def quarantine_assignment_ids():
         """The bare set of device ids under quarantine intent -- what the
@@ -2840,15 +3149,21 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             paging = limit is not None or offset or active_filter
             if paging:
                 devs.sort(key=lambda d: str(d.get("device_id") or ""))
-            hb = {d.get("device_id"): d for d in (catalog.list_devices()
-                                                  if catalog else [])}
+            heartbeat_rows = instruction_heartbeat_snapshot(unavailable_ok=False)
+            heartbeat_available = isinstance(heartbeat_rows, list)
+            hb = {d.get("device_id"): d for d in (heartbeat_rows or [])
+                  if isinstance(d, dict) and isinstance(d.get("device_id"), str)}
             # each device's latest onboard/undeploy job, so the UI can show
             # "onboarding…" / "waiting for heartbeat" instead of a misleading
             # "not enrolled" before the fresh agent's first heartbeat lands
             jobs = onboard.latest_jobs_by_device() if onboard else {}
             # one policy.json read for the whole table — get_policy() re-parses
             # the file per call, which multiplies badly on the polled endpoints
+            # Keep the established strict policy projection for assignments.
+            # Raw policy rows exist only for policy_view's stamp aggregate.
             policies = catalog.list_policies() if catalog else {}
+            revoked_principals = instruction_revocation_snapshot()
+            observed_at = now_fn()
 
             if not active_filter:
                 # Nothing to count that the inventory does not already know,
@@ -2858,7 +3173,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 total = len(devs)
                 window = devs[offset:] if limit is None else \
                     devs[offset:offset + limit]
-                return ([self._merge_device_row(d, policies, hb, jobs)
+                return ([self._merge_device_row(
+                            d, policies, hb, jobs, observed_at,
+                            heartbeat_available, revoked_principals)
                          for d in window], total, revision)
 
             # A filter reaches merged fields (heartbeat_model, status), so
@@ -2867,10 +3184,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             # ONCE per call, and only when the peer filter is actually used.
             quarantined_ids = (quarantine_assignment_ids()
                                if "peer" in filters else None)
-            now = time.time()
+            now = observed_at
             rows, total = [], 0
             for d in devs:
-                row = self._merge_device_row(d, policies, hb, jobs)
+                row = self._merge_device_row(
+                    d, policies, hb, jobs, observed_at,
+                    heartbeat_available, revoked_principals)
                 if q is not None and not self._row_matches_q(row, q):
                     continue
                 if filters and not self._row_matches_extra_filters(
@@ -3031,7 +3350,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
 
         @staticmethod
-        def _merge_device_row(d, policies, hb, jobs):
+        def _merge_device_row(d, policies, hb, jobs, observed_at,
+                              heartbeat_available, revoked_principals):
             """One inventory record joined with policy, heartbeat and job."""
             did = d.get("device_id")
             pol = policies.get(did, {})
@@ -3061,6 +3381,14 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             row["telemetry_enabled"] = h.get("telemetry_enabled")
             row["telemetry_stream_enabled"] = h.get(
                 "telemetry_stream_enabled")
+            revocation_available = isinstance(
+                revoked_principals, (set, frozenset))
+            revoked = ("device:%s" % did in revoked_principals
+                       if revocation_available and isinstance(did, str)
+                       else None)
+            row["instruction"] = _instruction_device_projection(
+                h, revoked, observed_at,
+                heartbeat_available=heartbeat_available)
             j = jobs.get(did)
             if j:
                 row["onboard_action"] = j["action"]

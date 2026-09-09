@@ -277,6 +277,31 @@
             <ul class="policy-members" id="policy-role-members"></ul>
             <p id="policy-origin-qos"></p>
             <p id="policy-mutual-origin"></p>
+            <h3>Instruction delivery</h3>
+            <dl class="policy-counts">
+              <div><dt>Highest issued revision</dt><dd id="policy-issued-revision">—</dd></div>
+              <div><dt>Devices missing an instruction stamp</dt><dd id="policy-instr-stamp-missing">—</dd></div>
+              <div><dt>Devices reporting pointer skew</dt><dd id="policy-pointer-skew">—</dd></div>
+              <div><dt>Server observation time</dt><dd id="policy-instruction-observed">—</dd></div>
+            </dl>
+            <p class="muted">Reported applied policy revisions — agent-asserted</p>
+            <ul class="policy-members" id="policy-applied-revisions"></ul>
+            <p class="muted">Primary instruction states — mixed evidence; old reports remain in the fleet denominator</p>
+            <ul class="policy-members" id="policy-instruction-states"></ul>
+            <h3>Instruction key custody</h3>
+            <dl class="policy-counts">
+              <div><dt>Custody state</dt><dd id="instruction-key-state">—</dd></div>
+              <div><dt>Signing certificate remaining</dt><dd id="instruction-cert-days">—</dd></div>
+              <div><dt>Key list age</dt><dd id="instruction-keylist-age">—</dd></div>
+              <div><dt>Root ceremony</dt><dd id="instruction-root-ceremony">—</dd></div>
+              <div><dt>Root quorum</dt><dd id="instruction-root-quorum">—</dd></div>
+            </dl>
+            <ul class="policy-members" aria-label="Evidence sources">
+              <li><strong>Server-observed:</strong> receipt age, origin and tracker observations, durable revocation and key custody, and missing instruction stamps.</li>
+              <li><strong>Device-authored:</strong> announce upload and download counters reported by the transfer client.</li>
+              <li><strong>Agent-asserted:</strong> instruction identity and state, applied options, QoS drift, and pointer skew.</li>
+            </ul>
+            <p class="muted"><code>violation = 0 does not mean compliant</code>. Application is the latest report, not verified compliance or proof of current device state.</p>
             <p class="muted">Declared roles appear in the table. Drift counts differences from peer policy. An explicit ACL assignment shadows a role. Role and QoS definitions are managed through the API or CLI.</p>
           </div>
         </details>
@@ -516,7 +541,7 @@
         <div class="devices-table-wrap">
         <div class="table-scroll">
         <table class="tbl dense" id="devices">
-          <thead><tr><th><input type="checkbox" id="mark-all" aria-label="Select all devices on this page"></th><th>Device</th><th>Role</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
+          <thead><tr><th><input type="checkbox" id="mark-all" aria-label="Select all devices on this page"></th><th>Device</th><th>Role</th><th>IP</th><th>Model</th><th>Management type</th><th>Agent install</th><th>Credential</th><th>Assigned images</th><th>Telemetry</th><th>Peer policy</th><th>Instructions</th><th>Status <button class="linkish" type="button" id="status-legend-btn" aria-expanded="false" aria-label="Show status pill legend">ⓘ</button></th></tr></thead>
           <tbody id="dev-rows"></tbody>
         </table>
         </div>

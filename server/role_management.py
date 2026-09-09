@@ -72,9 +72,10 @@ def _policy_roles(result):
         else peer_policy.compile_roles(result.document)
 
 
-def drift_report(fleet, policy_result, limit=DRIFT_ID_LIMIT):
+def drift_report(fleet, policy_result, limit=DRIFT_ID_LIMIT, rows=None):
     """Return a bounded, address-free declaration/enforcement drift summary."""
-    _revision, rows = fleet.snapshot()
+    if rows is None:
+        _revision, rows = fleet.snapshot()
     fleet_rows = {row.get("device_id"): row for row in rows
                   if isinstance(row, dict) and row.get("device_id")}
     compiled = _policy_roles(policy_result)

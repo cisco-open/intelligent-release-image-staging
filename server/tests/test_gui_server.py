@@ -115,7 +115,7 @@ def test_role_column_panel_and_modal_are_scoped_and_accessible():
     html, js, css = (_webroot(n) for n in ("index.html", "app.js", "styles.css"))
     assert '<th>Device</th><th>Role</th>' in html
     assert '<td class="dev-role">' in js and 'dash(d.role)' in js
-    assert 'colspan="12"' in js
+    assert 'colspan="13"' in js
     assert html.count('id="dev-filter-role"') == 1
     assert html.count('id="dev-filter-peer"') == 1
     assert "peer-intent badge" in js and "Quarantined intent" in js
@@ -10835,7 +10835,7 @@ def test_nav_divider_grid_spacing_and_compact_anatomy_comment():
 
 def test_devices_table_gets_the_dense_type_modifier():
     """Wave D fix 1 (operator, AFTER the Wave A type-role fix had already
-    landed: "still different fonts"). Devices is an 11-column table where a
+    landed: "still different fonts"). Devices is a 12-data-column table where a
     single row mixed 14px sans (.dev-id, plain-text cells like Management
     type), 12px mono (.machine), and 14px inherited control text (row
     selects/buttons) -- individually "correct" per type role, but
@@ -12138,6 +12138,560 @@ def test_role_policy_view_and_effective_qos(role_api):
     assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
     assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
     assert request("GET", "/api/devices/missing/effective-qos")[0] == 404
+
+
+# Task 19: the state-owning management API provides one bounded instruction
+# projection to both the Devices rows and the fleet roll-up.  These tests are
+# intentionally written against the final producer field names from the frozen
+# Task 19 preflight addendum; the producer workstream supplies their ingest.
+
+def _task19_stamp(policy_revision, serial=1, epoch=100):
+    import instructions
+    issued, expires = epoch, epoch + 100
+    stamp = {
+        "epoch": epoch, "instr_serial": serial,
+        "policy_revision": policy_revision, "platform": "guestshell",
+        "role": "default", "role_gen": "1" * 64,
+        "role_body_sha256": "2" * 64, "key_id": "3" * 64,
+        "verify_level": "sig", "issued_at": issued,
+        "expires_at": expires, "degraded": False,
+        "part": {
+            "peers": {"mode": "tracker-only", "include_origin": False,
+                      "allowed_expires_at": expires},
+            "qos_override": {}, "control_override": {},
+            "server_time": issued,
+        },
+    }
+    instructions.validate_stamp(stamp)
+    return stamp
+
+
+@pytest.mark.parametrize("raw_state,display_state,label", [
+    ("applied", "applied", "applied r9223372036854775807"),
+    ("reasserted", "applied", "applied r9223372036854775807"),
+    ("lkg", "lkg", "lkg"),
+    ("stale_expired", "stale", "stale"),
+    ("allowlist_expired", "stale", "stale"),
+    ("rollback_rejected", "rejected", "rejected"),
+    ("audience_mismatch", "rejected", "rejected"),
+    ("key_rejected", "rejected", "rejected"),
+    ("tamper_rejected", "rejected", "rejected"),
+    ("verifier_missing", "unavailable", "verifier unavailable"),
+    ("lkg_rejected", "rejected", "rejected"),
+    ("lkg_unreadable", "unavailable", "LKG unavailable"),
+    ("oversize", "rejected", "rejected"),
+    ("tracker-only", "tracker-only", "tracker-only"),
+    ("instr_pending", "pending", "pending"),
+    ("instr_unavailable", "unavailable", "unavailable"),
+    ("instr_forbidden", "forbidden", "forbidden"),
+    ("floor_reset", "floor_reset", "floor reset"),
+    ("none", "none", "no accepted instruction"),
+])
+def test_instruction_chip_projection_covers_closed_device_states(
+        raw_state, display_state, label):
+    heartbeat = {
+        "last_seen": 100.0, "instr_protocol": 1,
+        "instr_state": raw_state, "instr_epoch": 11,
+        "instr_serial": (1 << 63) - 1, "instr_policy_revision": 44,
+        "verify_level": "sig", "pointer_skew": False,
+    }
+    if raw_state == "key_rejected":
+        heartbeat["instr_reason"] = "unknown_key"
+    projected = gui_server._instruction_device_projection(
+        heartbeat, revoked=False, observed_at=200.0)
+    assert projected["display_state"] == display_state
+    assert projected["label"] == label
+    assert projected["underlying_state"] == raw_state
+    assert projected["accepted_identity"] == {
+        "epoch": 11, "instr_serial": (1 << 63) - 1,
+        "policy_revision": 44,
+    }
+    assert projected["report_age_seconds"] == 100
+    assert projected["report_stale"] is False
+    assert projected["pointer_skew"] is False
+    assert projected["evidence"] == "agent-asserted"
+
+
+def test_instruction_projection_distinguishes_capability_identity_and_revocation():
+    legacy = gui_server._instruction_device_projection(
+        {"instr_serial": 9, "instr_state": "applied"}, False, 10)
+    assert legacy["display_state"] == "pre-instructions"
+    assert legacy["reported_instr_serial"] == 9
+    assert legacy["accepted_identity"] is None
+
+    for marker in (None, True, "1", 2, {"future": 2}):
+        projected = gui_server._instruction_device_projection(
+            {"instr_protocol": marker, "instr_state": "applied",
+             "instr_epoch": 1, "instr_serial": 2,
+             "instr_policy_revision": 3}, False, 10)
+        assert projected["display_state"] == "unknown"
+        assert projected["label"] == "unknown"
+
+    partial = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied",
+         "instr_serial": 44, "private": "do-not-project",
+         "instr_reason": "<img src=x onerror=alert(1)>"}, False, 10)
+    assert partial["display_state"] == "unknown"
+    assert partial["accepted_identity"] is None
+    assert "private" not in str(partial)
+    assert "<img" not in str(partial)
+
+    raw_lkg = {"instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 8,
+               "instr_serial": 9, "instr_policy_revision": 10,
+               "pointer_skew": "yes", "last_seen": 9}
+    lkg = gui_server._instruction_device_projection(raw_lkg, True, 10)
+    assert lkg["display_state"] == "revoked"
+    assert lkg["label"] == "revoked"
+    assert lkg["underlying_state"] == "lkg"
+    assert lkg["accepted_identity"]["policy_revision"] == 10
+    assert lkg["revoked"] is True
+    assert lkg["pointer_skew"] is None
+    assert lkg["evidence"] == "server-observed"
+    assert lkg["underlying_evidence"] == "agent-asserted"
+    assert gui_server._instruction_device_projection(
+        raw_lkg, revoked=None, observed_at=10)["display_state"] == "unknown"
+
+    stale = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "applied", "instr_epoch": 8,
+         "instr_serial": 9, "instr_policy_revision": 10, "last_seen": 1},
+        False, 1000)
+    assert stale["display_state"] == "stale"
+    assert stale["label"] == "stale · last reported applied r9"
+    assert stale["underlying_state"] == "applied"
+    assert stale["accepted_identity"]["policy_revision"] == 10
+    assert stale["report_age_seconds"] == 999
+    assert stale["report_stale"] is True
+    assert stale["evidence"] == "server-observed"
+    assert stale["underlying_evidence"] == "agent-asserted"
+    for bad_last_seen in (None, float("inf"), 1001):
+        report = {"instr_protocol": 1, "instr_state": "applied",
+                  "instr_epoch": 8, "instr_serial": 9,
+                  "instr_policy_revision": 10,
+                  "last_seen": bad_last_seen}
+        unknown_age = gui_server._instruction_device_projection(
+            report, False, 1000)
+        assert unknown_age["display_state"] == "unknown"
+        assert unknown_age["report_age_seconds"] is None
+        assert unknown_age["evidence"] == "server-observed"
+
+
+def test_instruction_rollup_unavailable_sources_are_not_zero_evidence():
+    inventory = [{"device_id": "a"}, {"device_id": "b"}]
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeat_rows=None, raw_policies=None,
+        revoked_principals=None, observed_at=123)
+    assert result["fleet_rollup"] == {
+        "issued_revision": None, "applied": {}, "states": {"unknown": 2}}
+    assert result["instruction_status"] == {
+        "observed_at": 123, "instr_stamp_missing": None,
+        "pointer_skew": None, "issued_revision_label": None,
+    }
+
+    invalid = {"a": {"instr": {"policy_revision": 99}}, "b": {}}
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeat_rows=[], raw_policies=invalid,
+        revoked_principals=set(), observed_at=123)
+    assert result["fleet_rollup"]["issued_revision"] is None
+    assert result["instruction_status"]["instr_stamp_missing"] is None
+    assert result["fleet_rollup"]["states"] == {"pre-instructions": 2}
+
+    maximum = (1 << 63) - 1
+    result = gui_server._instruction_fleet_projection(
+        [{"device_id": "a"}], [],
+        {"a": {"instr": _task19_stamp(maximum)}}, set(), 123)
+    assert result["fleet_rollup"]["issued_revision"] == maximum
+    assert result["instruction_status"]["issued_revision_label"] == (
+        "r9223372036854775807")
+
+
+def test_instruction_rollup_mixed_context_revocation_and_orphans():
+    inventory = [{"device_id": name} for name in "abcdefgh"]
+    def hb(device_id, state, epoch, serial, revision, **extra):
+        row = {"device_id": device_id, "last_seen": 990,
+               "instr_protocol": 1, "instr_state": state,
+               "instr_epoch": epoch, "instr_serial": serial,
+               "instr_policy_revision": revision}
+        row.update(extra)
+        return row
+    heartbeats = [
+        hb("a", "applied", 1, 10, 7, pointer_skew=True),
+        hb("b", "lkg", 2, 11, 7),
+        hb("c", "tamper_rejected", 2, 12, 8),
+        hb("d", "instr_pending", 3, 13, 8),
+        {"device_id": "e", "last_seen": 990, "instr_protocol": 1,
+         "instr_state": "applied", "instr_serial": 14},
+        hb("f", "applied", 4, 15, 9, last_seen=1),
+        hb("g", "lkg", 4, 16, 9),
+        hb("orphan-heartbeat", "applied", 99, 99, 99,
+           pointer_skew=True),
+    ]
+    raw = {
+        "a": {"instr": _task19_stamp(7, 10, 100)},
+        "b": {"instr": _task19_stamp(8, 11, 101)},
+        "orphan-policy": {"instr": _task19_stamp(999, 999, 102)},
+    }
+    result = gui_server._instruction_fleet_projection(
+        inventory, heartbeats, raw, {"device:g"}, 1000)
+    assert result["fleet_rollup"] == {
+        "issued_revision": 8,
+        "applied": {"7": 2, "8": 2, "9": 2},
+        "states": {"applied": 1, "lkg": 1, "pending": 1,
+                   "pre-instructions": 1, "rejected": 1, "revoked": 1,
+                   "stale": 1, "unknown": 1},
+    }
+    assert sum(result["fleet_rollup"]["states"].values()) == len(inventory)
+    assert result["instruction_status"] == {
+        "observed_at": 1000, "instr_stamp_missing": 6,
+        "pointer_skew": 1, "issued_revision_label": "r8",
+    }
+
+    no_revocation = gui_server._instruction_fleet_projection(
+        inventory, heartbeats, raw, None, 1000)
+    assert no_revocation["fleet_rollup"]["states"] == {"unknown": 8}
+    unknown = gui_server._instruction_device_projection(
+        heartbeats[0], revoked=None, observed_at=1000)
+    assert unknown["display_state"] == "unknown"
+    assert unknown["evidence"] == "server-observed"
+    assert unknown["revoked"] is None
+    assert unknown["underlying_state"] == "applied"
+    assert unknown["underlying_evidence"] == "agent-asserted"
+
+
+@pytest.mark.parametrize("store", [
+    {"devices": []},
+    {"devices": {"bad/id": {"catalog_token": {"revoked": True}}}},
+    {"devices": {"a": {"catalog_token": "not-a-record"}}},
+    {"devices": {"a": {"catalog_token": {"revoked": "yes"}}}},
+])
+def test_instruction_revocation_corruption_is_unknown_not_not_revoked(store):
+    revoked = gui_server._instruction_revoked_principals(store)
+    assert revoked is None
+    projected = gui_server._instruction_device_projection(
+        {"instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 1,
+         "instr_serial": 2, "instr_policy_revision": 3, "last_seen": 9},
+        revoked, 10)
+    assert projected["display_state"] == "unknown"
+    assert projected["revoked"] is None
+    assert projected["underlying_state"] == "lkg"
+
+
+def test_instruction_rollup_uses_one_bulk_snapshot_at_10000_devices(
+        tmp_path, monkeypatch):
+    import json
+    import threading
+    import gui_app
+
+    rows = [{"device_id": "dev-%05d" % i, "device_ip": "10.0.0.1"}
+            for i in range(10000)]
+    heartbeats = []
+    for i in range(5000):
+        heartbeats.append({
+            "device_id": "dev-%05d" % i, "last_seen": 49999,
+            "instr_protocol": 1, "instr_state": "applied",
+            "instr_epoch": 100 + (i % 2), "instr_serial": i + 1,
+            "instr_policy_revision": 7,
+            "pointer_skew": i % 100 == 0,
+        })
+    raw = {"dev-%05d" % (i * 1000): {
+        "instr": _task19_stamp(i + 1, serial=i + 1, epoch=100 + i)}
+        for i in range(10)}
+
+    class FleetProbe:
+        calls = 0
+        def snapshot(self):
+            self.calls += 1
+            return 77, list(rows)
+
+    class CatalogProbe:
+        def __init__(self, state_dir):
+            self.state_dir = state_dir
+            self.heartbeat_calls = 0
+            self.raw_policy_calls = 0
+        def list_devices(self):
+            self.heartbeat_calls += 1
+            return list(heartbeats)
+        def list_raw_policies(self):
+            self.raw_policy_calls += 1
+            return dict(raw)
+        def list_policies(self):
+            raise AssertionError("strict or second policy read is forbidden")
+
+    fleet = FleetProbe()
+    catalog = CatalogProbe(str(tmp_path / "state"))
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    custody_calls = []
+    monkeypatch.setattr(gui_server, "instruction_custody_view",
+                        lambda _path: custody_calls.append(True) or None)
+    original_revoked = gui_server.secrets_store.revoked_device_principals
+    revocation_calls = []
+    def revoked_once(store):
+        revocation_calls.append(True)
+        return original_revoked(store)
+    monkeypatch.setattr(gui_server.secrets_store,
+                        "revoked_device_principals", revoked_once)
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=fleet, catalog=catalog,
+        certfile=None, now_fn=lambda: 50000)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/peer-policy",
+            headers={"Cookie": cookie})
+        view = json.loads(body)
+        assert status == 200
+        assert view["fleet_rollup"] == {
+            "issued_revision": 10, "applied": {"7": 5000},
+            "states": {"applied": 5000, "pre-instructions": 5000},
+        }
+        assert view["instruction_status"] == {
+            "observed_at": 50000, "instr_stamp_missing": 9990,
+            "pointer_skew": 50, "issued_revision_label": "r10",
+        }
+        assert fleet.calls == 1
+        assert catalog.heartbeat_calls == 1
+        assert catalog.raw_policy_calls == 1
+        assert len(revocation_calls) == 1
+        assert len(custody_calls) == 1
+    finally:
+        srv.shutdown()
+
+
+def test_instruction_rollup_marks_unreadable_bulk_sources_unavailable(
+        tmp_path):
+    import gui_app
+    import json
+    import threading
+    import catalog as catalog_mod
+    class Fleet:
+        def snapshot(self):
+            return 1, [{"device_id": "a", "device_ip": "10.0.0.1"}]
+    class BrokenCatalog:
+        state_dir = str(tmp_path / "state")
+        def list_devices(self):
+            raise catalog_mod.StateFileError("broken heartbeat snapshot")
+        def list_raw_policies(self):
+            raise catalog_mod.StateFileError("broken raw policy snapshot")
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=Fleet(), catalog=BrokenCatalog(),
+        certfile=None, now_fn=lambda: 123)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/peer-policy",
+            headers={"Cookie": cookie})
+        response = json.loads(body)
+        assert status == 200
+        assert response["fleet_rollup"] == {
+            "issued_revision": None, "applied": {},
+            "states": {"unknown": 1}}
+        assert response["instruction_status"] == {
+            "observed_at": 123, "instr_stamp_missing": None,
+            "pointer_skew": None, "issued_revision_label": None}
+    finally:
+        srv.shutdown()
+
+
+def test_instruction_chip_is_in_each_paged_device_row_with_revocation_precedence(
+        tmp_path):
+    import json
+    import time
+    import secrets_store
+    host, port, (app, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        for device_id in ("a", "b"):
+            fleet.upsert({"device_id": device_id,
+                          "device_ip": "10.0.0.%s" % (1 if device_id == "a" else 2)})
+        now = time.time()
+        cat.record_heartbeat("a", {
+            "instr_protocol": 1, "instr_state": "applied",
+            "instr_epoch": 4, "instr_serial": (1 << 63) - 1,
+            "instr_policy_revision": 7, "private": "must-not-leak",
+        }, now=now)
+        cat.record_heartbeat("b", {
+            "instr_protocol": 1, "instr_state": "lkg", "instr_epoch": 5,
+            "instr_serial": 6, "instr_policy_revision": 7,
+        }, now=now)
+        store = secrets_store.load(app.secrets_path)
+        store["devices"]["b"] = {
+            "catalog_token": {"revoked": True}}
+        secrets_store.save(store, app.secrets_path)
+        cookie, _ = _auth(host, port)
+        pages = []
+        for offset in (0, 1):
+            status, _, body = _req(
+                host, port, "GET", "/api/devices?limit=1&offset=%d" % offset,
+                headers={"Cookie": cookie})
+            response = json.loads(body)
+            assert status == 200
+            assert response["total"] == 2 and len(response["devices"]) == 1
+            pages.append(response["devices"][0])
+        assert [row["device_id"] for row in pages] == ["a", "b"]
+        assert pages[0]["instruction"]["label"] == (
+            "applied r9223372036854775807")
+        assert pages[0]["instruction"]["display_state"] == "applied"
+        assert "private" not in json.dumps(pages[0]["instruction"])
+        assert pages[1]["instruction"]["display_state"] == "revoked"
+        assert pages[1]["instruction"]["evidence"] == "server-observed"
+        assert pages[1]["instruction"]["underlying_state"] == "lkg"
+        assert pages[1]["instruction"]["underlying_evidence"] == "agent-asserted"
+    finally:
+        stop()
+
+
+def test_devices_preserves_fail_closed_heartbeat_snapshot_behavior(tmp_path):
+    import gui_app
+    import threading
+    import catalog as catalog_mod
+    class Fleet:
+        def snapshot(self):
+            return 1, [{"device_id": "a", "device_ip": "10.0.0.1"}]
+    class BrokenCatalog:
+        state_dir = str(tmp_path / "state")
+        def list_devices(self):
+            raise catalog_mod.StateFileError("broken heartbeat snapshot")
+    app = gui_app.GuiApp(str(tmp_path / "secrets.json"))
+    app.set_admin("admin", "pw")
+    srv = gui_server.make_server(
+        "127.0.0.1", 0, app, fleet=Fleet(), catalog=BrokenCatalog(),
+        certfile=None)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cookie, _ = _auth("127.0.0.1", srv.server_address[1])
+        status, _, body = _req(
+            "127.0.0.1", srv.server_address[1], "GET", "/api/devices",
+            headers={"Cookie": cookie})
+        assert status == 503
+        assert "unavailable" in json.loads(body)["error"]
+    finally:
+        srv.shutdown()
+
+
+def test_role_drift_accepts_preloaded_rows_without_a_second_fleet_read(
+        tmp_path):
+    import peer_policy
+    import role_management
+    result = peer_policy.load_policy(
+        str(tmp_path / "missing.json"), str(tmp_path / "missing-lkg.json"))
+    class FleetMustNotBeRead:
+        def snapshot(self):
+            raise AssertionError("preloaded rows must be authoritative")
+    report = role_management.drift_report(
+        FleetMustNotBeRead(), result,
+        rows=[{"device_id": "a", "role": "missing-role"}])
+    assert report == {"count": 1, "device_ids": ["a"], "truncated": False}
+
+
+def _run_instruction_console_js(script):
+    import subprocess
+    js = _webroot("app.js")
+    code = js.split("// ---- Instruction status projection ----", 1)[1].split(
+        "// ---- End instruction status projection ----", 1)[0]
+    result = subprocess.run(["node", "-"], input=r'''
+const assert = require('node:assert/strict');
+const elements = new Map();
+function el(id) {
+  if (!elements.has(id)) elements.set(id, {
+    textContent: '', innerHTML: '', hidden: false, className: ''
+  });
+  return elements.get(id);
+}
+var document = {getElementById: el};
+function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
+function fmtDate(v) { return 'time:' + v; }
+function policyCount(v) { return Number.isSafeInteger(v) && v >= 0 ? v : '—'; }
+''' + code + '\n' + script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_instruction_console_structure_labels_and_no_new_fetch_or_timer():
+    html, js = (_webroot(name) for name in ("index.html", "app.js"))
+    assert "<th>Instructions</th>" in html
+    assert 'colspan="13"' in js
+    for identifier in (
+            "policy-issued-revision", "policy-applied-revisions",
+            "policy-instruction-states", "policy-instr-stamp-missing",
+            "policy-pointer-skew", "policy-instruction-observed",
+            "instruction-key-state", "instruction-cert-days",
+            "instruction-keylist-age", "instruction-root-ceremony",
+            "instruction-root-quorum"):
+        assert 'id="%s"' % identifier in html
+    assert "Server-observed" in html
+    assert "Device-authored" in html
+    assert "Agent-asserted" in html
+    assert "violation = 0 does not mean compliant" in html
+    block = js.split("// ---- Instruction status projection ----", 1)[1].split(
+        "// ---- End instruction status projection ----", 1)[0]
+    assert "fetch(" not in block
+    assert "setTimeout(" not in block
+
+
+def test_instruction_console_renders_exact_escaped_chip_rollup_and_custody():
+    _run_instruction_console_js(r'''
+let cell = instructionCell({instruction: {
+  label: 'stale · last reported applied r9223372036854775807<img>', display_state: 'stale',
+  underlying_state: 'applied', evidence: 'server-observed',
+  report_age_seconds: 601, report_stale: true, pointer_skew: true,
+  qos_drift_count: 0
+}});
+assert.match(cell, /applied r9223372036854775807&lt;img>/);
+assert.doesNotMatch(cell, /9223372036854776000/);
+assert.doesNotMatch(cell, /<img>/);
+assert.match(cell, /server-observed/);
+assert.match(cell, /last agent report \(agent-asserted\): applied/);
+assert.match(cell, /report 601s old/);
+assert.match(cell, /pointer skew/);
+let rejected = instructionCell({instruction: {label: 'rejected',
+  display_state: 'rejected', underlying_state: 'key_rejected',
+  evidence: 'agent-asserted', reason: 'unknown_key', report_age_seconds: 1}});
+assert.match(rejected, /reason: unknown_key/);
+
+renderInstructionPanel({
+  fleet_rollup: {issued_revision: 12,
+    applied: {'7': 2, '9223372036854775807': 1},
+    states: {applied: 3, unknown: 1}},
+  instruction_status: {observed_at: 456, instr_stamp_missing: 4,
+    pointer_skew: 1},
+  instruction_keys: {state: 'signing_refused',
+    certificate_days_to_expiry: -2, keylist_age_days: 136,
+    root_ceremony_overdue: 'critical', root_quorum_degraded: true,
+    roots_attested_180d: 1, roots_configured: 2}
+});
+assert.equal(el('policy-issued-revision').textContent, 'r12');
+assert.match(el('policy-applied-revisions').innerHTML,
+  /r9223372036854775807<\/span>: 1/);
+assert.equal(el('policy-instr-stamp-missing').textContent, '4 devices');
+assert.equal(el('policy-pointer-skew').textContent, '1 device');
+assert.equal(el('policy-instruction-observed').textContent, 'time:456');
+assert.equal(el('instruction-cert-days').textContent, '-2 days');
+assert.match(el('instruction-root-ceremony').textContent, /critical/);
+assert.match(el('instruction-root-quorum').textContent, /degraded/);
+
+renderInstructionPanel({fleet_rollup: {issued_revision: null, applied: {}, states: {}},
+  instruction_status: {observed_at: 500, instr_stamp_missing: null,
+    pointer_skew: null}, instruction_keys: null});
+assert.equal(el('policy-instr-stamp-missing').textContent, 'unavailable');
+assert.equal(el('policy-pointer-skew').textContent, 'unavailable');
+assert.equal(el('instruction-cert-days').textContent, 'unavailable');
+assert.equal(el('instruction-root-ceremony').textContent, 'unknown');
+
+renderInstructionPanel({fleet_rollup: {issued_revision: 0, applied: {'0': 1}, states: {applied: 1}},
+  instruction_status: {observed_at: 501, instr_stamp_missing: 0,
+    pointer_skew: 0}, instruction_keys: {state: 'ready',
+    certificate_days_to_expiry: 0, keylist_age_days: 100,
+    root_ceremony_overdue: 'warn', root_quorum_degraded: false,
+    roots_attested_180d: 2, roots_configured: 2}});
+assert.equal(el('policy-issued-revision').textContent, 'r0');
+assert.equal(el('policy-instr-stamp-missing').textContent, '0 devices');
+assert.equal(el('policy-pointer-skew').textContent, '0 devices');
+assert.equal(el('instruction-cert-days').textContent, '0 days');
+assert.match(el('instruction-root-ceremony').textContent, /warn/);
+assert.match(el('instruction-root-quorum').textContent, /healthy/);
+''')
 
 
 def test_role_explain_requires_current_unambiguous_typed_endpoints(role_api):

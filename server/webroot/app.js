@@ -1449,9 +1449,10 @@
         (peerPolicyAssigned(d.device_id) ? 'Release ' : 'Quarantine ') + esc(d.device_id) + '"' +
         (peerPolicyBusy[d.device_id] ? ' disabled' : '') + '>' +
         (peerPolicyAssigned(d.device_id) ? 'Release' : 'Quarantine') + '</button></td>' +
+        '<td>' + instructionCell(d) + '</td>' +
         '<td>' + status +
         ' <button class="linkish dinfo" title="Deployment details">ⓘ</button></td></tr>';
-    }).join('') : '<tr><td colspan="12" class="muted">' +
+    }).join('') : '<tr><td colspan="13" class="muted">' +
       (total ? 'No devices match the current filters.' : 'No devices yet.') + '</td></tr>';
     document.querySelectorAll('#dev-rows .assign-btn').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -2761,6 +2762,118 @@
   function policyCount(value) {
     return Number.isSafeInteger(value) && value >= 0 ? value : '—';
   }
+  // ---- Instruction status projection ----
+  function instructionBadgeClass(state) {
+    if (state === 'applied') return 'badge-ok';
+    if (state === 'pending') return 'badge-running';
+    if (state === 'rejected' || state === 'revoked' || state === 'forbidden') return 'badge-fail';
+    if (state === 'pre-instructions' || state === 'none' || state === 'tracker-only') return 'badge-off';
+    return 'badge-queued';
+  }
+  function instructionCell(device) {
+    var instruction = device && device.instruction;
+    if (!instruction || typeof instruction !== 'object' || Array.isArray(instruction)) {
+      return '<span class="badge badge-queued">unknown</span>';
+    }
+    var state = typeof instruction.display_state === 'string'
+      ? instruction.display_state : 'unknown';
+    var label = typeof instruction.label === 'string'
+      ? instruction.label : 'unknown';
+    var detail = [];
+    if (typeof instruction.evidence === 'string') detail.push(instruction.evidence);
+    if (instruction.underlying_state && instruction.underlying_state !== state) {
+      detail.push('last agent report (agent-asserted): ' + instruction.underlying_state);
+    }
+    if (typeof instruction.reason === 'string') {
+      detail.push('reason: ' + instruction.reason);
+    }
+    if (Number.isSafeInteger(instruction.report_age_seconds)
+        && instruction.report_age_seconds >= 0) {
+      detail.push('report ' + instruction.report_age_seconds + 's old');
+    } else {
+      detail.push('report age unavailable');
+    }
+    if (instruction.pointer_skew === true) detail.push('pointer skew');
+    if (Number.isSafeInteger(instruction.qos_drift_count)
+        && instruction.qos_drift_count >= 0) {
+      detail.push(instruction.qos_drift_count + ' QoS drift violation' +
+        (instruction.qos_drift_count === 1 ? '' : 's'));
+    }
+    return '<span class="badge ' + instructionBadgeClass(state) + '">' +
+      esc(label) + '</span><div class="muted">' + detail.map(esc).join(' · ') + '</div>';
+  }
+  function decimalRevisionCompare(a, b) {
+    a = String(a); b = String(b);
+    return a.length === b.length ? (a < b ? -1 : a > b ? 1 : 0)
+      : a.length - b.length;
+  }
+  function instructionMapRows(values, revisionKeys, emptyText) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+      return '<li class="muted">unavailable</li>';
+    }
+    var keys = Object.keys(values).filter(function (key) {
+      return Number.isSafeInteger(values[key]) && values[key] >= 0;
+    }).sort(revisionKeys ? decimalRevisionCompare : undefined);
+    return keys.map(function (key) {
+      return '<li><span class="machine">' + esc(revisionKeys ? 'r' + key : key) +
+        '</span>: ' + values[key] + '</li>';
+    }).join('') || '<li class="muted">' + esc(emptyText) + '</li>';
+  }
+  function instructionDeviceCount(value) {
+    return Number.isSafeInteger(value) && value >= 0
+      ? value + ' device' + (value === 1 ? '' : 's') : 'unavailable';
+  }
+  function custodyInteger(value, suffix) {
+    return Number.isSafeInteger(value) ? value + suffix : 'unavailable';
+  }
+  function renderInstructionPanel(policy) {
+    policy = policy && typeof policy === 'object' ? policy : {};
+    var rollup = policy.fleet_rollup && typeof policy.fleet_rollup === 'object'
+      && !Array.isArray(policy.fleet_rollup) ? policy.fleet_rollup : null;
+    var status = policy.instruction_status || {};
+    var custody = policy.instruction_keys;
+    document.getElementById('policy-issued-revision').textContent =
+      typeof status.issued_revision_label === 'string'
+        ? status.issued_revision_label
+        : (rollup && Number.isSafeInteger(rollup.issued_revision)
+          && rollup.issued_revision >= 0 ? 'r' + rollup.issued_revision : 'unavailable');
+    document.getElementById('policy-applied-revisions').innerHTML =
+      instructionMapRows(rollup && rollup.applied, true, 'No accepted identity reported.');
+    document.getElementById('policy-instruction-states').innerHTML =
+      instructionMapRows(rollup && rollup.states, false, 'No inventory devices.');
+    document.getElementById('policy-instr-stamp-missing').textContent =
+      instructionDeviceCount(status.instr_stamp_missing);
+    document.getElementById('policy-pointer-skew').textContent =
+      instructionDeviceCount(status.pointer_skew);
+    document.getElementById('policy-instruction-observed').textContent =
+      typeof status.observed_at === 'number' && Number.isFinite(status.observed_at)
+        ? fmtDate(status.observed_at) : 'unavailable';
+    if (!custody || typeof custody !== 'object' || Array.isArray(custody)) {
+      document.getElementById('instruction-key-state').textContent = 'unavailable';
+      document.getElementById('instruction-cert-days').textContent = 'unavailable';
+      document.getElementById('instruction-keylist-age').textContent = 'unavailable';
+      document.getElementById('instruction-root-ceremony').textContent = 'unknown';
+      document.getElementById('instruction-root-quorum').textContent = 'unknown';
+      return;
+    }
+    document.getElementById('instruction-key-state').textContent =
+      typeof custody.state === 'string' ? custody.state : 'unavailable';
+    document.getElementById('instruction-cert-days').textContent =
+      custodyInteger(custody.certificate_days_to_expiry, ' days');
+    document.getElementById('instruction-keylist-age').textContent =
+      custodyInteger(custody.keylist_age_days, ' days');
+    document.getElementById('instruction-root-ceremony').textContent =
+      ['ok', 'warn', 'critical', 'unknown'].indexOf(custody.root_ceremony_overdue) >= 0
+        ? custody.root_ceremony_overdue : 'unknown';
+    var roots = Number.isSafeInteger(custody.roots_attested_180d)
+      && Number.isSafeInteger(custody.roots_configured)
+      ? ' · ' + custody.roots_attested_180d + '/' + custody.roots_configured +
+        ' roots attested in 180 days' : '';
+    document.getElementById('instruction-root-quorum').textContent =
+      custody.root_quorum_degraded === true ? 'degraded' + roots
+      : custody.root_quorum_degraded === false ? 'healthy' + roots : 'unknown';
+  }
+  // ---- End instruction status projection ----
   function roleCapabilityMessage() {
     if (!peerPolicyReadOk) return 'Peer policy unavailable. Role changes are disabled; refresh to read current policy.';
     if (peerPolicy.roles_supported !== true) {
@@ -2791,6 +2904,7 @@
     banner.textContent = roleCapabilityMessage();
     banner.hidden = !banner.textContent;
     syncRoleActionAvailability();
+    renderInstructionPanel(p);
     document.getElementById('policy-roles-defined').textContent = policyCount(roles.defined);
     document.getElementById('policy-roles-restricted').textContent = policyCount(roles.restricted);
     document.getElementById('policy-role-drift').textContent = policyCount(drift.count);
