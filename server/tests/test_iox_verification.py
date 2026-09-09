@@ -2583,6 +2583,41 @@ def test_transcript_quota_check_and_creation_share_the_store_lock(
     assert observed == [True]
 
 
+def test_attempt_admission_store_deadline_returns_closed_timeout(
+        tmp_path, monkeypatch):
+    import contextlib
+    import deployment_records
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    factory = _TransportFactory()
+    calls = []
+    prepare, preflight, on_output = _callbacks(calls, record_id=None)
+
+    @contextlib.contextmanager
+    def expired(unused_store, deadline=None, monotonic_fn=None):
+        assert deadline is not None
+        assert monotonic_fn is not None
+        raise deployment_records.StoreLockTimeout(
+            "deployment record store lock timed out")
+        yield
+
+    monkeypatch.setattr(
+        deployment_records.DeploymentRecordStore, "_store_lock", expired)
+    controller = _controller(tmp_path, store, factory)
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only",
+                     record_id=None),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 4
+    assert result["error_category"] == "timeout"
+    assert factory.calls == []
+    assert calls == []
+    assert os.listdir(str(tmp_path / "iox" / "transcripts")) == []
+
+
 @pytest.mark.parametrize("category,timed_out,expected_code", [
     ("timeout", True, 4),
     ("cancelled", False, 130),

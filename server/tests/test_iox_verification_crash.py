@@ -1650,7 +1650,7 @@ def test_active_fence_limit_counts_recordless_sessions(tmp_path):
     {"session_files": 4, "transcript_files": 4,
      "ordinary_transcripts": 4, "active_fences": 1},
     {"session_files": 1, "transcript_files": 4,
-     "ordinary_transcripts": 4, "active_fences": 4},
+     "ordinary_transcripts": 4, "active_fences": 1},
 ])
 def test_fence_capacity_is_reserved_across_processes(tmp_path, limits):
     import multiprocessing
