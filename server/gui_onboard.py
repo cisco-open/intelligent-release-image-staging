@@ -1375,7 +1375,13 @@ class OnboardService:
                 # record create, so the old planned record cannot block manual intent.
                 for current in superseded:
                     if current.get("record_id") and self.record_store:
-                        self.record_store.transition(current["record_id"], "removed")
+                        retire = getattr(
+                            self.record_store, "retire_planned", None)
+                        if retire is None:
+                            self.record_store.transition(
+                                current["record_id"], "removed")
+                        else:
+                            retire(current["record_id"])
                     self._cancel_queued_locked(current, "manual_override")
                 if prepare and not job.get("_defer_iox_prepare"):
                     prepared = prepare()
@@ -1433,7 +1439,7 @@ class OnboardService:
                     self._cancel_queued_locked(job, reason)
             if queued:
                 if job.get("record_id"):
-                    self._transition_or_note(jid, job["record_id"], "removed")
+                    self._retire_planned_or_note(jid, job["record_id"])
             else:
                 self._append(jid, "ERROR: execution failed")
                 if job.get("record_id"):
@@ -1850,6 +1856,23 @@ class OnboardService:
                          % (record_id, state, exc))
             return False
 
+    def _retire_planned_or_note(self, job_id, record_id):
+        """Retire only device-untouched plans and preserve recovery records."""
+        if not record_id:
+            return True
+        if self.record_store is None:
+            return self._transition_or_note(job_id, record_id, "removed")
+        retire = getattr(self.record_store, "retire_planned", None)
+        if retire is None:
+            return self._transition_or_note(job_id, record_id, "removed")
+        try:
+            retire(record_id)
+            return True
+        except Exception as exc:
+            self._append(job_id, "planned record %s not retired: %s"
+                         % (record_id, exc))
+            return False
+
     def _submission_uses_iox(self, device_id, resolved):
         """Return whether queue admission already identifies an IOx job.
 
@@ -2070,8 +2093,8 @@ class OnboardService:
                 # An undeploy record already describes the live deployment,
                 # so leave it unchanged when teardown never started.
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
                 self._append(job_id, "ERROR: " + str(exc))
                 self._finish(job_id, "error", None)
                 return
@@ -2090,8 +2113,8 @@ class OnboardService:
                     self._append(job_id, "ERROR: %s not found in artifacts dir "
                                  "-- build device/iox/build.sh%s and place it in "
                                  "artifacts/ (device untouched)" % (pkg, flag))
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
                     self._finish(job_id, "error", None)
                     return
             # An operator abort can land while the job is "running" but the
@@ -2108,8 +2131,8 @@ class OnboardService:
                 self._append(job_id, "ERROR: aborted by operator before the "
                              "installer started; device untouched")
                 if action == "onboard":
-                    self._transition_or_note(job_id, j.get("record_id"),
-                                             "removed")
+                    self._retire_planned_or_note(
+                        job_id, j.get("record_id"))
                 if platform == "iox":
                     with self._lock:
                         current = self._jobs.get(job_id)
@@ -2265,8 +2288,7 @@ class OnboardService:
                         # failed evidence bind cannot leave false teardown
                         # authority behind.
                         if action == "onboard" and prepared:
-                            self._transition_or_note(
-                                job_id, prepared, "removed")
+                            self._retire_planned_or_note(job_id, prepared)
                         raise
                     if prepared:
                         if not self._transition_or_note(
@@ -2381,7 +2403,7 @@ class OnboardService:
                         device_id, platform, env)
                 except Exception as exc:
                     self._cleanup_instruction_bootstrap(bootstrap_paths)
-                    self._transition_or_note(job_id, record_id, "removed")
+                    self._retire_planned_or_note(job_id, record_id)
                     diagnostic = ("invalid staging capability"
                                   if str(exc) == "invalid staging capability"
                                   else "instruction bootstrap unavailable")
@@ -2881,7 +2903,7 @@ class OnboardService:
                         record_ids.append((jid, j["record_id"]))
                     n += 1
         for jid, record_id in record_ids:
-            if not self._transition_or_note(jid, record_id, "removed"):
+            if not self._retire_planned_or_note(jid, record_id):
                 self._append(jid, "cancelled job record could not be retired")
         return n
 

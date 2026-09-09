@@ -242,7 +242,7 @@ class _Creds:
         return [{"id": "lab"}]
 
 
-def _onboard_components(tmp_path, fleet, clock):
+def _onboard_components(tmp_path, fleet, clock, platform="guestshell"):
     creds = _Creds()
     records = deployment_records.DeploymentRecordStore(
         str(tmp_path), now_fn=clock)
@@ -257,16 +257,24 @@ def _onboard_components(tmp_path, fleet, clock):
         record_store=records, max_concurrent=2, now_fn=clock)
 
     def plan(device_id, device):
-        resolved = {
-            "management_type": "routed", "device_ip": device["device_ip"],
-            "iris_vlan": device["iris_vlan"], "svi_ip": device["svi_ip"],
-            "svi_mask": device["svi_mask"], "svi_igp": "",
-            "app_ip": device["app_ip"], "app_mask": device["app_mask"],
-            "app_gateway": device["app_gateway"], "inband_vlan": "",
-            "vpg_number": "", "nat_interface": "", "swarm_port": "6881",
-            "ios_ssh_host": "", "model": device["model"],
-            "platform": "guestshell", "renderer": "v1",
-        }
+        if platform == "xr-appmgr":
+            resolved = {
+                "management_type": "xr-host",
+                "device_ip": device["device_ip"],
+                "model": device["model"], "platform": platform,
+                "renderer": "v1",
+            }
+        else:
+            resolved = {
+                "management_type": "routed", "device_ip": device["device_ip"],
+                "iris_vlan": device["iris_vlan"], "svi_ip": device["svi_ip"],
+                "svi_mask": device["svi_mask"], "svi_igp": "",
+                "app_ip": device["app_ip"], "app_mask": device["app_mask"],
+                "app_gateway": device["app_gateway"], "inband_vlan": "",
+                "vpg_number": "", "nat_interface": "", "swarm_port": "6881",
+                "ios_ssh_host": "", "model": device["model"],
+                "platform": "guestshell", "renderer": "v1",
+            }
         value = {"device_id": device_id,
                  "inventory_revision": fleet.revision(),
                  "resolved": resolved,
@@ -286,6 +294,9 @@ def _onboard_components(tmp_path, fleet, clock):
         return updated
 
     def resources(resolved):
+        if resolved["platform"] == "xr-appmgr":
+            return [{"kind": "xr-appmgr", "ownership": "iris-created",
+                     "id": "iris"}]
         return [
             {"kind": "vlan", "ownership": "iris-created",
              "id": resolved["iris_vlan"]},
@@ -599,6 +610,108 @@ def test_interrupted_applying_onboard_never_retargets_from_fresh_plan(
         assert records.get(
             admitted["record"]["record_id"], strict=True)["state"] == "unknown"
         assert not onboard.list_jobs()
+    finally:
+        onboard.shutdown()
+
+
+@pytest.mark.parametrize("platform", ("guestshell", "xr-appmgr"))
+def test_interrupted_applying_collision_keeps_occurrence_teardown_authority(
+        tmp_path, monkeypatch, platform):
+    clock = _Clock()
+    fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
+    if platform == "guestshell":
+        fleet.upsert(_routed_device())
+    else:
+        fleet.upsert({
+            "device_id": "edge-1", "device_ip": "192.0.2.1",
+            "model": "8010",
+            "platform": "xr-appmgr", "management_type": "xr-host",
+            "credential_profile_id": "lab",
+        })
+        fleet.update_observation("edge-1", os_family="xr")
+    policy = _Policy()
+    onboard, records, submission = _onboard_components(
+        tmp_path, fleet, clock, platform=platform)
+    store = _make_schedule(
+        tmp_path, _definition("onboard", ["edge-1"]), ["edge-1"])
+    occurrence = _claim(store, ["edge-1"])
+    prior = schedules.ReceiptStore(tmp_path).begin(
+        occurrence["id"], "edge-1", now=NOW)
+    executor = _base_executor(
+        tmp_path, store=store, fleet=fleet, policy=policy, writer=None,
+        submission=submission, onboard=onboard, records=records, clock=clock)
+    provenance = executor._provenance(
+        occurrence["schedule"], occurrence, "edge-1")
+    plan = submission._plan("edge-1", fleet.get_device("edge-1"))
+    initial_evidence = (
+        {"status": "passed", "device_identity": "FOC0000TEST",
+         "detected_model": "C9300"}
+        if platform == "guestshell" else
+        {"status": "passed", "detected_model": "8010"})
+    admitted_plan = submission._apply_preflight(plan, initial_evidence)
+    candidate = {
+        "controller_id": "iris", "device_id": "edge-1",
+        "fleet_registered_at": fleet.get_device("edge-1")["registered_at"],
+        "inventory_revision": admitted_plan["inventory_revision"],
+        "plan_hash": admitted_plan["plan_hash"],
+        "resolved": admitted_plan["resolved"],
+        "preflight": initial_evidence,
+        "resources": submission._owned_resources(admitted_plan["resolved"]),
+    }
+    admitted = records.admit_scheduled(
+        candidate, provenance=provenance, attempt=prior["attempt"],
+        authorize=lambda *_args: None)
+    record_id = admitted["record"]["record_id"]
+    records.transition(record_id, "applying")
+    records.recover_interrupted()
+
+    def probe(_argv, input=None, **_kwargs):
+        if platform == "guestshell":
+            sections = (
+                ("VERSION", "Cisco IOS XE Software\n"
+                 "cisco C9300 (X86) processor\n"
+                 "Processor board ID FOC0000TEST\n"),
+                ("RUNNING", "app-hosting appid guestshell\n"),
+                ("APPS", "guestshell RUNNING\n"),
+                ("FILES", "Directory of bootflash:/guest-share/\niris/\n"),
+            )
+        else:
+            sections = (
+                ("VERSION", "Cisco IOS XR Software, Version 25.4.2 LNT\n"
+                 "cisco 8010 (VXR) processor\n"),
+                ("APPS", "iris docker iris-xr Up app_manager\n"),
+                ("SOURCES", "iris-xr 0.1.0 ThinXR app_manager\n"),
+            )
+        return SimpleNamespace(returncode=0, stdout="\n".join(
+            "__IRIS_PREFLIGHT_%s__\n%s" % section for section in sections))
+
+    monkeypatch.setattr(gui_onboard.subprocess, "run", probe)
+    if platform == "guestshell":
+        onboard._guestshell_preflight = lambda dev, env, resolved: (
+            gui_onboard._default_guestshell_preflight(
+                dev, env, resolved, onboard.repo_root))
+    else:
+        onboard._xr_preflight = lambda dev, env, resolved: (
+            gui_onboard._default_xr_preflight(
+                dev, env, resolved, onboard.repo_root))
+    try:
+        result = executor._dispatch_onboard(
+            occurrence["schedule"], occurrence, "edge-1", prior)
+        assert result["status"] in ("submitted", "running", "error")
+        job = onboard.get_job(result["job_id"])
+        if job["state"] not in ("done", "error", "cancelled"):
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                job = onboard.get_job(result["job_id"])
+                if job["state"] in ("done", "error", "cancelled"):
+                    break
+                time.sleep(.01)
+        assert job["state"] == "error"
+        record = records.get(record_id, strict=True)
+        assert record["state"] == "unknown"
+        assert record["recovery"]["interrupted_from"] == "applying"
+        assert records.recoverable_for_device("edge-1")["record_id"] == \
+            record_id
     finally:
         onboard.shutdown()
 

@@ -1305,8 +1305,19 @@ class DeploymentRecordStore:
                         _RECORD_MAX_BYTES - _RECORD_LIFECYCLE_RESERVE_BYTES):
                     return result("refused", "existing_deployment")
                 if "iox_verification" not in existing:
-                    existing["state"] = "planned"
-                    existing.setdefault("timestamps", {})["finished_at"] = None
+                    # A recovered planned record never reached the device, so
+                    # it can safely re-enter the ordinary planned lifecycle.
+                    # A recovered applying record may already own resources on
+                    # the admitted device. Keep it recoverable until the
+                    # resumed worker has passed preflight and explicitly moves
+                    # it back to applying; a pre-apply refusal must not erase
+                    # the only authority capable of tearing those resources
+                    # down.
+                    if ((existing.get("recovery") or {}).get(
+                            "interrupted_from") == "planned"):
+                        existing["state"] = "planned"
+                        existing.setdefault("timestamps", {})[
+                            "finished_at"] = None
                     self._check_candidate(data, ordinary=True)
                     _atomic_write_json(self.path, data)
                     return result("resumed", value=existing)
@@ -1387,6 +1398,73 @@ class DeploymentRecordStore:
             self._check_candidate(data, ordinary=True)
             _atomic_write_json(self.path, data)
             return copy.deepcopy(candidate)
+
+    def update_scheduled_recovery(self, record_id, *, provenance, plan_hash,
+                                  resolved, preflight, resources):
+        """Refresh a resumed applying record without dropping its authority.
+
+        Startup recovery changes an interrupted scheduled apply to ``unknown``.
+        Its original occurrence may retry only while retaining that state, its
+        recovery origin, and its admitted device identity. The caller supplies
+        the exact occurrence provenance under live schedule authority; this
+        method only enforces the durable record boundary.
+        """
+        tag = validate_schedule_provenance(provenance)
+        with self._store_lock():
+            data = self._read(strict=True)
+            record = data["records"].get(record_id)
+            if record is None:
+                raise ValueError("unknown record: %s" % record_id)
+            if (record.get("state") != "unknown" or
+                    (record.get("recovery") or {}).get(
+                        "interrupted_from") != "applying" or
+                    record.get("schedule_provenance") != tag):
+                raise ValueError(
+                    "only the owning occurrence may refresh a recovered apply")
+            admitted_identity = str(
+                (record.get("resolved") or {}).get("device_identity") or "")
+            refreshed_identity = str(
+                (resolved or {}).get("device_identity") or "")
+            if ((record.get("resolved") or {}).get("platform") in
+                    ("guestshell", "iox") and not admitted_identity):
+                raise ValueError(
+                    "recovered record has no admitted device identity")
+            if admitted_identity and refreshed_identity != admitted_identity:
+                raise ValueError("recovered device identity changed")
+            candidate = copy.deepcopy(record)
+            candidate.update({"plan_hash": plan_hash,
+                              "resolved": copy.deepcopy(resolved),
+                              "preflight": copy.deepcopy(preflight),
+                              "resources": copy.deepcopy(resources)})
+            self._validate(candidate, new_record=False)
+            _check_record_growth(candidate, _record_payload_size(record))
+            data["records"][record_id] = candidate
+            self._check_candidate(data, ordinary=True)
+            _atomic_write_json(self.path, data)
+            return copy.deepcopy(candidate)
+
+    def retire_planned(self, record_id):
+        """Retire a record only if no apply has ever started.
+
+        This is the atomic pre-apply cleanup primitive. In particular, a
+        recovered ``unknown`` apply is returned unchanged rather than being
+        mistaken for a fresh plan and stripped of teardown authority.
+        """
+        with self._store_lock():
+            data = self._read(strict=True)
+            record = data["records"].get(record_id)
+            if record is None:
+                raise ValueError("unknown record: %s" % record_id)
+            if record.get("state") != "planned":
+                return copy.deepcopy(record)
+            previous_size = _record_payload_size(record)
+            record["state"] = "removed"
+            record.setdefault("timestamps", {})["finished_at"] = int(
+                self._now())
+            _check_record_growth(record, previous_size)
+            self._check_candidate(data, ordinary=False)
+            _atomic_write_json(self.path, data)
+            return copy.deepcopy(record)
 
     def list(self, device_id=None, strict=False):
         """Records, optionally for one device. *strict* makes an unreadable

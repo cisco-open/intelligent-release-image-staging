@@ -1444,8 +1444,48 @@ def test_own_interrupted_record_requires_live_attempt_and_window(tmp_path, state
     assert calls == [(_provenance(), 2, original)]
     assert result["status"] == "resumed"
     assert result["record"]["record_id"] == "mine"
-    assert result["record"]["state"] == "planned"
+    assert result["record"]["state"] == (
+        "unknown" if state == "applying" else "planned")
     assert result["record"]["recovery"] == original["recovery"]
+
+
+def test_recovered_applying_refresh_stays_bound_and_recoverable(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    resolved = dict(_record()["resolved"], device_identity="9ABC123")
+    store.create(_record(
+        record_id="mine", resolved=resolved,
+        schedule_provenance=_provenance()))
+    store.transition("mine", "applying")
+    store.recover_interrupted()
+    admitted = _scheduled(
+        store, resume_record_id="mine", resolved=resolved)["record"]
+    assert admitted["state"] == "unknown"
+
+    updated = store.update_scheduled_recovery(
+        "mine", provenance=_provenance(), plan_hash="b" * 64,
+        resolved=resolved,
+        preflight={"status": "passed", "device_identity": "9ABC123"},
+        resources=_record()["resources"])
+    assert updated["state"] == "unknown"
+    assert store.recoverable_for_device("edge-01")["record_id"] == "mine"
+    with pytest.raises(ValueError, match="identity"):
+        store.update_scheduled_recovery(
+            "mine", provenance=_provenance(), plan_hash="c" * 64,
+            resolved=dict(resolved, device_identity="OTHER"),
+            preflight={"status": "passed", "device_identity": "OTHER"},
+            resources=_record()["resources"])
+    store.transition("mine", "applying")
+    assert store.transition("mine", "active")["state"] == "active"
+
+
+def test_retire_planned_preserves_recovered_applying_authority(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="mine", schedule_provenance=_provenance()))
+    store.transition("mine", "applying")
+    store.recover_interrupted()
+    before = store.get("mine")
+    assert store.retire_planned("mine") == before
+    assert store.recoverable_for_device("edge-01") == before
 
 
 @pytest.mark.parametrize("foreign,router,reason", [

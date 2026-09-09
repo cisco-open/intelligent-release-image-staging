@@ -2442,6 +2442,10 @@ class _ScheduledExecutor(object):
                     admitted.get("reason") or "record_recovery_required")
             record = admitted["record"]
             record_ref["id"] = record["record_id"]
+            record_ref["recovered_applying"] = (
+                record.get("state") == "unknown" and
+                (record.get("recovery") or {}).get("interrupted_from") ==
+                "applying")
             if admitted.get("predecessor_record_id"):
                 record_ref["predecessor"] = admitted[
                     "predecessor_record_id"]
@@ -2452,11 +2456,19 @@ class _ScheduledExecutor(object):
             record_id = record_ref.get("id")
             if not record_id:
                 raise ValueError("planned record is unavailable")
-            self.record_store.update_planned(
-                record_id, plan_hash=final_plan["plan_hash"],
-                resolved=final_plan["resolved"], preflight=evidence,
-                resources=self.submission._owned_resources(
-                    final_plan["resolved"]))
+            update = (self.record_store.update_scheduled_recovery
+                      if record_ref.get("recovered_applying") else
+                      self.record_store.update_planned)
+            kwargs = {
+                "plan_hash": final_plan["plan_hash"],
+                "resolved": final_plan["resolved"],
+                "preflight": evidence,
+                "resources": self.submission._owned_resources(
+                    final_plan["resolved"]),
+            }
+            if record_ref.get("recovered_applying"):
+                kwargs["provenance"] = provenance
+            update(record_id, **kwargs)
             return final_plan["resolved"]
 
         return authority_guard, authority_check, prepare, pre_apply, record_ref
