@@ -1296,6 +1296,22 @@ def test_legacy_alias_csv_and_current_projection_roundtrip_portably(tmp_path):
     assert portable["app_ip"] == "192.0.2.22"
 
 
+def test_imported_legacy_row_can_be_classified_by_operator_upsert(tmp_path):
+    fs = _fs(tmp_path)
+    fs.import_csv(
+        "device_id,device_ip,vlan,svi_ip,svi_mask,guest_ip,model\n"
+        "old,192.0.2.20,666,192.0.2.21,255.255.255.252,"
+        "192.0.2.22,C9300\n")
+
+    saved = fs.upsert(dict(_ROUTED, device_id="old",
+                           device_ip="192.0.2.20"))
+
+    assert saved["management_type"] == "routed"
+    assert saved["iris_vlan"] == "666"
+    assert saved["app_ip"] == _ROUTED["app_ip"]
+    assert "vlan" not in saved and "guest_ip" not in saved
+
+
 def test_current_csv_boundary_is_portable_and_retains_local_only_fields(tmp_path):
     source = gui_fleet.FleetStore(str(tmp_path / "source"), now_fn=lambda: 1000)
     source.upsert(dict(_ROUTED, role="boat", credential_profile_id="lab"))

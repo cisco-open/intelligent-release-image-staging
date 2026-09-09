@@ -532,6 +532,38 @@ def test_csv_import_synchronizes_multiple_roles_with_one_policy_event(tmp_path):
             fleet.get_device("d01")["role"]} == {"boat", "fiber"}
 
 
+def test_csv_refusal_precedes_relaxing_role_policy_commit(tmp_path):
+    fleet = _fleet(tmp_path)
+    auth_path, lkg_path = _write_roles(tmp_path, [
+        ("boat", {"restricted": True, "peers": ["boat"]}),
+        ("open", {"restricted": False, "peers": ["open"]}),
+    ])
+    manager = _manager(tmp_path, fleet)
+    manager.set_role("d00", "boat", actor="test")
+    corrupt = fleet.get_device("d00")
+    corrupt["future_policy"] = "repair-me"
+    fleet._devices.put("d00", corrupt)
+    before_fleet = fleet.snapshot()
+    before_policy = _policy(auth_path, lkg_path).document
+    row = {key: value for key, value in corrupt.items()
+           if key in gui_fleet.CSV_V2_COLS}
+    row["role"] = "open"
+    text = ",".join(gui_fleet.CSV_V2_COLS) + "\n" + \
+        ",".join(str(row.get(key, ""))
+                 for key in gui_fleet.CSV_V2_COLS) + "\n"
+
+    with pytest.raises(_module().RoleManagementError) as caught:
+        manager.import_csv(text, actor="test")
+
+    assert caught.value.code == "fleet_write_failed"
+    assert caught.value.partial is False
+    assert caught.value.result["applied"] == 0
+    assert fleet.snapshot() == before_fleet
+    # Exact equality includes revision and operation_outbox: no successful
+    # role/audit outcome was recorded before the deterministic refusal.
+    assert _policy(auth_path, lkg_path).document == before_policy
+
+
 def test_blank_csv_has_no_membership_opinion_during_existing_drift(tmp_path):
     fleet = _fleet(tmp_path)
     auth_path, lkg_path = _write_roles(tmp_path, [

@@ -650,6 +650,23 @@ class RoleCoordinator:
                 raise RoleManagementError(
                     "policy revision conflict", code="revision_conflict",
                     status=409, revision=policy.document.get("revision"))
+            try:
+                # Validate retained server/local fields and every prospective
+                # replacement before a relaxing role change can commit first.
+                # Fleet persistence repeats this under its shard locks.
+                self.fleet.validate_parsed_csv(parsed)
+            except Exception as exc:
+                raise RoleManagementError(
+                    str(exc), code="fleet_write_failed", status=503,
+                    partial=False,
+                    result={"revision": policy.document["revision"],
+                            "applied": 0, "failed": {},
+                            "stats": {"imported": 0, "new": 0,
+                                      "updated": 0,
+                                      "skipped": parsed["skipped"],
+                                      "roles_cleared": 0},
+                            "role_drift": drift_report(self.fleet, policy)}) \
+                    from None
             desired = {}
             for record in parsed["records"]:
                 previous = self.fleet.get_device(record["device_id"])

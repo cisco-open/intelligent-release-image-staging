@@ -633,6 +633,14 @@ class FleetStore:
             if (old_router != new_router or old_xr != new_xr) and \
                     "platform" not in record:
                 merged.pop("platform", None)
+            if previous_record.get("management_type") in (None, "", "legacy_routed"):
+                # Historical CSV aliases are valid stored compatibility data,
+                # but a classified row must carry only the canonical names.
+                # A complete Console/API edit supplies the current fields;
+                # discard the retained aliases before full validation so an
+                # imported device can actually leave legacy_routed state.
+                for alias in _LEGACY_CSV_ALIASES:
+                    merged.pop(alias, None)
         # ``None`` means "leave unchanged" for ordinary partial fields, but an
         # explicitly present blank/null role is the role API's clear operation.
         # Remove the prior key before the usual non-None overlay and let both
@@ -1026,6 +1034,43 @@ class FleetStore:
             records.append(normalized)
         return records, skipped
 
+    def _merge_import_record(self, previous, source):
+        """Build one final CSV replacement row without writing it."""
+        if previous is not None:
+            # Refuse recoverable historical/future data rather than silently
+            # erasing it during a whole-row CSV replacement.
+            _validate_stored_fields(previous)
+        record = dict(source)
+        registered_at = self._registration_stamp(previous)
+        family = previous.get("os_family") if isinstance(previous, dict) else None
+        if family:
+            record["os_family"] = family
+        profile = (previous.get("credential_profile_id")
+                   if isinstance(previous, dict) else None)
+        if profile and not record.get("credential_profile_id"):
+            record["credential_profile_id"] = profile
+        prior_role = previous.get("role") if isinstance(previous, dict) else None
+        if prior_role and not record.get("role"):
+            record["role"] = prior_role
+        record = validate_record(record, allow_legacy=True)
+        record["registered_at"] = registered_at
+        _check_stored_row_size(record)
+        return record
+
+    def validate_parsed_csv(self, parsed):
+        """Purely validate CSV replacement rows against current stored state.
+
+        Role coordination calls this before any policy-first relaxation. The
+        persistence path repeats the same merge and validation under each
+        device shard lock.
+        """
+        records, skipped = self._revalidate_parsed_csv(parsed)
+        normalized = []
+        for record in records:
+            previous = self.get_device(record["device_id"])
+            normalized.append(self._merge_import_record(previous, record))
+        return {"records": normalized, "skipped": skipped}
+
     def import_parsed_csv(self, parsed):
         """Apply a :meth:`parse_csv` result, preserving non-CSV state.
 
@@ -1064,49 +1109,18 @@ class FleetStore:
 
         def merge(did, previous):
             nonlocal new, updated, roles_cleared
-            record = dict(by_id[did])
             if previous is not None:
                 updated += 1
             else:
                 new += 1
-            # A re-import REPLACES the row wholesale, so carry the
-            # registration stamp across explicitly or every CSV import
-            # would look like a fresh registration of the whole fleet.
-            registered_at = self._registration_stamp(previous)
-            # Same reason, different field: os_family is determined from
-            # the device's own 'show version' banner and is deliberately
-            # NOT a CSV column -- an operator typing it would be a new way
-            # to lie to the system. Dropping it on the documented
-            # export -> edit -> re-import round trip would silently reopen
-            # the IOS-XR misroute on the next onboard.
-            family = previous.get("os_family") if isinstance(previous, dict) else None
-            if family:
-                record["os_family"] = family
-            # And the credential profile: the CSV deliberately carries no
-            # credential column (fleet-workflows.md), so the assignment
-            # made in the Console after the first import must survive the
-            # export -> edit -> re-import cycle, or one bulk edit silently
-            # disarms every device's onboard/undeploy until re-assigned.
-            profile = (previous.get("credential_profile_id")
-                       if isinstance(previous, dict) else None)
-            if profile and not record.get("credential_profile_id"):
-                record["credential_profile_id"] = profile
             prior_role = (previous.get("role")
                           if isinstance(previous, dict) else None)
-            incoming_role = record.get("role")
-            if prior_role and not incoming_role:
-                record["role"] = prior_role
-            # This should remain zero under the carry-forward above.  Count
-            # the actual stored outcome so a future replacement-merge change
-            # cannot silently weaken the guarantee while still reporting 0.
+            record = self._merge_import_record(previous, by_id[did])
+            # This remains zero under _merge_import_record's carry-forward.
+            # Count the actual result so a future change cannot weaken the
+            # guarantee while still reporting zero.
             if prior_role and not record.get("role"):
                 roles_cleared += 1
-            # Revalidate the final durable row after carrying server-owned
-            # and non-CSV fields forward. Parsed previews are untrusted, and
-            # direct callers must not bypass the storage schema by editing one.
-            record = validate_record(record, allow_legacy=True)
-            record["registered_at"] = registered_at
-            _check_stored_row_size(record)
             intended[did] = {"ok": True, "device": record}
             existed[did] = previous is not None
             return record
