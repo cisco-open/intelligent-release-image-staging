@@ -37,10 +37,13 @@ flowchart LR
     Server --> PVC["RWO data PVC"]
 ```
 
-The server Deployment uses `replicas: 1` with `Recreate`. The tracker peer
-registry is in memory, catalog state is file-backed, and seeder RPC is local to
-the server pod. More replicas would split coordination state rather than add
-capacity. Console can restart independently without interrupting devices. Pods receive
+The server Deployment uses `replicas: 1` with `Recreate`. There are three single-replica reasons: the tracker peer
+registry is in memory; catalog state is file-backed and seeder RPC is local to
+the pod; and the instruction stamper, serial history, activation/admission
+state and file-backed instruction artifacts have single-writer semantics with
+no cross-pod coordination. Multi-replica server operation is unsupported and
+not covered by validation. More replicas would split coordination state rather
+than add capacity. Console can restart independently without interrupting devices. Pods receive
 private cluster addresses and use Service DNS; devices and browsers use the
 LoadBalancer addresses. Neither pod needs its own external IP.
 
@@ -64,6 +67,23 @@ does not require rebuilding them: server startup refreshes the distributed
 IOS-XR harddisk bind mount receives the new runtime trust anchor. Package
 readiness checks bytes against manifests, not whether the source has changed;
 use the [rebuild procedure](development.md#embedded-agent-packages).
+
+## Phase 1 storage and network impact
+
+The existing `iris-data` PVC stays mounted at `/data`, with `IRIS_STATE` at
+`/data/state`, `IRIS_CONFIG` at `/data/config`, images and artifacts under that
+layout. `IRIS_RUN` remains `/run/iris` on memory `emptyDir`; plaintext signing
+material never becomes PVC state. Public roots and encrypted signing material
+use the existing configuration storage. Phase 1 requires no new Secret, port,
+Service or NetworkPolicy rule.
+
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` add authenticated traffic on
+existing device HTTPS 8443, with no new listener, network path or firewall flow.
+TCP 9443 remains Console-to-server management-only. Server-only instruction
+state, age identity, encrypted signing key and runtime plaintext must never
+be mounted into Console pods. Validate this [single-replica layout](validation.md#phase-1-layout-validation)
+without claiming multi-replica coverage.
 
 ## External address
 

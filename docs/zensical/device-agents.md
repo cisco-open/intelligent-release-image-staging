@@ -230,22 +230,91 @@ URL avoids a hostname lookup on that path.
 
 ## Agent loop
 
-Each tick:
+Each mechanical tick loads configuration, refreshes credentials when needed,
+verifies available instructions/LKG and reasserts verified/default aria2 options.
+It sends a heartbeat even when signed logical catalog cadence is not due. On a
+due tick with readable assignment policy and successful option application:
 
-1. Load device config and token material.
-2. Refresh the token when needed.
-3. Read the current assigned set and stop torrents for removed assignments.
-4. Skip acquisition for images already staged and verified.
-5. Download missing content through `aria2c`.
-6. Verify each completed file against its catalog SHA-256.
-7. Place the image at the storage root and attest it by exact byte size. On
+1. Read the current assigned set and stop torrents for removed assignments.
+2. Skip acquisition for images already staged and verified.
+3. Download missing content through `aria2c`.
+4. Verify each completed file against its catalog SHA-256.
+5. Place the image at the storage root and attest it by exact byte size. On
    IOS-XE that is a copy — [crash-safely, never deleting a
    pre-existing same-named file first](#crash-safe-same-name-replacement); on
    IOS-XR the download already landed there through the bind mount, so the
    agent only attests it.
-8. Report per-image state and one combined heartbeat. A catalog or transfer
+6. Report per-image state and one combined heartbeat. A catalog or transfer
    error for one image does not prevent the remaining assignments from being
    checked.
+
+## Instruction trust by platform
+
+Read the [device administrator trust boundary](security.md#device-administrator-trust-boundary)
+before treating an instruction report as compliance. The same verified policy
+engine runs on all supported agents; the trust boundary differs:
+
+| Property | Unified IOx/XR image | Guest Shell |
+| --- | --- | --- |
+| Two distinct public roots | Embedded mode-0444 signer/root files; image pin depends on enforced package signature | Same public roots in a replaceable bundle on flash; tamper-evidence |
+| Signature verifier | Bundled OpenSSH verifier on both architectures | Runtime probe of `ssh-keygen -Y verify`; absent support gives `verifier_missing` and tracker-only peers, not silent acceptance |
+| Mechanical tick | Container supervisor; `IRIS_TICK_SECONDS` interval/floor | IOS-owned 60-second EEM timer with bounded startup jitter |
+| Agent update evidence | Canonical image and wrapper provenance; native signing is a separate gate | Digest-only bundle update with adjacent SHA-256 sidecar, bounded members and prior-bundle rollback |
+| Compatibility | Shared agent sources | Python 3.6 compatible; no claim that every Guest Shell includes a verifier |
+
+For IOx, onboarding controls the device-global verification setting through a
+durable owned transaction: signed/no mutation; unsigned with initial enabled →
+disable for installation → restore and read-back before activation/start;
+initial disabled stays disabled; unknown refuses. Interruption/resume and
+uninstall recovery honor recorded obligations without blindly enabling an
+operator-changed/unowned state. See [IOx verification](iox.md#device-global-package-verification).
+
+The instruction envelope is capped at 256 KiB and bound to this device/platform.
+MAC-before-decrypt, signature verification and a monotonic `(epoch, instr_serial)`
+floor precede application. Authenticated refresh places current/prior instruction
+keys in mode-0600 agent configuration; the LKG key is generated locally. None
+of these keys belongs in platform activation arguments. F3 offline delivery
+carries a ciphertext bootstrap envelope, never a secret key; normal authenticated
+refresh self-heals its key availability. See the [redelivery runbook](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
+## Instruction failures and recovery
+
+Instruction-body fetch/verification failures affect the instruction step only; heartbeat/staging
+continue when usable LKG or defaults can be applied. An aria2 RPC apply failure
+still sends heartbeat but skips staging for that tick. An unreadable assignment
+policy also skips staging reconciliation while heartbeat and existing aria2
+transfers continue. A rejected candidate
+leaves the prior verified LKG's QoS/peer posture in place where usable, otherwise
+defaults apply. Server tracker/origin controls remain
+in force. The state below is agent-asserted unless explicitly marked
+server-observed; it does not prove device compliance.
+
+| Condition / visible state | Retained QoS/peer state | Retry or operator action |
+| --- | --- | --- |
+| First tick/no file: `none` | Defaults and tracker-only peers | Await a stamp and authenticated refresh. Missing protocol marker on a legacy agent yields server display `pre-instructions`; IOS `version` is not capability evidence. |
+| Valid fresh envelope: `applied` | Verified QoS and peer posture | Normal cadence; accepted identity is reported. |
+| Valid cached instructions during catalog loss: `lkg` fallback | Locally re-encrypted verified LKG | LKG survives instruction-key rotations. A request-error state may override the raw `lkg` label while this accepted identity/posture is retained; retry on a later ordinary tick. |
+| Instruction expires: `stale_expired` | Role `on_stale: keep` retains verified QoS; `defaults` restores defaults | Restore authenticated catalog time and fresh instructions. Peer expiry is independent. |
+| Attribution expires: `allowlist_expired` | Expired allow-list falls back to tracker-only; a deny-list remains in force | Refresh endpoint attribution/instructions. Never turn an expired allow-list into open access. |
+| Older identity: `rollback_rejected`; authenticated reset: `floor_reset` | Reject older candidate; a validated reset adopts its new floor | Repair server epoch/stamp through the recovery runbook; do not delete local replay state. |
+| Wrong device/platform: `audience_mismatch` | Retain usable LKG/defaults | Redeliver the envelope for the exact inventory device/platform. |
+| Unknown per-device key: `key_rejected`, reason `unknown_key` | Retain usable LKG/defaults | At most one refresh in the tick, bounded by unknown key ID; retry a later tick. |
+| Known-key bad MAC: `key_rejected`, reason `bad_mac` | Retain usable LKG/defaults | Reject evidence and inspect integrity; bad MAC does not trigger key refresh. |
+| Bad/revoked signer, invalid envelope or equal identity/different bytes: `tamper_rejected` | Retain only independently usable LKG/defaults | Repair signer/keylist or envelope provenance; never bypass verification. |
+| Missing verifier: `verifier_missing` | Tracker-only peers, with verified/default QoS | Supply a supported verifier through the agent package; Guest Shell availability is probed at runtime. |
+| Rejected/unreadable local cache: `lkg_rejected`, `lkg_unreadable` | Defaults and tracker-only peers when no usable LKG exists | Obtain a fresh envelope; preserve evidence for diagnosis. |
+| Oversize response: `oversize` | Retain usable LKG/defaults | Fix the producer/transport; never raise the 256 KiB cap as a recovery shortcut. |
+| aria2 session restart: `reasserted`; same-session drift correction | Unconditionally reapply verified/default global and active-GID options before reconciliation | Inspect agent-asserted `qos_drift_count`; every future `addTorrent` uses the same verified/default policy. |
+| Instructions 404, 429, 5xx or transport failure: `instr_unavailable`; 409: `instr_pending` | Retain usable LKG/defaults | Later-tick retry; investigate stamp/state and bounded retry hints. No in-tick sleep/retry loop. |
+| Instructions 401/403: `instr_forbidden` | Retain usable LKG/defaults | One-shot authenticated token refresh, then later-tick retry; durable revocation cannot be healed by rotation. |
+| Durable revoked principal: display `revoked` (server-observed) | Underlying agent LKG/state remains visible as agent-asserted evidence | Resolve the retirement/compromise decision on the server; do not rotate to spare the device. |
+| Pointer/body race | A valid higher body serial applies; a lower-but-fresh body above the accepted floor applies with `pointer_skew`; a candidate below the floor rejects | After three skew observations, report the latch and inspect producer convergence. At the floor, identical envelope bytes are idempotent; equal identity with different bytes rejects. |
+| Explicit `tracker-only` peer posture | Tracker supplies peers under server policy | No device peer-list enforcement is claimed. |
+
+The closed raw state list and the separate display classifications are in
+[Reference](reference.md#instruction-protocol-and-state-reference). A rejection
+can coexist with a complete older accepted identity; never treat a reported
+candidate failure as proof that the older policy was erased.
 
 ## Crash-safe same-name replacement
 
@@ -304,6 +373,22 @@ Shell's same-name adoption path does not overwrite a conflicting root file;
 an operator must resolve that conflict. See
 [Sizing the storage root](management-type.md#sizing-the-storage-root).
 
+## Verified policy and mechanical ticks
+
+Legacy `max_peers` remains parseable for upgrade compatibility but is ignored
+as policy. The agent emits the value-free `MAX-PEERS-IGNORED` notice once;
+Guest Shell no longer exports that setting. Container `IRIS_MAX_PEERS` and
+`IRIS_MAX_CONCURRENT` are absent from Dockerfile defaults but remain provisional
+launcher inputs until the first successful agent tick. No restored download
+starts in that interval. The agent unconditionally writes verified/default
+global and active-GID options before reconciliation, and every future
+`addTorrent` uses verified/default values.
+
+`IRIS_TICK_SECONDS` is an explicit mechanical launcher interval/floor. Signed
+`catalog_tick_s` controls logical catalog/staging cadence; every mechanical
+tick still reasserts QoS and sends a heartbeat. Telemetry cadence/pause gates
+cannot stop heartbeats, key refresh or the agent recovery path.
+
 ## Cadence jitter and overload backoff
 
 Guest Shell's EEM watchdog and the IOx/XR container supervisors all drive the
@@ -334,9 +419,8 @@ per-device state](reference.md#keyed-per-device-state)):
   restart, say) get their first catalog contact spread out instead of firing
   together. Set it to `0` for a single-device debug session watching for the
   first tick.
-- **Failure backoff.** After a tick fails outright — the catalog unreachable,
-  timed out, or answering a non-2xx status, the same shape a saturated
-  server produces — the next contact backs off exponentially, capped at
+- **Failure backoff.** When the agent process exits unsuccessfully, the
+  launcher backs off the next contact exponentially, capped at
   `IRIS_TICK_BACKOFF_MAX` (600s by default), instead of retrying on the
   ordinary cadence. IOx/XR skip the whole tick (`next_tick_sleep` in
   `entrypoint.sh`); Guest Shell/router cannot skip an EEM-fired tick, so
@@ -346,9 +430,11 @@ per-device state](reference.md#keyed-per-device-state)):
   `$STAGE/.iris-tick-backoff`. A success immediately clears the streak and
   resumes ordinary cadence. The cap is comfortably inside the catalog
   token's multi-day refresh slack, so a run of backed-off ticks never
-  strands a device.
+  strands a device. Handled Phase 1 policy/instruction fetch or apply failures
+  return a contained tick result and do not trigger this process-exit backoff;
+  their retry is on a later ordinary tick, with no in-tick sleep/retry loop.
 
-All of these are tuning knobs, not protocol values — see [Reference →
+These launcher controls set mechanical timing, not signed policy authority — see [Reference →
 Device container environment variables](reference.md#device-container-environment-variables)
 for defaults and ranges.
 
@@ -376,8 +462,8 @@ undeploy/onboard sequence when changing a deployed app's run options.
 
 For Guest Shell, add `iris_log = on` to the persisted `iris-agent.conf`.
 Bootstrap reads it on each EEM tick before checking aria2. Settings made only
-in an interactive shell do not survive that tick. `rpc_port` and `max_peers`
-are read from the same configuration file. Invalid Guest Shell values fall
+in an interactive shell do not survive that tick. `rpc_port`
+is read from the same configuration file. Invalid Guest Shell values fall
 back to launcher defaults; the common container rejects invalid environment
 values at startup.
 
@@ -385,6 +471,13 @@ See [Device agent config keys](reference.md#device-agent-config-keys) and
 [Device container environment variables](reference.md#device-container-environment-variables)
 for the supported values. Disabling the aria2 log does not disable writes
 needed for downloads, checkpoints, agent state, or telemetry.
+
+Guest Shell writes its RPC secret into mode-0600 `$EXEC_DIR/aria2.conf`
+(default `/home/guestshell/aria2.conf`). aria2 receives the config path, and the
+RPC readiness probe reads the protected secret file; neither receives the
+secret value in process arguments. Treat these files and the mode-0600
+`iris-agent.conf` as private. This file boundary does not hide credentials from
+a privileged device administrator.
 
 ## Verification gates
 

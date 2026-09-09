@@ -93,6 +93,60 @@ the inventory and use its exact device ID.
 
 The authenticated principal is not allowed to perform the operation.
 
+## instruction-keylist-unavailable
+
+503: the root-signed keylist cannot be read or validated. Repair server custody
+or state and retry on a later tick; the bounded retry hint is 10 seconds.
+Usable cached keylist/LKG evidence is retained.
+
+## instruction-keylist-missing
+
+404: no published instruction keylist exists. Complete the root-signed keylist
+procedure; the agent retains usable prior evidence and retries on a later tick.
+
+## instruction-state-unavailable
+
+503: policy stamp, role artifact, key or custody state cannot be safely read or
+validated. Inspect producer/custody status; repair the source rather than
+fabricating an empty stamp. The bounded retry hint is 10 seconds.
+
+## instruction-stamp-missing
+
+404: the device has no instruction stamp or its immutable role artifact is
+missing. Check admission/producer state and use `iris-instr-key restamp
+<device_id>` after fixing the source. Current `instr_stamp_missing` inventory
+counts are separate from cumulative route failures.
+
+## stale_pointer
+
+409: the stamped key no longer resolves to a current or still-valid prior
+instruction key. Finish/restamp the committed rotation and retry later; the
+bounded retry hint is 10 seconds. The agent reports `instr_pending` while
+retaining usable LKG/defaults.
+
+## instruction-device-forbidden
+
+403: a valid current catalog token belongs to a different device than the path.
+Invalid/revoked, non-current or unsupported credentials instead return 401
+`catalog-authentication-required`. For instruction 401/403 the agent attempts
+one-shot refresh and reports `instr_forbidden`; durable revocation is
+server-observed and cannot be healed by key rotation.
+
+## instruction-rate-limit-exceeded
+
+429: the per-device instruction request budget is exhausted. Honor the bounded
+`Retry-After` hint on a later tick; never add an in-tick sleep/retry loop.
+
+These fetch failures affect the instruction step only; heartbeat/staging
+continue with verified fallback/defaults when policy apply succeeds. An aria2
+RPC apply failure still sends heartbeat but skips staging for that tick. Shared `catalog-authentication-required`
+and `credential-store-unavailable` failures still apply. Bad MAC, audience,
+rollback, signer and size failures are local agent states, listed with actions
+in the [failure table](device-agents.md#instruction-failures-and-recovery).
+Missing/invalid evidence stays unknown: **violation = 0 does not mean compliant**.
+For custody renewal, refusal and degraded-root alarms, use the
+[root runbook](operations.md#instruction-root-ceremony-and-recovery).
+
 ## fleet_write_failed
 
 A coordinated membership change could not finish its Fleet write. Policy may

@@ -316,7 +316,7 @@ documented management API. Use `iris-role` and scalar-only CSV definitions for
 role membership and scalar QoS; tracker-state effective-QoS explanations are
 exposed through the API, while the Console does not edit the nested state map.
 
-Phase 0 changes future tracker introductions only; it
+Tracker policy changes affect future introductions; quarantine
 does not sever existing connections or remove retained peers. For immediate
 containment, unassign every image from the affected device and let its current
 agent remove those torrents on the next tick. Device-side rate intent is
@@ -328,6 +328,56 @@ the device was deleted from the inventory, or a forced teardown stripped the
 agent without using the deployment record as authority. It is kept as the account of what
 IRIS built on that box, but it never authorises a teardown and never blocks an
 onboard again.
+
+## Instruction status and custody
+
+Devices shows a canonical instruction chip with a server-created exact label,
+source evidence and report age. Raw instruction state, accepted
+`{epoch, instr_serial, policy_revision}`, verification level, pointer skew and
+QoS drift are agent-asserted. Device-authored reports are not independent
+measurements. Durable revocation and receipt age are server-observed: revoked
+wins visually while the underlying agent LKG/state remains visible; stale
+reports show their last state and missing/invalid/future receipt time is unknown.
+The chip's `reason` distinguishes `unknown_key` from `bad_mac` rejection.
+
+The separate raw and display state vocabularies, including legacy
+`pre-instructions`, derived `stale`/`rejected`/`unavailable`/`unknown` and durable
+`revoked`, are listed in [Reference](reference.md#instruction-protocol-and-state-reference).
+Capability comes from `instr_protocol: 1`, not IOS `version`. Labels retain exact
+i63 values as strings, so browser rounding cannot change identity.
+
+The Peer policy disclosure shows issued policy revision, accepted application
+counts grouped by policy revision, state counts, current `instr_stamp_missing`
+and `pointer_skew` device counts, and observation time. It excludes orphan
+heartbeats and retains accepted identities beneath stale/rejected/revoked
+states. `policy_revision` is server-issued intent; `instr_serial` with
+`instr_epoch` is sealed freshness; `enforcement.applied_revision` and
+`iris_peer_enforcement_applied_revision` are unrelated aria2 blocklist counters.
+Unavailable heartbeat/policy/revocation/custody evidence stays null/unknown,
+never a healthy zero. **violation = 0 does not mean compliant**.
+
+The custody panel shows enablement/state, certificate days remaining (including
+zero/negative values), renewal/signing-refusal flags, keylist age and re-signing
+due, root ceremony status, and roots attested in 180 days. Disabled reads not
+enabled; unavailable evidence stays unavailable. Quorum healthy means recorded
+attestations support both roots, not that the Console inspected private-key
+custody. Follow [root recovery](operations.md#instruction-root-ceremony-and-recovery)
+for warning, critical or degraded status. The current bounded schemas are in
+[OpenAPI](openapi.yaml); the deprecated effective-QoS `delivery_state` sentinel is not
+an application receipt. That response now includes the same canonical
+`instruction` object as Devices.
+
+### IOx onboarding verification
+
+IOx verification is device-global. The onboarding job prefers a signed wrapper
+with no verification-state change. Unsigned/enabled records the obligation,
+disables only for installation and restores with read-back before
+activation/start; initial disabled stays disabled; unknown refuses. Durable
+interruption/resume and uninstall recovery never blindly enables an
+operator-changed or unowned state. Inspect the job/deployment evidence when
+restoration is incomplete. Package readiness and signature-marker presence do
+not validate a native signature. See [IOx prerequisites](iox.md#device-global-package-verification)
+before onboarding other applications on the same device.
 
 ## Bulk device actions
 

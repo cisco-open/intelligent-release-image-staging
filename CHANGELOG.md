@@ -66,10 +66,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   compatibility, explicit seeder/leecher cadence layers, and API-only
   `qos_state` configuration; tracker state remains outside device delivery.
 - Apply origin-wide and per-torrent upload limits plus an origin peer cap, with
-  count-only reconciliation status. Per-role origin shaping and device-side
-  QoS are not present in Phase 0; effective device QoS is reported as
-  `pre-instructions`. Device-side limits remain cooperative in the presence of
-  a privileged device administrator.
+  count-only reconciliation status. Per-role origin
+  shaping remains unavailable. Phase 1 adds verified device QoS below; the
+  effective-QoS route retains its deprecated `pre-instructions` compatibility
+  sentinel and adds the canonical `instruction` object used by Devices, with
+  fleet rollups on the policy view. Device-side limits remain cooperative under a privileged administrator.
 - Measure issue #153's prospective mutual-origin deny as a preflight count while
   retaining the existing applied origin blocklist. Shared NAT permit/deny
   conflicts stay unblocked and are reported by reason/count. The issue remains
@@ -80,6 +81,35 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   aria2 binaries are now the pinned source inputs for future refreshed Guest
   Shell bundles and signed device packages; this does not cut a release, sign a
   package, or update a deployed device.
+
+### Phase 1 instructions
+
+- Deliver bounded per-device encrypted instruction envelopes and root-signed
+  keylists over existing authenticated catalog HTTPS 8443. Verify signatures,
+  MACs, audience, expiry and monotonic freshness before applying device QoS and
+  peer controls; keep locally encrypted LKG through instruction-key rotations.
+- Reassert verified/default QoS every mechanical tick and before new torrents;
+  demote plaintext peer/concurrency launch values to upgrade compatibility.
+  Signed logical catalog cadence remains separate from heartbeat/reassertion.
+- Add server-only encrypted online signing custody, two distinct offline public
+  roots, certificate/keylist windows and recovery runbooks. IOx/XR image trust
+  depends on enforced native package signatures; Guest Shell remains
+  tamper-evident, with runtime verifier probing and tracker-only fallback.
+- Preserve owned IOx device-global verification state through unsigned package
+  onboarding, interruption and uninstall; prefer signed wrappers without state
+  mutation. Verify Guest Shell bundle SHA-256 sidecars and both public-root
+  files, retaining the prior runnable bundle on refusal.
+- Show instruction state, exact accepted identity, policy-revision rollups,
+  evidence age, drift, pointer skew, missing stamps and custody alarms in the
+  Console/API. Unavailable evidence remains null/unknown; violation = 0 does
+  not mean compliant.
+- Document Compose, split-host and single-replica Kubernetes custody/network
+  checks. Five supervised processes and existing ports remain; multi-replica
+  server operation is unsupported. The next package build must propagate the
+  final shared agent and current pinned aria2c binaries to every device format.
+  This Unreleased work is not a signed release or live-device validation.
+  Issue #153 stays preflight-only through a full tagged-release dwell and a
+  separately authorized activation release with lab/live evidence.
 
 ## [2026.09.05]
 

@@ -195,7 +195,7 @@ Credential lookup uses fixed-size SHA-256 digest keys and checks the selected
 record's token with a constant-time comparison. Each request checks that
 record's current expiry and revocation state without scanning other devices.
 
-### Roles, virtual ACLs, and the Phase 0 boundary
+### Roles, virtual ACLs, and server enforcement
 
 A device may declare one role. Role names match
 `^[a-z0-9][a-z0-9._-]{0,31}$`; `default`, `quarantine`, `origin`, `seeder`, and
@@ -212,7 +212,7 @@ it is not conjoined with the role ACL. Quarantine remains the reserved explicit
 deny-all assignment and takes precedence. Use the explain route before changing
 or migrating a device that already has an explicit assignment.
 
-Phase 0 enforces new introductions at the tracker. It **does not sever existing connections**
+The tracker enforces new introductions. It **does not sever existing connections**
 or purge peers that aria2 already knows, and aria2 may reconnect
 to a retained peer without asking the tracker again. The immediate containment
 lever is to unassign every image from the restricted device; the existing agent
@@ -230,8 +230,8 @@ not the device IDs or addresses.
 Issue #153 remains open through one full release of preflight observation. A
 later, separately reviewed activation would apply the
 union of current self-evaluation and mutual-origin evaluation to **all** ACLs,
-including hand-written ACLs. Phase 0 has neither completed that observation
-window nor activated the union.
+including hand-written ACLs. Phase 1 does not complete that tagged-release dwell
+or authorize activation or lab/live validation of the union.
 
 When permitted and denied principals share one translated IPv4 address, a
 global origin block would affect both. IRIS records a `shared_permit_deny`
@@ -240,31 +240,115 @@ weaken address-level origin isolation; use distinct addresses when that
 isolation is required.
 
 The **agent-distribution exemption** is an invariant: role ACLs, QoS values,
-announce cadence, candidate ceilings, and future instruction vocabulary cannot
-gate bootstrap artifacts, enrollment, token refresh, or agent packages. A
-restricted or quarantined device must retain the recovery path used to receive
-and refresh the agent. Phase 0 adds no device instruction route and does not
-alter any deployed package.
-
-The exemption covers installers, Guest Shell bundles, IOx and IOS-XR packages,
-artifact recovery, enrollment, and token refresh. These recovery artifacts are
-separate from OS-image torrent staging. The current Phase 0 structural guards
-cover import reachability, the scoped refresh handler, packaging/install shell
-controls (including `server/pack-agent-bundle.sh` and
-`server/provision-served.sh`; `tools/make-agent-bundle.sh` is the operator
-wrapper), artifact-route metadata, the closed QoS grammar, and refresh ordering.
-Device instruction parsing, device cadence gates, and handout-budget accounting
-do not exist in Phase 0, so no later parser/cadence/budget guard is claimed here.
+announce cadence, candidate ceilings, and instruction policy cannot gate
+bootstrap artifacts, enrollment, token refresh, or agent packages. A restricted
+or quarantined device retains this recovery path. Recovery artifacts are
+separate from OS-image torrent staging; instruction-body fetch/verification failure stops the
+instruction step only; heartbeat/staging continue with verified fallback or
+defaults when policy apply succeeds. An aria2 RPC apply failure still sends
+heartbeat but skips staging for that tick. Tracker/origin policy remains authoritative for its own controls.
 
 ### Device administrator trust boundary
 
-IRIS cannot keep a policy confidential from, or make it tamper-proof against,
-an administrator with IOS privilege 15 or IOS-XR root-lr access. That
-administrator controls the supported device environment. Device-side rates and
-caps are therefore cooperative and tamper-evident, never tamper-proof, even if
-a future phase delivers instructions. Phase 0 does not deliver those
-instructions at all. Any future `violation = 0` status would show only that IRIS
-observed no violation; it would not prove device compliance.
+The encrypted instruction file is confidential against users below privilege 15, against offline copies of flash and `show tech`, against swarm peers and network observers, and against reuse on another device. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.
+
+A privilege-15 or IOS-XR root-lr administrator can alter the runtime or bypass
+the agent. A valid signature proves the signed instruction's origin, not that
+the administrator applied it. Device-side rates and caps remain cooperative;
+**violation = 0 does not mean compliant**. See [instruction evidence](observability.md#instruction-evidence-and-custody)
+and the [platform comparison](device-agents.md#instruction-trust-by-platform).
+
+### Encrypted instruction envelope
+
+Phase 1 serves a bounded, per-device envelope on authenticated catalog HTTPS.
+The 256 KiB response cap applies before parsing. SP800-108/HMAC-SHA-256 derives
+separate encryption, MAC and nonce keys with per-device context; a deterministic
+16-byte nonce binds device ID, key ID, epoch and instruction serial. An
+HMAC-SHA-256 counter keystream encrypts the private device part. A separate
+HMAC authenticates the PAE-bound envelope, including header, signed role body,
+nonce and ciphertext. MAC-before-decrypt prevents unauthenticated plaintext
+from reaching the policy parser. This construction is not AES-GCM.
+
+The agent also verifies the OpenSSH role signature and signer revocation list,
+checks device/platform audience and the role binding, and applies monotonic
+`(epoch, instr_serial)` replay floors. Reusing an identity with different bytes
+is rejected. An authenticated server clock anchors expiry; a wall-clock change
+cannot silently extend validity. Signed role intent is public within the
+envelope; confidentiality protects the private per-device part. Failure never
+makes unverified instructions authoritative. See the [failure table](device-agents.md#instruction-failures-and-recovery).
+
+### Two-root trust and custody
+
+Exactly two distinct offline-root public keys form the trust set. Keep their
+private keys with separate custodians at separate sites, never on the server.
+The unified IOx/XR image embeds `iris-signers.allowed_signers` and
+`iris-root.allowed_signers` as mode-0444 files. With a natively signed package
+and enforced platform verification, these are image-pinned roots. Guest Shell
+receives the same two public-root files in its bundle on replaceable flash:
+that is tamper-evidence, not an immutable image pin. Losing one root's private
+material leaves provisioned trust bytes unchanged; the surviving root can
+issue the next online certificate. Follow the [root runbooks](operations.md#instruction-root-ceremony-and-recovery).
+
+The optional online signing private key is encrypted at
+`$IRIS_CONFIG/instr/signing-key.age`; plaintext exists only at runtime as
+`$IRIS_RUN/instr/signing-key`. Public key, certificate and `roots.d/` remain
+under `$IRIS_CONFIG/instr/`. The age identity and instruction state remain on
+the server host. The Console has management token/CA files only, never server
+instruction state, the age identity, encrypted signing key, or runtime plaintext.
+Public roots are public material, not credentials.
+
+No current/prior instruction key, LKG key, online signing private key or
+offline-root private key enters IOx `run-opts`, XR `docker-run-opts`, installer
+arguments, or device platform configuration. Authenticated refresh alone
+returns the current and bounded prior instruction keys into the agent's
+mode-0600 configuration; the LKG key is created on the device. A valid LKG is
+locally re-encrypted and survives per-device instruction-key rotation.
+
+There is a bootstrap exception: the enrollment bearer remains in IOx
+`run-opts` and XR `docker-run-opts`; IOx also retains its SSH-to-self password.
+A privileged device administrator can read those bootstrap credentials,
+including in platform configuration or diagnostic output. The default
+enrollment TTL is 3,600 seconds (one hour); prompt first authenticated refresh
+replaces the agent's active credential, with a normal token overlap of 120
+seconds. Refresh does not erase the original bootstrap value from platform
+activation configuration. These values are not promised confidential from
+privilege 15/root-lr or `show tech-support`.
+The closed credential-width registry retains 128-bit bearer credentials and
+uses 256-bit cryptographic instruction keys. Missing, unsupported or mismatched
+widths fail before minting, without printing values.
+
+For a leaked key on an otherwise honest device, rotate its instruction key
+with `iris-instr-key rotate --no-overlap <device_id>`. For a retired or
+compromised device, use `iris-revoke <device_id>`; never rotate keys to spare a
+revoked device. Revocation is durable server authority and blocks its catalog
+access even when the last device report still says LKG.
+
+### IOx verification and Guest Shell bundle boundary
+
+IOx verification is a device-global setting. A signed wrapper is preferred
+and causes no verification-state change. An unsigned wrapper uses the
+[owned transaction](iox.md#device-global-package-verification): initial
+`enabled` is recorded durably, disabled only for installation, and restored
+with read-back before activation/start; initial `disabled` stays disabled;
+`unknown` refuses mutation and installation. Durable obligations survive
+interruption/resume and guide uninstall recovery; an operator-changed or
+unowned state is never blindly enabled. Signature-marker presence is not
+cryptographic validation. The claim that the container never changes in the
+field requires a natively signed wrapper and verification remaining enabled.
+Current proof artifacts are unsigned and do not establish that premise.
+
+Cisco documents the global control and media restrictions in the
+[IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html)
+and [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html).
+Platform signature refusal is preserved; the unsigned transaction is not a
+promise that every media/platform combination will accept or run the app.
+
+`server/pack-agent-bundle.sh` emits Guest Shell's adjacent 64-hex SHA-256
+sidecar. This is digest validation, not a detached signature. Bootstrap collects sidecar before archive, bounds archive
+and member processing, and refuses missing, malformed or mismatched evidence
+while preserving the prior runnable bundle. Bundle and installer also bind the
+two public-root files. An administrator who can replace bootstrap, bundle and
+evidence remains inside the trusted-device-admin boundary.
 
 ### Tracker transport security
 

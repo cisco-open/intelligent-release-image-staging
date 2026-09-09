@@ -26,6 +26,46 @@ The installer reads the selected package from the server's local
 host-key-checked SCP session before driving app hosting. It does not put a
 credential in an artifact URL.
 
+## Device-global package verification
+
+Before onboarding, inspect `show app-hosting infra` and the other IOx apps on
+the device. Verification is device-global, so a change affects more than IRIS.
+Prefer a natively signed wrapper and keep verification enabled. The controller
+in `server/iox_verification.py`, consumed by `device/iox/install.sh`, owns the
+entire transaction:
+
+| Wrapper / initial observation | Owned behavior |
+| --- | --- |
+| Signed | No verification-state change; the platform validates the signature. A signature-marker presence check is not cryptographic validation. |
+| Unsigned / `enabled` | Durably record the initial state and restoration obligation; disable only for installation; restore and read-back before activation/start. |
+| Unsigned / `disabled` | Leave disabled; no unowned enable operation. |
+| Unsigned / `unknown` | Refuse mutation and installation. Obtain readable platform evidence first. |
+
+Interruption/resume and uninstall recovery use durable obligations. They do
+not blindly enable an operator-changed or unowned state. Inspect the onboarding
+job and deployment record before retrying; unresolved restoration blocks
+progress. This is the current supported unsigned transaction, not evidence of
+production signing. Current proof artifacts are unsigned.
+
+Cisco documents signature enforcement, SD/bootflash restrictions and the global
+setting in the [IE-3x00 IOx deployment guide](https://www.cisco.com/c/en/us/td/docs/switches/lan/cisco_ie3X00/software/17_14/b_cisco-iox-ie3x00-switches/m-ie3400-deploying-iox-applications.html).
+The [Catalyst 9000 App Hosting guide](https://www.cisco.com/c/en/us/support/docs/switches/catalyst-9500-series-switches/222780-understand-app-hosting-on-catalyst-9000.html)
+limits disabling verification to USB/SSD media. Platform/media signature
+refusals remain failures; do not interpret an unsigned build as proof that
+activation succeeds after verification is restored. The claim that the
+container never changes in the field depends on a natively signed IOx wrapper
+and platform verification remaining enabled.
+
+The enrollment bearer and SSH-to-self password remain in IOx `run-opts`,
+readable by a privileged device administrator and potentially diagnostic
+output. Enrollment defaults to 3,600 seconds (one hour), followed promptly by
+authenticated refresh with normal 120-second token overlap. Instruction keys,
+LKG keys, online signing private keys and offline-root private keys never enter
+`run-opts` or installer arguments. The agent's mode-0600 config receives
+instruction keys only from refresh. F3 redelivery uses an encrypted bootstrap
+envelope through the controller's application-data channel; see
+[offline recovery](operations.md#f3-offline-bootstrap-envelope-redelivery).
+
 ## Files
 
 | File | Purpose |
@@ -126,6 +166,12 @@ installer removes that incomplete app before retrying. An app that is
 `RUNNING` is a live deployment and requires undeploy first.
 
 ## Build modes
+
+Builds require exactly two distinct approved public-root `.pub` files in
+`IRIS_INSTRUCTION_ROOTS_DIR` (or `--instruction-roots-dir DIR`). Use
+`ARIA2C_BIN_AMD64` and `ARIA2C_BIN_ARM64` for the current pinned binaries when
+older fallback artifacts remain on disk; architecture/checksum verification
+fails closed. These public-root inputs do not provide native package signing.
 
 The canonical build always persists one OCI archive with one image manifest
 per CPU architecture under one multi-architecture identity. `--image-only`
@@ -245,8 +291,9 @@ SHA-256 while retaining its canonical image provenance. A manifest for the
 unsigned input will correctly report a digest mismatch beside the signed
 output. This manifest is a readiness check, not a signature or an attestation
 from the signer; native signature verification remains the platform's job.
-The IOx installer keeps app-hosting verification enabled when the tar carries
-signature metadata.
+The IOx installer makes no verification-state change for a wrapper carrying
+signature metadata; only native platform verification establishes authenticity.
+For unsigned wrappers, use the [owned transaction](#device-global-package-verification).
 
 For a source change, rebuild the package and obtain a new signature. For a
 certificate change, re-onboard using the existing package so the installer

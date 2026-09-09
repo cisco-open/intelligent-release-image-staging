@@ -199,6 +199,37 @@ for what makes a file eligible, and
 [Import skip reasons](reference.md#import-skip-reasons) for the reasons a file is
 listed greyed out instead.
 
+## Prepare instruction trust
+
+Before building device packages, provision exactly two distinct offline-root
+public keys through the [custody ceremony](operations.md#instruction-root-ceremony-and-recovery).
+Keep private roots with separate custodians/sites. Point package builders at the
+public `.pub` directory with `IRIS_INSTRUCTION_ROOTS_DIR` or
+`--instruction-roots-dir DIR`; use the current pinned amd64/arm64 aria2c inputs.
+Initialize server online certificate/keylist custody and producer authority
+before expecting a device instruction stamp. Build success with disposable
+roots is not production custody or signing evidence. Guest Shell can remain
+tracker-only when its runtime verifier is absent.
+
+## IOx verification prerequisite
+
+Before IOx onboarding, read `show app-hosting infra`: app-hosting verification
+is device-global. A signed wrapper is preferred and causes no verification-state
+change. The unsigned transaction durably records initial enabled state,
+disables only for installation, then restores with read-back before
+activation/start. Initial disabled stays disabled; unknown refuses mutation
+and installation. Interruption/resume and uninstall recovery honor owned
+obligations, never blindly enabling an operator-changed or unowned state.
+Check media/platform restrictions in [IOx verification](iox.md#device-global-package-verification).
+Unsigned proof packages do not establish successful live activation.
+
+A privileged device administrator can read the bootstrap enrollment bearer in
+IOx `run-opts` or XR `docker-run-opts`, plus IOx's SSH-to-self password. The
+bearer defaults to a 3,600-second TTL; complete the first authenticated refresh
+promptly (normal token overlap is 120 seconds). Instruction/LKG/signing/root
+private keys never belong in platform configuration. See the
+[security boundary](security.md#two-root-trust-and-custody).
+
 ## Prepare devices
 
 Create an inventory from the template:

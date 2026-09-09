@@ -26,6 +26,21 @@ server; it does not cluster the tracker, catalog, or seeder. Kubernetes uses
 the same division of work with Services and Secrets; see
 [Kubernetes](kubernetes.md).
 
+## Phase 1 instruction custody
+
+Both `GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` remain authenticated
+application traffic on device-to-server HTTPS 8443. There is no new listener,
+port, network path or firewall flow; 9443 remains Console-to-server
+management-only. Preserve the selected Compose project, env files and volumes.
+
+Only the server host holds `$IRIS_CONFIG/instr/signing-key.age`, the separate
+age identity, `$IRIS_RUN/instr/signing-key` runtime plaintext, and durable
+instruction state under `$IRIS_STATE`. The Console holds its management
+token/CA files and browser identity; never copy server data during relocation.
+The two offline-root public keys are public material; their private keys remain
+with separate offline custodians. See [layout validation](validation.md#phase-1-layout-validation).
+
 ## Addresses and prerequisites
 
 Use two amd64 Linux hosts with Docker Engine 23.0 or newer and Docker Compose

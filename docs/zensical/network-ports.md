@@ -47,7 +47,7 @@ run; the Console has no UI for it.
 
 | Destination port | Transport | Source -> destination | Protocol | Purpose |
 | --- | --- | --- | --- | --- |
-| 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, assignment, enrollment-token refresh, heartbeats, and reports. |
+| 8443 | TCP | Device agent -> catalog | HTTPS | Image policy, sealed instructions/keylist, assignment, enrollment-token refresh, heartbeats, and reports. |
 | 6969 | TCP | Device or server seeder -> tracker | Authenticated HTTPS | Private BitTorrent announces. IOx/XR use a bearer header; Guest Shell uses its personalized query credential inside TLS. All agents and the origin seeder pin the server certificate; neither credential form is logged. |
 | 6881 | TCP | Device -> server seeder | BitTorrent | Initial image pieces from the origin seeder. |
 | 6881-6999 | TCP | Device <-> device | BitTorrent | Peer-to-peer fetch and reseed traffic. Router NAT uses static TCP PAT for 6881. |
@@ -65,12 +65,13 @@ See
 [Telemetry variables](reference.md#telemetry-variables) for which variable does
 what.
 
-**No new port or network flow** is introduced by Phase 0 role and QoS policy.
-Role evaluation, announce cadence, and candidate selection use the existing
-tracker HTTPS flow on 6969. Origin QoS uses the server's existing loopback-only
-aria2 JSON-RPC connection. Role lifecycle, previews, explanations, and status
-use the existing Console-to-management flow on 9443. There is no device
-instruction endpoint in Phase 0; catalog traffic on 8443 is unchanged.
+Phase 1 adds **no new listener, port, network path or firewall flow**.
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` are new authenticated
+application traffic on the existing device-to-catalog HTTPS connection, TCP
+8443. TCP 9443 remains Console-to-server management-only and never serves device
+instructions. Tracker policy uses existing 6969; origin QoS uses loopback-only
+aria2 RPC. No Kubernetes Secret, Service or NetworkPolicy rule is added.
 
 The server management API reads its local telemetry state, so 9101 needs
 **external** reachability only for authenticated Prometheus scraping or

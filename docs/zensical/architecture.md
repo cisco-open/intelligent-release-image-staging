@@ -91,52 +91,59 @@ The server and Console divide the work as follows:
 | Telemetry service | Reads device reports stored by the catalog and combines them with tracker and seeder data for swarm views, metrics, and exports. |
 | Device agent | Downloads pieces, verifies the image, stages it to platform storage, and reports status. |
 
-## Phase 0 roles and traffic controls
+## Roles, encrypted instructions and traffic controls
 
-Phase 0 adds policy at the two server-owned BitTorrent control points. The
-tracker applies virtual role ACLs, server-side cadence, and server-side peer selection
-on every announce. It returns only mutually permitted candidates,
-caps the request by the role's effective `numwant`, and tells the client when
-to announce again. DHT, peer exchange, and local peer discovery remain disabled,
-so the tracker is the only source of new peer introductions.
+The tracker applies role ACLs, announce cadence and candidate ceilings before
+introducing mutually permitted peers. DHT, peer exchange and local discovery
+remain disabled. The origin reconciler applies global and per-image upload
+limits and its peer cap. These server controls remain authoritative; per-role
+origin shaping is not expressible in one shared torrent.
 
-The origin reconciler separately applies the global origin upload limit, the
-per-torrent origin upload limit, and the origin's per-torrent peer cap to
-`aria2c`. These controls are global or per image. Per-role origin shaping is not expressible
-in one shared torrent: aria2 exposes no origin-side rate limit
-for a particular remote role. A metered device downlink is protected only
-cooperatively. Device administrators remain able to alter their environment;
-any later device policy would be tamper-evident rather than tamper-proof.
-Phase 0 neither changes a device's live aria2 options nor installs a device-side
-traffic policy.
+Phase 1 adds a server stamper and device verifier to this path. The stamper
+signs immutable role intent and records per-device serials and policy revision.
+The catalog seals a per-device envelope and serves it, plus the root-signed
+keylist, through the existing authenticated HTTPS transport on TCP 8443.
+The agent verifies signature, MAC-before-decrypt, audience, expiry and the
+monotonic `(epoch, instr_serial)` floor before applying QoS/peer instructions;
+responses are capped at 256 KiB. It reasserts verified/default options on every
+mechanical tick and saves a device-key-encrypted LKG for catalog outages.
 
 ```mermaid
 flowchart LR
-    Fleet["Fleet declaration<br/>one role per device"] --> Compile["Compiled membership<br/>drift can differ"]
-    Policy["Revisioned peer policy<br/>roles + QoS intent"] --> Compile
-    Compile --> Tracker["Tracker<br/>ACL, cadence, candidate ceiling"]
-    Policy --> Origin["Origin reconciler<br/>global + per-torrent shaping"]
-    Tracker --> Device["Existing device aria2c"]
-    Origin --> Device
-    Recovery["Agent distribution<br/>enrollment + token refresh"] --> Device
+    Fleet["Fleet role declaration"] --> Policy["Revisioned role/QoS policy"]
+    Policy --> Tracker["Tracker :6969<br/>ACL, cadence, candidates"]
+    Policy --> Origin["Origin reconciler<br/>global/per-image rates"]
+    Policy --> Stamp["Management process<br/>stamper daemon thread"]
+    Roots["Two offline roots<br/>public trust only on server/device"] --> Stamp
+    Stamp --> Catalog["Catalog :8443<br/>per-device sealed envelope + keylist"]
+    Catalog --> Verify["Agent verification<br/>signature, MAC, audience, replay floor"]
+    Verify --> Local["Verified QoS/peers + local LKG"]
+    Tracker --> Aria["Device aria2c"]
+    Origin --> Aria
+    Local --> Aria
+    Recovery["Exempt agent artifacts<br/>enrollment + refresh"] --> Verify
 ```
 
-Role ACLs are compiled in memory from the revisioned policy document; they do
-not consume the 64 stored-ACL slots and are never serialized as ordinary ACLs.
-The Fleet declaration and compiled membership are coordinated but separate
-durable values, which is why partial writes can produce visible `role_drift`.
-The separate agent-distribution path in the diagram is exempt from role and
-QoS policy so a restricted device retains its recovery channel.
-The same behavior applies in the one-host Compose stack, separate Docker hosts,
-and Kubernetes. All state and enforcement stay on the server tier.
-There is no new service and no new listener, environment variable, Secret, Service,
-NetworkPolicy rule, or device flow for Phase 0.
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` are new authenticated
+application requests, with no new listener, port, network path or firewall
+flow. TCP 9443 remains Console-to-server management-only. The management
+process adds custody and stamper daemon threads; the entrypoint still
+supervises five processes, not another service/container.
 
-The boundary matters during an incident: a policy change stops **new** tracker
-pairings, but it does not close an existing BitTorrent connection or erase a
-peer address already retained by aria2. See [Role-policy operations and
-rollback](operations.md#role-policy-operations-and-rollback) for the immediate
-containment procedure.
+Role ACLs are compiled in memory and consume none of the 64 stored-ACL slots.
+Fleet declaration and compiled membership remain separate durable values;
+partial writes can produce `role_drift`. Agent distribution, enrollment and
+refresh remain exempt from role/QoS restrictions. Device admins can bypass a
+cooperative agent; see the [honest guarantee](security.md#device-administrator-trust-boundary)
+for signed IOx/XR images versus Guest Shell's replaceable trust files.
+
+Tracker policy changes and quarantine stop new peer selection but do not
+terminate an established device-to-device connection or erase retained peers.
+Use [image unassignment](operations.md#role-policy-operations-and-rollback)
+where immediate containment is required. Issue #153 mutual-origin union remains
+preflight-only, pending one full tagged-release dwell and a separately
+authorized activation release with lab/live validation.
 
 IOx and IOS-XR appmgr use the same multi-architecture device image and the
 same entrypoint. `IRIS_DEVICE_PLATFORM=iox` or `xr-appmgr` selects the storage

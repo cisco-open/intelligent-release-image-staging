@@ -157,7 +157,7 @@ membership, and device QoS. Device retirement clears peer quarantine along with
 the ordinary ACL, role membership, and device QoS. Peer quarantine controls
 device peer discovery and is separate from catalog image quarantine.
 
-Phase 0 changes tracker discovery on the next announce and does not sever a
+Tracker policy changes discovery on the next announce and does not sever a
 live connection or erase aria2's retained peer list. If isolation cannot wait
 for connections to age naturally, unassign every image from the affected
 device; its current agent removes the torrents on the next tick. This remains a
@@ -184,6 +184,231 @@ version, verify the retained quarantine intent, repair any `role_drift`, verify
 the policy and origin-QoS status, and deliberately release each quarantine. Do
 not delete `peer-policy.json` or its LKG to silence a warning: doing so loses
 role, ACL, and quarantine intent.
+
+## Instruction-root ceremony and recovery
+
+These procedures describe operator actions; they are not a record of a
+production ceremony or release. Use the selected deployment's server shell
+(`docker compose -f server/docker-compose.yml exec iris sh`, the split-host
+server equivalent, or `kubectl -n iris exec -it deployment/iris-seed-server -c
+iris -- sh`). Its existing `IRIS_CONFIG`, `IRIS_STATE`, `IRIS_RUN` and age
+identity must stay with that deployment. Offline-root private material never
+enters this shell, the server, installer arguments or device platform config.
+
+Exactly two distinct public roots belong in `$IRIS_CONFIG/instr/roots.d/`, with
+private material held by separate custodians at separate sites. The optional
+encrypted online key is `$IRIS_CONFIG/instr/signing-key.age`; runtime plaintext
+is `$IRIS_RUN/instr/signing-key`. Keep the [durable state inventory](server.md#instruction-state-and-processes)
+with its deployment: epochs, serial history, admission/activation records,
+role artifacts and keylist authority must not be restored backwards.
+
+### Quarterly two-root ceremony
+
+1. Have both custodians verify separate custody/sites and compare public
+   fingerprints with the approved inventory (`ssh-keygen -lf root-a.pub` and
+   `ssh-keygen -lf root-b.pub`, on public copies). Record identities,
+   fingerprints, times and outcomes; never record private keys or bearer values.
+2. In the server shell, inspect `iris-instructions --status` and export only
+   the online public half to a controlled exchange directory. Create that
+   directory before these commands:
+
+   ```bash
+   install -d -m 0700 "$IRIS_RUN/ceremony"
+   iris-instructions --export-public "$IRIS_RUN/ceremony/signing-key.pub"
+   iris-instructions --status
+   ```
+
+   On the first setup only, generate the server's online key with
+   `iris-instructions --generate-online-key` before exporting it. This uses the
+   configured age recipients and keeps the plaintext in the runtime directory.
+3. Take the public key to one offline custodian. Issue a 30-day certificate
+   for exactly the `iris-server` principal. The private-key path below exists
+   only on that offline station; use its normal passphrase prompt:
+
+   ```bash
+   ssh-keygen -s /offline/root-a -I iris-online -n iris-server \
+     -V +0s:+30d signing-key.pub
+   ```
+
+   Return only `signing-key-cert.pub` to the server exchange directory and
+   validate/import it:
+
+   ```bash
+   iris-instructions --import-certificate "$IRIS_RUN/ceremony/signing-key-cert.pub"
+   ```
+
+   Renew at half of the 30-day lifetime; signing refuses with seven days or
+   less remaining. An instruction stamp lasts at most seven days. Renewal is
+   therefore a scheduled action, not something to defer to certificate expiry.
+4. Re-sign the current approved KRL with a strictly increasing keylist sequence.
+   Retain all intended revocations. Set `IRIS_CEREMONY_SEQ` to the next reviewed
+   sequence and `IRIS_CEREMONY_ROOT_ID` to the configured public-root ID (for
+   example `root-a`); neither is a secret. In the server shell:
+
+   ```bash
+   iris-instructions --keylist-request "$IRIS_RUN/ceremony/revocations.krl" \
+     --keylist-seq "$IRIS_CEREMONY_SEQ" --root-id "$IRIS_CEREMONY_ROOT_ID" \
+     --output "$IRIS_RUN/ceremony/keylist.payload"
+   ```
+
+   Move only that public payload offline. Sign its exact bytes there:
+
+   ```bash
+   ssh-keygen -Y sign -f /offline/root-a -n iris-keylist-v1 keylist.payload
+   ```
+
+   Return only `keylist.payload.sig`; in the server shell assemble and install
+   it against the unchanged request:
+
+   ```bash
+   iris-instructions --assemble-keylist "$IRIS_RUN/ceremony/keylist.payload.sig" \
+     --payload "$IRIS_RUN/ceremony/keylist.payload" \
+     --output "$IRIS_RUN/ceremony/keylist.envelope"
+   iris-instructions --install-keylist "$IRIS_RUN/ceremony/keylist.envelope"
+   iris-instructions --status
+   ```
+
+   Repeat with the other custodian/root and the next sequence so both roots
+   are independently attested. The CLI accepts no root private-key input and
+   independently verifies the claimed root. An identical artifact retry can
+   repair interrupted metadata publication; do not change bytes at the same
+   sequence. Re-signing is due at 90 days, warning at 100, critical at 135;
+   both roots must have attestations within 180 days for healthy quorum.
+5. Check the Console custody panel and `iris_instruction_*` metrics against
+   the recorded certificate/keylist windows. `enabled: false` is not enabled,
+   null/unknown is unavailable, and degraded quorum needs custody investigation.
+   Verify a current stamp and authorized device receipt separately; never
+   call command success live-device validation. Preserve public ceremony
+   evidence and dispose of exchange copies according to local custody policy.
+
+### One-root loss
+
+1. Preserve the two public-root files and existing device trust bytes. Identify
+   the surviving offline custodian; do not delete the lost root's public key
+   from provisioned trust merely because its private copy is unavailable.
+2. Use the quarterly export/issue/import procedure with the surviving root for
+   the next online certificate and keylist. No device trust change is required
+   for this failover, so loss of one private root is invisible to provisioned
+   devices until custody evidence ages.
+3. Record quorum as degraded operationally until the replacement-root plan and
+   next signed device release are complete. The automated 180-day attestation
+   metric can remain healthy temporarily; it cannot detect physical key loss.
+   A replacement changes trust bytes and must propagate through every package
+   and affected device. Never substitute disposable proof roots.
+
+### Both-roots-lost break glass
+
+1. Preserve public/state evidence, declare the custody outage and retain server
+   tracker/origin enforcement. Devices use usable LKG, then the documented
+   stale behavior. Do not weaken signature, audience or replay verification.
+2. At two separate offline sites, create two new independent roots with normal
+   passphrase protection (`ssh-keygen -t ed25519 -f /offline/root-a`, and the
+   corresponding root-b command at its site). Record their public fingerprints.
+   Complete recovery requires a reviewed maintenance procedure that reconciles
+   root configuration, existing keylist/revocation state and sequence before
+   provisioning the new online certificate/keylist. The current CLI cannot
+   migrate an installed keylist to two wholly new roots: certificate import
+   and keylist install first verify the old keylist under the configured roots.
+   Simply replacing `roots.d/` and rerunning those commands will fail. This is
+   an intentional break-glass boundary: no code path claims recovery. Preserve
+   existing revocations and evidence; do not delete state to bypass it. The
+   remaining steps require the reviewed maintenance recovery first.
+3. Build fresh Guest Shell bundles, unified OCI, both IOx tars and XR RPM with
+   the new public roots and the current pinned aria2c binaries. Typical build
+   entry points are `tools/make-agent-bundle.sh --instruction-roots-dir DIR`,
+   `IRIS_INSTRUCTION_ROOTS_DIR=DIR tools/provision-iox-packages.sh`, and
+   `tools/build-xr-package.sh --instruction-roots-dir DIR --out artifacts/`.
+   Build the ARM Guest Shell variant with `--arch arm64 --aria2 PATH` too.
+   Supply the canonical binaries for both architectures, inspect trust/source
+   byte identity and wrapper provenance, and obtain native signatures before
+   claiming signed-image trust. No staged IOS image is installed or activated.
+4. Re-onboard every device with the new trust material. A disconnected device
+   uses [F3 bootstrap-envelope redelivery](#f3-offline-bootstrap-envelope-redelivery)
+   after the fresh agent/trust package arrives. Verify the accepted identity
+   and custody state on each device; publishing packages alone is not fleet
+   recovery. An intentional server authority recovery uses
+   `iris-instr-key recover`, which advances the epoch; fresh activation uses
+   `iris-instr-key initialize`. Do not delete local replay floors to force
+   acceptance or report the fleet recovered while devices remain on old roots.
+
+### Instruction failure and key response
+
+Instruction-body fetch/verification failures affect the instruction step only; heartbeat/staging
+continue when usable LKG or defaults can be applied. If aria2 RPC policy apply
+fails, the heartbeat is still sent but staging is skipped for that tick. Repair
+the RPC failure before claiming staging progress. An unreadable assignment
+policy also skips staging reconciliation; heartbeat and existing aria2
+transfers continue. The [failure table](device-agents.md#instruction-failures-and-recovery)
+covers expiry, allow-list/deny-list asymmetry, bad audience/signature/MAC,
+rollback/floor reset, missing verifier, rejected LKG, 256 KiB oversize,
+pointer/body races, one-shot refresh and later-tick retries.
+
+For a leaked instruction key on an otherwise honest device:
+
+```bash
+iris-instr-key rotate --no-overlap <device_id>
+```
+
+A committed rotation can report incomplete restamping. After fixing producer
+state, run `iris-instr-key restamp <device_id>`; do not repeatedly rotate.
+For retirement or compromise, use `iris-revoke <device_id>` instead. Durable
+revocation wins over an agent-reported LKG and must not be avoided by rotation.
+
+## F3 offline bootstrap-envelope redelivery
+
+F3 transports a ciphertext bootstrap envelope for one device; it is not a
+secret key, an OS image, or a bypass of signature/audience/replay checks. In the
+server shell, materialize it to a controlled private destination:
+
+```bash
+iris-instruction-bootstrap <device_id> --output "$IRIS_RUN/ceremony/bootstrap.envelope"
+```
+
+The output is mode 0600 and bounded; the CLI prints no envelope or key bytes.
+Transfer it through the authorized platform installer/controller. Guest Shell
+installer generation (`tools/gen-device-installers.sh`) stages a short-lived
+capability-bound envelope and the installer places
+`iris-instructions.bootstrap`; IOx uses its owned application-data delivery;
+XR snapshots `IRIS_INSTRUCTION_BOOTSTRAP_FILE` and copies the ciphertext to
+`harddisk:iris-instructions.bootstrap`. Preserve exact bytes and device identity,
+never place a key in activation configuration. Disconnected here means the
+normal instruction body needs redelivery: fresh authenticated refresh/time and
+usable verification trust are still required before the agent can accept it.
+A new-root recovery first needs the new agent/trust package.
+
+On the next ordinary tick, authenticated refresh self-heals current/prior key
+availability and the agent consumes the verified envelope transactionally.
+Retryable delivery/durability failures retain it; rejected evidence never
+replaces working LKG. Observe accepted identity/state after the tick and follow
+the failure table if the device remains pending or unavailable.
+
+## Guest Shell fleet bundle drop
+
+Treat a Phase 1 Guest Shell agent update as a fleet operation. Build each
+required architecture with `tools/make-agent-bundle.sh --arch amd64|arm64
+--aria2 PATH --instruction-roots-dir DIR --out OUTPUT`, using the canonical
+binary and exactly two approved public roots. Record archive/sidecar hashes
+and source provenance. The adjacent 64-hex SHA-256 sidecar is digest evidence,
+not a detached signature.
+
+Publish the bundle and sidecar together on the existing artifact server, with
+coordinated installer/bootstrap evidence for both public-root files. Deliver
+sidecar before archive and observe bootstrap's outcome: missing, malformed or
+mismatched evidence, unsafe members or incomplete writes must refuse the new
+bundle and preserve the prior runnable bundle. Never remove the prior runnable
+agent to force a refused update through. Check the next tick's
+`instr_protocol`, accepted identity and instruction state, including
+tracker-only fallback where Guest Shell lacks `ssh-keygen -Y verify`.
+Roll back by restoring the reviewed prior bundle/evidence as one set; do not
+rewind replay state or substitute trust roots. This changes the agent only;
+it never installs or activates the staged IOS image.
+
+IOx recovery differs: its device-global verification controller records and
+restores only an owned initial enabled state, with read-back before
+activation/start; initial disabled stays disabled, unknown refuses, and a
+signed wrapper causes no state change. Interruption/resume and uninstall
+recovery never blindly enables operator-changed or unowned state. See
+[IOx verification](iox.md#device-global-package-verification).
 
 ## Peer-policy operations and their backlog
 
@@ -231,7 +456,7 @@ operation_backlog_full`. See [Peer policy](reference.md#peer-policy).
 
 ### Tracker cadence, selection, and origin QoS
 
-Issue #158 is active in Phase 0. On every authenticated announce, the tracker
+On every authenticated announce, the tracker
 loads the current compiled policy and resolves the parsed state before applying
 exactly one bounded ±10% jitter within 10–300 seconds. Exact `left == 0`
 selects seeder; positive, omitted, malformed, and negative values select
@@ -270,8 +495,9 @@ also cut off the permitted principal.
 
 Keep #153 open until one full release of preflight observation has completed.
 Only a later reviewed activation may union the current self-evaluation set with
-mutual-origin evaluation for every ACL, including hand-written ACLs. This Phase
-0 runbook neither starts that release window nor activates the union.
+mutual-origin evaluation for every ACL, including hand-written ACLs. This
+runbook neither starts the tagged-release dwell nor authorizes an activation
+release or lab/live validation of the union.
 
 ## Endpoint writes that fail
 
@@ -507,7 +733,18 @@ On Catalyst 9300 IOx devices the final agent-to-IOS transfer uses the bind-mount
 
 ### How many torrents are served at once
 
-Both the origin seeder and every device agent raise aria2's concurrency limit well above any realistic catalog, because a *seeding* torrent never finishes and so would otherwise hold one of aria2's five default slots forever. Left at the default, the sixth published image is never served at all and any device assigned it reports staging indefinitely — aria2 treats a held-back torrent as waiting rather than as an error, so nothing is logged. Override with `SEED_MAX_CONCURRENT` (origin, default 1000) or `IRIS_MAX_CONCURRENT` / `MAX_CONCURRENT` (devices, default 100). These are not throughput controls: bandwidth is governed by peer limits and transfer policy, and lowering these only starves images.
+A seeding torrent holds an aria2 concurrency slot indefinitely. The origin's
+`SEED_MAX_CONCURRENT` defaults to 1000; device verified/default
+`max_concurrent` defaults to 100. Configure device concurrency through signed
+QoS intent, not launcher variables. Legacy `IRIS_MAX_CONCURRENT` and
+`IRIS_MAX_PEERS` are provisional until the first successful tick, with restored
+downloads held until verified/default options are written. Parsed legacy
+`max_peers` is ignored and produces the value-free `MAX-PEERS-IGNORED` notice
+once. `IRIS_TICK_SECONDS` controls the mechanical interval/floor; signed
+`catalog_tick_s` controls logical catalog/staging cadence. Every mechanical
+tick reasserts QoS and sends a heartbeat; all future `addTorrent` calls use
+verified/default policy. A low concurrency cap can leave assigned images
+waiting even when bandwidth remains available.
 
 `iris_seeder_queued_torrents` is the signal to watch. Any non-zero value means the origin is holding back a published image; alert on it.
 
@@ -724,8 +961,12 @@ provenance evidence is missing or invalid, then rechecks. It will not rebuild
 packages to paper over a served-versus-distributed certificate failure.
 
 Package rebuilds remain mandatory after a shared agent or device-image source
-change. Rebuild the server to refresh its Guest Shell bundle, then build both
-IOx wrappers and the XR wrapper with their adjacent provenance manifests:
+change. Before rebuilding, set `IRIS_INSTRUCTION_ROOTS_DIR` to the approved
+two-public-root directory and `ARIA2C_BIN_AMD64` / `ARIA2C_BIN_ARM64` to the
+current checksum-pinned binaries if fallback artifacts are older. Root private
+keys never enter build inputs. Rebuild the server to refresh its Guest Shell
+bundle, then build both IOx wrappers and the XR wrapper with their adjacent
+provenance manifests:
 
 ```bash
 docker compose -f server/docker-compose.yml up -d --build
@@ -739,7 +980,8 @@ changed without a `VERSION` change. To retain that archive, set
 `IRIS_DEVICE_IMAGE_OCI` to a new path for both wrapper commands instead. Both
 families must package the same canonical build.
 
-For a manual Guest Shell bundle build, the no-argument command still verifies
+For a manual Guest Shell bundle build with the approved public-root directory
+configured, the no-argument command still verifies
 `bin/aria2c` against the x86_64 pin and writes `artifacts/iris-agent.tgz`.
 Produce the ARM bundle from an explicitly selected aarch64 binary:
 

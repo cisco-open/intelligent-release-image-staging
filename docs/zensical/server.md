@@ -171,7 +171,7 @@ for every subsequent Compose command.
 | Path | Role |
 | --- | --- |
 | `/var/lib/iris` | Catalog state, policies, torrent metadata, the peer ledger, peer endpoints, and deployment records. |
-| `/etc/iris` | The age-encrypted secret store and generated TLS material, **plus two plaintext files**: the console certificate override `tls/gui-crt.pem` (its private key is the age-encrypted `tls/gui-key.pem.age`) and the append-only audit trail `audit.jsonl`. |
+| `/etc/iris` | The age-encrypted secret store and generated TLS material, **plus plaintext public material and audit data**: the console certificate override `tls/gui-crt.pem` (its private key is the age-encrypted `tls/gui-key.pem.age`) and the append-only audit trail `audit.jsonl`. |
 | `/run/iris` | Plaintext runtime secrets on tmpfs. |
 | `/var/lib/iris-images` | Uploads volume (`IRIS_IMAGES_DIR`); images the Console received over its authenticated HTTPS API. |
 | `/opt/images` | Read-only import root (`IMAGES_ROOT`), the host `IRIS_IMAGE_ROOT` tree mounted `:ro`. |
@@ -211,6 +211,32 @@ Docker Compose uses separate named volumes for state, encrypted config, GUI
 image uploads, the narrow tier credential, and its public management CA. The
 Kubernetes alpha maps all durable server paths into one ReadWriteOnce PVC under
 `/data` and keeps `/run/iris` memory-backed; the Console mounts no PVC.
+
+## Instruction state and processes
+
+Phase 1 adds custody and stamper daemon threads inside the management process.
+`server/docker-entrypoint.sh` still supervises five processes; this is not a
+sixth service or container. New authenticated application paths
+`GET /v1/devices/{device_id}/instructions` and
+`GET /v1/devices/{device_id}/instruction-keylist` share TCP 8443. There is no
+new listener, port, network path or firewall flow; TCP 9443 is management-only.
+
+`InstructionPaths` and `StamperPaths` define the following exact locations:
+
+| Base | Files / directories |
+| --- | --- |
+| `$IRIS_CONFIG/instr/` | Optional `signing-key.age` (encrypted online private key), `signing-key.pub`, `signing-key-cert.pub`, `roots.d/` (public roots only) |
+| `$IRIS_RUN/instr/` | `signing-key` (runtime plaintext only), `signing-key-cert.pub` (runtime certificate cache) |
+| `$IRIS_STATE/` | `instructions-epoch.json`, `instructions-epoch.json.lock`, `instruction-key-status.json`, `instruction-stamper-status.json` |
+| `$IRIS_STATE/instructions/` | `keylist.current`, `keylist-state.json`, `keylist.lock`, `roles.d/`, `role-state.json`, `activation.json`, `producer.lock`, `admitted-devices.json`, `serial-history.json`, `roles.lock` |
+
+Keep the encrypted signing key, age identity, runtime plaintext and durable
+instruction state on the server host. Public roots are not secret. Back up
+config and state consistently while keeping the age identity separate; never
+restore serial history backwards or copy these stores to the Console. Use
+[producer recovery and custody runbooks](operations.md#instruction-root-ceremony-and-recovery)
+for an intentional recovery epoch. A green certificate-freshness check does
+not waive rebuilding all device packages after shared-agent changes.
 
 ## Publishing images
 

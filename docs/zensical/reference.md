@@ -117,7 +117,7 @@ Console has its own [deployment variables](docker-hosts.md#deployment-settings).
 | `IRIS_HEALTH_LISTENERS` | `tracker:6969,catalog:8443,artifacts:8000,management:9443` | What the server tier's `:9101/readyz` TCP-probes, as `name:port,name:port`. Console readiness is local to its own `/readyz`; the server does not depend on it. Blank keeps the default set; the literal `off` checks nothing, for a deployment that runs a subset of the services and does not want the missing ones reported down. |
 | `IRIS_AUDIT_RETENTION_DAYS` | `90` days | Audit entries older than this are dropped by timestamp on the next amortized prune. A non-integer or non-positive value falls back to the default. |
 | `IRIS_AUDIT_MAX_EVENTS` | `50000` | Hard cap on surviving audit entries. A prune above the cap evicts the **oldest by file position** (append order), so a forged far-future timestamp cannot shield an entry and a wrong clock cannot mass-delete fresh ones. A non-integer or non-positive value falls back to the default. Raise both of these if you have a longer retention obligation — the trail is append-only JSONL and prunes itself. |
-| `SEED_MAX_CONCURRENT` | `1000` | `--max-concurrent-downloads` for the origin seeder's aria2c. See [Operations](operations.md#scaling-notes) for when this matters; the device-side equivalent is `IRIS_MAX_CONCURRENT` in the container agents. |
+| `SEED_MAX_CONCURRENT` | `1000` | `--max-concurrent-downloads` for the origin seeder's aria2c. See [Operations](operations.md#scaling-notes) for when this matters; device concurrency is signed/default `max_concurrent`; legacy launcher inputs have no enduring policy authority. |
 | `IRIS_SSH_LEGACY` | `0` | `1` re-enables SHA-1 KEX, `ssh-rsa` and CBC ciphers for server-side device sessions, for IOS-XE images that offer no modern alternative. |
 | `IRIS_SSH_HOST_KEY` | unset | Pin one device/stage-host public host key (`<type> <base64>`) for strict verification. See [Security](security.md#device-ssh-host-keys). |
 | `IRIS_SSH_KNOWN_HOSTS` | unset | Path to a `known_hosts` file to verify strictly against. With neither this nor `IRIS_SSH_HOST_KEY` set, host keys are recorded on first contact into a persistent `known_hosts` under `$IRIS_STATE/ssh` and must match afterwards; `/dev/null` is never used. |
@@ -461,14 +461,14 @@ commit makes it stale.
 
 | Route | Body / result |
 | --- | --- |
-| `GET /api/v1/peer-policy` | Count-only policy view and ETag. It includes role definition/restriction/member counts, at most ten drift IDs with a truncation flag, outbox occupancy, tracker enforcement, future mutual-origin preflight count, origin-QoS apply counts, and a fleet rollup whose current state is `pre-instructions`. No peer address or raw deny list crosses this boundary. `roles_supported` is the binary capability; `roles_present` records that role state has existed. |
+| `GET /api/v1/peer-policy` | Count-only policy view and ETag. It includes role definition/restriction/member counts, at most ten drift IDs with a truncation flag, outbox occupancy, tracker enforcement, future mutual-origin preflight count, origin-QoS apply counts, and a fleet rollup by accepted policy revision and canonical instruction display state, plus nullable observation/custody status. No peer address or raw deny list crosses this boundary. `roles_supported` is the binary capability; `roles_present` records that role state has existed. |
 | `GET /api/v1/peer-policy/roles` | Full sorted role definitions and the current revision/ETag. Definitions contain policy values, never membership IDs. |
 | `PUT /api/v1/peer-policy/roles/<name>` | Create or replace a definition. Body fields are `restricted`, `peers`, `origin`, `nets`, `on_stale`, `qos`, optional `qos_state`, plus `confirm_token` on apply. Preview with `?dry_run=1`. A full role-definition replacement must include `qos_state` to retain the stored state object. |
 | `DELETE /api/v1/peer-policy/roles/<name>` | Delete an unused role after preview/confirmation. The preview returns 200 JSON with candidate revision/ETag; the committed DELETE returns 204 with an empty body and the committed ETag. A role with members or another role referring to it returns `role_in_use` with counts/names. |
 | `PUT /api/v1/peer-policy/qos` | Replace global QoS keys with `{"qos": {...}}`, or one role's QoS with `{"role": "<name>", "qos": {...}}`; the optional `qos_state` object selects the seeder/leecher tracker layers at the same scope. Omitted `qos_state` preserves its stored object. Explicit `qos_state: {}` removes only the selected state layer and preserves scalar QoS. At least one of `qos` or `qos_state` is required; preview and confirmation rules apply. |
 | `POST /api/v1/devices/<id>/role` | `{"role": "<name>"}` sets membership; `{"role": null}` clears it. The fleet declaration and compiled membership are coordinated and the response reports partial failure/drift. |
 | `POST /api/v1/devices/bulk-role` | `{"device_ids": [...], "role": "<name-or-null>"}` applies one membership change as one policy revision and one outbox entry, with `applied`, `failed`, `partial`, and drift detail. The request cap is the supported fleet size and the split Console accepts the 2 MiB bulk body. |
-| `GET /api/v1/devices/<id>/effective-qos` | Without a query, the legacy scalar `qos` object remains byte-compatible. With exactly one `tracker_state=seeder|leecher`, the response retains scalar `qos` and adds paired `tracker_state`/`tracker_qos` values and sources; invalid, blank, duplicate, or unknown query input returns `422 invalid_policy_request` after an unknown device returns 404. `delivery_state: pre-instructions` means configured intent/provenance; Phase 0 has not delivered it to the device. |
+| `GET /api/v1/devices/<id>/effective-qos` | Without a query, the legacy scalar `qos` object remains byte-compatible. With exactly one `tracker_state=seeder|leecher`, the response retains scalar `qos` and adds paired `tracker_state`/`tracker_qos` values and sources; invalid, blank, duplicate, or unknown query input returns `422 invalid_policy_request` after an unknown device returns 404. `delivery_state: pre-instructions` is a deprecated legacy Phase 0 sentinel, not a current delivery observation. The required `instruction` object uses the same canonical bounded projection as `/api/v1/devices`, including unavailable/invalid evidence; `/api/v1/peer-policy` supplies fleet rollups. |
 | `GET /api/v1/peer-policy/explain?a=&b=` | Resolve each argument as a device id, `device:<id>`, or `service:seeder`; require one fresh, unambiguous attributed address per side; then return both directional decisions, matched sequences, effective ACL/source, role/shadow facts, `mutual`, revision, and ETag. Returns 422 rather than guessing when identity or address attribution is ambiguous. |
 | `PUT /api/v1/peer-policy/quarantine/<device_id>` | Quarantines or releases one device. The body must be **exactly** `{"quarantined": <bool>, "if_revision": <int ≥ 1>}` — no other keys, no other types. `if_revision` is the revision you read from `GET /api/v1/peer-policy`, and the write commits only if the policy is still at that revision. 200 `{ok: true, revision, quarantined}` on success. |
 
@@ -504,7 +504,7 @@ definition has these fields:
 | `peers` | the role itself; at most 64 | Permitted role names. The list must contain itself. Links between two restricted roles must be symmetric; lifecycle writes normalize reciprocal links. |
 | `origin` | `true` | Whether the tracker may introduce `service:seeder` to this restricted role. Issue #153 origin-side mutual blocking remains preflight-only. |
 | `nets` | empty IPv4 list | Optional, validated subnet hints for role management. They do not classify tracker announces or install a network ACL. |
-| `on_stale` | `keep` for restricted roles, `defaults` otherwise | Future device-instruction stale behavior. It has no device-side effect in Phase 0. |
+| `on_stale` | `keep` for restricted roles, `defaults` otherwise | Instruction-expiry fallback: retain verified QoS with `keep`, or restore defaults. Peer allow-list expiry independently falls back to tracker-only. |
 | `qos` | empty | Overrides the global scalar layer for keys allowed at role scope. |
 | `qos_state` | omitted | Closed `seeder`/`leecher` tracker cadence and `numwant` overlays for this role; tracker-only and API-configured. |
 
@@ -542,28 +542,29 @@ nonzero rate must be at least 8,192 B/s. Scalar QoS retains its existing
 compilation precedence. The exact tracker-state precedence is builtin →
 `roles.qos_default` → `roles.qos_state_default.<state>` →
 `roles.defs.<role>.qos` → `roles.defs.<role>.qos_state.<state>`; a partial state
-map overrides only its supplied key. Phase 0 exposes the device layer for
-compilation/explanation but has no public device-QoS mutation and no device
-delivery. Only tracker cadence/selection and the three origin controls in this
-table are actively applied in Phase 0.
+map overrides only its supplied key. Phase 1 delivers verified device QoS and
+logical cadence through encrypted instructions; there is still no public
+device-QoS mutation. Tracker-state overlays stay on the tracker and never enter
+the device envelope. Server tracker/origin controls remain independent of
+device cooperation.
 
-| Key | Default | Range | Allowed scope | Phase 0 behavior |
+| Key | Default | Range | Allowed scope | Current behavior |
 | --- | ---: | ---: | --- | --- |
-| `max_peers` | 10 | 1–1,000 | global, role, device | `pre-instructions`; the device launcher's existing value remains authoritative. |
+| `max_peers` | 10 | 1–1,000 | global, role, device | Verified/default hard per-torrent peer cap, including pending outbound peers. |
 | `per_peer_bps` | 12,500,000 | 0–10,000,000,000 | global, role, device | A modelling input only. The builtin does not create a cap; when explicitly set it derives absent per-torrent rates as `per_peer_bps × fanout`. |
-| `fanout` | 1 | 1–1,000 and no greater than `max_peers` | global, role, device | Modelling input for the derived per-torrent rates; `pre-instructions`. |
-| `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
-| `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
-| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Unlimited by default; `pre-instructions`. |
-| `max_concurrent` | 100 | 1–1,000 | global, role, device | `pre-instructions`. |
-| `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | `pre-instructions`. |
+| `fanout` | 1 | 1–1,000 and no greater than `max_peers` | global, role, device | Modelling input for derived per-torrent rates. |
+| `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `overall_up_bps`, `overall_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
+| `max_concurrent` | 100 | 1–1,000 | global, role, device | Applied from verified/default device policy. |
+| `request_peer_speed_limit_bps` | 51,200 | 0 or 8,192–1,000,000,000 | global, role | Applied from verified/default device policy. |
 | `announce_min_interval_s` | 30 s | 10–300 s | global, role, state overlay | Tracker resolves state before applying exactly one bounded ±10% jitter and returns the issued value as both `interval` and `min interval`; a peerless leecher in the pinned client still has a 120 s floor. |
 | `numwant` | 50 | 4–200 | global, role, state overlay | Tracker ceiling after selected-state resolution and before selection. The pinned client requests at most 50; an explicit client `numwant=0` receives no peers. |
-| `handout_budget` | 0 (off) | 0–1,000 | global, role | Accepted policy input for a later phase; no handout-budget accounting is active in Phase 0. |
-| `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | `pre-instructions`; the existing launcher cadence remains unchanged. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
-| `telemetry_every_ticks` | 1 | 1–60 | global, role, device | `pre-instructions`. |
-| `telemetry_pause` | `false` | boolean | global, role, device | `pre-instructions`. |
-| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Future instruction fallback only. |
+| `handout_budget` | 0 (off) | 0–1,000 | global, role | Accepted policy input for a later phase; handout-budget accounting is not active. |
+| `catalog_tick_s` | 60 s | 60–900 s, multiple of 60 | global, role, device | Signed logical catalog/staging cadence; mechanical tick timing remains separate. For a restricted device, the effective value may not exceed effective `endpoint_ttl()/3`; the endpoint TTL defaults to 900 s but is configurable. |
+| `telemetry_every_ticks` | 1 | 1–60 | global, role, device | Applied from verified/default device policy. |
+| `telemetry_pause` | `false` | boolean | global, role, device | Applied from verified/default device policy. |
+| `on_stale` | `defaults` | `keep` or `defaults` | global or role definition | Verified instruction-expiry fallback. |
 | `origin_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active origin-wide upload limit; unlimited by default. |
 | `origin_per_torrent_up_bps` | 0 | 0 or 8,192–10,000,000,000 | global only | Active per-image origin upload limit; unlimited by default. |
 | `origin_max_peers` | 55 | 1–1,000 | global only | Active origin per-torrent peer cap. |
@@ -593,14 +594,14 @@ outside any catalog or telemetry pause gate.
 
 Zero is unlimited, so no rate key expresses **never upload**. Use assignment
 and peer-access policy to avoid creating an upload path, while accounting for
-connections aria2 already retained. Phase 0 does not enforce a device upload
-rate.
+connections aria2 already retained. Device upload rates are reasserted from
+verified/default policy, but a privileged device administrator can bypass them.
 
 Per-role origin shaping is not expressible with aria2's global/per-download
 controls. The origin can shape all traffic or one image and the tracker can
 withhold the origin from a restricted role, but the origin cannot rate-limit
-one role within a shared swarm. Device downlink limits in Phase 0 are
-cooperative/modelled only.
+one role within a shared swarm. Verified device downlink limits remain
+cooperative under the privileged-administrator boundary.
 
 Refusals on role/QoS writes use Problem Details. Important codes are:
 
@@ -754,7 +755,8 @@ Every route requires `Authorization: Bearer <token>`; a missing or invalid
 bearer answers a Problem Details 401 before any route is matched. Authorization
 is narrower than successful authentication:
 
-* **Identity-bound** (`heartbeat`, `telemetry`, `policy`, `token-refresh`): the
+* **Identity-bound** (`heartbeat`, `telemetry`, `policy`, `instructions`,
+  `instruction-keylist`, `token-refresh`): the
   token must resolve to that path's own `<device_id>` under `catalog_token` —
   or, on `token-refresh` only, the immediately preceding
   `catalog_token_prev`, so a device that never saw the response to its own
@@ -773,9 +775,11 @@ is narrower than successful authentication:
 | `GET /v1/images/<id>` | Assignment-bound | Device-facing view of one approved image; an unassigned and nonexistent id both return 404. |
 | `GET /v1/torrents/<id>` (also accepts `<id>.torrent`) | Assignment-bound | An IOx/XR request advertises `X-IRIS-Tracker-Auth: bearer` and receives a torrent with a token-free tracker URL; its agent supplies the separately rotated announce bearer as an aria2 per-download header. A request without that opt-in receives query-token personalization used by Guest Shell bundles. Both forms carry `Cache-Control: private, no-store` and `Vary: Authorization, X-IRIS-Tracker-Auth`. 404 means the id is not approved or no torrent exists; 503 means the identity-compatibility gate is closed; missing announce material or personalization failure is a redacted 500. There is no cross-device or shared-token fallback. |
 | `GET /v1/devices/<id>/policy` | Identity-bound | The device's own policy view — see [Policy schema](#policy-schema). |
+| `GET /v1/devices/{device_id}/instructions` | Current catalog bearer, identity-bound | Bounded sealed per-device envelope, maximum 256 KiB; strong ETag/304 on unchanged bytes. 404 missing stamp/artifact, 409 `stale_pointer`, 429 rate limit, 503 unavailable state. |
+| `GET /v1/devices/{device_id}/instruction-keylist` | Current catalog bearer, identity-bound | Root-signed keylist/KRL, maximum 128 KiB; ETag/304. 404 missing, 503 unavailable. |
 | `POST /v1/devices/<id>/heartbeat` | Identity-bound | Body: the device's heartbeat JSON — see [Keyed per-device state](#keyed-per-device-state). 200 `{ok: true, stream_every, stream_pause, report_requested?, report_request_id?}`. |
 | `POST /v1/devices/<id>/telemetry` | Identity-bound | Body: the device telemetry report. Malformed input is a Problem Details 400; a report naming an image outside the device's currently approved set is invalid. 200 `{ok: true}`. |
-| `POST /v1/devices/<id>/token-refresh` | Identity-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response cannot strand the device. Errors use Problem Details; 200 returns `{catalog_token, expires_at, announce_token?, rpc_secret?}` — the last two appear only when the device actually has one, never as an empty string that would overwrite the agent's working value. |
+| `POST /v1/devices/<id>/token-refresh` | Identity-bound (current **or** previous token) | Rotates `catalog_token`. A request presenting the just-rotated previous token replays the same successor rather than rotating again, so a lost response cannot strand the device. Errors use Problem Details; 200 returns `{catalog_token, expires_at, instr_key, instr_key_prev?, announce_token?, rpc_secret?}`. Current/bounded prior instruction keys are private refresh material; optional announce/RPC fields appear only when present, never as empty strings that overwrite working values. |
 
 Every POST additionally requires `Content-Length` (a chunked or length-less
 body is refused with 411), rejects a non-numeric or negative
@@ -1211,14 +1215,14 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `CAF_APP_APPDATA_DIR` | **required; supplied by CAF** | IOx only | Application-data directory containing the runtime-delivered `iris-catalog.pem`. The entrypoint derives and validates this trust path before starting either catalog or tracker traffic. XR instead uses the fixed `harddisk:` bind path `/hostmount/iris-catalog.pem`. |
 | `IRIS_TELEMETRY` | `on` | IOx, XR | Enables normal device reports. Only the documented boolean spellings are accepted. A redeploy value reconciles an existing persistent config. |
 | `IRIS_TELEMETRY_STREAM` | `off` | IOx, XR | Enables live transfer samples when telemetry is on. A redeploy value reconciles an existing persistent config. |
-| `IRIS_TICK_SECONDS` | `60` | IOx, XR | Base interval for the common agent loop; integer 1–86400. |
+| `IRIS_TICK_SECONDS` | `60` | IOx, XR | Mechanical launcher interval/floor; integer 1–86400. Signed `catalog_tick_s` governs logical catalog/staging cadence; every mechanical tick still reasserts QoS and sends heartbeat. |
 | `IRIS_TICK_JITTER_PCT` | `10` | IOx, XR | Dithers every ordinary tick by ±this percent of `IRIS_TICK_SECONDS`. |
 | `IRIS_STARTUP_JITTER` | `1` (on) | IOx, XR | Spreads the first tick after container start across the whole `IRIS_TICK_SECONDS` window. `0` disables it. |
 | `IRIS_TICK_BACKOFF_MAX` | `600` (seconds) | IOx, XR, Guest Shell, router | Cap on the exponential backoff applied after a tick's agent process fails outright. |
 | `IRIS_TICK_JITTER_MAX` | `8` (seconds) | Guest Shell, router | Bound (0..N-1, uniform) on the per-tick sleep `bootstrap.sh` takes before contacting the catalog. The EEM timer's own 60s period is unaffected — IOS owns that clock. |
 | `IRIS_RPC_PORT` | `6800` | IOx, XR | Local aria2 JSON-RPC port; integer 1–65535. It is persisted as `rpc_port`. |
-| `IRIS_MAX_PEERS` | `10` | IOx, XR | Hard per-torrent peer admission limit (including pending outbound connections) in the patched aria2c; integer 1–1000. It is persisted as `max_peers`. |
-| `IRIS_MAX_CONCURRENT` | `100` | IOx, XR | aria2 concurrent-download ceiling; integer 1–1000. |
+| `IRIS_MAX_PEERS` | launcher fallback `10`; absent from Dockerfile defaults | IOx, XR | Legacy provisional launch value, integer 1–1000; verified/default policy supersedes it at the first successful tick, before any restored download starts. No enduring policy authority. |
+| `IRIS_MAX_CONCURRENT` | launcher fallback `100`; absent from Dockerfile defaults | IOx, XR | Legacy provisional launch ceiling, integer 1–1000; first successful tick writes verified/default global and active-GID options before reconciliation. Every future `addTorrent` uses verified/default values. |
 | `CAF_APP_PERSISTENT_DIR` | `/data` | IOx only | CAF persistent root. The profile stages and keeps its work/config/state under `<root>/iris`; it must be an absolute path without `..`. XR neither reads nor accepts it as a storage selector. |
 | `IRIS_TARGET_FS` | unset (auto-detect) | IOx only | Optional IOS filesystem preference such as `sdflash:`. The prefix grammar is checked here and the agent still requires live proof that the filesystem is writable and is not `crashinfo:`. XR rejects the variable and always uses `harddisk:`. |
 | `IRIS_SHARE_DIR` | `/mnt/share` | IOx only | Container side of the optional IOx host-data share; absolute path without `..`. If it is not usable, IOx uses SCP. XR rejects it. |
@@ -1262,13 +1266,70 @@ rejects production path overrides.
 | `telemetry_stream` | `off` | Live transfer-sample streaming ([Transfer streaming](observability.md#transfer-streaming)). Fail-closed: only an explicit `on`/`1`/`true`/`yes` enables; requires `telemetry` on. Delivered by the installers (`TELEMETRY_STREAM`) and IOx deploy env (`IRIS_TELEMETRY_STREAM`), and changed by redeploy. |
 | `iris_log` | unset (off) | Guest Shell's only persistent path to the `IRIS_LOG` device-side logging opt-in — see [Device agents → Device-side logging (flash write endurance)](device-agents.md#device-side-logging-flash-write-endurance). `bootstrap.sh` reads this key on every EEM tick and exports it as `IRIS_LOG` before running `guestshell-start.sh`; an operator sets `iris_log = on` in the device's `iris-agent.conf` and the next tick picks it up, no reinstall. Validated before export: only letters/digits are accepted (`on`/`1`/`true`/`yes` enable it, case-insensitive, matching every other platform's parsing), anything else — including an attempt to inject shell syntax — is dropped with a warning and the built-in default (off) applies. |
 | `rpc_port` | `6800` | Also read by `bootstrap.sh` and exported as `RPC_PORT` for `guestshell-start.sh`'s own aria2c launch line, in addition to the Python agent's existing use of this key for its own RPC calls to aria2c. Validated as an integer 1–65535; an out-of-range or non-numeric value is dropped with a warning and `guestshell-start.sh`'s built-in default (`6800`) applies. |
-| `max_peers` | `10` | Also read by `bootstrap.sh` and exported as `MAX_PEERS` for `guestshell-start.sh`'s `--bt-max-peers`. Validated as an integer 1–65535; an out-of-range or non-numeric value is dropped with a warning and `guestshell-start.sh`'s built-in default (`10`) applies. |
+| `max_peers` | legacy only | Parsed-but-ignored for upgrade compatibility, with a value-free `MAX-PEERS-IGNORED` notice once. Guest Shell no longer exports it; active `max_peers` policy uses the signed/default 1–1000 bound above. |
 
 `device_ssh_known_hosts` controls only the IOx agent's SSH-to-self connection.
 Strict checking requires both the setting and a file at that path; IRIS does
 not create it. Guest Shell uses the on-box `cli` module and XR uses its host
 mount, so neither agent opens that SSH connection. Server-initiated onboarding
 has its own [SSH host-key policy](security.md#device-ssh-host-keys).
+
+## Instruction protocol and state reference
+
+The [OpenAPI contract](openapi.yaml) defines the bounded wire schema. Device
+heartbeat `instr_protocol: 1` denotes capability; `version` continues to mean
+IOS software. An absent protocol marker is legacy `pre-instructions`, while a
+present invalid/future marker is unknown. Accepted identity is complete
+`{instr_epoch, instr_serial, instr_policy_revision}` or absent; legacy
+standalone serial remains compatible but is not a complete acceptance claim.
+
+| Revision term | Meaning |
+| --- | --- |
+| `policy_revision` | Server-issued role/QoS intent; fleet applied counts group by this value. |
+| `instr_serial` with `instr_epoch` | Per-device sealed instruction freshness identity; monotonic `(epoch, instr_serial)` replay floor. |
+| `enforcement.applied_revision`, `iris_peer_enforcement_applied_revision` | aria2 blocklist change counters, unrelated to policy revision or instruction serial. |
+
+The nineteen raw agent states are `none`, `applied`, `lkg`, `stale_expired`,
+`allowlist_expired`, `rollback_rejected`, `floor_reset`, `audience_mismatch`,
+`key_rejected`, `tamper_rejected`, `verifier_missing`, `lkg_rejected`,
+`lkg_unreadable`, `oversize`, `reasserted`, `instr_unavailable`, `instr_pending`,
+`instr_forbidden`, and `tracker-only`. The server display vocabulary is
+`applied`, `lkg`, `stale`, `rejected`, `tracker-only`, `pre-instructions`,
+`unknown`, `unavailable`, `pending`, `forbidden`, `floor_reset`, `none`, and
+`revoked`. Display classifications are not raw device-authored states. For
+condition, retained QoS/peer state and retry action, use the complete
+[failure table](device-agents.md#instruction-failures-and-recovery).
+
+Each `/api/v1/devices` row and successful
+`/api/v1/devices/<id>/effective-qos` response has one canonical `instruction`
+object:
+`display_state`, `label`, `evidence`, `underlying_state`, `underlying_label`,
+`underlying_evidence`, `reason`, `reported_instr_serial`, `accepted_identity`,
+`verify_level`, `pointer_skew`, `qos_drift_count`, `report_age_seconds`,
+`report_stale`, `revoked`, and `revocation_evidence`. `accepted_identity` is
+null or complete `{epoch, instr_serial, policy_revision}`. Durable revocation
+and report age are server-observed; raw state, accepted identity, verification
+level and QoS drift are agent-asserted. Device-authored reports are statements
+from the device, not independent server measurements. Exact i63 identity
+labels are server-created strings so browser number rounding cannot alter them.
+
+`/api/v1/peer-policy` adds `fleet_rollup` with exactly `issued_revision`,
+`applied` (decimal policy-revision keys), and `states`; `instruction_status`
+with `observed_at`, current inventory-device `instr_stamp_missing`,
+`pointer_skew` count and exact `issued_revision_label`; and nullable validated
+`instruction_keys` custody status. Inventory devices count once and orphan
+heartbeats are excluded. Accepted identities remain visible even under stale,
+rejected or revoked display states. Null means unavailable/invalid evidence,
+not healthy zero. Missing or corrupt heartbeat, policy, revocation and custody
+sources remain explicit unknown/unavailable. **violation = 0 does not mean compliant**.
+
+The 256 KiB envelope uses a per-device KDF and audience binding, signature and
+MAC-before-decrypt checks. Both authenticated instruction GET paths use existing
+8443; 9443 is management-only. The [state path inventory](server.md#instruction-state-and-processes)
+distinguishes `$IRIS_CONFIG/instr/signing-key.age`, runtime
+`$IRIS_RUN/instr/signing-key`, and `$IRIS_STATE` durable producer state. No
+instruction/LKG/online/offline private key enters platform config; IOx/XR
+bootstrap enrollment credentials remain a documented [exception](security.md#two-root-trust-and-custody).
 
 ## Generated outputs
 
