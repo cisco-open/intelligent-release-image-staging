@@ -21,6 +21,7 @@ case "$1" in
   exec)
     # $2 = iris, $3.. = the command run inside the container
     shift 2
+    [ -z "${DOCKER_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
     case "$1" in
       cat)
         case "$2" in
@@ -31,6 +32,8 @@ case "$1" in
       # Enrollment tokens are 32 hexadecimal characters, as minted by the
       # real secrets store.
       iris-mint-enrollment) echo "0123456789abcdef0123456789abcdef" ;;
+      printenv) [ "$2" = IRIS_ARTIFACTS_DIR ] && echo /srv/artifacts ;;
+      iris-instruction-bootstrap) [ "${BOOTSTRAP_FAIL:-0}" = 1 ] && exit 1 || : ;;
       *) exit 1 ;;
     esac ;;
   restart) : ;;
@@ -124,14 +127,46 @@ case "$1" in
   ps) echo iris ;;
   exec)
     shift 2
+    [ -z "${DOCKER_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
     case "$1" in
       cat) [ "$2" = /etc/iris/tls/crt.pem ] && printf -- '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n' ;;
       iris-mint-enrollment) echo "$2" >> "$MINT_LOG"; echo "0123456789abcdef0123456789abcdef" ;;
+      printenv) [ "$2" = IRIS_ARTIFACTS_DIR ] && echo /srv/artifacts ;;
+      iris-instruction-bootstrap) [ "${BOOTSTRAP_FAIL:-0}" = 1 ] && exit 1 || : ;;
       *) exit 1 ;;
     esac ;;
   *) exit 1 ;;
 esac
 STUB
+}
+
+@test "generator materializes an instruction envelope after mint and exports only its capability" {
+  _mint_logging_stub
+  export DOCKER_CALL_LOG="$WORK/docker-calls.log"; : > "$DOCKER_CALL_LOG"
+
+  run env IRIS_HOST_IP=10.0.0.9 bash "$GEN" "$CSV"
+  [ "$status" -eq 0 ]
+
+  installer="$OUT/install-203.0.113.3.sh"
+  capability="$(sed -n 's/^export IRIS_STAGING_CAPABILITY=//p' "$installer")"
+  [[ "$capability" =~ ^[0-9a-f]{32}$ ]]
+  ! grep -q 'iris-instruction-bootstrap' "$installer"
+  ! grep -q 'iris-instructions-.*\.envelope' "$installer"
+
+  mint_line="$(grep -n '^iris-mint-enrollment 203\.0\.113\.3$' "$DOCKER_CALL_LOG" | cut -d: -f1)"
+  bootstrap_line="$(grep -n "^iris-instruction-bootstrap 203\\.0\\.113\\.3 --output /srv/artifacts/staging/iris-instructions-203\\.0\\.113\\.3-$capability\\.envelope$" "$DOCKER_CALL_LOG" | cut -d: -f1)"
+  [ -n "$mint_line" ]
+  [ -n "$bootstrap_line" ]
+  [ "$mint_line" -lt "$bootstrap_line" ]
+}
+
+@test "instruction-envelope materialization failure publishes no installer set" {
+  export BOOTSTRAP_FAIL=1
+  run env IRIS_HOST_IP=10.0.0.9 bash "$GEN" "$CSV"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"instruction bootstrap unavailable"* ]]
+  [ ! -e "$OUT/install-203.0.113.3.sh" ]
+  [ ! -e "$OUT/install-all.sh" ]
 }
 
 @test "an invalid later row mints nothing and writes nothing" {
