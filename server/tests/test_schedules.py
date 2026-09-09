@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Schedule authority, durable progress, and local-clock boundary contracts."""
-import copy
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import json
@@ -267,6 +266,8 @@ def test_early_binding_retains_preview_and_definition_edits_do_not_replay_slot(t
     first = occurrences.create(row, slot, {"revision": 7, "now": NOW + 60,
                                           "device_ids": ["edge-3"]}, now=NOW + 60)
     assert first["target_snapshot"]["device_ids"] == ["edge-1", "edge-2"]
+    assert first["target_snapshot"]["revision"] == 7
+    assert first["preview"]["revision"] == 4
     changed = store.patch("s-boat", {"state": "pending"}, expected_rev=1)
     second = occurrences.create(changed, slot, changed["preview"], now=NOW + 60)
     assert first == second
@@ -296,3 +297,70 @@ def test_claim_checks_live_revision_and_keeps_crash_retry_identity(tmp_path, mon
     assert store.claim_occurrence("s-boat", expected_rev=2, slot=slot,
                                   target_snapshot=snapshot, now=NOW + 62) == existing
 
+
+def test_receipt_intent_submission_terminal_are_monotonic_across_restart(tmp_path):
+    store = schedules.ReceiptStore(tmp_path)
+    oid = "a" * 32
+    intent = store.begin(oid, "edge-1", now=NOW)
+    assert intent["status"] == "intent" and intent["completed_at"] is None
+    assert store.completed_device_ids(oid) == set()
+    submitted = store.record(oid, "edge-1", status="submitted", reason="queued",
+                             expected_status="intent", job_id="job-1", record_id="record-1", now=NOW + 1)
+    restarted = schedules.ReceiptStore(tmp_path)
+    assert restarted.get(oid, "edge-1") == submitted
+    assert restarted.begin(oid, "edge-1", now=NOW + 2) == submitted
+    with pytest.raises(schedules.ScheduleConflict):
+        restarted.record(oid, "edge-1", status="submitted", reason="queued",
+                          expected_status="intent", job_id="stale-job", now=NOW + 3)
+    with pytest.raises(schedules.ScheduleConflict):
+        restarted.record(oid, "edge-1", status="ok", reason="onboarded",
+                          expected_rev=intent["rev"], now=NOW + 3)
+    terminal = restarted.record(oid, "edge-1", status="ok", reason="onboarded",
+                                 expected_status="submitted", expected_rev=submitted["rev"], now=NOW + 4)
+    assert terminal["job_id"] == "job-1" and terminal["record_id"] == "record-1"
+    assert restarted.record(oid, "edge-1", status="error", reason="conflict", now=NOW + 5) == terminal
+    assert restarted.completed_device_ids(oid) == {"edge-1"}
+
+
+def test_delete_recreate_same_name_and_epoch_cannot_reuse_occurrence(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    first = create(store)
+    slot = schedules.occurrence_slot(first, NOW + 60)
+    store.claim_occurrence("s-boat", expected_rev=1, slot=slot,
+                           target_snapshot=first["preview"], now=NOW + 60)
+    store.delete("s-boat", expected_rev=1)
+    second = create(store)
+    assert store.progress("s-boat") is None
+    assert schedules.occurrence_id(first, slot["scheduled_at"]) != schedules.occurrence_id(second, slot["scheduled_at"])
+
+
+def test_claim_rejects_future_or_obsolete_slot(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    row = create(store)
+    slot = schedules.occurrence_slot(row, NOW)
+    with pytest.raises(schedules.ScheduleConflict):
+        store.claim_occurrence("s-boat", expected_rev=1, slot=slot, target_snapshot=row["preview"], now=NOW)
+    changed = store.patch("s-boat", {"when": {"kind": "once", "at": NOW + 90, "window_seconds": 60}}, expected_rev=1)
+    with pytest.raises(schedules.ScheduleConflict):
+        store.claim_occurrence("s-boat", expected_rev=changed["rev"], slot=slot, target_snapshot=row["preview"], now=NOW + 100)
+
+
+@pytest.mark.parametrize("metadata", [{"actor": "alice"}, {"actor": "console:alice\n"}, {"now": True}])
+def test_invalid_server_metadata_refused_before_write(tmp_path, metadata):
+    store = schedules.ScheduleStore(tmp_path)
+    kwargs = {"actor": "console:alice", "now": NOW, **metadata}
+    with pytest.raises(schedules.ScheduleValidationError):
+        store.create("s-boat", definition(), **kwargs)
+    assert store.list() == []
+
+
+def test_retarget_requires_fresh_server_preview(tmp_path):
+    store = schedules.ScheduleStore(tmp_path)
+    row = create(store)
+    target = {"filters": {"role": "fiber"}, "bind": "early"}
+    with pytest.raises(schedules.ScheduleValidationError):
+        store.patch("s-boat", {"target": target}, expected_rev=1)
+    assert store.get("s-boat") == row
+    changed = store.patch("s-boat", {"target": target}, expected_rev=1,
+                           preview={"revision": 8, "now": NOW + 1, "device_ids": ["edge-3"]})
+    assert changed["preview"]["device_ids"] == ["edge-3"]

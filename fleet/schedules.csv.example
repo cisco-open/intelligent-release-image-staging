@@ -1,0 +1,8 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+# JSON columns preserve the closed schedule schema. Weekday: Monday=0.
+# Assignment approves staging only; onboarding deploys the IRIS agent only.
+# Empty filters and device_ids explicitly select the whole fleet.
+id,kind,target,payload,when,after,state
+s-boat,assign,"{""filters"":{""role"":""boat""},""device_ids"":[],""bind"":""late""}","{""image_ids"":[""image-a""],""mode"":""merge""}","{""kind"":""recurring"",""weekday"":5,""hour"":2,""minute"":0,""tz"":""Europe/Stockholm"",""window_seconds"":7200}",,pending
