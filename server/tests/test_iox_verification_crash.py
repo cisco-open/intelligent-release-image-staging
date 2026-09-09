@@ -541,6 +541,12 @@ class _FakeTransport(object):
         self.trace.append(("command_start", purpose))
         if hasattr(self, "transcript"):
             self.transcript.append(dict(self.config["command_contexts"][command_id]))
+        instruction_cleanup = (
+            b"delete /force " in command_bytes and
+            b"iris-instructions-" in command_bytes)
+        if instruction_cleanup and hasattr(
+                self.device, "instruction_source"):
+            self.device.instruction_source = False
         if purpose == "disable":
             self.device.state = "disabled"
             self.device.mutations.append("disable")
@@ -607,6 +613,9 @@ class _FakeTransport(object):
         command_id = context["command_id"]
         self.transcript.append(dict(context))
         self.trace.append(("upload", remote_path))
+        if (context["purpose"] == "upload_instructions" and
+                hasattr(self.device, "instruction_source")):
+            self.device.instruction_source = True
         self.transcript.append({
             "schema_version": 1, "type": "command_end", "command_id": command_id,
             "finished_at": 100, "returncode": 0, "timed_out": False,
@@ -1823,6 +1832,16 @@ class _FileDevice(object):
         content["state"] = value
         _durable_fixture_json(self.path, content)
 
+    @property
+    def instruction_source(self):
+        return bool(_read_json(self.path).get("instruction_source", False))
+
+    @instruction_source.setter
+    def instruction_source(self, value):
+        content = _read_json(self.path)
+        content["instruction_source"] = bool(value)
+        _durable_fixture_json(self.path, content)
+
 
 _INSTALL_RECIPE = r'''import json,os,signal,socket,struct,sys
 signal.alarm(6)
@@ -1897,11 +1916,15 @@ def _crash_worker(root, barrier):
                 die("after_disable_effect")
             if item == ("command_end", "read") and store.journal["phase"] == "ownership_probe":
                 die("after_probe_read")
+            if (item[0] == "upload" and
+                    "iris-instructions-" in item[1]):
+                die("after_instruction_upload")
 
     transport = _FakeTransport(_FileDevice(str(root / "device.json")), Trace())
     install = barrier in ("before_disable_intent", "after_disable_intent",
                           "after_disable_effect", "before_disable_confirmed",
-                          "after_disable_confirmed")
+                          "after_disable_confirmed",
+                          "after_instruction_upload")
     overrides = {}
     if install:
         import sys
@@ -2070,6 +2093,59 @@ def test_real_process_crash_restarts_same_durable_store_without_replaying_enable
     journal = _read_json(path)["records"][_RECORD]["iox_verification"]
     assert journal["phase"] == recovered_phase
     assert _read_json(device_path)["effects"] == effects
+
+
+def test_sigkill_after_instruction_upload_recovers_persisted_transaction_cleanup(
+        tmp_path):
+    import io
+    import tarfile
+
+    _verification_module()
+    _authority_layout(tmp_path)
+    _durable_fixture_json(
+        str(tmp_path / "deployment_records.json"), {"records": {}})
+    with tarfile.open(
+            str(tmp_path / "wrapper.tar"), "w",
+            format=tarfile.USTAR_FORMAT) as archive:
+        entry = tarfile.TarInfo("package.yaml")
+        body = b'descriptor-schema-version: "2.7"\n'
+        entry.size = len(body)
+        archive.addfile(entry, io.BytesIO(body))
+    device_path = str(tmp_path / "device.json")
+    _durable_fixture_json(
+        device_path,
+        {"state": "enabled", "effects": [], "instruction_source": False})
+
+    _run_crash_worker(tmp_path, "after_instruction_upload")
+
+    store_path = str(tmp_path / "deployment_records.json")
+    journal = _read_json(store_path)["records"][_RECORD]["iox_verification"]
+    assert journal["phase"] == "restored"
+    assert journal["unresolved"] is False
+    assert journal["instruction_cleanup_pending"] is True
+    assert _read_json(device_path)["instruction_source"] is True
+
+    fence_path = str(
+        tmp_path / "iox" / "sessions" /
+        (_board_key(_BOARD) + ".lock.json"))
+    fence = _read_json(fence_path)
+    if fence["state"] == "active":
+        before = _read_bytes(store_path)
+        _run_crash_worker(tmp_path, "restart")
+        assert _read_json(str(tmp_path / "result.json"))["result_code"] == 5
+        assert _read_bytes(store_path) == before
+        fence["boot_id"] = "00000000-0000-4000-8000-000000000000"
+        _durable_fixture_json(fence_path, fence)
+
+    _run_crash_worker(tmp_path, "restart")
+
+    result = _read_json(str(tmp_path / "result.json"))
+    assert result["result_code"] == 0
+    journal = _read_json(store_path)["records"][_RECORD]["iox_verification"]
+    assert "instruction_cleanup_pending" not in journal
+    assert journal["phase"] == "restored"
+    assert journal["unresolved"] is False
+    assert _read_json(device_path)["instruction_source"] is False
 
 
 @pytest.mark.parametrize("failure", ["mkdir", "parent_fsync"])

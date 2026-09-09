@@ -1,6 +1,8 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
+
 import deployment_records
 import pytest
 
@@ -1015,6 +1017,47 @@ def test_terminal_deployment_and_verification_accept_later_diagnostic(tmp_path):
     assert diagnosed["unresolved"] is False
     assert diagnosed["terminal_at"] == terminal_at
     assert store.get("iox-r1")["state"] == "removed"
+
+
+def test_instruction_cleanup_intent_is_closed_durable_and_restart_recoverable(
+        tmp_path):
+    store, journal, _transcript_ref, _observation = _begin_iox(
+        tmp_path, state="disabled", now=100)
+    journal = store.iox_event(
+        "iox-r1", journal["transaction_id"], 0, "observed", "unchanged",
+        {"reason": "initially_disabled", "observation": None,
+         "transcript_refs": []})
+
+    pending = store.iox_instruction_cleanup_intent(
+        "iox-r1", journal["transaction_id"], journal["revision"],
+        journal["phase"])
+    assert pending["instruction_cleanup_pending"] is True
+    assert pending["revision"] == journal["revision"] + 1
+    assert store.iox_obligations(_IOX_BOARD) == [pending]
+
+    reopened = deployment_records.DeploymentRecordStore(
+        str(tmp_path), now_fn=lambda: 101)
+    assert reopened.iox_obligations(_IOX_BOARD) == [pending]
+    summary = reopened.iox_summary("edge-01")
+    assert len(summary) == 1
+    assert summary[0]["instruction_cleanup_pending"] is True
+    serialized = json.dumps(reopened.get("iox-r1"), sort_keys=True)
+    assert "iris-instructions-" not in serialized
+    assert "flash:" not in serialized
+
+    before = open(reopened.path, "rb").read()
+    with pytest.raises(TypeError):
+        reopened.iox_instruction_cleanup_intent(
+            "iox-r1", pending["transaction_id"], pending["revision"],
+            pending["phase"], "flash:any-owner-selected-path")
+    assert open(reopened.path, "rb").read() == before
+
+    complete = reopened.iox_instruction_cleanup_complete(
+        "iox-r1", pending["transaction_id"], pending["revision"],
+        pending["phase"])
+    assert "instruction_cleanup_pending" not in complete
+    assert complete["revision"] == pending["revision"] + 1
+    assert reopened.iox_obligations(_IOX_BOARD) == []
 
 
 def test_iox_summary_is_the_exact_safe_public_projection(tmp_path):

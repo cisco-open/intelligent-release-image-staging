@@ -825,6 +825,10 @@ if os.path.basename(sys.argv[0]) == "scp":
     else:
         trace("unstable_upload_source")
         sys.exit(95)
+    if scenario.get("scp_echo_content"):
+        write(content)
+    if scenario.get("scp_stderr"):
+        write(scenario["scp_stderr"], 2)
     trace("uploaded", sha256=hashlib.sha256(content).hexdigest(), size=len(content))
     sys.exit(0)
 
@@ -1428,6 +1432,75 @@ def test_cleanup_confirmation_is_answered_once_in_the_config_step(tmp_path, peer
     result = _command(transport, "\n".join(commands).encode("ascii"))
     assert _value(result, "framing_complete") is True
     assert peer.received() == ["terminal length 0", "terminal width 512", commands[0], commands[1], "yes", commands[2], "exit"]
+    peer.assert_reaped()
+
+
+@pytest.mark.parametrize("purpose,payloads,expected_category", [
+    ("copy_instructions", ["Copy complete\n"], None),
+    ("remove_instructions", ["", ""], None),
+    ("remove_instructions", ["", "iris-instructions-" + "d" * 32 +
+                              ".envelope\n"], "rejected"),
+])
+def test_instruction_command_parses_private_payload_then_exposes_no_path_or_stream(
+        tmp_path, peer_factory, purpose, payloads, expected_category):
+    remote = "flash:iris-instructions-%s.envelope" % ("d" * 32)
+    if purpose == "copy_instructions":
+        commands = [
+            "app-hosting data appid iris copy %s iris-instructions.bootstrap" %
+            remote]
+    else:
+        commands = [
+            "delete /force %s" % remote,
+            "dir flash: | include iris-instructions-%s\\.envelope" %
+            ("d" * 32),
+        ]
+    peer = peer_factory(commands=commands, payload=payloads)
+    transport, unused = _transport(tmp_path, peer, purpose=purpose)
+
+    result = _command(transport, "\n".join(commands).encode("ascii"))
+
+    assert _value(result, "error_category") == expected_category
+    assert _value(result, "stdout") == b""
+    assert _value(result, "stderr") == b""
+    records = _records(
+        _transcript_path(tmp_path / "state").read_bytes())
+    decoded = b"".join(
+        base64.b64decode(record["data_b64"])
+        for record in records if record["type"] == "stream")
+    assert remote.encode("ascii") not in decoded
+    assert ("iris-instructions-%s.envelope" % ("d" * 32)).encode(
+        "ascii") not in decoded
+    peer.assert_reaped()
+
+
+def test_instruction_upload_discards_ciphertext_and_remote_diagnostics(
+        tmp_path, peer_factory):
+    body = b"private-instruction-ciphertext"
+    remote = "flash:iris-instructions-%s.envelope" % ("d" * 32)
+    peer = peer_factory(
+        commands=[], scp_echo_content=True,
+        scp_stderr="diagnostic for %s\n" % remote)
+    transport, unused = _transport(
+        tmp_path, peer, purpose="upload_instructions")
+    source = tmp_path / "instruction.envelope"
+    source.write_bytes(body)
+    descriptor = os.open(str(source), os.O_RDONLY)
+    try:
+        result = transport.upload(
+            descriptor, remote, time.monotonic() + 1.5)
+    finally:
+        os.close(descriptor)
+
+    assert _value(result, "error_category") is None
+    assert _value(result, "stdout") == b""
+    assert _value(result, "stderr") == b""
+    records = _records(
+        _transcript_path(tmp_path / "state").read_bytes())
+    decoded = b"".join(
+        base64.b64decode(record["data_b64"])
+        for record in records if record["type"] == "stream")
+    assert body not in decoded
+    assert remote.encode("ascii") not in decoded
     peer.assert_reaped()
 
 
