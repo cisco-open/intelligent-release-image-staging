@@ -514,3 +514,71 @@ def test_bad_executor_result_keeps_intent_for_reconciliation(setup):
     saved = schedules.ReceiptStore(store.state_dir).get(occurrence(store)["id"], "edge-1")
     assert saved["status"] == "intent" and "job_id" not in saved
     assert runner.last_error == "schedule_runner_error"
+
+
+def test_dispatch_budget_rotates_between_occurrences_after_initial_due_order(setup):
+    store, clock, executor, reads, runner = setup
+    create(store, "a-old", at=NOW-10)
+    create(store, "z-young")
+    runner.resolve_target = lambda row: {"revision":8, "now":clock.now, "device_ids":[row["id"]]}
+    runner.max_dispatches = 1
+    executor.results["a-old"] = {"status":"deferred", "reason":"device_busy"}
+    runner.run_once()
+    assert [d[1] for d in executor.dispatched] == ["a-old"]
+    clock.now += 1
+    runner.run_once()
+    assert [d[1] for d in executor.dispatched] == ["a-old", "z-young"]
+    assert occurrence(store, "z-young")["state"] == "completed"
+    assert occurrence(store, "a-old")["state"] == "running"
+
+
+def test_expired_owned_queue_is_cancelled_before_a_failing_poll(setup):
+    store, clock, executor, reads, runner = setup
+    create(store, window=10)
+    executor.results = {d:{"status":"submitted", "reason":"queued", "job_id":"job-"+d}
+                        for d in ("edge-1", "edge-2")}
+    runner.run_once()
+    oid = occurrence(store)["id"]
+    actions = []
+    def cancel(occurrence_id, job_ids):
+        actions.append(("cancel", occurrence_id, job_ids))
+    def failed_poll(receipt):
+        actions.append(("poll", receipt["device_id"]))
+        raise OSError("job state unavailable")
+    executor.cancel_queued = cancel
+    executor.poll = failed_poll
+    clock.now += 10
+    runner.run_once()
+    assert actions[0] == ("cancel", oid, ["job-edge-1", "job-edge-2"])
+    assert actions[1][0] == "poll"
+    assert runner.last_error == "schedule_runner_error"
+    assert all(r["status"] == "submitted" for r in receipts(store, occurrence(store)))
+
+
+@pytest.mark.parametrize("status", ["submitted", "running"])
+def test_poll_retry_delay_is_honored_without_delaying_window_cancellation(setup, status):
+    store, clock, executor, reads, runner = setup
+    create(store, window=10)
+    executor.results = {d:{"status":status, "reason":"queued", "job_id":"job-"+d}
+                        for d in ("edge-1", "edge-2")}
+    runner.run_once()
+    executor.poll_results = {d:{"status":"deferred", "reason":"device_busy", "retry_at":NOW+30}
+                             for d in ("edge-1", "edge-2")}
+    clock.now += 1
+    runner.run_once()
+    assert len(executor.polled) == 2
+    clock.now += 1
+    runner.run_once()
+    assert len(executor.polled) == 2
+    clock.now = NOW+10
+    runner.run_once()
+    assert len(executor.polled) == 2
+    if status == "submitted":
+        assert executor.cancelled[-1] == (occurrence(store)["id"], ["job-edge-1", "job-edge-2"])
+    else:
+        assert not executor.cancelled
+    executor.poll_results = {d:{"status":"ok", "reason":"onboarded"} for d in ("edge-1", "edge-2")}
+    clock.now = NOW+30
+    runner.run_once()
+    assert len(executor.polled) == 4
+    assert occurrence(store)["state"] == "completed"

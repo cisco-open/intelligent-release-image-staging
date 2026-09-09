@@ -111,6 +111,7 @@ class ScheduleRunner:
         self._failures = 0
         self._recovered = False
         self._active = set()
+        self._service_order = []
         self._validated = set()
         self._facts = {}
         self._retry_at = {}
@@ -220,7 +221,15 @@ class ScheduleRunner:
                 if upcoming is not None:
                     heapq.heappush(pending, (upcoming["scheduled_at"], current["id"], current, upcoming))
         self._remaining = self.max_dispatches
-        for oid in sorted(self._active, key=lambda oid: (self.occurrences.get(oid)["scheduled_at"], oid)):
+        # First service follows earliest due order. Keep a rotating order for
+        # subsequent passes so one deferring occurrence cannot repeatedly spend
+        # the global dispatch budget before younger occurrences get a turn.
+        order = [oid for oid in self._service_order if oid in self._active]
+        known = set(order)
+        order.extend(sorted(self._active - known,
+            key=lambda oid: (self.occurrences.get(oid)["scheduled_at"], oid)))
+        self._service_order = order[1:] + order[:1]
+        for oid in order:
             if self._stopping():
                 break
             try:
@@ -344,12 +353,54 @@ class ScheduleRunner:
         return successor
 
     def _poll(self, occurrence, did, prior, closed):
+        if self._retry_at.get((occurrence["id"], did), 0) > self._now():
+            return prior
         result = self._result(self.executor.poll(copy.deepcopy(prior)))
         if result["status"] == "retry":
             return self._retry(occurrence, did, prior, result, closed)
         return self._save(occurrence, did, prior, result)
 
+    def _cancel_closed(self, occurrence, attempted):
+        closed = self._closed_reason(occurrence)
+        if not closed or closed == "window_not_open":
+            return
+        # Polling can fail or be deferred beyond the window end. Cancellation
+        # therefore has its own path and only carries this occurrence's IDs.
+        owned = set()
+        for did in occurrence["target_snapshot"]["device_ids"]:
+            receipt = self.receipts.get(occurrence["id"], did)
+            if receipt and receipt["status"] == "submitted" and receipt.get("job_id"):
+                owned.add(receipt["job_id"])
+        new = owned - attempted
+        if new:
+            attempted.update(new)
+            self.executor.cancel_queued(occurrence["id"], sorted(new))
+
     def _process(self, occurrence):
+        if occurrence["state"] not in _ACTIVE:
+            self._active.discard(occurrence["id"])
+            return
+        attempted, cancellation_errors = set(), []
+
+        def cancel_closed():
+            try:
+                self._cancel_closed(occurrence, attempted)
+            except Exception as exc:
+                # An unavailable cancellation endpoint must not prevent receipt
+                # reconciliation. The whole-pass guard still reports/backoffs.
+                cancellation_errors.append(exc)
+
+        cancel_closed()
+        try:
+            self._process_devices(occurrence)
+        finally:
+            # Also cover a clock crossing the boundary during dispatch/poll,
+            # including an exception before that operation could return.
+            cancel_closed()
+        if cancellation_errors:
+            raise cancellation_errors[0]
+
+    def _process_devices(self, occurrence):
         oid = occurrence["id"]
         if occurrence["state"] not in _ACTIVE:
             self._active.discard(oid)
@@ -419,17 +470,6 @@ class ScheduleRunner:
                 self._retry(occurrence, did, intent, result, self._admission_reason(occurrence))
             else:
                 self._save(occurrence, did, intent, result)
-        closed = self._closed_reason(occurrence)
-        if closed and closed != "window_not_open":
-            # Only IDs durably bound to this occurrence are eligible; the
-            # executor checks queued status atomically with job admission.
-            owned = []
-            for did in targets:
-                receipt = self.receipts.get(oid, did)
-                if receipt and receipt["status"] == "submitted" and receipt.get("job_id"):
-                    owned.append(receipt["job_id"])
-            if owned:
-                self.executor.cancel_queued(oid, sorted(set(owned)))
         done = self.receipts.completed_device_ids(oid)
         if len(done) == len(targets):
             reasons = {refusal["reason"]} if refusal else set()
