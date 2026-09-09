@@ -518,10 +518,13 @@ def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
             assert props[name]["type"] == "string"
             assert props[name]["minLength"] == 1
             assert props[name]["maxLength"] == 96
-        for name in ("evidence", "underlying_evidence", "revocation_evidence"):
-            assert props[name]["type"] == ["string", "null"]
-            assert set(props[name]["enum"]) == {
-                "agent-asserted", "server-observed", None}
+        assert props["evidence"]["type"] == "string"
+        assert set(props["evidence"]["enum"]) == {
+            "agent-asserted", "server-observed"}
+        assert props["underlying_evidence"] == {
+            "type": "string", "const": "agent-asserted"}
+        assert props["revocation_evidence"] == {
+            "type": "string", "const": "server-observed"}
         assert set(props["underlying_state"]["enum"]) == raw_states | {None}
         assert set(props["reason"]["enum"]) == {
             "unknown_key", "bad_mac", None}
@@ -557,6 +560,12 @@ def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
         invalid = dict(example, accepted_identity={
             "epoch": 11, "instr_serial": 7})
         assert list(validator.iter_errors(invalid))
+        for field, value in (
+                ("evidence", None),
+                ("evidence", "device-authored"),
+                ("underlying_evidence", "server-observed"),
+                ("revocation_evidence", "agent-asserted")):
+            assert list(validator.iter_errors(dict(example, **{field: value})))
 
 
 def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
@@ -655,6 +664,8 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
             "issued_revision": 12, "applied": {"7": 1},
             "states": {"applied": 1}}
         assert set(example["instruction_keys"]) == custody_fields
+        assert example["instruction_keys"]["updated_at"] <= \
+            example["instruction_status"]["observed_at"]
         assert not list(Draft202012Validator(schema).iter_errors(example))
         assert not list(Draft202012Validator(rollup).iter_errors(
             example["fleet_rollup"]))
