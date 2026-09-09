@@ -297,11 +297,13 @@ _ALIVE='ARIA2_PID=$$; proc_stat "$$"; ARIA2_START="$PROC_START"'
   [[ "$output" == *"IRIS_LOG has an invalid boolean value"* ]]
 }
 
-@test "install.sh's quoting guard runs before the first device session" {
-  # structural: the guard precedes the [2/7] teardown AND the identity probe
+@test "install.sh's quoting guard runs before dry-run configuration rendering" {
+  # Real execution uses only the private controller recipe above this branch.
+  # Here the guard must precede both standalone rendering calls so an unsafe
+  # value cannot enter output that an operator may inspect or paste.
   guard="$(grep -n '^_no_quotes_or_newlines DEVICE_SSH_PASS' "$INSTALL" | cut -d: -f1)"
-  probe="$(grep -n "printf 'show version" "$INSTALL" | head -1 | cut -d: -f1)"
-  step1="$(grep -n '\[2/7\] remove existing app' "$INSTALL" | head -1 | cut -d: -f1)"
-  [ -n "$guard" ] && [ -n "$probe" ] && [ -n "$step1" ]
-  [ "$guard" -lt "$probe" ] && [ "$guard" -lt "$step1" ]
+  network="$(grep -n '^ios_net$' "$INSTALL" | cut -d: -f1)"
+  app="$(grep -n '^appid_block_redacted$' "$INSTALL" | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$network" ] && [ -n "$app" ]
+  [ "$guard" -lt "$network" ] && [ "$guard" -lt "$app" ]
 }
