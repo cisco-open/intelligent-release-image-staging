@@ -291,6 +291,103 @@ install_prior_agent() {
   [ -f "$TMP/gss.log" ]
 }
 
+@test "simultaneous ticks cannot enter through an unpublished lock owner" {
+  mkdir -p "$STAGE/agent"
+  cat > "$STAGE/agent/iris_agent.py" <<'PYTHON'
+import os
+import time
+
+running = os.environ["IRIS_AGENT_RUNNING"]
+try:
+    os.mkdir(running)
+except OSError:
+    with open(os.environ["IRIS_AGENT_OVERLAP"], "w") as stream:
+        stream.write("overlap\n")
+with open(os.environ["IRIS_AGENT_ENTRIES"], "a") as stream:
+    stream.write("entered\n")
+time.sleep(2)
+try:
+    os.rmdir(running)
+except OSError:
+    pass
+PYTHON
+
+  real_mkdir="$(command -v mkdir)"
+  cat > "$BIN/mkdir" <<'SHELL'
+#!/usr/bin/env bash
+last=""
+for argument in "$@"; do last="$argument"; done
+"$IRIS_REAL_MKDIR" "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$last" = "$IRIS_LOCK_PATH" ] \
+    && [ ! -e "$IRIS_LOCK_READY" ]; then
+  : > "$IRIS_LOCK_READY"
+  sleep 1
+fi
+exit "$status"
+SHELL
+  chmod +x "$BIN/mkdir"
+
+  hook="$TMP/flock-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import fcntl
+import os
+import time
+
+_real_flock = fcntl.flock
+
+
+def _hold_first_acquisition(descriptor, operation):
+    result = _real_flock(descriptor, operation)
+    if operation & fcntl.LOCK_EX and operation & fcntl.LOCK_NB:
+        try:
+            marker = os.open(os.environ["IRIS_LOCK_READY"],
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError:
+            pass
+        else:
+            os.close(marker)
+            time.sleep(1)
+    return result
+
+
+fcntl.flock = _hold_first_acquisition
+PYTHON
+
+  env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      IRIS_REAL_MKDIR="$real_mkdir" IRIS_LOCK_PATH="$STAGE/.bundle-lock" \
+      IRIS_LOCK_READY="$TMP/lock-ready" \
+      IRIS_AGENT_RUNNING="$TMP/agent-running" \
+      IRIS_AGENT_OVERLAP="$TMP/agent-overlap" \
+      IRIS_AGENT_ENTRIES="$TMP/agent-entries" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh" > "$TMP/first.out" 2>&1 &
+  first_pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$TMP/lock-ready" ] || break
+    sleep 0.02
+  done
+  [ -e "$TMP/lock-ready" ]
+
+  second_status=0
+  env PYTHONPATH="$hook" PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      IRIS_REAL_MKDIR="$real_mkdir" IRIS_LOCK_PATH="$STAGE/.bundle-lock" \
+      IRIS_LOCK_READY="$TMP/lock-ready" \
+      IRIS_AGENT_RUNNING="$TMP/agent-running" \
+      IRIS_AGENT_OVERLAP="$TMP/agent-overlap" \
+      IRIS_AGENT_ENTRIES="$TMP/agent-entries" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh" > "$TMP/second.out" 2>&1 &
+  second_pid=$!
+  wait "$second_pid" || second_status=$?
+  first_status=0
+  wait "$first_pid" || first_status=$?
+
+  [ "$first_status" -eq 0 ]
+  [ "$second_status" -eq 0 ]
+  [ ! -e "$TMP/agent-overlap" ]
+  [ "$(wc -l < "$TMP/agent-entries" | tr -d ' ')" -eq 1 ]
+}
+
 @test "a verified bundle commits atomically, retains one prior footprint, and updates bootstrap by rename" {
   # bootstrap.sh runs FROM $SRC/bootstrap.sh (the EEM applet's path) and, on
   # a bundle drop, replaces that very file. `cp -f` rewrote the same inode,
