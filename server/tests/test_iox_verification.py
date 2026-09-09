@@ -2518,6 +2518,67 @@ def test_reconcile_rejects_malformed_binding_before_attempt(
     assert factory.calls == []
 
 
+@pytest.mark.parametrize("operation", [
+    "install", "uninstall", "recover", "reconcile",
+])
+def test_session_deadline_starts_before_strict_pre_attempt_store_reads(
+        tmp_path, operation):
+    clock = _ExactClock()
+    journal = _journal(
+        phase="indeterminate", state="unknown", revision=7,
+        unresolved=True)
+    record = _record(journal=journal)
+
+    class SlowStore(_StatefulStore):
+        armed = False
+        consumed = False
+        def consume(self):
+            if self.armed and not self.consumed:
+                self.consumed = True
+                clock.advance(200)
+        def list(self, *args, **kwargs):
+            if operation == "install":
+                self.consume()
+            return _StatefulStore.list(self, *args, **kwargs)
+        def get(self, *args, **kwargs):
+            if operation in ("uninstall", "reconcile"):
+                self.consume()
+            return _StatefulStore.get(self, *args, **kwargs)
+        def iox_obligations(self, *args, **kwargs):
+            if operation == "recover":
+                self.consume()
+            return _StatefulStore.iox_obligations(self, *args, **kwargs)
+
+    store = SlowStore(
+        tmp_path, records=[record], obligations=[journal])
+    factory = _TransportFactory(verification="enabled", clock=clock)
+    controller = _controller(
+        tmp_path, store, factory, clock=clock,
+        session_seconds=100, restoration_reserve_seconds=10)
+    store.armed = True
+    prepare, preflight, on_output = _callbacks([], record_id="r1")
+    try:
+        if operation == "install":
+            result = controller.run_install(
+                _request(wrapper_path=_write_unsigned_wrapper(tmp_path)),
+                prepare, preflight, on_output, _Cancel())
+        elif operation == "uninstall":
+            result = controller.run_uninstall(
+                _request(action="uninstall", record_id="r1"),
+                prepare, preflight, on_output, _Cancel())
+        elif operation == "recover":
+            result = controller.recover_board(_BOARD, _Cancel())
+        else:
+            result = controller.reconcile_enabled(
+                "r1", journal["transaction_id"], 7, True, _Cancel())
+    finally:
+        controller.close()
+    assert store.consumed is True
+    assert result["result_code"] == 4
+    assert result["error_category"] == "timeout"
+    assert factory.calls == []
+
+
 def test_force_retirement_runs_while_physical_board_lock_is_held(tmp_path):
     import fcntl
 
