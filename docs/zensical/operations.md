@@ -281,7 +281,7 @@ role artifacts and keylist authority must not be restored backwards.
 5. Check the Console custody panel and `iris_instruction_*` metrics against
    the recorded certificate/keylist windows. `enabled: false` is not enabled,
    null/unknown is unavailable, and degraded quorum needs custody investigation.
-   Verify a current stamp and authorized device receipt separately; never
+   Verify a current stamp and the authorized device's reported acceptance separately; never
    call command success live-device validation. Preserve public ceremony
    evidence and dispose of exchange copies according to local custody policy.
 

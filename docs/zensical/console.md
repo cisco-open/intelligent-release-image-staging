@@ -336,12 +336,12 @@ Devices shows a canonical instruction chip with a server-created exact label,
 source evidence and report age. Raw instruction state, accepted
 `{epoch, instr_serial, policy_revision}`, verification level, pointer skew and
 QoS drift are agent-asserted. Device-authored reports are not independent
-measurements. Durable revocation and receipt age are server-observed: revoked
+measurements. Durable revocation and report age are server-observed: revoked
 wins visually while the underlying agent LKG/state remains visible. Within a
 supported instruction report, raw `stale_expired` or `allowlist_expired` is
-stale by agent assertion before receipt-age classification, even when age is
-unknown. Other supported reports with missing/invalid/future receipt time display unknown;
-old valid receipt times display stale with the last reported state. The chip's
+stale by agent assertion before report-age classification, even when age is
+unknown. Other supported reports with missing/invalid/future report arrival time display unknown;
+old valid report arrival times display stale with the last reported state. The chip's
 `reason` distinguishes `unknown_key` from `bad_mac` rejection.
 
 The separate raw and display state vocabularies, including legacy
@@ -368,7 +368,7 @@ attestations support both roots, not that the Console inspected private-key
 custody. Follow [root recovery](operations.md#instruction-root-ceremony-and-recovery)
 for warning, critical or degraded status. The current bounded schemas are in
 [OpenAPI](openapi.yaml); the deprecated effective-QoS `delivery_state` sentinel is not
-an application receipt. That response now includes the same canonical
+evidence of instruction application. That response now includes the same canonical
 `instruction` object as Devices.
 
 ### IOx onboarding verification

@@ -431,7 +431,9 @@ def test_run_once_orders_contained_instruction_step_after_policy_before_reconcil
             "effective": {"private": "effective-must-not-leak"},
             "attestation": {
                 "instr_state": "applied",
+                "instr_epoch": NOW,
                 "instr_serial": 7,
+                "instr_policy_revision": 3,
                 "verify_level": "sig",
                 "arbitrary": "attestation-must-not-leak",
             },
@@ -450,9 +452,14 @@ def test_run_once_orders_contained_instruction_step_after_policy_before_reconcil
     heartbeat = catalog.heartbeats[-1]
     assert {name for name in heartbeat
             if name.startswith("instr") or name == "verify_level"} == {
-                "instr_state", "instr_serial", "verify_level"}
+                "instr_protocol", "instr_state", "instr_epoch", "instr_serial",
+                "instr_policy_revision", "verify_level"}
+    assert type(heartbeat["instr_protocol"]) is int
+    assert heartbeat["instr_protocol"] == 1
     assert heartbeat["instr_state"] == "applied"
+    assert heartbeat["instr_epoch"] == NOW
     assert heartbeat["instr_serial"] == 7
+    assert heartbeat["instr_policy_revision"] == 3
     assert heartbeat["verify_level"] == "sig"
     assert "instruction" not in heartbeat
     assert "effective" not in heartbeat

@@ -1356,9 +1356,9 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
                                  "underlying", "agent"),
                  "durable revocation must override but retain device evidence")
     _assert_section_terms(observability, "Instruction evidence and custody",
-                          ("receipt age", "server-observed", "stale",
+                          ("report age", "server-observed", "stale",
                            "underlying", "agent assertion"),
-                 "receipt-age stale state must retain underlying evidence")
+                 "report-age stale state must retain underlying evidence")
     _assert_unit(observability, ("Missing/corrupt", "null/unknown",
                                  "never become healthy zero"),
                  "unavailable evidence must not be rendered as healthy zero")

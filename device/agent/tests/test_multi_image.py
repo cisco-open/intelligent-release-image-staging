@@ -166,10 +166,11 @@ def test_two_images_both_stage_and_heartbeat_lists_them():
 
 
 def test_single_image_set_behaves_exactly_as_before():
-    # A one-image set must be byte-identical to the pre-multi-image agent:
-    # same return string, same single heartbeat with the same keys (no
-    # staged_image_ids — the server falls back to current_image_id/stage_state
-    # for one-image agents and rollouts), same top-level state bookkeeping.
+    # A one-image set keeps the pre-multi-image staging shape plus the additive
+    # instruction-capability marker: same return string, same single heartbeat
+    # with no staged_image_ids (the server falls back to
+    # current_image_id/stage_state for one-image agents and rollouts), and the
+    # same top-level state bookkeeping.
     cat = MultiCatalog([_img("img1")], ids=["img1"])
     deps, rec = make_deps(cat, {"/stage/img1.bin": 5})
     state = {}
@@ -181,7 +182,9 @@ def test_single_image_set_behaves_exactly_as_before():
     assert set(hb) == {"current_image_id", "free_flash_bytes", "version",
                        "model", "stage_state", "stage_error", "target_fs",
                        "telemetry_enabled", "telemetry_stream_enabled",
-                       "telemetry_observation"}
+                       "telemetry_observation", "instr_protocol"}
+    assert type(hb["instr_protocol"]) is int
+    assert hb["instr_protocol"] == 1
     assert hb["current_image_id"] == "img1"
     assert hb["stage_state"] == "ready"
     # top-level bookkeeping the old agent wrote, still written

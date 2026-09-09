@@ -84,7 +84,7 @@ Read these fields literally:
 Legacy scalar `qos` remains instruction intent. Its deprecated compatibility
 sentinel `delivery_state: pre-instructions` is not a current delivery
 observation. Use the response's canonical `instruction` object, the matching
-Devices projection and fleet rollups for receipt evidence. An explicit
+Devices projection and fleet rollups for reported instruction-application evidence. An explicit
 `tracker_qos` explains the selected tracker state and its sources. `tracker_qos` is tracker-only: tracker
 state never enters instruction QoS/control, telemetry, semantic hashes, role artifacts,
 stamps, serials, envelopes, heartbeat, or device configuration.
@@ -107,7 +107,7 @@ evaluation for every ACL.
 ## Instruction evidence and custody
 
 **violation = 0 does not mean compliant**. Distinguish server-observed facts
-(durable revocation, receipt age and server custody/stamp status), device-authored
+(durable revocation, report age and server custody/stamp status), device-authored
 reports (claims created on the device), and agent-asserted instruction facts
 (raw state, accepted identity, verification level and QoS drift). A privileged
 administrator can bypass the agent; absence of a reported violation proves
@@ -137,9 +137,9 @@ See [failure actions](device-agents.md#instruction-failures-and-recovery).
 
 Durable `revoked` overrides an agent's LKG claim while retaining the underlying
 state and evidence. Within a supported instruction report, raw `stale_expired`
-or `allowlist_expired` remains stale by agent assertion before receipt-age
+or `allowlist_expired` remains stale by agent assertion before report-age
 classification, even when age is unknown. Other supported reports with
-missing/invalid/future receipt time display unknown; an old valid receipt time
+missing/invalid/future report arrival time display unknown; an old valid report arrival time
 displays stale with the last reported state. `pointer_skew` reports
 the existing three-observation latch, and `qos_drift_count` is a bounded count
 of agent-reported corrections. `instr_stamp_missing` is a current
