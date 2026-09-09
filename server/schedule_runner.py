@@ -1,0 +1,450 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Inert, server-side schedule runner with durable per-device evidence.
+
+The owner calls run(stop_event) from one daemon thread after deployment recovery.
+Imports and construction start no threads and read/write no stores. New-window
+countdowns read definitions/progress only; target resolution happens at fire.
+
+resolve_target(schedule) returns revision/now/device_ids, optionally accompanied
+by transient validation facts. role_guard(schedule) is a context manager that
+validates authoritative role state under the owner's role-management lock. That
+lock surrounds claim/rechecks, never executor calls. The guard must raise
+ExecutionRefused with a safe reason code when authority is unavailable.
+
+The injected executor is nonblocking:
+  validate(schedule, snapshot, phase='window_start') -> None or refusal result
+  dispatch(schedule, occurrence, device_id, prior_receipt) -> result
+  poll(receipt) -> result
+  cancel_queued(occurrence_id, job_ids) -> ignored (poll confirms each outcome)
+
+A result has status and reason. Durable statuses are ok/skipped/error or
+submitted/running (submitted requires job_id). Deferred results retain the
+current receipt with a safe reason and optional transient retry_at. A retry
+result from poll means authoritative recovery found no work requiring continued
+polling; it must carry manual_generation for a durable successor attempt.
+Prepared results may bind manual_generation/before_image_ids to an intent before
+any external action. Dispatch must reconcile an existing intent by its immutable
+occurrence/device identity before admitting work: an earlier call may have
+succeeded immediately before the process lost its result.
+
+The runner owns persistence/timing; Task23 owns actual assignment/onboarding,
+recovery provenance, policy checks, and bounded admission. Task24 owns gate math.
+No executor or gate is treated as success merely because it is unavailable.
+"""
+import contextlib
+import copy
+import heapq
+import re
+import threading
+import time
+
+import schedules
+
+
+_ACTIVE = frozenset(("pending", "running", "interrupted"))
+_METADATA = frozenset(("job_id", "record_id", "predecessor_record_id",
+    "manual_generation", "before_image_ids", "after_image_ids", "removed_image_ids", "notes"))
+_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+
+
+class ExecutionRefused(RuntimeError):
+    """Expected refusal carrying a public, non-diagnostic reason code."""
+    def __init__(self, reason):
+        if not isinstance(reason, str) or not _REASON.fullmatch(reason):
+            raise ValueError("invalid execution refusal reason")
+        self.reason = reason
+        super().__init__(reason)
+
+
+class UnavailableExecutor:
+    """Safe placeholder until Task23 supplies the real executor."""
+    def validate(self, schedule, snapshot, phase):
+        return {"status": "skipped", "reason": "executor_unavailable"}
+
+    def dispatch(self, schedule, occurrence, device_id, prior_receipt):
+        raise ExecutionRefused("executor_unavailable")
+
+    def poll(self, receipt):
+        # Existing evidence could belong to work admitted by an earlier build.
+        return {"status": "deferred", "reason": "executor_unavailable"}
+
+    def cancel_queued(self, occurrence_id, job_ids):
+        return None
+
+
+@contextlib.contextmanager
+def _default_role_guard(schedule):
+    if schedule["target"]["filters"].get("role") not in (None, "", "__none"):
+        raise ExecutionRefused("role_authority_unavailable")
+    yield
+
+
+class ScheduleRunner:
+    """One state-owner runner; tests drive run_once with an injected clock."""
+    def __init__(self, store, resolve_target, *, executor=None, role_guard=None,
+                 now_fn=time.time, wake_event=None, idle_recheck=30,
+                 poll_interval=1, max_claims=32, max_dispatches=100,
+                 error_fn=None):
+        for value in (idle_recheck, poll_interval):
+            if type(value) not in (int, float) or not 0 < value <= 300:
+                raise ValueError("runner intervals must be positive and bounded")
+        for value in (max_claims, max_dispatches):
+            if type(value) is not int or value < 1:
+                raise ValueError("runner budgets must be positive integers")
+        self.store = store
+        self.occurrences = schedules.OccurrenceStore(store.state_dir)
+        self.receipts = schedules.ReceiptStore(store.state_dir)
+        self.resolve_target = resolve_target
+        self.executor = executor if executor is not None else UnavailableExecutor()
+        self.role_guard = role_guard if role_guard is not None else _default_role_guard
+        self.now_fn = now_fn
+        self.wake_event = wake_event if wake_event is not None else threading.Event()
+        self.idle_recheck = idle_recheck
+        self.poll_interval = poll_interval
+        self.max_claims = max_claims
+        self.max_dispatches = max_dispatches
+        self.error_fn = error_fn
+        self.last_error = None
+        self._failures = 0
+        self._recovered = False
+        self._active = set()
+        self._validated = set()
+        self._facts = {}
+        self._retry_at = {}
+        self._position = {}
+        self._stop = threading.Event()
+        self._external_stop = None
+
+    def _now(self):
+        value = self.now_fn()
+        if type(value) not in (int, float) or not 0 <= value <= schedules.MAX_EPOCH:
+            raise ValueError("invalid runner clock")
+        return int(value)
+
+    def wake(self):
+        self.wake_event.set()
+
+    def stop(self):
+        self._stop.set()
+        self.wake()
+
+    def _stopping(self):
+        return self._stop.is_set() or (self._external_stop is not None and self._external_stop.is_set())
+
+    def recover(self):
+        """Mark interrupted once, retaining active work even for deleted rows."""
+        if self._recovered:
+            return []
+        recovered = self.occurrences.recover_interrupted(now=self._now())
+        self._active.update(row["id"] for row in self.occurrences.list() if row["state"] in _ACTIVE)
+        self._recovered = True
+        return recovered
+
+    def run(self, stop_event):
+        self._external_stop = stop_event
+        try:
+            while not self._stopping():
+                # A write during the scan must remain visible to this wait.
+                self.wake_event.clear()
+                delay = self.run_once()
+                if not self._stopping():
+                    self.wake_event.wait(delay)
+        finally:
+            self._external_stop = None
+
+    def run_once(self):
+        """Run one bounded pass, returning a positive, stop-aware wait delay.
+
+        This guard includes recovery, definitions, math, claims, receipt writes
+        and error reporting. A corrupt store is never interpreted as empty.
+        """
+        if self._stopping():
+            return self.idle_recheck
+        try:
+            self.recover()
+            delay = self._pass()
+        except Exception as exc:
+            self.last_error = exc.reason if isinstance(exc, ExecutionRefused) else "schedule_runner_error"
+            self._failures = min(self._failures + 1, 10)
+            if self.error_fn is not None:
+                try:
+                    self.error_fn(self.last_error)
+                except Exception:
+                    pass
+            return min(self.idle_recheck, self.poll_interval * 2 ** (self._failures - 1))
+        self._failures = 0
+        self.last_error = None
+        return max(0.01, min(self.idle_recheck, delay))
+
+    def _slot(self, row, now):
+        progress = self.store.progress(row["id"])
+        cursor = progress["last_slot"] if progress else None
+        # On first startup, start at creation rather than discarding earlier
+        # weekly slots. Subsequent scans use the durable last-claimed cursor.
+        anchor = row["created_at"] if cursor is None and row["when"]["kind"] == "recurring" else now
+        slot = schedules.occurrence_slot(row, anchor, after_epoch=cursor)
+        if slot is not None:
+            slot["status"] = ("future" if now < slot["scheduled_at"] else
+                              "due" if now < slot["window_end"] else "missed")
+        return slot
+
+    def _pass(self):
+        now = self._now()
+        pending = []
+        for row in self.store.list():
+            slot = self._slot(row, now)
+            if slot is not None:
+                heapq.heappush(pending, (slot["scheduled_at"], row["id"], row, slot))
+        claims = 0
+        errors = []
+        while pending and pending[0][0] <= self._now() and claims < self.max_claims and not self._stopping():
+            _, _, row, slot = heapq.heappop(pending)
+            claims += 1
+            try:
+                claimed = self._claim(row, slot)
+            except schedules.ScheduleConflict:
+                # Definition edited/deleted during resolution. A fresh pass
+                # recomputes from its new authority; this stale row cannot fire.
+                continue
+            except Exception as exc:
+                errors.append(exc)
+                continue
+            if claimed["state"] in _ACTIVE:
+                self._active.add(claimed["id"])
+            current = self.store.get(row["id"])
+            if current is not None:
+                upcoming = self._slot(current, self._now())
+                if upcoming is not None:
+                    heapq.heappush(pending, (upcoming["scheduled_at"], current["id"], current, upcoming))
+        self._remaining = self.max_dispatches
+        for oid in sorted(self._active, key=lambda oid: (self.occurrences.get(oid)["scheduled_at"], oid)):
+            if self._stopping():
+                break
+            try:
+                self._process(self.occurrences.get(oid))
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
+        delay = self.poll_interval if self._active else self.idle_recheck
+        if pending:
+            delay = min(delay, max(0.01, pending[0][0] - self._now()))
+        return delay
+
+    def _claim(self, row, slot):
+        existing = self.occurrences.get(schedules.occurrence_id(row, slot["scheduled_at"]))
+        facts = None
+        if existing is not None:
+            snapshot = existing.get("target_snapshot")
+        elif self._now() >= slot["window_end"]:
+            snapshot = None
+        else:
+            facts = self.resolve_target(copy.deepcopy(row))
+            snapshot = schedules.normalize_snapshot({key: facts[key] for key in ("revision", "now", "device_ids")})
+            # Target resolution can cross the end boundary; never publish a
+            # fabricated fired set for a slot that was missed before claim.
+            if self._now() >= slot["window_end"]:
+                snapshot = None
+        guard = self.role_guard(row) if snapshot is not None else contextlib.nullcontext()
+        with guard:
+            claimed = self.store.claim_occurrence(row["id"], expected_rev=row["rev"],
+                expected_generation=row["generation"], slot=slot,
+                target_snapshot=snapshot, now=self._now())
+        if facts is not None and claimed["state"] in _ACTIVE:
+            # Facts are diagnostic/validation input, not additional durable
+            # authority. Core binding remains the store's closed snapshot.
+            self._facts[claimed["id"]] = dict(facts, **claimed["target_snapshot"])
+        return claimed
+
+    def _closed_reason(self, occurrence):
+        if self._stopping():
+            return "runner_stopping"
+        now = self._now()
+        if now < occurrence["scheduled_at"]:
+            return "window_not_open"
+        if now >= occurrence["window_end"]:
+            return "window_closed"
+        live = self.store.get(occurrence["schedule_id"])
+        original = occurrence["schedule"]
+        # Re-affirm changes the audit label/revision, not a frozen operation.
+        if (live is None or live["generation"] != occurrence["schedule_generation"] or
+                any(live.get(key) != original.get(key) for key in schedules.DEFINITION_KEYS)):
+            return "schedule_changed"
+        return None
+
+    def _admission_reason(self, occurrence):
+        reason = self._closed_reason(occurrence)
+        if reason is not None:
+            return reason
+        try:
+            with self.role_guard(occurrence["schedule"]):
+                return self._closed_reason(occurrence)
+        except ExecutionRefused as exc:
+            return exc.reason
+
+    @staticmethod
+    def _result(result):
+        if not isinstance(result, dict) or set(result) - ({"status", "reason", "retry_at"} | _METADATA):
+            raise ValueError("invalid executor result fields")
+        if result.get("status") not in schedules.RECEIPT_STATES | {"deferred", "retry", "prepared"}:
+            raise ValueError("invalid executor result status")
+        if not isinstance(result.get("reason"), str) or not _REASON.fullmatch(result["reason"]):
+            raise ValueError("invalid executor result reason")
+        if result["status"] == "intent":
+            raise ValueError("use prepared or deferred for an executor intent result")
+        if "retry_at" in result and (type(result["retry_at"]) is not int or not 0 <= result["retry_at"] <= schedules.MAX_EPOCH):
+            raise ValueError("invalid executor retry time")
+        return result
+
+    def _save(self, occurrence, did, prior, result):
+        result = self._result(result)
+        status = result["status"]
+        if status == "retry":
+            raise ValueError("retry needs recovery handling")
+        if status in ("deferred", "prepared"):
+            status = prior["status"]
+        if status in ("submitted", "running") and not result.get("job_id", prior.get("job_id")):
+            raise ValueError("admitted result requires job identity")
+        metadata = {key: value for key, value in result.items() if key in _METADATA}
+        saved = self.receipts.record(occurrence["id"], did, status=status,
+            reason=result["reason"], now=self._now(), expected_rev=prior["rev"], **metadata)
+        key = (occurrence["id"], did)
+        if result["status"] in ("deferred", "prepared"):
+            self._retry_at[key] = max(self._now()+self.poll_interval, result.get("retry_at", 0))
+        else:
+            self._retry_at.pop(key, None)
+        return saved
+
+    def _finish_unsubmitted(self, occurrence, did, prior, reason, status="skipped"):
+        return self.receipts.record(occurrence["id"], did, status=status,
+            reason=reason, now=self._now(), expected_rev=prior["rev"] if prior else None)
+
+    def _retry(self, occurrence, did, prior, result, closed):
+        if closed == "window_not_open":
+            return self._save(occurrence, did, prior,
+                {"status": "deferred", "reason": closed})
+        if closed:
+            return self._finish_unsubmitted(occurrence, did, prior, closed)
+        # A retry is explicit authoritative recovery, never inferred from
+        # absent in-memory jobs. Preserve the old attempt before admission.
+        if "manual_generation" not in result:
+            raise ValueError("recovery retry requires manual generation")
+        if prior["attempt"] >= schedules.MAX_RECEIPT_ATTEMPTS:
+            return self._finish_unsubmitted(occurrence, did, prior,
+                "retry_limit_exceeded", "error")
+        successor = self.receipts.successor_attempt(occurrence["id"], did,
+            expected_rev=prior["rev"], now=self._now(),
+            manual_generation=result["manual_generation"],
+            predecessor_record_id=result.get("predecessor_record_id"),
+            before_image_ids=result.get("before_image_ids"))
+        self._retry_at.pop((occurrence["id"], did), None)
+        return successor
+
+    def _poll(self, occurrence, did, prior, closed):
+        result = self._result(self.executor.poll(copy.deepcopy(prior)))
+        if result["status"] == "retry":
+            return self._retry(occurrence, did, prior, result, closed)
+        return self._save(occurrence, did, prior, result)
+
+    def _process(self, occurrence):
+        oid = occurrence["id"]
+        if occurrence["state"] not in _ACTIVE:
+            self._active.discard(oid)
+            return
+        if occurrence["state"] != "running":
+            occurrence = self.occurrences.transition(oid, "running", now=self._now(), expected_state=occurrence["state"])
+        targets = occurrence["target_snapshot"]["device_ids"]
+        complete = self.receipts.completed_device_ids(oid)
+        closed = self._admission_reason(occurrence)
+        refusal = None
+        if closed is None and (len(complete) < len(targets) or not targets):
+            if "after" in occurrence["schedule"]:
+                refusal = {"status":"skipped", "reason":"gate_unavailable"}
+            elif oid not in self._validated:
+                refusal = self.executor.validate(copy.deepcopy(occurrence["schedule"]),
+                    copy.deepcopy(self._facts.get(oid, occurrence["target_snapshot"])), "window_start")
+                if refusal is not None:
+                    refusal = self._result(refusal)
+                    if refusal["status"] not in ("skipped", "error"):
+                        raise ValueError("validation must allow or refuse without admission")
+                else:
+                    self._validated.add(oid)
+        start = self._position.get(oid, 0)
+        order = list(enumerate(targets))
+        order = order[start:] + order[:start]
+        for position, did in order:
+            if self._stopping():
+                break
+            if did in complete:
+                continue
+            prior = self.receipts.get(oid, did)
+            closed = self._admission_reason(occurrence)
+            if prior and prior["status"] in ("submitted", "running"):
+                self._position[oid] = (position + 1) % max(1, len(targets))
+                self._poll(occurrence, did, prior, closed)
+                continue
+            if closed == "window_not_open":
+                continue  # wall clock moved backwards; do not dispatch or close
+            if closed:
+                if prior is not None:
+                    # Intent may precede a successful but unrecorded admission.
+                    self._poll(occurrence, did, prior, closed)
+                else:
+                    self._finish_unsubmitted(occurrence, did, None, closed)
+                continue
+            if refusal is not None:
+                if prior is not None:
+                    self._poll(occurrence, did, prior, refusal["reason"])
+                else:
+                    self._finish_unsubmitted(occurrence, did, None, refusal["reason"], refusal["status"])
+                continue
+            if self._remaining <= 0 or self._retry_at.get((oid,did), 0) > self._now():
+                continue
+            self._remaining -= 1
+            self._position[oid] = (position + 1) % max(1, len(targets))
+            intent = prior if prior is not None else self.receipts.begin(oid, did, now=self._now())
+            closed = self._admission_reason(occurrence)
+            if closed:
+                if prior is not None:
+                    self._poll(occurrence, did, intent, closed)
+                else:
+                    self._finish_unsubmitted(occurrence, did, intent, closed)
+                continue
+            result = self._result(self.executor.dispatch(copy.deepcopy(occurrence["schedule"]),
+                copy.deepcopy(occurrence), did, copy.deepcopy(intent)))
+            if result["status"] == "retry":
+                self._retry(occurrence, did, intent, result, self._admission_reason(occurrence))
+            else:
+                self._save(occurrence, did, intent, result)
+        closed = self._closed_reason(occurrence)
+        if closed and closed != "window_not_open":
+            # Only IDs durably bound to this occurrence are eligible; the
+            # executor checks queued status atomically with job admission.
+            owned = []
+            for did in targets:
+                receipt = self.receipts.get(oid, did)
+                if receipt and receipt["status"] == "submitted" and receipt.get("job_id"):
+                    owned.append(receipt["job_id"])
+            if owned:
+                self.executor.cancel_queued(oid, sorted(set(owned)))
+        done = self.receipts.completed_device_ids(oid)
+        if len(done) == len(targets):
+            reasons = {refusal["reason"]} if refusal else set()
+            statuses = {refusal["status"]} if refusal else set()
+            for did in targets:
+                result = self.receipts.get(oid, did)
+                reasons.add(result["reason"])
+                statuses.add(result["status"])
+            state = ("stalled" if "gate_unavailable" in reasons else
+                     "failed" if "error" in statuses or "executor_unavailable" in reasons else
+                     "cancelled" if "schedule_changed" in reasons else "completed")
+            self.occurrences.transition(oid, state, now=self._now(), expected_state="running")
+            self._active.discard(oid)
+            self._validated.discard(oid)
+            self._facts.pop(oid, None)
+            self._position.pop(oid, None)
+            for did in targets:
+                self._retry_at.pop((oid, did), None)
