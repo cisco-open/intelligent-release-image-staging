@@ -521,3 +521,40 @@ def test_task14_instruction_attestation_invalid_drift_omits_whole_fact(damage):
     else:
         pair["observed"] = invalid_numbers[damage.removeprefix("pair-")]
     assert sanitize({"qos_drift": fact, "instr_serial": 7}) == {"instr_serial": 7}
+
+
+@pytest.mark.parametrize("marker", [None, False, True, 0, 2, -1, 2 ** 63,
+                                     1.0, "1", "private-token", [], {}])
+def test_task19_attestation_protocol_invalid_present_is_bounded_unknown(marker):
+    assert instructions.sanitize_instruction_attestation(
+        {"instr_protocol": marker}) == {"instr_protocol": None}
+    assert instructions.sanitize_instruction_attestation({}) == {}
+    assert instructions.sanitize_instruction_attestation(
+        {"instr_protocol": 1}) == {"instr_protocol": 1}
+
+
+@pytest.mark.parametrize("field", ["instr_epoch", "instr_serial", "instr_policy_revision"])
+def test_task19_attestation_accepted_identity_is_complete_bounded_unit(field):
+    identity = {"instr_epoch": 11, "instr_serial": 7, "instr_policy_revision": 3}
+    for boundary in (0, 2 ** 63 - 1):
+        valid = dict(identity, **{field: boundary})
+        assert instructions.sanitize_instruction_attestation(valid) == valid
+    for invalid in (None, False, True, -1, 2 ** 63, 1.0, "1", {}, []):
+        candidate = dict(identity, **{field: invalid})
+        assert instructions.sanitize_instruction_attestation(
+            dict(candidate, instr_state="lkg")) == {"instr_state": "lkg"}
+    partial = dict(identity)
+    del partial[field]
+    assert instructions.sanitize_instruction_attestation(partial) == {}
+    # Old persisted reports keep the bounded serial without invented members.
+    assert instructions.sanitize_instruction_attestation(
+        {"instr_serial": 7}) == {"instr_serial": 7}
+
+
+@pytest.mark.parametrize("value", [True, False, None, 0, 1, 3, "true", [], {}])
+def test_task19_attestation_pointer_skew_boolean_only(value):
+    supplied = {"pointer_skew": value, "pointer_skew_count": 3,
+                "fetched_pointer": {"epoch": 11, "instr_serial": 100},
+                "token": "private-token"}
+    expected = {"pointer_skew": value} if type(value) is bool else {}
+    assert instructions.sanitize_instruction_attestation(supplied) == expected

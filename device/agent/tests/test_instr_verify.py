@@ -1445,3 +1445,72 @@ def test_malformed_local_lkg_key_loads_but_is_never_regenerated(instr, tmp_path,
     assert cfg["lkg_key"] == malformed
     assert agent_config.load(str(path))["lkg_key"] == malformed
     assert (tmp_path / "iris-instructions.lkg").read_bytes() == before
+
+
+def test_task19_pointer_skew_heartbeat_threshold_restart_cache_and_reset(instr, tmp_path):
+    catalog, state, cfg = RouteCatalog(), {}, config()
+    hints = {"instr_rev": {"epoch": NOW - 1, "instr_serial": 8}}
+    identity = {"instr_epoch": NOW - 1, "instr_serial": 7, "instr_policy_revision": 3}
+    for observation in (1, 2, 3):
+        if observation > 1:
+            catalog.response = (304, b"", {"Date": "Mon, 07 Sep 2026 12:00:00 GMT"})
+        fact = run_step(instr, tmp_path, catalog, state, hints=hints, cfg=cfg,
+                        mono=10 + observation)
+        assert {name: fact[name] for name in identity} == identity
+        assert fact["pointer_skew"] is (observation == 3)
+        assert "pointer_skew_count" not in fact
+        state = json.loads(json.dumps(state))
+    assert len(catalog.requests) == 3
+    # Reloaded latch survives a fresh launcher and cache-only early return.
+    cached = instr.run_instruction_step(
+        cfg, state, catalog, {}, None, "guestshell", str(tmp_path), BOOT, 20,
+        AcceptVerifier(), lambda _updated: None, lambda *_args: None,
+        cache_only=True)["attestation"]
+    assert cached["pointer_skew"] is True
+    assert {name: cached[name] for name in identity} == identity
+    fact = run_step(instr, tmp_path, catalog, state, hints=hints, cfg=cfg, mono=21)
+    assert fact["pointer_skew"] is True
+    assert len(catalog.requests) == 3
+    # Existing pointer-change reset takes effect even when that fetch is pending.
+    moved = {"instr_rev": {"epoch": NOW - 1, "instr_serial": 9}}
+    catalog.response = (409, b"", {})
+    fact = run_step(instr, tmp_path, catalog, state, hints=moved, cfg=cfg, mono=22)
+    assert fact["instr_state"] == "instr_pending"
+    assert fact["pointer_skew"] is False
+    assert {name: fact[name] for name in identity} == identity
+
+
+@pytest.mark.parametrize("damage", ["rejected", "transport", "promotion"])
+def test_task19_accepted_identity_never_comes_from_failed_candidate(
+        instr, tmp_path, monkeypatch, damage):
+    catalog, state, cfg = RouteCatalog(), {}, config()
+    first = run_step(instr, tmp_path, catalog, state, cfg=cfg)
+    identity = {"instr_epoch": NOW - 1, "instr_serial": 7, "instr_policy_revision": 3}
+    assert {name: first[name] for name in identity} == identity
+    candidate = make_envelope(header={"instr_serial": 8, "policy_revision": 900})
+    if damage == "rejected":
+        parts = unframe(candidate)
+        parts[-1] = b"x" * 32
+        candidate = frame(parts)
+    elif damage == "promotion":
+        def fail(*_args, **_kwargs):
+            raise OSError("private-candidate-detail")
+        monkeypatch.setattr(instr, "_promote_verified", fail)
+    catalog.response = (OSError("private-candidate-detail") if damage == "transport"
+                        else (200, candidate, {"Date": "Mon, 07 Sep 2026 12:00:00 GMT"}))
+    fact = run_step(instr, tmp_path, catalog, state,
+                    hints={"instr_rev": {"epoch": NOW - 1, "instr_serial": 8}},
+                    cfg=cfg, mono=20)
+    assert {name: fact[name] for name in identity} == identity
+    assert "private-candidate-detail" not in repr(fact)
+
+
+@pytest.mark.parametrize("latch", [None, True, -1, 4, "3", {}, []])
+def test_task19_pointer_skew_missing_or_invalid_is_unknown(instr, tmp_path, latch):
+    state = {"instructions": {}} if latch is None else {
+        "instructions": {"pointer_skew_count": latch}}
+    fact = instr.run_instruction_step(
+        config(), state, RouteCatalog(), {}, None, "guestshell", str(tmp_path),
+        BOOT, 10, AcceptVerifier(), lambda _updated: None,
+        lambda *_args: None, cache_only=True)["attestation"]
+    assert "pointer_skew" not in fact

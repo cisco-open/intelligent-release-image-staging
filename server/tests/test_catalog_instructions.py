@@ -1324,3 +1324,49 @@ def test_direct_bootstrap_cli_writes_only_private_ciphertext(
     assert output.stat().st_mode & 0o777 == 0o600
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""
+
+
+def test_task19_heartbeat_protocol_identity_and_pointer_survive_ingestion(tmp_path, monkeypatch):
+    fixture = _Fixture(tmp_path, monkeypatch, devices=("device-a",))
+    try:
+        identity = {"instr_epoch": 11, "instr_serial": 7, "instr_policy_revision": 3}
+        valid = dict(identity, instr_protocol=1, pointer_skew=True,
+                     instr_state="lkg", version="17.18.03")
+        for payload, expected in (
+                (valid, valid),
+                ({"instr_protocol": {"token": "private-token"},
+                  "instr_epoch": True, "instr_serial": 7,
+                  "instr_policy_revision": 3, "pointer_skew": "true"},
+                 {"instr_protocol": None}),
+                ({"version": "17.18.03", "instr_serial": 7},
+                 {"version": "17.18.03", "instr_serial": 7})):
+            assert _request(fixture, "/v1/devices/device-a/heartbeat",
+                            method="POST", body=payload)[0] == 200
+            stored = fixture.store.get_device("device-a")
+            for key, value in expected.items():
+                assert stored[key] == value
+            instruction_fields = set(identity) | {"instr_protocol", "pointer_skew", "instr_state"}
+            assert instruction_fields.intersection(stored) == instruction_fields.intersection(expected)
+            assert "private-token" not in repr(stored)
+    finally:
+        fixture.close()
+
+
+def test_task19_attestation_raw_policy_snapshot_is_bulk_copied_and_structurally_checked(tmp_path):
+    raw = {"device-a": {"instr": {"not-a-valid-stamp": True},
+                         "approved_image_ids": ["image-a"]},
+           "device-b": {"approved_image_id": None}}
+    (tmp_path / "policy.json").write_text(json.dumps(raw))
+    store = catalog.CatalogStore(str(tmp_path))
+    result = store.list_raw_policies()
+    assert result == raw
+    result["device-a"]["approved_image_ids"].append("image-b")
+    assert store.list_raw_policies() == raw
+    with pytest.raises(catalog.StateFileError):
+        store.list_policies()
+    shard = Path(store._raw_policies.dir) / ("%03x.json" % keyed_state.bucket_of(
+        "device-a", store._raw_policies.shards))
+    # A structurally bad row never becomes an empty or all-missing snapshot.
+    shard.write_text(json.dumps({"device-a": []}))
+    with pytest.raises(catalog.StateFileError):
+        store.list_raw_policies()

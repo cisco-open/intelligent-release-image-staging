@@ -210,7 +210,9 @@ def _result(peers=None, state="applied", serial=7, control=None):
         "effective_peers": copy.deepcopy(verified["device"]["peers"]),
         "attestation": {
             "instr_state": state,
+            "instr_epoch": verified["header"]["epoch"],
             "instr_serial": serial,
+            "instr_policy_revision": verified["header"]["policy_revision"],
             "verify_level": "sig",
         },
     }
@@ -1574,7 +1576,10 @@ def test_future_torrent_defaults_ignore_plaintext_cfg_for_native_and_xr_callers(
 def test_heartbeat_projects_complete_task14_attestation_and_no_private_data():
     attestation = {
         "instr_state": "applied",
+        "instr_protocol": 1,
+        "instr_epoch": NOW - 1,
         "instr_serial": 7,
+        "instr_policy_revision": 4,
         "verify_level": "sig",
         "applied": dict(APPLIED_EXPECTED),
         "blocklist_rules": 2,
@@ -1603,7 +1608,10 @@ def test_heartbeat_projects_complete_task14_attestation_and_no_private_data():
 def test_heartbeat_omits_whole_invalid_nested_units():
     invalid = {
         "instr_state": "applied",
+        "instr_protocol": 1,
+        "instr_epoch": NOW - 1,
         "instr_serial": 7,
+        "instr_policy_revision": 4,
         "verify_level": "sig",
         "applied": dict(APPLIED_EXPECTED, overall_up=True),
         "blocklist_rules": 2,
@@ -1612,8 +1620,8 @@ def test_heartbeat_omits_whole_invalid_nested_units():
     }
     heartbeat = iris_agent._heartbeat_with_instruction({}, invalid)
     assert heartbeat == {
-        "instr_state": "applied", "instr_serial": 7,
-        "verify_level": "sig"}
+        "instr_protocol": 1, "instr_state": "applied", "instr_epoch": NOW - 1,
+        "instr_serial": 7, "instr_policy_revision": 4, "verify_level": "sig"}
 
 
 @pytest.mark.parametrize("reason", [
@@ -1622,7 +1630,9 @@ def test_heartbeat_omits_whole_invalid_nested_units():
     pytest.param("unsupported", id="unsupported"),
 ])
 def test_heartbeat_omits_malformed_key_rejected_unit_like_server(reason):
-    attestation = {"instr_state": "key_rejected", "instr_serial": 7}
+    attestation = {"instr_protocol": 1, "instr_state": "key_rejected",
+                   "instr_epoch": NOW - 1, "instr_serial": 7,
+                   "instr_policy_revision": 4}
     if reason is not None:
         attestation["instr_reason"] = reason
 
@@ -2028,3 +2038,85 @@ def test_apply_failure_wins_over_policy_failure_and_skips_all_staging(
     assert heartbeat["instr_state"] == "instr_unavailable"
     assert "applied" not in heartbeat
     assert "blocklist_rules" not in heartbeat
+
+
+@pytest.mark.parametrize("attestation", [None, [], {}, {"instr_state": "instr_pending"},
+                                          {"instr_protocol": "private-token"}])
+def test_task19_heartbeat_protocol_is_unconditional_and_preserves_ios_version(attestation):
+    payload = {"version": "17.18.03", "stage_state": "error"}
+    heartbeat = iris_agent._heartbeat_with_instruction(payload, attestation)
+    assert type(heartbeat["instr_protocol"]) is int
+    assert heartbeat["instr_protocol"] == 1
+    assert heartbeat["version"] == "17.18.03"
+    assert payload == {"version": "17.18.03", "stage_state": "error"}
+    assert "private-token" not in repr(heartbeat)
+
+
+@pytest.mark.parametrize("field", ["instr_epoch", "instr_serial", "instr_policy_revision"])
+def test_task19_heartbeat_accepted_identity_is_complete_or_absent(field):
+    identity = {"instr_epoch": NOW - 1, "instr_serial": 7, "instr_policy_revision": 4}
+    assert iris_agent._heartbeat_with_instruction({}, identity) == dict(
+        identity, instr_protocol=1)
+    for invalid in (None, False, True, -1, 2 ** 63, 1.0, "1", {}, []):
+        assert iris_agent._heartbeat_with_instruction(
+            {}, dict(identity, **{field: invalid})) == {"instr_protocol": 1}
+    partial = dict(identity)
+    del partial[field]
+    assert iris_agent._heartbeat_with_instruction({}, partial) == {"instr_protocol": 1}
+    assert iris_agent._heartbeat_with_instruction(
+        {}, {"instr_serial": 7}) == {"instr_protocol": 1}
+
+
+@pytest.mark.parametrize("value", [True, False, None, 0, 1, 3, "true", [], {}])
+def test_task19_heartbeat_pointer_skew_boolean_only(value):
+    supplied = {"pointer_skew": value, "pointer_skew_count": 3,
+                "fetched_pointer": {"epoch": 11, "instr_serial": 100}}
+    expected = {"instr_protocol": 1}
+    if type(value) is bool:
+        expected["pointer_skew"] = value
+    assert iris_agent._heartbeat_with_instruction({}, supplied) == expected
+
+
+@pytest.mark.parametrize("path", ["ordinary", "cached", "pending", "step-error",
+                                  "preview-error", "rpc-error", "cached-rpc-error",
+                                  "policy-error", "policy-rpc-error", "no-step"])
+def test_task19_heartbeat_protocol_pointer_and_identity_on_runtime_paths(path, monkeypatch):
+    monkeypatch.setattr(instr, "boot_id", lambda: BOOT)
+    monkeypatch.setattr(iris_agent.time, "monotonic", lambda: 100.0)
+    catalog, rpc = RuntimeCatalog(), AriaRPC()
+    result = _result()
+    result["attestation"]["pointer_skew"] = True
+    state = {"instructions": {"pointer_skew_count": 3}}
+    if path in ("cached", "cached-rpc-error"):
+        state["instructions"]["poll"] = {
+            "boot_id": BOOT, "monotonic": 99.0, "assignment_ids": []}
+    if path == "pending":
+        result = {"instruction": None, "effective": None,
+                  "attestation": {"instr_state": "instr_pending", "pointer_skew": True}}
+    def step(**kwargs):
+        if ((path == "step-error" and not kwargs.get("cache_only"))
+                or (path == "preview-error" and kwargs.get("cache_only"))):
+            raise OSError("private-runtime-detail")
+        return copy.deepcopy(result)
+    if "rpc-error" in path:
+        rpc.fail_method = "aria2.setBtPeerBlocklist"
+    if path in ("policy-error", "policy-rpc-error", "preview-error"):
+        catalog.policy_error = OSError("private-runtime-detail")
+    deps = _deps(catalog, None if path == "no-step" else step, rpc, {})
+    iris_agent.run_once(_cfg(), deps, state)
+    assert len(catalog.heartbeats) == 1
+    heartbeat = catalog.heartbeats[0]
+    assert heartbeat["instr_protocol"] == 1
+    assert type(heartbeat["instr_protocol"]) is int
+    assert heartbeat["version"] == "17.18.03"
+    if path != "no-step":
+        assert heartbeat["pointer_skew"] is True
+    fields = {"instr_epoch", "instr_serial", "instr_policy_revision"}
+    if path in ("ordinary", "cached", "policy-error"):
+        assert {name: heartbeat[name] for name in fields} == {
+            "instr_epoch": result["instruction"]["header"]["epoch"],
+            "instr_serial": 7, "instr_policy_revision": 4}
+    else:
+        assert not fields.intersection(heartbeat)
+    assert "pointer_skew_count" not in heartbeat
+    assert "private-runtime-detail" not in repr(heartbeat)
