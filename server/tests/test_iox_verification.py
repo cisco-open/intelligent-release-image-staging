@@ -2245,6 +2245,9 @@ def test_summary_for_device_has_only_safe_obligations_and_session_projection(
     assert set(value) == {"iox_verification_obligations", "iox_sessions"}
     assert value["iox_verification_obligations"] == [safe]
     assert value["iox_sessions"] == []
+    assert "controller_id" not in json.dumps(value)
+    assert "wrapper_sha256" not in json.dumps(value)
+    assert "transcript" not in json.dumps(value)
 
 
 def test_verification_read_fence_durability_failure_stops_all_later_commands(
@@ -2327,10 +2330,10 @@ def test_transcript_quota_check_and_creation_share_the_store_lock(
     monkeypatch.setattr(iox_transport, "_TranscriptWriter", checked_writer)
     controller = _controller(tmp_path, LockedStore(tmp_path),
                              _TransportFactory())
-    try:
-        controller._new_attempt("install", _request(), _Cancel())
-    finally:
-        controller.close()
+    attempt = controller._new_attempt("install", _request(), _Cancel())
+    with controller._active_lock:
+        controller._active.discard(attempt)
+    controller.close()
     assert observed == [True]
 
 
@@ -2450,9 +2453,6 @@ def test_force_retirement_runs_while_physical_board_lock_is_held(tmp_path):
         controller.close()
     assert result["result_code"] == 0
     assert len(checks) == 1
-    assert "controller_id" not in json.dumps(value)
-    assert "wrapper_sha256" not in json.dumps(value)
-    assert "transcript" not in json.dumps(value)
 
 
 class _PrivateClient(object):

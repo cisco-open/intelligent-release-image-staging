@@ -1093,6 +1093,96 @@ def test_cancellation_with_unreaped_descendant_keeps_active_fence(tmp_path):
     assert _read_json(fence_path)["state"] == "active"
 
 
+def test_supervisor_eof_reap_uses_only_the_original_absolute_deadline():
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    module = _verification_module()
+    deadline = time.monotonic() + 0.8
+    supervisor = module._SupervisorClient.start(
+        None, time.monotonic, deadline)
+    child = supervisor.popen(
+        [sys.executable, "-c",
+         "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, env={}, pass_fds=(), close_fds=True,
+        start_new_session=True, role="transport",
+        timeout=max(0.01, deadline - time.monotonic()))
+    try:
+        assert supervisor.abandon(deadline) is True
+        assert supervisor._process.poll() is not None
+        assert time.monotonic() <= deadline + 0.25
+    finally:
+        for pid in (child.pid, supervisor.pid):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@pytest.mark.parametrize("path", ["discover", "known"])
+def test_post_flock_revalidation_failure_never_leaks_board_lock(
+        tmp_path, monkeypatch, path):
+    import fcntl
+
+    module = _verification_module()
+    trace = []
+    store = _FakeStore(tmp_path, None, trace)
+    transport = _FakeTransport(_Device("enabled"), trace)
+    controller, unused = _controller(tmp_path, store, transport)
+
+    class Supervisor(object):
+        pid = os.getpid()
+        start_ticks = 0
+        def reap_all(self, deadline):
+            return True
+        def release(self, deadline):
+            return True
+        def abandon(self, deadline):
+            return True
+
+    monkeypatch.setattr(module._SupervisorClient, "start",
+                        classmethod(lambda cls, *args: Supervisor()))
+    monkeypatch.setattr(
+        module, "_revalidate_board_lock",
+        lambda *args: (_ for _ in ()).throw(
+            ValueError("injected lock pathname replacement")))
+    request = _AttrDict(
+        device_id=_DEVICE, job_id=_JOB, record_id=None,
+        teardown_mode="force_agent_only",
+        target=_AttrDict(host=_HOST, port=22, platform="iox",
+                         model="C9300-48UXM", os_family="xe"))
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.target = request.target
+    attempt.board = _BOARD if path == "known" else None
+    try:
+        with pytest.raises((ValueError, module._ControllerFailure)):
+            if path == "known":
+                controller._acquire_known_board_lock(attempt)
+            else:
+                controller._discover_and_lock(attempt)
+        lock_fd = module._open_board_lock(controller.lock_dir, _BOARD)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(lock_fd)
+    finally:
+        # Close a leaked descriptor on the rejected implementation so the red
+        # regression cannot contaminate another selector in this process.
+        lock_suffix = "/" + _board_key(_BOARD) + ".lock"
+        for name in os.listdir("/proc/self/fd"):
+            try:
+                descriptor = int(name)
+                if os.readlink("/proc/self/fd/" + name).endswith(lock_suffix):
+                    os.close(descriptor)
+            except (OSError, ValueError):
+                pass
+        controller.close()
+
+
 # Visibility and bounded admission -----------------------------------------
 
 
