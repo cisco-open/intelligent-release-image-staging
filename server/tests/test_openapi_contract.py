@@ -600,6 +600,8 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
         assert not list(applied_validator.iter_errors({
             str((1 << 63) - 1): 1}))
         assert list(applied_validator.iter_errors({str(1 << 63): 1}))
+        for newline_key in ("7\n", str((1 << 63) - 1) + "\n"):
+            assert list(applied_validator.iter_errors({newline_key: 1}))
         state_map = rollup["properties"]["states"]
         assert state_map["additionalProperties"] is False
         assert set(state_map["properties"]) == states
@@ -630,6 +632,8 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
         assert not list(label_validator.iter_errors(
             "r%d" % ((1 << 63) - 1)))
         assert list(label_validator.iter_errors("r%d" % (1 << 63)))
+        for newline_label in ("r7\n", "r%d\n" % ((1 << 63) - 1)):
+            assert list(label_validator.iter_errors(newline_label))
 
         custody = schema["properties"]["instruction_keys"]
         assert custody["oneOf"][1] == {"type": "null"}
