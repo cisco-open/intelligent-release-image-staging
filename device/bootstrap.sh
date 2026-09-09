@@ -201,7 +201,212 @@ collect_file() {
     fi
   fi
 }
-for f in bundle.tgz.sha256 iris-agent.conf rpc-secret iris-catalog.pem \
+
+# iris-agent.conf contains lkg_key, a device-local key that must remain paired
+# with iris-instructions.lkg across re-onboarding.  The installers make a
+# best-effort IOS-side read so their fresh config normally carries it, but an
+# SSH/read failure must not turn that convenience into key destruction.  Make
+# the on-device copy authoritative and publish the merged config atomically.
+collect_agent_config() {
+  if [ ! -e "$SRC/iris-agent.conf" ] && [ ! -L "$SRC/iris-agent.conf" ]; then
+    return 0
+  fi
+  python3 - "$SRC/iris-agent.conf" "$STAGE/iris-agent.conf" <<'PY'
+import errno
+import os
+import re
+import stat
+import sys
+
+MAX_CONFIG = 65536
+KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class ConfigError(Exception):
+    pass
+
+
+def fixed_failure(message):
+    sys.stderr.write("IRIS-BOOTSTRAP: %s\n" % message)
+    raise SystemExit(1)
+
+
+def identity(metadata):
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_nlink, metadata.st_size,
+            getattr(metadata, "st_mtime_ns", metadata.st_mtime),
+            getattr(metadata, "st_ctime_ns", metadata.st_ctime))
+
+
+def read_regular(path, missing_ok=False):
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if missing_ok and error.errno == errno.ENOENT:
+            return None, None
+        raise ConfigError()
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > MAX_CONFIG):
+            raise ConfigError()
+        chunks = []
+        remaining = MAX_CONFIG + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        after = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
+        if (len(data) > MAX_CONFIG or identity(before) != identity(after)
+                or identity(after) != identity(named)
+                or len(data) != after.st_size):
+            raise ConfigError()
+        return data, identity(after)
+    except OSError:
+        raise ConfigError()
+    finally:
+        os.close(descriptor)
+
+
+def effective_key(data):
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        raise ConfigError()
+    found = False
+    value = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, candidate = stripped.split("=", 1)
+        if key.strip() == "lkg_key":
+            found = True
+            value = candidate.strip()
+    if found and KEY_RE.fullmatch(value) is None:
+        raise ConfigError()
+    return value
+
+
+def with_local_key(data, local_key):
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        raise ConfigError()
+    retained = []
+    for line in text.splitlines(True):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped \
+                and stripped.split("=", 1)[0].strip() == "lkg_key":
+            continue
+        retained.append(line)
+    merged = "".join(retained)
+    if merged and not merged.endswith(("\n", "\r")):
+        merged += "\n"
+    merged += "lkg_key = %s\n" % local_key
+    encoded = merged.encode("utf-8")
+    if len(encoded) > MAX_CONFIG:
+        raise ConfigError()
+    return encoded
+
+
+def same_named_file(path, expected):
+    try:
+        return identity(os.stat(path, follow_symlinks=False)) == expected
+    except OSError:
+        return False
+
+
+source, destination = sys.argv[1:]
+try:
+    incoming, incoming_identity = read_regular(source)
+    effective_key(incoming)
+except ConfigError:
+    fixed_failure("incoming iris-agent.conf is unsafe or invalid")
+
+try:
+    existing, existing_identity = read_regular(destination, missing_ok=True)
+    local_key = None if existing is None else effective_key(existing)
+except ConfigError:
+    fixed_failure(
+        "existing iris-agent.conf is unsafe or has an invalid lkg_key")
+
+try:
+    published = incoming if local_key is None \
+        else with_local_key(incoming, local_key)
+except ConfigError:
+    fixed_failure("incoming iris-agent.conf cannot retain the local lkg_key")
+
+if not same_named_file(source, incoming_identity):
+    fixed_failure("incoming iris-agent.conf changed while it was read")
+if existing_identity is not None \
+        and not same_named_file(destination, existing_identity):
+    fixed_failure("existing iris-agent.conf changed while it was read")
+if existing_identity is None and os.path.lexists(destination):
+    fixed_failure("existing iris-agent.conf changed while it was read")
+
+temporary = destination + ".new"
+try:
+    try:
+        stale = os.lstat(temporary)
+    except OSError as error:
+        if error.errno != errno.ENOENT:
+            raise ConfigError()
+    else:
+        if not stat.S_ISREG(stale.st_mode) or stale.st_nlink != 1:
+            raise ConfigError()
+        os.unlink(temporary)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(published):
+            written = os.write(descriptor, published[offset:])
+            if written <= 0:
+                raise ConfigError()
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if not same_named_file(source, incoming_identity):
+        raise ConfigError()
+    if existing_identity is not None \
+            and not same_named_file(destination, existing_identity):
+        raise ConfigError()
+    if existing_identity is None and os.path.lexists(destination):
+        raise ConfigError()
+    os.replace(temporary, destination)
+    directory = os.open(os.path.dirname(destination), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    # Leave a newer uploader candidate alone if the name changed after our
+    # bounded read.  Reprocessing the same candidate after a crash is safe.
+    if same_named_file(source, incoming_identity):
+        os.unlink(source)
+except (ConfigError, OSError):
+    try:
+        os.unlink(temporary)
+    except OSError:
+        pass
+    fixed_failure("cannot safely publish iris-agent.conf")
+PY
+}
+
+collect_agent_config || exit 1
+for f in bundle.tgz.sha256 rpc-secret iris-catalog.pem \
          iris-instructions.bootstrap; do
   collect_file "$f" || exit 1
 done
