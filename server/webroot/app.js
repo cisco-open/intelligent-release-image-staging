@@ -1282,14 +1282,33 @@
     peerPolicyReadOk = !!nextPolicy && typeof nextPolicy === 'object' && !Array.isArray(nextPolicy);
     if (peerPolicyReadOk) peerPolicy = nextPolicy;
     renderPeerPolicyPanel();
-    if (!dr.ok) return;
+    var targetWarning = document.getElementById('dev-target-warning');
+    if (!dr.ok) {
+      devStatus.textContent = 'Device target preview unavailable (' + dr.status +
+        ').';
+      document.getElementById('dev-rows').innerHTML =
+        '<tr><td colspan="13" class="muted">Device target preview unavailable.</td></tr>';
+      document.getElementById('dev-count').textContent = 'Results unavailable';
+      devTotal = 0;
+      devOffset = 0;
+      updateDevPager(0);
+      var markAll = document.getElementById('mark-all');
+      if (markAll) {
+        markAll.checked = false;
+        markAll.indeterminate = false;
+      }
+      if (targetWarning) {
+        targetWarning.textContent =
+          'Target preview unavailable — filters are not confirmed.';
+      }
+      return;
+    }
     var dbody = await dr.json();
     if (mine !== devicesRefreshGeneration) return;
     var devs = dbody.devices || [];
     var devNow = dbody.now || Date.now() / 1000;   // server clock for last_seen freshness
     devTotal = dbody.total || 0;
     devOffset = dbody.offset || 0;
-    var targetWarning = document.getElementById('dev-target-warning');
     if (targetWarning) {
       targetWarning.textContent = (dbody.target_warnings || []).join(' · ');
     }

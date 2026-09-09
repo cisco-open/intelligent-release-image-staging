@@ -11967,6 +11967,81 @@ def test_target_filters_use_fleet_and_deployment_facts_not_heartbeat(tmp_path):
         stop()
 
 
+def test_target_role_drift_includes_ordinary_assignment_shadowing(tmp_path):
+    import peer_policy
+
+    host, port, (_, fleet, _, cat), stop = _serve_full(tmp_path)
+    try:
+        fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
+                      "model": "C9300", "role": "boat"})
+        _define_device_role(cat)
+
+        def shadow_role(document):
+            document["roles"]["role_of"]["d1"] = "boat"
+            document["acls"]["manual"] = {
+                "rules": [{"seq": 17, "action": "deny",
+                           "match": {"type": "any"}}]}
+            document["assignments"]["d1"] = "manual"
+
+        peer_policy.commit_mutation(
+            os.path.join(cat.state_dir, "peer-policy.json"),
+            os.path.join(cat.state_dir, "peer-policy.lkg.json"),
+            action="shadow", target="d1", actor="test", now=2,
+            mutate=shadow_role)
+        cookie, _ = _login(host, port)
+        status, _, raw = _req(
+            host, port, "GET", "/api/devices?role=boat",
+            headers={"Cookie": cookie})
+        body = json.loads(raw)
+        assert status == 200 and body["total"] == 1
+        assert body["target_facts"]["role_drift"] == 1
+        assert "1 devices have declared role drift" in body["target_warnings"]
+    finally:
+        stop()
+
+
+def test_record_backed_target_facts_are_stable_across_preview_filters(tmp_path):
+    class Records:
+        def __init__(self):
+            self.calls = []
+
+        def list(self, strict=False):
+            self.calls.append(strict)
+            return [{
+                "record_id": "r1", "device_id": "record-backed",
+                "state": "active", "timestamps": {"planned_at": 10},
+                "resolved": {"platform": "guestshell", "os_family": "xe"},
+            }]
+
+    records = Records()
+    host, port, (_, fleet, _, _cat), stop = _serve_full(
+        tmp_path, record_store=records)
+    try:
+        fleet.upsert({"device_id": "record-backed",
+                      "device_ip": "10.0.0.1", "model": "C9300",
+                      "role": "boat"})
+        fleet.upsert({"device_id": "missing", "device_ip": "10.0.0.2",
+                      "model": "C9300", "role": "boat"})
+        cookie, _ = _login(host, port)
+        for query in ("", "?role=boat", "?role=boat&os_family=xe"):
+            status, _, raw = _req(
+                host, port, "GET", "/api/devices" + query,
+                headers={"Cookie": cookie})
+            body = json.loads(raw)
+            assert status == 200
+            by_id = {row["device_id"]: row for row in body["devices"]}
+            if "record-backed" in by_id:
+                assert by_id["record-backed"]["os_family"] == "xe"
+                assert by_id["record-backed"]["platform_resolved"] == \
+                    "guestshell"
+            assert body["target_facts"]["missing_os_family"] == 1
+            assert "1 devices have no os_family yet" in \
+                body["target_warnings"]
+        assert records.calls == [True, True, True]
+    finally:
+        stop()
+
+
 def test_device_type_filters_have_server_and_client_preview_parity():
     html = _webroot("index.html")
     js = _webroot("app.js")
@@ -11983,6 +12058,21 @@ def test_device_type_filters_have_server_and_client_preview_parity():
     assert "d.platform_resolved || d.platform" in predicate
     assert "target_warnings" in js
     assert 'id="dev-target-warning"' in html
+    refresh = js.split("async function refreshDevices() {", 1)[1].split(
+        "\n  function syncDeviceFilterOptions()", 1)[0]
+    failed = refresh.split("if (!dr.ok)", 1)[1].split(
+        "var dbody = await dr.json()", 1)[0]
+    assert "devStatus.textContent" in failed
+    assert "targetWarning.textContent" in failed
+    assert "document.getElementById('dev-rows').innerHTML" in failed
+    assert "Device target preview unavailable." in failed
+    assert "document.getElementById('dev-count').textContent = " \
+        "'Results unavailable'" in failed
+    assert "devTotal = 0" in failed and "devOffset = 0" in failed
+    assert "updateDevPager(0)" in failed
+    assert "markAll.checked = false" in failed
+    assert "markAll.indeterminate = false" in failed
+    assert "delete SELECTED" not in failed
 
     # Task 22 consumes this same pure predicate; the HTTP handler delegates to
     # it rather than owning a second copy of the target language.
@@ -12024,10 +12114,7 @@ def test_resolved_type_filter_fails_visible_on_unreadable_record_state(tmp_path)
         fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1",
                       "model": "C9300"})
         ck, _ = _login(host, port)
-        st, _, _ = _req(host, port, "GET", "/api/devices",
-                        headers={"Cookie": ck})
-        assert st == 200 and calls == []
-        st, _, raw = _req(host, port, "GET", "/api/devices?platform=guestshell",
+        st, _, raw = _req(host, port, "GET", "/api/devices",
                           headers={"Cookie": ck})
         assert st == 503 and calls == [True]
         problem = json.loads(raw)

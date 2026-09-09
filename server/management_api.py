@@ -2068,22 +2068,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 "enforcement": enforcement, "origin_qos": origin_view,
                 "instruction_keys": custody}
 
-    def quarantine_assignment_ids():
-        """The bare set of device ids under quarantine intent -- what the
-        console's peer-policy filter (?peer=quarantined/not-quarantined)
-        needs, without policy_view()'s enforcement-status read. Read ONLY
-        when a caller actually asks for the peer filter (_device_page), so a
-        /api/devices poll that never touches it costs nothing extra."""
+    def role_policy_snapshot():
+        """The authoritative policy result used by preview drift checks."""
         auth_path, lkg_path, _ = policy_paths()
-        result = peer_policy.load_policy(auth_path, lkg_path)
-        return peer_policy.quarantine_device_ids(result.document)
+        return peer_policy.load_policy(auth_path, lkg_path)
 
-    def compiled_role_snapshot():
-        """The enforcement-side role assignment for preview drift counts."""
-        auth_path, lkg_path, _ = policy_paths()
-        return dict(peer_policy.load_policy(auth_path, lkg_path).roles.role_of)
-
-    def deployment_type_snapshot(required=False):
+    def deployment_type_snapshot():
         """One bulk read of live deployment facts, keyed by device id.
 
         The newest applicable record wins. Terminal removed, superseded and
@@ -2091,7 +2081,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         targeting row. Only the small trusted type projection crosses into
         the Devices response.
         """
-        if record_store is None or not required:
+        if record_store is None:
             return {}
         records = record_store.list(strict=True)
         return deployment_target_snapshot(records)
@@ -3367,9 +3357,12 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             policies = catalog.list_policies() if catalog else {}
             revoked_principals = instruction_revocation_snapshot()
             observed_at = now_fn()
-            deployment_types = deployment_type_snapshot(
-                bool({"platform", "os_family"} & set(filters)))
-            compiled_roles = compiled_role_snapshot()
+            deployment_types = deployment_type_snapshot()
+            role_policy = role_policy_snapshot()
+            role_report = role_management.drift_report(
+                fleet, role_policy,
+                limit=len(devs) + len(role_policy.roles.role_of), rows=devs)
+            role_drift_ids = frozenset(role_report["device_ids"])
 
             def merge(device):
                 return self._merge_device_row(
@@ -3378,9 +3371,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     deployment_types.get(device.get("device_id"), {}))
 
             def role_drift(row):
-                declared = row.get("role") or None
-                compiled = compiled_roles.get(row.get("device_id"))
-                return declared != compiled
+                return row.get("device_id") in role_drift_ids
 
             def matches_without_os(row):
                 if q is not None and not self._row_matches_q(row, q):
@@ -3418,9 +3409,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
             # A filter reaches merged fields (heartbeat_model, status), so
             # every row is merged to be counted; only the window is
-            # retained. The peer-quarantine assignment set is read at most
-            # ONCE per call, and only when the peer filter is actually used.
-            quarantined_ids = (quarantine_assignment_ids()
+            # retained. Peer and role-drift facts come from the same policy
+            # snapshot, so one preview cannot mix policy revisions.
+            quarantined_ids = (peer_policy.quarantine_device_ids(
+                                   role_policy.document)
                                if "peer" in filters else None)
             now = observed_at
             rows, total = [], 0
