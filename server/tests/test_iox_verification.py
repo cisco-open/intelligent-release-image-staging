@@ -1962,6 +1962,55 @@ def test_force_does_not_select_a_record_or_create_a_dummy_journal(tmp_path):
                 "preflight", "prepare"]
 
 
+def test_successful_predecessor_recovery_does_not_bind_force_recipe_to_record(
+        tmp_path):
+    journal = _journal(
+        record_id="old-r1", phase="disabled_confirmed", state="disabled",
+        revision=2, unresolved=True)
+    record = _record(record_id="old-r1", journal=journal)
+    store = _StatefulStore(
+        tmp_path, records=[record], obligations=[journal])
+    factory = _TransportFactory(verification="disabled")
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only",
+                     record_id=None),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 0
+    assert result["record_id"] is None
+    assert result["iox_verification"] is None
+
+
+def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
+        tmp_path):
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    request = _request(
+        action="uninstall", teardown_mode="force_agent_only", record_id=None)
+    attempt = module._Attempt(
+        controller, "uninstall", request, _Cancel(), False)
+    attempt.target = {
+        "package_fs": "flash:", "target_fs": "sdflash:",
+        "pkg": "iris-arm64.tar", "management_type": "routed",
+    }
+    try:
+        rendered = controller._render_command(
+            attempt, "cleanup_stage_probe").decode("ascii")
+    finally:
+        controller.close()
+    first = rendered.splitlines()[0]
+    assert first == (
+        "dir flash: | include iris-arm64.tar|iris-ca.pem|iris-catalog.pem")
+
+
 @pytest.mark.parametrize("exit_intent,expected_code,expect_retirement", [
     (0, 0, True),
     (7, 4, False),
