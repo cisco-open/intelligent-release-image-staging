@@ -568,6 +568,34 @@ def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
             assert list(validator.iter_errors(dict(example, **{field: value})))
 
 
+def test_task19_effective_qos_deprecates_legacy_delivery_state_and_requires_instruction():
+    from jsonschema import Draft202012Validator
+
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        device_media = document["paths"][prefix + "/devices"]["get"][
+            "responses"]["200"]["content"]["application/json"]
+        canonical = device_media["schema"]["properties"]["devices"][
+            "items"]["properties"]["instruction"]
+        media = document["paths"][
+            prefix + "/devices/{device_id}/effective-qos"]["get"][
+                "responses"]["200"]["content"]["application/json"]
+        schema = media["schema"]
+        assert "instruction" in schema["required"]
+        assert schema["properties"]["instruction"] == canonical
+        legacy = schema["properties"]["delivery_state"]
+        assert legacy["type"] == "string"
+        assert legacy["const"] == "pre-instructions"
+        assert legacy["deprecated"] is True
+        assert "legacy" in legacy["description"].lower()
+        assert "instruction" in legacy["description"].lower()
+        example = media["example"]
+        assert example["delivery_state"] == "pre-instructions"
+        assert example["instruction"] == device_media["example"][
+            "devices"][0]["instruction"]
+        assert not list(Draft202012Validator(schema).iter_errors(example))
+
+
 def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
     from jsonschema import Draft202012Validator
 

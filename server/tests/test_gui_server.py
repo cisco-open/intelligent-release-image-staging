@@ -12132,12 +12132,84 @@ def test_role_policy_view_and_effective_qos(role_api):
     assert "10.1.0." not in json.dumps(view)
     status, _, qos = request("GET", "/api/devices/d1/effective-qos")
     assert status == 200 and qos["delivery_state"] == "pre-instructions"
+    assert qos["instruction"]["display_state"] == "pre-instructions"
+    assert qos["instruction"]["accepted_identity"] is None
     assert qos["qos"]["numwant"]["source"] == "builtin"
     assert qos["qos"]["numwant"]["effective_ceiling"] == 50
     assert qos["qos"]["announce_min_interval_s"]["peerless_leecher_floor_s"] == 120
     assert qos["qos"]["catalog_tick_s"]["offline_horizon_s"] == 600
     assert qos["qos"]["catalog_tick_s"]["heartbeat_always"] is True
     assert request("GET", "/api/devices/missing/effective-qos")[0] == 404
+
+
+def test_effective_qos_uses_one_keyed_heartbeat_read_and_projects_identity(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    cat.record_heartbeat("d1", {
+        "instr_protocol": 1, "instr_state": "applied",
+        "instr_epoch": 9, "instr_serial": 17,
+        "instr_policy_revision": 4, "verify_level": "sig",
+        "pointer_skew": False, "private": "must-not-cross-projection",
+    }, now=time.time())
+    original_get = cat.get_device
+    calls = []
+
+    def keyed_get(device_id):
+        calls.append(device_id)
+        return original_get(device_id)
+
+    def forbid_bulk_read(*args, **kwargs):
+        raise AssertionError("effective-QoS must not scan all heartbeats")
+
+    monkeypatch.setattr(cat, "get_device", keyed_get)
+    monkeypatch.setattr(cat, "list_devices", forbid_bulk_read)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert calls == ["d1"]
+    assert body["instruction"]["display_state"] == "applied"
+    assert body["instruction"]["accepted_identity"] == {
+        "epoch": 9, "instr_serial": 17, "policy_revision": 4}
+    assert "private" not in body["instruction"]
+    assert body["delivery_state"] == "pre-instructions"
+
+
+def test_effective_qos_keeps_desired_explanation_when_heartbeat_is_unreadable(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    calls = []
+
+    def unreadable(device_id):
+        calls.append(device_id)
+        raise catalog_mod.StateFileError("unreadable heartbeat shard")
+
+    monkeypatch.setattr(cat, "get_device", unreadable)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert calls == ["d1"]
+    assert body["qos"]["numwant"]["source"] == "builtin"
+    assert body["instruction"]["display_state"] == "unknown"
+    assert body["instruction"]["evidence"] == "server-observed"
+    assert body["delivery_state"] == "pre-instructions"
+
+
+def test_effective_qos_keeps_underlying_report_when_revocation_is_unavailable(
+        role_api, monkeypatch):
+    request, _, cat = role_api
+    cat.record_heartbeat("d1", {
+        "instr_protocol": 1, "instr_state": "applied",
+        "instr_epoch": 9, "instr_serial": 17,
+        "instr_policy_revision": 4, "last_seen": time.time(),
+    })
+    monkeypatch.setattr(
+        gui_server, "_instruction_revoked_principals", lambda store: None)
+    status, _, body = request("GET", "/api/devices/d1/effective-qos")
+    assert status == 200
+    assert body["instruction"]["display_state"] == "unknown"
+    assert body["instruction"]["underlying_state"] == "applied"
+    assert body["instruction"]["accepted_identity"] == {
+        "epoch": 9, "instr_serial": 17, "policy_revision": 4}
+    assert body["instruction"]["revoked"] is None
+    assert body["qos"]["numwant"]["source"] == "builtin"
 
 
 # Task 19: the state-owning management API provides one bounded instruction

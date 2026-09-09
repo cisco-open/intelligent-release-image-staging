@@ -1304,7 +1304,7 @@ def _state_qos_legacy_rows():
 
 
 @pytest.mark.parametrize("tier", ["management", "console"])
-def test_tracker_state_effective_qos_preserves_legacy_bytes_and_closes_query(
+def test_tracker_state_effective_qos_expands_legacy_response_and_closes_query(
         policy_tiers, tier):
     import copy
     import peer_policy
@@ -1315,7 +1315,9 @@ def test_tracker_state_effective_qos_preserves_legacy_bytes_and_closes_query(
         revision = _state_qos_document(store)["revision"]
         expected = {"revision": revision, "degraded": False, "fail_closed": False,
                     "device_id": device_id, "qos": expected_qos,
-                    "delivery_state": "pre-instructions"}
+                    "delivery_state": "pre-instructions",
+                    "instruction": management_api._instruction_device_projection(
+                        {}, False, 0)}
         status, headers, raw = request(tier, "GET", "/devices/%s/effective-qos" % device_id,
                                        raw_response=True)
         assert status == 200
