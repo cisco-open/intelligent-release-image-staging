@@ -152,6 +152,48 @@ PYTHON
   check_guest_status stale
 }
 
+@test "readiness cannot attest a different bundle inode than it hashed" {
+  run run_prov
+  [ "$status" -eq 0 ]
+
+  replacement_dir="$TMP/replacement"
+  mkdir -p "$replacement_dir"
+  tar xzf "$ART/iris-agent.tgz" -C "$replacement_dir"
+  printf '\n# substituted after digest\n' >> \
+    "$replacement_dir/agent/iris_agent.py"
+  tar czf "$TMP/replacement.tgz" -C "$replacement_dir" \
+    agent bootstrap.sh guestshell-start.sh rotate-logs.sh aria2c \
+    iris-signers.allowed_signers iris-root.allowed_signers
+
+  hook="$TMP/python-hook"
+  mkdir -p "$hook"
+  cat > "$hook/sitecustomize.py" <<'PYTHON'
+import os
+import tarfile
+
+_real_open = tarfile.open
+_swapped = False
+
+
+def _swap_open(*args, **kwargs):
+    global _swapped
+    if not _swapped:
+        os.replace(os.environ["IRIS_TEST_REPLACEMENT"],
+                   os.environ["IRIS_TEST_BUNDLE"])
+        _swapped = True
+    return _real_open(*args, **kwargs)
+
+
+tarfile.open = _swap_open
+PYTHON
+  export PYTHONPATH="$hook"
+  export IRIS_TEST_REPLACEMENT="$TMP/replacement.tgz"
+  export IRIS_TEST_BUNDLE="$ART/iris-agent.tgz"
+  run run_prov
+  [ "$status" -ne 0 ]
+  grep -q '"state": "failed"' "$TMP/run/served-bundle.json"
+}
+
 @test "missing instruction roots fails closed and preserves prior publication" {
   run run_prov
   [ "$status" -eq 0 ]
