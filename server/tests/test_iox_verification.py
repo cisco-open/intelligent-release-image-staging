@@ -926,7 +926,7 @@ def _install_operations():
 
 def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
                           cleanup_on_error=True, authority=None,
-                          prepare_hook=None, prefix_chunks=()):
+                          prepare_hook=None, prefix_chunks=(), cancel=None):
     timeline = factory.calls
     store = _StatefulStore(tmp_path, calls=timeline)
     wrapper_path = _write_wrapper(tmp_path, markers)
@@ -956,7 +956,7 @@ def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
         result = controller.run_install(
             _request(wrapper_path=wrapper_path), prepare, preflight,
             lambda stream, data: timeline.append(("output", stream, data)),
-            _Cancel())
+            cancel or _Cancel())
     finally:
         controller.close()
     return result, store, timeline, wrapper_path
@@ -2526,6 +2526,107 @@ def test_post_device_fence_failure_forbids_cleanup_and_recovery_commands(
                    if call[0] == "command" and call[4] == "app_stop")
     assert not [call for call in factory.calls[app_stop + 1:]
                 if call[0] in ("command", "upload")]
+
+
+def test_cancel_after_durable_event_never_uses_stale_journal_authority(
+        tmp_path, monkeypatch):
+    module = _module()
+    cancel = _Cancel()
+    journal = _journal(phase="disable_intent", state="enabled", revision=1)
+    store = _StatefulStore(
+        tmp_path, records=[_record(journal=journal)], obligations=[journal])
+    controller = _controller(tmp_path, store, _TransportFactory())
+    attempt = module._Attempt(
+        controller, "install",
+        _request(wrapper_path=_write_unsigned_wrapper(tmp_path)), cancel)
+    attempt.board = _BOARD
+    attempt.record_id = "r1"
+    attempt.journal = copy.deepcopy(journal)
+    original = _StatefulStore.iox_event
+    committed = []
+
+    def cancel_after_confirmation(store, *args, **kwargs):
+        value = original(store, *args, **kwargs)
+        if args[4] == "disable_confirmed" and not committed:
+            committed.append(copy.deepcopy(value))
+            cancel.cancelled = True
+        return value
+
+    monkeypatch.setattr(_StatefulStore, "iox_event",
+                        cancel_after_confirmation)
+    try:
+        updated = controller._event(attempt, "disable_confirmed", {
+            "confirmation": copy.deepcopy(
+                _journal(phase="disabled_confirmed")["disable_confirmation"]),
+            "transcript_refs": copy.deepcopy(journal["transcript_refs"]),
+        })
+    finally:
+        controller.close()
+
+    assert committed and updated == committed[0]
+    assert attempt.journal == committed[0]
+    assert attempt.journal["phase"] == "disabled_confirmed"
+    assert attempt.journal["revision"] == 2
+    with pytest.raises(module._ControllerFailure) as failure:
+        attempt.check()
+    assert failure.value.category == "cancelled"
+
+
+def test_cancel_after_durable_begin_publishes_the_created_journal(
+        tmp_path, monkeypatch):
+    cancel = _Cancel()
+    factory = _TransportFactory(verification="enabled")
+    original = _StatefulStore.iox_begin
+
+    def cancel_after_begin(store, *args, **kwargs):
+        value = original(store, *args, **kwargs)
+        cancel.cancelled = True
+        return value
+
+    monkeypatch.setattr(_StatefulStore, "iox_begin", cancel_after_begin)
+    result, store, unused_timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, cancel=cancel)
+
+    assert result["result_code"] == 130
+    assert result["error_category"] == "cancelled"
+    assert result["iox_verification"] is not None
+    assert result["iox_verification"]["phase"] == "observed"
+    assert result["iox_verification"]["revision"] == 0
+    assert store.records["new-r1"]["iox_verification"]["phase"] == "observed"
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+def test_force_retirement_completed_before_late_cancel_remains_successful(
+        tmp_path):
+    cancel = _Cancel()
+    old_record = _record(record_id="old-r1")
+
+    class CancellingRetirementStore(_StatefulStore):
+        def retire_device(self, device_id, reason):
+            value = _StatefulStore.retire_device(self, device_id, reason)
+            cancel.cancelled = True
+            return value
+
+    store = CancellingRetirementStore(tmp_path, records=[old_record])
+    factory = _TransportFactory()
+    calls = []
+    prepare, preflight, on_output = _callbacks(calls, record_id=None)
+    recipe = _write_recipe_peer(tmp_path)
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", recipe]})
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only",
+                     record_id=None),
+            prepare, preflight, on_output, cancel)
+    finally:
+        controller.close()
+
+    assert cancel.cancelled is True
+    assert result["result_code"] == 0
+    assert result["error_category"] is None
+    assert store.records["old-r1"]["state"] == "abandoned"
 
 
 def test_discovery_cleanup_failure_dominates_the_original_error(
