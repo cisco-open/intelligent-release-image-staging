@@ -830,3 +830,40 @@ class ReceiptStore:
 
     def completed_device_ids(self, identifier):
         return {key for key, row in self._rows(identifier).snapshot().items() if row["status"] in TERMINAL_RECEIPT_STATES}
+
+
+def list_schedule_receipts(state_dir, schedule_id, *, limit=MAX_RECEIPT_PAGE,
+                           offset=0):
+    """Return one deterministic, globally capped page across occurrences.
+
+    Receipt shards remain occurrence-scoped for write isolation and replay
+    evidence. This projection does not claim a cross-shard transaction.
+    """
+    _identifier(schedule_id, "schedule id")
+    _integer(limit, "receipt limit", 1, MAX_RECEIPT_PAGE)
+    _integer(offset, "receipt offset")
+    receipt_store = ReceiptStore(state_dir)
+    total = 0
+    selected = []
+    wanted_end = offset + limit
+    for occurrence in OccurrenceStore(state_dir).list(schedule_id):
+        first = receipt_store.list(occurrence["id"], limit=1)
+        occurrence_total = first["total"]
+        start = total
+        total += occurrence_total
+        if occurrence_total == 0 or wanted_end <= start or offset >= total:
+            continue
+        local_offset = max(0, offset - start)
+        local_limit = min(limit - len(selected), occurrence_total - local_offset)
+        page = receipt_store.list(
+            occurrence["id"], limit=local_limit, offset=local_offset)
+        for receipt in page["receipts"]:
+            selected.append(dict(
+                receipt, schedule_id=schedule_id,
+                scheduled_at=occurrence["scheduled_at"],
+                window_end=occurrence["window_end"],
+                schedule_rev=occurrence["schedule_rev"],
+                occurrence_state=occurrence["state"]))
+    return {"schedule_id": schedule_id, "receipts": selected,
+            "total": total, "offset": offset,
+            "truncated": offset > 0 or offset + len(selected) < total}

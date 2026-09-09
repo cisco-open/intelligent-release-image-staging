@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gui_fleet       # noqa: E402
 import peer_policy     # noqa: E402
 import role_management # noqa: E402
+import schedules       # noqa: E402
 
 
 ROLE_QOS_FIELDS = (
@@ -40,7 +41,7 @@ def _manager():
     state_dir, auth_path, lkg_path = _paths()
     return role_management.RoleCoordinator(
         gui_fleet.FleetStore(state_dir), auth_path, lkg_path,
-        now_fn=time.time)
+        now_fn=time.time, schedule_store=schedules.ScheduleStore(state_dir))
 
 
 def _print_json(value):

@@ -60,6 +60,7 @@ import peer_enforcement
 import role_management
 import secretfs
 import secrets_store
+import schedules
 import setup_status
 import telemetry
 import telemetry_destination
@@ -915,6 +916,209 @@ _STATUS_LEVELS = {
     "unassigned": "inactive", "not-enrolled": "inactive",
     "offline": "inactive",
 }
+
+
+class ScheduleTargetError(RuntimeError):
+    """Stable public failure for an unavailable targeting authority."""
+
+    def __init__(self, message, *, code="schedule_target_unavailable",
+                 status=503):
+        self.code = code
+        self.status = status
+        super().__init__(message)
+
+
+def _target_row_assigned_ids(row):
+    ids = row.get("assigned_image_ids")
+    if ids:
+        return ids
+    single = row.get("assigned_image_id")
+    return [single] if single else []
+
+
+def _target_row_has_staged(row, image_id):
+    if image_id in (row.get("errored_image_ids") or ()):
+        return False
+    staged = row.get("staged_image_ids")
+    if staged is not None:
+        return image_id in staged
+    return (row.get("stage_state") == "ready"
+            and row.get("current_image_id") == image_id)
+
+
+def _target_status_key(row):
+    onboard_finished_at = row.get("onboard_finished_at")
+    last_seen = row.get("last_seen")
+    job_fresh = bool(onboard_finished_at) and (
+        not last_seen or last_seen < onboard_finished_at)
+    onboard_state = row.get("onboard_state")
+    onboard_action = row.get("onboard_action")
+    if onboard_state in ("queued", "running"):
+        return "undeploying" if onboard_action == "undeploy" else "onboarding"
+    if onboard_state == "done" and onboard_action == "onboard" and job_fresh:
+        return "waiting-heartbeat"
+    if onboard_state == "error" and job_fresh:
+        return "undeploy-failed" if onboard_action == "undeploy" else "onboard-failed"
+    assigned_ids = _target_row_assigned_ids(row)
+    errored_ids = [item for item in (row.get("errored_image_ids") or [])
+                   if item in assigned_ids]
+    if (assigned_ids and not errored_ids and
+            all(_target_row_has_staged(row, item) for item in assigned_ids)):
+        return "deployed"
+    if errored_ids:
+        return "image-failed"
+    if row.get("stage_error") or row.get("stage_state") in ("error", "copy_failed"):
+        return "placement-failed"
+    if row.get("stage_state") == "transferring_to_ios":
+        return "copying"
+    if row.get("stage_state") in ("unassigned", "ready"):
+        return "waiting-staging" if assigned_ids else "unassigned"
+    if row.get("stage_state"):
+        return "staging"
+    if last_seen and not assigned_ids:
+        return "unassigned"
+    if last_seen:
+        return "enrolled"
+    return "not-enrolled"
+
+
+def _target_status_level(row, key):
+    if key == "image-failed":
+        assigned = _target_row_assigned_ids(row)
+        errored = [item for item in (row.get("errored_image_ids") or [])
+                   if item in assigned]
+        ratio = (len(errored) / len(assigned)) if assigned else 0
+        return "severe" if ratio >= 0.5 else "warning"
+    return _STATUS_LEVELS.get(key, "inactive")
+
+
+def _target_is_offline(row, now):
+    return bool(row.get("last_seen")) and (now - row["last_seen"]) >= 600
+
+
+def _merge_target_row(device, policies, heartbeat_by_id, jobs, observed_at,
+                      heartbeat_available, revoked_principals,
+                      deployment_type=None):
+    """Join one trusted targeting row from bounded authority snapshots."""
+    device_id = device.get("device_id")
+    policy = policies.get(device_id, {})
+    heartbeat = heartbeat_by_id.get(device_id, {})
+    row = dict(device)
+    row.update(trusted_target_projection(device, deployment_type))
+    row["assigned_image_id"] = policy.get("approved_image_id")
+    row["assigned_image_ids"] = policy.get("approved_image_ids")
+    for name in ("last_seen", "stage_state", "stage_error", "current_image_id",
+                 "staged_image_ids", "errored_image_ids", "target_fs",
+                 "telemetry_enabled", "telemetry_stream_enabled"):
+        row[name] = heartbeat.get(name)
+    row["heartbeat_model"] = heartbeat.get("model")
+    revocation_available = isinstance(revoked_principals, (set, frozenset))
+    revoked = ("device:%s" % device_id in revoked_principals
+               if revocation_available and isinstance(device_id, str) else None)
+    row["instruction"] = _instruction_device_projection(
+        heartbeat, revoked, observed_at,
+        heartbeat_available=heartbeat_available)
+    job = jobs.get(device_id)
+    if job:
+        row["onboard_action"] = job["action"]
+        row["onboard_state"] = job["state"]
+        row["onboard_finished_at"] = job["finished_at"]
+    return row
+
+
+def resolve_schedule_target(target, *, fleet, catalog, record_store,
+                            role_policy, now, jobs=None,
+                            heartbeat_rows=None, revoked_principals=None):
+    """Resolve a normalized target from one snapshot of each authority.
+
+    The returned diagnostic fields are transient. Callers persist only
+    revision, now, and device_ids in a schedule preview/target snapshot.
+    These independent stores do not provide a cross-store transaction.
+    """
+    if not isinstance(target, dict):
+        raise schedules.ScheduleValidationError("invalid target fields")
+    filters = target.get("filters")
+    explicit = target.get("device_ids")
+    if not isinstance(filters, dict) or not isinstance(explicit, list):
+        raise schedules.ScheduleValidationError("invalid target fields")
+    heartbeat_dependent = bool(set(filters).intersection(
+        ("q", "telemetry", "status")))
+    if "status" in filters and jobs is None:
+        raise ScheduleTargetError(
+            "status targeting requires the management job authority",
+            code="schedule_target_status_unavailable")
+    if heartbeat_dependent and catalog is None:
+        raise ScheduleTargetError(
+            "targeting requires the heartbeat authority",
+            code="schedule_target_heartbeat_unavailable")
+    if role_policy.fail_closed or role_policy.degraded:
+        raise ScheduleTargetError("peer policy is unavailable",
+                                  code="schedule_target_policy_unavailable")
+
+    revision, devices = fleet.snapshot()
+    devices = sorted(devices, key=lambda row: str(row.get("device_id") or ""))
+    records = record_store.list(strict=True) if record_store is not None else []
+    deployment_types = deployment_target_snapshot(records)
+    policies = catalog.list_policies() if catalog is not None else {}
+    if heartbeat_rows is None:
+        heartbeat_rows = catalog.list_devices() if catalog is not None else []
+    heartbeat_available = isinstance(heartbeat_rows, list)
+    if heartbeat_dependent and not heartbeat_available:
+        raise ScheduleTargetError(
+            "targeting requires the heartbeat authority",
+            code="schedule_target_heartbeat_unavailable")
+    heartbeat_by_id = {
+        row.get("device_id"): row for row in (heartbeat_rows or [])
+        if isinstance(row, dict) and isinstance(row.get("device_id"), str)}
+    jobs = jobs or {}
+    quarantined = frozenset(peer_policy.quarantine_device_ids(
+        role_policy.document))
+    drift = role_management.drift_report(
+        fleet, role_policy,
+        limit=len(devices) + len(role_policy.roles.role_of), rows=devices)
+    drift_ids = frozenset(drift["device_ids"])
+    q = filters.get("q")
+    q = q.lower() if isinstance(q, str) and q else None
+    column_filters = {key: value for key, value in filters.items() if key != "q"}
+    explicit_ids = frozenset(explicit)
+
+    def matches(row, chosen_filters):
+        if explicit_ids and row.get("device_id") not in explicit_ids:
+            return False
+        if q:
+            haystack = " ".join(str(row.get(key) or "") for key in
+                                ("device_id", "device_ip", "model",
+                                 "heartbeat_model")).lower()
+            if q not in haystack:
+                return False
+        return target_row_matches(
+            row, chosen_filters, now=now, quarantined_ids=quarantined,
+            status_key_fn=_target_status_key,
+            status_level_fn=_target_status_level,
+            offline_fn=_target_is_offline)
+
+    matched = []
+    missing_os_family = 0
+    role_drift = 0
+    without_os = {key: value for key, value in column_filters.items()
+                  if key != "os_family"}
+    for device in devices:
+        row = _merge_target_row(
+            device, policies, heartbeat_by_id, jobs, now,
+            heartbeat_available, revoked_principals,
+            deployment_types.get(device.get("device_id"), {}))
+        if not row.get("os_family") and matches(row, without_os):
+            missing_os_family += 1
+        if not matches(row, column_filters):
+            continue
+        device_id = row["device_id"]
+        matched.append(device_id)
+        if device_id in drift_ids:
+            role_drift += 1
+    return {"revision": revision, "now": int(now), "device_ids": matched,
+            "missing_os_family": missing_os_family,
+            "role_drift": role_drift,
+            "quarantined_ids": sorted(quarantined.intersection(matched))}
 
 
 # ---- persisted deploy logs (written by OnboardService._persist_log) -------
@@ -1886,6 +2090,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 os.path.join(state_dir, "peer-policy.lkg.json"),
                 os.path.join(state_dir, "peer-enforcement.json"))
 
+    schedule_store = schedules.ScheduleStore(policy_state_dir())
+    schedule_occurrence_store = schedules.OccurrenceStore(policy_state_dir())
+    schedule_receipt_store = schedules.ReceiptStore(policy_state_dir())
+
     def role_coordinator():
         """Build the shared direct-store coordinator for this state owner."""
         if fleet is None:
@@ -1898,7 +2106,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         return role_management.RoleCoordinator(
             fleet, auth_path, lkg_path, now_fn=now_fn,
-            acked_revision_fn=acked_revision)
+            acked_revision_fn=acked_revision, schedule_store=schedule_store)
 
     def instruction_heartbeat_snapshot(unavailable_ok=True):
         if catalog is None:
@@ -2086,6 +2294,26 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
         records = record_store.list(strict=True)
         return deployment_target_snapshot(records)
 
+    def schedule_target_resolver(target, role_policy=None):
+        """Resolve through the same authorities as the Devices filter bar."""
+        if fleet is None:
+            raise ScheduleTargetError("fleet state is unavailable")
+        return resolve_schedule_target(
+            target, fleet=fleet, catalog=catalog, record_store=record_store,
+            role_policy=role_policy or role_policy_snapshot(),
+            now=int(now_fn()),
+            jobs=(onboard.latest_jobs_by_device()
+                  if onboard is not None else None),
+            heartbeat_rows=instruction_heartbeat_snapshot(unavailable_ok=False),
+            revoked_principals=instruction_revocation_snapshot())
+
+    def runner_schedule_target_resolver(schedule):
+        """Runner seam: accept a complete stored schedule, return rich facts."""
+        if not isinstance(schedule, dict) or not isinstance(
+                schedule.get("target"), dict):
+            raise schedules.ScheduleValidationError("invalid schedule target")
+        return schedule_target_resolver(copy.deepcopy(schedule["target"]))
+
     class Handler(BaseHTTPRequestHandler):
         timeout = 60  # socket inactivity timeout (s): a stalled upload frees its thread
 
@@ -2117,6 +2345,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     self.close_connection = True
                     return False
                 requested_path = urlsplit(self.path).path
+                self._iris_management_wire = requested_path.startswith(
+                    "/internal/v1/")
                 management_only = (self.command, requested_path) in (
                     ("GET", "/internal/v1/console-certificate"),
                     ("POST", "/internal/v1/authorizations"))
@@ -2695,6 +2925,294 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 return None
             return data
 
+        def _schedule_problem(self, status, code, title, *, headers=None,
+                              **extensions):
+            api_problem.send(self, status, code, title, headers=headers,
+                             **extensions)
+
+        def _schedule_session(self, *, mutation=False, unread_body=0):
+            try:
+                info = app.session_info(self._sid())
+            except (secrets_store.StoreCorruptError, OSError, ValueError,
+                    TypeError, RecursionError, OverflowError):
+                self._drain_body(unread_body)
+                self._schedule_problem(503, "credential-store-unavailable",
+                                       "Credential store unavailable")
+                return None
+            if info is None:
+                self._drain_body(unread_body)
+                self._schedule_problem(401, "console-session-required",
+                                       "Console session required")
+                return None
+            if mutation and not _csrf_ok(
+                    self.headers.get("X-CSRF-Token", ""), info["csrf"]):
+                self._drain_body(unread_body)
+                self._schedule_problem(403, "csrf-validation-failed",
+                                       "CSRF validation failed")
+                return None
+            return info
+
+        def _schedule_json_body(self, raw):
+            try:
+                data = json.loads(raw or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                self._schedule_problem(400, "invalid-request",
+                                       "Invalid request")
+                return None
+            if not isinstance(data, dict):
+                self._schedule_problem(400, "invalid-request",
+                                       "Invalid request")
+                return None
+            return data
+
+        @staticmethod
+        def _schedule_target_facts(resolved):
+            if resolved is None:
+                return None
+            return {key: resolved[key] for key in
+                    ("missing_os_family", "role_drift", "quarantined_ids")}
+
+        @staticmethod
+        def _schedule_actor_exists(actor, admin):
+            if actor == "cli:iris-schedule":
+                return True
+            if actor.startswith("console:") and admin is not None:
+                return actor[len("console:"):] == admin.get("username")
+            return False
+
+        def _schedule_views(self, rows):
+            admin = gui_auth.get_admin(app._load())
+            views = []
+            for row in rows:
+                view = dict(row)
+                view["etag"] = schedules.schedule_etag(row)
+                view["creator_exists"] = self._schedule_actor_exists(
+                    row["created_by"], admin)
+                views.append(view)
+            return views
+
+        def _schedule_error(self, exc, *, raced=False):
+            if raced and isinstance(exc, schedules.ScheduleNotFound):
+                self._schedule_problem(412, "precondition_failed",
+                                       "Precondition failed")
+                return
+            if isinstance(exc, schedules.ScheduleRevisionConflict):
+                try:
+                    row = schedule_store.get(exc.schedule_id)
+                except Exception:
+                    self._schedule_problem(503, "schedule_state_unavailable",
+                                           "Schedule state unavailable")
+                    return
+                headers = ([('ETag', schedules.schedule_etag(row))]
+                           if row is not None else None)
+                self._schedule_problem(412, "precondition_failed",
+                                       "Precondition failed", headers=headers)
+                return
+            if isinstance(exc, role_management.RoleManagementError):
+                safe = {key: value for key, value in exc.result.items()
+                        if key not in ("ok", "error", "partial")}
+                self._schedule_problem(exc.status, exc.code,
+                                       exc.code.replace("_", " ").title(),
+                                       **safe)
+                return
+            if isinstance(exc, (schedules.ScheduleValidationError,
+                                schedules.ScheduleConflict,
+                                schedules.ScheduleNotFound,
+                                schedules.ScheduleStateError,
+                                ScheduleTargetError)):
+                code = exc.code
+                self._schedule_problem(
+                    exc.status, code, code.replace("_", " ").title())
+                return
+            self._schedule_problem(503, "schedule_state_unavailable",
+                                   "Schedule state unavailable")
+
+        def _schedule_existing(self, schedule_id):
+            try:
+                row = schedule_store.get(schedule_id)
+            except Exception as exc:
+                self._schedule_error(exc)
+                return None
+            if row is None:
+                self._schedule_problem(404, "schedule_not_found",
+                                       "Schedule not found")
+                return None
+            return row
+
+        def _schedule_precondition(self, row):
+            current = schedules.schedule_etag(row)
+            values = self.headers.get_all("If-Match") or []
+            if not values:
+                self._schedule_problem(
+                    428, "precondition_required", "Precondition required",
+                    headers=(("ETag", current),))
+                return None
+            if len(values) != 1 or values[0] not in ("*", current):
+                self._schedule_problem(
+                    412, "precondition_failed", "Precondition failed",
+                    headers=(("ETag", current),))
+                return None
+            return "*" if values[0] == "*" else row["rev"]
+
+        def _schedule_get(self, path):
+            info = self._schedule_session()
+            if info is None:
+                return
+            try:
+                if path == "/api/schedules":
+                    if urlsplit(self.path).query:
+                        raise schedules.ScheduleValidationError(
+                            "schedule list has no query parameters")
+                    rows = schedule_store.list()
+                    views = self._schedule_views(rows)
+                    self._json(200, {"schedules": views, "total": len(views)})
+                    return
+                receipts_match = re.fullmatch(
+                    r"/api/schedules/([^/]+)/receipts", path)
+                if receipts_match:
+                    schedule_id = unquote(receipts_match.group(1))
+                    row = schedule_store.get(schedule_id)
+                    if row is None:
+                        raise schedules.ScheduleNotFound("no such schedule")
+                    query = parse_qs(urlsplit(self.path).query,
+                                     keep_blank_values=True)
+                    if set(query) - {"limit", "offset"} or any(
+                            len(values) != 1 for values in query.values()):
+                        raise schedules.ScheduleValidationError(
+                            "invalid receipt pagination")
+                    raw_limit = (query.get("limit") or ["1000"])[0]
+                    raw_offset = (query.get("offset") or ["0"])[0]
+                    if not raw_limit.isdecimal() or not raw_offset.isdecimal():
+                        raise schedules.ScheduleValidationError(
+                            "invalid receipt pagination")
+                    self._json(200, schedules.list_schedule_receipts(
+                        schedule_store.state_dir, schedule_id,
+                        limit=int(raw_limit), offset=int(raw_offset)))
+                    return
+                item_match = re.fullmatch(r"/api/schedules/([^/]+)", path)
+                if item_match:
+                    schedule_id = unquote(item_match.group(1))
+                    row = schedule_store.get(schedule_id)
+                    if row is None:
+                        raise schedules.ScheduleNotFound("no such schedule")
+                    view = self._schedule_views([row])[0]
+                    self._json(200, {"schedule": view},
+                               extra_headers=(("ETag", view["etag"]),))
+                    return
+            except Exception as exc:
+                self._schedule_error(exc)
+                return
+            self._schedule_problem(404, "route-not-found", "Route not found")
+
+        @staticmethod
+        def _normalized_schedule_patch(row, patch):
+            if not isinstance(patch, dict) or set(patch) - schedules.DEFINITION_KEYS:
+                raise schedules.ScheduleValidationError(
+                    "invalid schedule patch fields")
+            definition = {key: row[key] for key in schedules.DEFINITION_KEYS
+                          if key in row}
+            definition.update(copy.deepcopy(patch))
+            if definition.get("after", False) is None:
+                definition.pop("after")
+            normalized = schedules.normalize_definition(definition)
+            out = {}
+            for key in patch:
+                if key == "after" and patch[key] is None:
+                    out[key] = None
+                else:
+                    out[key] = normalized[key]
+            return out
+
+        def _schedule_mutation(self, method, path, raw, info):
+            actor = "console:" + info["username"]
+            try:
+                if method == "POST" and path == "/api/schedules":
+                    body = self._schedule_json_body(raw)
+                    if body is None:
+                        return
+                    schedule_id = body.get("id")
+                    definition = {key: value for key, value in body.items()
+                                  if key != "id"}
+                    definition = schedules.normalize_definition(definition)
+                    coordinator = role_coordinator()
+                    if coordinator is None:
+                        raise ScheduleTargetError("fleet state is unavailable")
+                    row, resolved = coordinator.create_schedule(
+                        schedule_id, definition, actor=actor, now=int(now_fn()),
+                        resolve_target=schedule_target_resolver)
+                    view = self._schedule_views([row])[0]
+                    self._json(201, {
+                        "schedule": view,
+                        "target_facts": self._schedule_target_facts(resolved),
+                    }, extra_headers=((
+                        "Location",
+                        ("/internal/v1/schedules/" if getattr(
+                            self, "_iris_management_wire", False)
+                         else "/api/schedules/") + row["id"]),
+                                      ("ETag", view["etag"])))
+                    return
+
+                reaffirm_match = re.fullmatch(
+                    r"/api/schedules/([^/]+)/reaffirm", path)
+                item_match = re.fullmatch(r"/api/schedules/([^/]+)", path)
+                match = reaffirm_match or item_match
+                if match is None:
+                    self._schedule_problem(404, "route-not-found",
+                                           "Route not found")
+                    return
+                schedule_id = unquote(match.group(1))
+                before = self._schedule_existing(schedule_id)
+                if before is None:
+                    return
+                expected = self._schedule_precondition(before)
+                if expected is None:
+                    return
+
+                if method == "DELETE" and item_match:
+                    schedule_store.delete(schedule_id, expected_rev=expected)
+                    self._send(204, "application/json", b"",
+                               (("ETag", schedules.schedule_etag(before)),))
+                    return
+                body = self._schedule_json_body(raw)
+                if body is None:
+                    return
+                if method == "POST" and reaffirm_match:
+                    if body:
+                        raise schedules.ScheduleValidationError(
+                            "reaffirm body must be empty")
+                    row = schedule_store.reaffirm(
+                        schedule_id, actor, expected_rev=expected)
+                    view = self._schedule_views([row])[0]
+                    self._json(200, {"schedule": view},
+                               extra_headers=(("ETag", view["etag"]),))
+                    return
+                coordinator = role_coordinator()
+                if coordinator is None:
+                    raise ScheduleTargetError("fleet state is unavailable")
+                if method == "PUT" and item_match:
+                    definition = schedules.normalize_definition(body)
+                    row, resolved = coordinator.put_schedule(
+                        schedule_id, definition, expected_rev=expected,
+                        resolve_target=schedule_target_resolver)
+                elif method == "PATCH" and item_match:
+                    patch = self._normalized_schedule_patch(before, body)
+                    row, resolved = coordinator.patch_schedule(
+                        schedule_id, patch, expected_rev=expected,
+                        resolve_target=schedule_target_resolver)
+                else:
+                    self._schedule_problem(404, "route-not-found",
+                                           "Route not found")
+                    return
+                view = self._schedule_views([row])[0]
+                self._json(200, {
+                    "schedule": view,
+                    "target_facts": self._schedule_target_facts(resolved),
+                }, extra_headers=(("ETag", view["etag"]),))
+            except schedules.ScheduleNotFound as exc:
+                self._schedule_error(exc, raced=True)
+            except Exception as exc:
+                self._schedule_error(exc)
+
         def _body_reader(self, remaining):
             """Return a zero-arg reader() streaming up to *remaining* bytes from
             the request body in 1 MiB chunks (b'' at EOF)."""
@@ -2786,6 +3304,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_GET(self):
             path = self.path.split("?", 1)[0]
+            if path == "/api/schedules" or path.startswith("/api/schedules/"):
+                self._schedule_get(path)
+                return
             if path == "/__management/console-certificate" and \
                     management_token_file is not None:
                 # The state-free console keeps no durable TLS key.  Its only
@@ -4256,6 +4777,24 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_PUT(self):
             path = self.path.split("?", 1)[0]
+            if re.fullmatch(r"/api/schedules/[^/]+", path):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length < 0 or length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                raw = self.rfile.read(length) if length else b""
+                self._schedule_mutation("PUT", path, raw, info)
+                return
             if path.startswith("/api/peer-policy/roles/") or path == "/api/peer-policy/qos":
                 info = self._require_session_csrf()
                 if info is not None:
@@ -4366,6 +4905,26 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                               % (_fmt_bytes(length), job_id))
             self._json(200, {"job_id": job_id})
 
+        def do_PATCH(self):
+            path = self.path.split("?", 1)[0]
+            if not re.fullmatch(r"/api/schedules/[^/]+", path):
+                self._schedule_problem(404, "route-not-found", "Route not found")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                self._schedule_problem(400, "invalid-request", "Invalid request")
+                return
+            if length < 0 or length > _MAX_BODY:
+                self._schedule_problem(413, "payload-too-large",
+                                       "Payload too large")
+                return
+            info = self._schedule_session(mutation=True, unread_body=length)
+            if info is None:
+                return
+            raw = self.rfile.read(length) if length else b""
+            self._schedule_mutation("PATCH", path, raw, info)
+
         def do_POST(self):
             path = self.path.split("?", 1)[0]
             try:
@@ -4426,6 +4985,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
+                return
+            if path == "/api/schedules" or re.fullmatch(
+                    r"/api/schedules/[^/]+/reaffirm", path):
+                if length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                raw = self.rfile.read(length) if length else b""
+                self._schedule_mutation("POST", path, raw, info)
                 return
             if path == "/api/image-verification/offline":
                 # KGV reconciler Task 4: a large (tens-of-MB) tar upload --
@@ -5493,6 +6065,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
 
         def do_DELETE(self):
             path = self.path.split("?", 1)[0]
+            if re.fullmatch(r"/api/schedules/[^/]+", path):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length < 0:
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                if length > _MAX_BODY:
+                    self._schedule_problem(413, "payload-too-large",
+                                           "Payload too large")
+                    return
+                info = self._schedule_session(mutation=True,
+                                              unread_body=length)
+                if info is None:
+                    return
+                if length:
+                    self.rfile.read(length)
+                    self._schedule_problem(400, "invalid-request",
+                                           "Invalid request")
+                    return
+                self._schedule_mutation("DELETE", path, b"", info)
+                return
             info = self._require_session_csrf()
             if info is None:
                 return
@@ -5725,6 +6323,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             None, device_id, device, onboarding=False))
     srv = _ConsoleServer((host, port), Handler)
     srv.onboard_submission = submission_adapter
+    # Inert runner construction seams. They are the exact instances used by
+    # HTTP handlers and do not start background work.
+    srv.schedule_store = schedule_store
+    srv.schedule_occurrence_store = schedule_occurrence_store
+    srv.schedule_receipt_store = schedule_receipt_store
+    srv.schedule_target_resolver = runner_schedule_target_resolver
+    schedule_coordinator = role_coordinator()
+    srv.schedule_role_guard = (schedule_coordinator.schedule_role_guard
+                               if schedule_coordinator is not None else None)
     tls_ctx = None
     if certfile:
         # Startup crash-window guard: the preferred cert file (normally the

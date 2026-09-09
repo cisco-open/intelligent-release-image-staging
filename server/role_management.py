@@ -24,6 +24,7 @@ particular, callers must never hold the peer-policy umbrella lock before
 calling a method here; that reverse order can deadlock another process which
 has already declared the fleet phase and is waiting to compile policy.
 """
+import contextlib
 import json
 import os
 import time
@@ -31,6 +32,7 @@ import time
 import assignment_service
 import gui_fleet
 import peer_policy
+import schedules
 import secrets_store
 
 
@@ -191,12 +193,13 @@ class RoleCoordinator:
     """One outer transaction coordinator for API, CSV and CLI role writes."""
 
     def __init__(self, fleet, auth_path, lkg_path, now_fn=time.time,
-                 acked_revision_fn=None):
+                 acked_revision_fn=None, schedule_store=None):
         self.fleet = fleet
         self.auth_path = auth_path
         self.lkg_path = lkg_path
         self.now_fn = now_fn
         self.acked_revision_fn = acked_revision_fn or (lambda: 0)
+        self.schedule_store = schedule_store
         self.lock_path = os.path.join(
             os.path.dirname(os.path.abspath(auth_path)), "role-management")
 
@@ -227,6 +230,102 @@ class RoleCoordinator:
         roles = document.get("roles", {})
         defs = roles.get("defs", {}) if isinstance(roles, dict) else {}
         return defs if isinstance(defs, dict) else {}
+
+    @staticmethod
+    def _scheduled_role(definition):
+        if not isinstance(definition, dict):
+            return None
+        target = definition.get("target")
+        filters = target.get("filters") if isinstance(target, dict) else None
+        role = filters.get("role") if isinstance(filters, dict) else None
+        return role if isinstance(role, str) and role not in ("", "__none") \
+            else None
+
+    def _require_scheduled_role(self, definition, policy):
+        role = self._scheduled_role(definition)
+        if role is not None and role not in self._known_roles(policy.document):
+            raise RoleManagementError(
+                "unknown schedule target role", code="role_not_found",
+                status=422, role=role)
+        return role
+
+    @contextlib.contextmanager
+    def schedule_role_guard(self, definition):
+        """Hold role authority across validation and a schedule claim.
+
+        The yielded policy is the exact snapshot validated. A runner claims the
+        schedule inside this context and invokes executors only after leaving.
+        """
+        with secrets_store.store_lock(self.lock_path):
+            policy = self._load()
+            self._require_scheduled_role(definition, policy)
+            yield policy
+
+    @staticmethod
+    def _schedule_preview(resolved):
+        return {key: resolved[key]
+                for key in ("revision", "now", "device_ids")}
+
+    def create_schedule(self, schedule_id, definition, *, actor, now,
+                        resolve_target):
+        if self.schedule_store is None:
+            raise RoleManagementError(
+                "schedule authority unavailable",
+                code="schedule_state_unavailable", status=503)
+        definition = schedules.normalize_definition(definition)
+        with self.schedule_role_guard(definition) as policy:
+            resolved = resolve_target(definition["target"],
+                                      role_policy=policy)
+            row = self.schedule_store.create(
+                schedule_id, definition, actor=actor, now=now,
+                preview=self._schedule_preview(resolved))
+            return row, resolved
+
+    def put_schedule(self, schedule_id, definition, *, expected_rev,
+                     resolve_target):
+        if self.schedule_store is None:
+            raise RoleManagementError(
+                "schedule authority unavailable",
+                code="schedule_state_unavailable", status=503)
+        definition = schedules.normalize_definition(definition)
+        with self.schedule_role_guard(definition) as policy:
+            resolved = resolve_target(definition["target"],
+                                      role_policy=policy)
+            row = self.schedule_store.put(
+                schedule_id, definition, expected_rev=expected_rev,
+                preview=self._schedule_preview(resolved))
+            return row, resolved
+
+    def patch_schedule(self, schedule_id, patch, *, expected_rev,
+                       resolve_target):
+        if self.schedule_store is None:
+            raise RoleManagementError(
+                "schedule authority unavailable",
+                code="schedule_state_unavailable", status=503)
+        # All definition writers take the same outer lock. Only a retarget
+        # needs a policy/fleet read and a new preview.
+        with secrets_store.store_lock(self.lock_path):
+            resolved = None
+            preview = None
+            if "target" in patch:
+                current = self.schedule_store.get(schedule_id)
+                if current is not None:
+                    candidate = {key: current[key] for key in
+                                 schedules.DEFINITION_KEYS if key in current}
+                    candidate.update(patch)
+                    if candidate.get("after", False) is None:
+                        candidate.pop("after")
+                    normalized = schedules.normalize_definition(candidate)
+                    patch = dict(patch, target=normalized["target"])
+                policy = self._load()
+                self._require_scheduled_role({"target": patch["target"]},
+                                             policy)
+                resolved = resolve_target(patch["target"],
+                                          role_policy=policy)
+                preview = self._schedule_preview(resolved)
+            row = self.schedule_store.patch(
+                schedule_id, patch, expected_rev=expected_rev, preview=preview)
+            return row, resolved
 
     def _validate_mapping(self, mapping, result, allow_missing=False,
                           allow_shadow=False):
@@ -891,6 +990,8 @@ class RoleCoordinator:
 
     def delete_role(self, name, actor, **kwargs):
         with secrets_store.store_lock(self.lock_path):
+            referring_schedules = (self.schedule_store.referring_schedules(name)
+                                   if self.schedule_store is not None else [])
             _revision, rows = self.fleet.snapshot()
             declared = sorted(
                 row["device_id"] for row in rows
@@ -902,9 +1003,12 @@ class RoleCoordinator:
                     referring_roles=sorted(other for other, definition in
                         self._load().document.get("roles", {}).get("defs", {}).items()
                         if other != name and name in definition.get("peers", [other])),
-                    referring_schedules=[], device_ids=declared[:DRIFT_ID_LIMIT],
+                    referring_schedules=referring_schedules,
+                    device_ids=declared[:DRIFT_ID_LIMIT],
                     truncated=len(declared) > DRIFT_ID_LIMIT)
             try:
+                kwargs = dict(kwargs)
+                kwargs["referring_schedules"] = referring_schedules
                 return peer_policy.delete_role(
                     self.auth_path, self.lkg_path, name, actor=actor,
                     now=self.now_fn(), acked_revision=self._acked(), **kwargs)
@@ -918,11 +1022,22 @@ class RoleCoordinator:
             _revision, rows = self.fleet.snapshot()
             declared = sorted({row.get("role") for row in rows
                                if isinstance(row, dict) and row.get("role")})
-            missing = [name for name in declared if name not in definitions]
+            schedule_references = {}
+            if self.schedule_store is not None:
+                for row in self.schedule_store.list():
+                    role = self._scheduled_role(row)
+                    if role is not None and role not in definitions:
+                        schedule_references.setdefault(role, []).append(row["id"])
+            missing = sorted(set(name for name in declared
+                                 if name not in definitions) |
+                             set(schedule_references))
             if missing:
                 raise RoleManagementError(
                     "role definitions omit declared fleet roles",
                     code="role_in_use", status=422, roles=missing[:DRIFT_ID_LIMIT],
+                    referring_schedules=sorted(
+                        schedule_id for ids in schedule_references.values()
+                        for schedule_id in ids)[:DRIFT_ID_LIMIT],
                     truncated=len(missing) > DRIFT_ID_LIMIT)
             def mutate(candidate):
                 roles = candidate.setdefault("roles", {})

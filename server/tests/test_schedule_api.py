@@ -148,6 +148,12 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     assert created["target_facts"]["role_drift"] == 1
     assert set(created["target_facts"]) == {
         "missing_os_family", "role_drift", "quarantined_ids"}
+    with server.schedule_role_guard(created["schedule"]):
+        runner_preview = server.schedule_target_resolver(created["schedule"])
+    assert runner_preview["device_ids"] == ["edge-1"]
+    assert set(runner_preview) == {
+        "revision", "now", "device_ids", "missing_os_family",
+        "role_drift", "quarantined_ids"}
 
     listed_status, _, listed_raw = _request(
         server, "GET", "/api/schedules", headers={"Cookie": auth["Cookie"]})
@@ -194,7 +200,7 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     assert put["created_by"] == "console:alice"
     assert put_headers["ETag"] == '"iris-schedule-s-boat-3"'
 
-    app.set_admin("bob", "new-password", invalidate_sessions=True)
+    app.set_admin("bob", "new-password")
     login_status, login_headers, login_body = _request(
         server, "POST", "/api/login",
         {"username": "bob", "password": "new-password"})
@@ -213,6 +219,12 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     assert affirmed["created_by"] == "console:bob"
     assert affirmed["creator_exists"] is True
     assert affirmed_headers["ETag"] == '"iris-schedule-s-boat-4"'
+
+    refused_delete, _, refused_raw = _request(
+        server, "DELETE", "/api/schedules/s-boat", {},
+        dict(bob, **{"If-Match": affirmed_headers["ETag"]}))
+    assert refused_delete == 400
+    assert json.loads(refused_raw)["code"] == "invalid-request"
 
     deleted_status, deleted_headers, deleted_raw = _request(
         server, "DELETE", "/api/schedules/s-boat",
@@ -246,6 +258,35 @@ def test_callback_disappearance_is_precondition_failure(schedule_api,
     assert status == 412
     assert "ETag" not in response_headers
     assert json.loads(raw)["code"] == "precondition_failed"
+
+
+def test_conflict_reread_failure_is_stable_unavailable(schedule_api,
+                                                       monkeypatch):
+    server, _app, auth = schedule_api
+    status, headers, _ = _request(
+        server, "POST", "/api/schedules",
+        {"id": "s-reread", **_definition(["edge-1"])}, auth)
+    assert status == 201
+    real_get = server.schedule_store.get
+
+    def conflict(*_args, **_kwargs):
+        raise schedules.ScheduleRevisionConflict("s-reread", 1)
+
+    calls = {"count": 0}
+
+    def first_get_then_fail(schedule_id):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return real_get(schedule_id)
+        raise schedules.ScheduleStateError("reread unavailable")
+
+    monkeypatch.setattr(server.schedule_store, "get", first_get_then_fail)
+    monkeypatch.setattr(server.schedule_store, "patch", conflict)
+    status, _, raw = _request(
+        server, "PATCH", "/api/schedules/s-reread", {"state": "paused"},
+        dict(auth, **{"If-Match": headers["ETag"]}))
+    assert status == 503
+    assert json.loads(raw)["code"] == "schedule_state_unavailable"
 
 
 def test_cross_occurrence_receipts_are_visible_and_capped(schedule_api):
@@ -314,3 +355,24 @@ def test_schedule_problem_type_is_stable(schedule_api):
     assert problem["type"] == api_problem.TYPE_BASE + "invalid_schedule"
     assert problem["code"] == "invalid_schedule"
 
+
+def test_target_resolution_fails_closed_without_process_authorities(tmp_path):
+    fleet = gui_fleet.FleetStore(str(tmp_path))
+    fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
+    policy = peer_policy.load_policy(
+        str(tmp_path / "peer-policy.json"),
+        str(tmp_path / "peer-policy.lkg.json"))
+    cat = catalog.CatalogStore(str(tmp_path))
+    base = dict(fleet=fleet, record_store=_Records(), role_policy=policy,
+                now=NOW, heartbeat_rows=[], revoked_principals=set())
+    with pytest.raises(management_api.ScheduleTargetError) as status_error:
+        management_api.resolve_schedule_target(
+            {"filters": {"status": "not-enrolled"}, "device_ids": [],
+             "bind": "late"}, catalog=cat, jobs=None, **base)
+    assert status_error.value.code == "schedule_target_status_unavailable"
+    with pytest.raises(management_api.ScheduleTargetError) as heartbeat_error:
+        management_api.resolve_schedule_target(
+            {"filters": {"q": "edge"}, "device_ids": [], "bind": "late"},
+            catalog=None, jobs={}, **base)
+    assert heartbeat_error.value.code == "schedule_target_heartbeat_unavailable"
+    assert schedules.ScheduleStore(tmp_path).list() == []
