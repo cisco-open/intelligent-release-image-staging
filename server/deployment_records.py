@@ -75,6 +75,9 @@ _STORE_MAX_BYTES = 64 * 1024 * 1024
 _STORE_ORDINARY_MAX_BYTES = 48 * 1024 * 1024
 _STORE_MAX_RECORDS = 8192
 _RECORD_MAX_BYTES = 128 * 1024
+# Mandatory state, bounded timestamps, and interruption metadata must remain
+# writable after admission; ordinary evidence and IOx payload cannot use this.
+_RECORD_LIFECYCLE_RESERVE_BYTES = 512
 _IOX_MAX_UNRESOLVED = 512
 _IOX_JOURNAL_MAX_BYTES = 16 * 1024
 _IOX_TRANSCRIPT_MAX_BYTES = 1024 * 1024
@@ -213,6 +216,29 @@ def validate_schedule_provenance(value, device_id=None):
     if device_id is not None and value["device_id"] != device_id:
         raise ValueError("schedule provenance device_id mismatch")
     return copy.deepcopy(value)
+
+
+def _record_payload_size(record):
+    # Only server-maintained lifecycle fields are excluded. Provenance,
+    # predecessor linkage, operator evidence, and the IOx journal are payload.
+    payload = {key: value for key, value in record.items()
+               if key not in ("state", "timestamps", "recovery")}
+    return len(_canonical_json(payload))
+
+
+def _check_record_growth(record, previous_size=None):
+    if (previous_size is None or
+            _record_payload_size(record) > previous_size):
+        if len(_canonical_json(record)) > (
+                _RECORD_MAX_BYTES - _RECORD_LIFECYCLE_RESERVE_BYTES):
+            raise ValueError("deployment record lifecycle reserve size limit exceeded")
+
+
+def _record_is_router(record):
+    resolved = record.get("resolved") or {}
+    return (resolved.get("platform") == "router" or
+            resolved.get("management_type") in (
+                "router-routed", "router-nat", "router-host"))
 
 
 def _pairs_object(pairs):
@@ -1164,12 +1190,14 @@ class DeploymentRecordStore:
                 record["state"] = "superseded"
                 record.setdefault("timestamps", {})["finished_at"] = timestamp
             elif record.get("state") in _STALE_ON_ACTIVATION:
+                previous_size = _record_payload_size(record)
                 record["state"] = "abandoned"
                 record["evidence"] = {
                     "status": "abandoned",
                     "reason": "superseded by the activation of record %s"
                               % keep_record_id}
                 record.setdefault("timestamps", {})["finished_at"] = timestamp
+                _check_record_growth(record, previous_size)
 
     def create(self, record_in):
         """Persist a new planned record and return its immutable initial record."""
@@ -1183,6 +1211,7 @@ class DeploymentRecordStore:
         timestamp = int(self._now())
         record["state"] = "planned"
         record["timestamps"] = {"planned_at": timestamp, "finished_at": None}
+        _check_record_growth(record)
         with self._store_lock():
             data = self._read(strict=True)
             if record["record_id"] in data["records"]:
@@ -1228,9 +1257,7 @@ class DeploymentRecordStore:
             _matching_string(resume_record_id, _RECORD_ID, "resume_record_id")
         record["record_id"] = record.get("record_id") or secrets.token_hex(16)
         _matching_string(record["record_id"], _RECORD_ID, "scheduled record_id")
-        resolved = record["resolved"]
-        router = (router or resolved.get("platform") == "router" or
-                  resolved.get("management_type") in ("router-routed", "router-nat"))
+        router = router or _record_is_router(record)
 
         def result(status, reason=None, value=None):
             response = {"status": status, "reason": reason,
@@ -1252,8 +1279,9 @@ class DeploymentRecordStore:
             conflicts = [row for row in records.values()
                          if row["device_id"] == tag["device_id"] and
                          row["state"] not in _TERMINAL]
-            if router and any(row["state"] in _RECOVERABLE or
-                              row["state"] == "active" for row in conflicts):
+            if any((router or _record_is_router(row)) and
+                   (row["state"] in _RECOVERABLE or row["state"] == "active")
+                   for row in conflicts):
                 return result("refused", "router_requires_undeploy")
             if any(row["state"] == "unknown" and
                    row.get("schedule_provenance") != tag for row in conflicts):
@@ -1267,6 +1295,11 @@ class DeploymentRecordStore:
                     return result("refused", "conflict")
                 if (existing["state"] not in ("planned", "unknown") or
                         (existing["state"] == "unknown" and "recovery" not in existing)):
+                    return result("refused", "existing_deployment")
+                # A legacy row retained at startup because metadata could not
+                # fit must not bypass that refusal through a planned resume.
+                if _record_payload_size(existing) > (
+                        _RECORD_MAX_BYTES - _RECORD_LIFECYCLE_RESERVE_BYTES):
                     return result("refused", "existing_deployment")
                 if "iox_verification" not in existing:
                     existing["state"] = "planned"
@@ -1289,6 +1322,7 @@ class DeploymentRecordStore:
                 return result("refused", "conflict")
             record["state"] = "planned"
             record["timestamps"] = {"planned_at": timestamp, "finished_at": None}
+            _check_record_growth(record)
             records[record["record_id"]] = record
             self._check_candidate(data, ordinary=True)
             _atomic_write_json(self.path, data)
@@ -1307,6 +1341,7 @@ class DeploymentRecordStore:
         record["state"] = "active"
         record["adopted"] = True
         record["timestamps"] = {"planned_at": timestamp, "finished_at": timestamp}
+        _check_record_growth(record)
         with self._store_lock():
             data = self._read(strict=True)
             if record["record_id"] in data["records"]:
@@ -1344,6 +1379,7 @@ class DeploymentRecordStore:
                               "preflight": copy.deepcopy(preflight),
                               "resources": copy.deepcopy(resources)})
             self._validate(candidate, new_record=False)
+            _check_record_growth(candidate, _record_payload_size(record))
             data["records"][record_id] = candidate
             self._check_candidate(data, ordinary=True)
             _atomic_write_json(self.path, data)
@@ -1372,6 +1408,7 @@ class DeploymentRecordStore:
             if record is None:
                 raise ValueError("unknown record: %s" % record_id)
             current = record.get("state")
+            previous_size = _record_payload_size(record)
             if state not in _TRANSITIONS.get(current, frozenset()):
                 raise ValueError("invalid record transition: %s -> %s" % (current, state))
             record["state"] = state
@@ -1382,6 +1419,7 @@ class DeploymentRecordStore:
             if state == "active":
                 self._supersede_other_actives(data, record.get("device_id"),
                                               record_id)
+            _check_record_growth(record, previous_size)
             self._check_candidate(data, ordinary=evidence is not None)
             _atomic_write_json(self.path, data)
             return copy.deepcopy(record)
@@ -1391,12 +1429,39 @@ class DeploymentRecordStore:
         collapse legacy duplicate actives (written before activation superseded
         siblings): keep each device's NEWEST active — by activation time, then
         plan time, then record id, so the choice is deterministic — and retire
-        the rest, restoring the one-active-per-device invariant undeploy needs."""
+        the rest, restoring the one-active-per-device invariant undeploy needs.
+
+        Legacy rows may predate the lifecycle reserve. Leave a row unchanged
+        if its mandatory metadata cannot fit either hard cap, and continue the
+        bounded batch. Its original nonterminal state and all authority remain
+        intact and fail closed; one full row must not abort global startup.
+        """
         changed = []
         with self._store_lock():
             data = self._read(strict=True)
-            for record in data["records"].values():
-                if record.get("state") in _NONTERMINAL:
+            body_size = len(_store_json(data))
+
+            def retain_if_fits(candidate):
+                nonlocal body_size
+                record_id = candidate["record_id"]
+                original = data["records"][record_id]
+                if len(_canonical_json(candidate)) > _RECORD_MAX_BYTES:
+                    return
+                # The wrappers preserve the exact nesting/indentation of one
+                # row in the real store, without serializing the whole store
+                # for every row (which would make startup quadratic).
+                old_size = len(_store_json({"records": {record_id: original}}))
+                new_size = len(_store_json({"records": {record_id: candidate}}))
+                candidate_size = body_size + new_size - old_size
+                if candidate_size > _STORE_MAX_BYTES:
+                    return
+                data["records"][record_id] = candidate
+                body_size = candidate_size
+                changed.append(record_id)
+
+            for original in list(data["records"].values()):
+                if original.get("state") in _NONTERMINAL:
+                    record = copy.deepcopy(original)
                     record["recovery"] = {
                         "schema_version": 1,
                         "interrupted_from": record["state"],
@@ -1404,7 +1469,7 @@ class DeploymentRecordStore:
                     }
                     record["state"] = "unknown"
                     record.setdefault("timestamps", {})["finished_at"] = int(self._now())
-                    changed.append(record["record_id"])
+                    retain_if_fits(record)
             actives = {}
             for record in data["records"].values():
                 if record.get("state") == "active":
@@ -1417,10 +1482,11 @@ class DeploymentRecordStore:
                     return (timestamps.get("finished_at") or 0,
                             timestamps.get("planned_at") or 0,
                             record.get("record_id") or "")
-                for record in sorted(duplicates, key=_age)[:-1]:
+                for original in sorted(duplicates, key=_age)[:-1]:
+                    record = copy.deepcopy(original)
                     record["state"] = "superseded"
                     record.setdefault("timestamps", {})["finished_at"] = int(self._now())
-                    changed.append(record["record_id"])
+                    retain_if_fits(record)
             if changed:
                 self._check_candidate(data, ordinary=False)
                 _atomic_write_json(self.path, data)
@@ -1454,9 +1520,11 @@ class DeploymentRecordStore:
                 if (record.get("device_id") != device_id
                         or record.get("state") in _TERMINAL):
                     continue
+                previous_size = _record_payload_size(record)
                 record["state"] = "abandoned"
                 record["evidence"] = {"status": "abandoned", "reason": reason}
                 record.setdefault("timestamps", {})["finished_at"] = timestamp
+                _check_record_growth(record, previous_size)
                 retired.append(record["record_id"])
             if retired:
                 self._check_candidate(data, ordinary=True)
@@ -1569,6 +1637,8 @@ class DeploymentRecordStore:
             }
             candidate = copy.deepcopy(data)
             candidate["records"][record_id]["iox_verification"] = journal
+            _check_record_growth(candidate["records"][record_id],
+                                 _record_payload_size(record))
             self._check_candidate(candidate, ordinary=True)
             _atomic_write_json(self.path, candidate)
             return copy.deepcopy(journal)
@@ -1785,6 +1855,8 @@ class DeploymentRecordStore:
 
             candidate_data = copy.deepcopy(data)
             candidate_data["records"][record_id]["iox_verification"] = candidate
+            _check_record_growth(candidate_data["records"][record_id],
+                                 _record_payload_size(record))
             self._check_candidate(candidate_data, ordinary=False)
             indexes = self._journal_transcript_indexes(candidate)
             if observation is not None:
@@ -1873,6 +1945,8 @@ class DeploymentRecordStore:
             candidate_data = copy.deepcopy(data)
             candidate_data["records"][record_id][
                 "iox_verification"] = candidate
+            _check_record_growth(candidate_data["records"][record_id],
+                                 _record_payload_size(record))
             self._check_candidate(candidate_data, ordinary=False)
             _atomic_write_json(self.path, candidate_data)
             return copy.deepcopy(candidate)

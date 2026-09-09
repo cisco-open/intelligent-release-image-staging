@@ -1654,3 +1654,164 @@ def test_schedule_corrupt_persisted_authority_refuses_strict_reads(tmp_path, fie
         store.get("mine", strict=True)
     with pytest.raises(deployment_records.RecordStoreUnreadable):
         _scheduled(store)
+
+
+@pytest.mark.parametrize("classification", [
+    {"platform": "router"}, {"management_type": "router-nat"},
+    {"management_type": "router-host"}, {"management_type": "router-routed"},
+])
+@pytest.mark.parametrize("stored_router", [False, True])
+def test_schedule_router_classification_cannot_be_downgraded(tmp_path, classification, stored_router):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    ordinary = {"platform": "guestshell", "management_type": "inband"}
+    store.create(_record(record_id="old", schedule_provenance=_provenance(),
+                         resolved=classification if stored_router else ordinary))
+    store.recover_interrupted()
+    original = store.get("old", strict=True)
+    result = _scheduled(store, resume_record_id="old", router=False,
+                        resolved=ordinary if stored_router else classification)
+    assert result["status"] == "refused"
+    assert result["reason"] == "router_requires_undeploy"
+    assert store.get("old", strict=True) == original
+
+
+def _pad_record_to_size(row, size):
+    row["padding"] = ""
+    row["padding"] = "x" * (size - len(deployment_records._canonical_json(row)))
+    assert len(deployment_records._canonical_json(row)) == size
+    return row
+
+
+def test_new_near_cap_records_reserve_recovery_metadata(tmp_path):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 1)
+    cap = deployment_records._RECORD_MAX_BYTES
+    row = dict(_record(record_id="near"), state="planned",
+               timestamps={"planned_at": 1, "finished_at": None})
+    _pad_record_to_size(row, cap - 512 + 1)
+    with pytest.raises(ValueError, match="reserve"):
+        store.create(row)
+    row["padding"] = row["padding"][:-1]
+    created = store.create(row)
+    assert len(deployment_records._canonical_json(created)) == cap - 512
+    store._now = lambda: deployment_records._MAX_INTEGER
+    assert store.recover_interrupted() == ["near"]
+    recovered = store.get("near", strict=True)
+    assert recovered["recovery"]["interrupted_from"] == "planned"
+    assert recovered["padding"] == created["padding"]
+    assert len(deployment_records._canonical_json(recovered)) <= cap
+
+
+@pytest.mark.parametrize("state", ["planned", "applying"])
+def test_legacy_exact_cap_recovery_preserves_row_and_progresses_batch(tmp_path, state):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
+    large = dict(_record(record_id="large", schedule_provenance=_provenance()),
+                 state=state, timestamps={"planned_at": 1, "finished_at": None},
+                 evidence={"note": "retain operator evidence"})
+    _pad_record_to_size(large, deployment_records._RECORD_MAX_BYTES)
+    small = dict(_record(record_id="small", device_id="edge-02"), state="planned",
+                 timestamps={"planned_at": 1, "finished_at": None})
+    deployment_records._atomic_write_json(store.path, {"records": {"large": large, "small": small}})
+    assert store.recover_interrupted() == ["small"]
+    assert store.get("large", strict=True) == large
+    assert store.get("small", strict=True)["state"] == "unknown"
+    assert store.recover_interrupted() == []
+    assert _scheduled(store)["reason"] == "existing_deployment"
+    assert _scheduled(store, resume_record_id="large")["status"] == "refused"
+    assert store.get("large", strict=True) == large
+
+
+def test_legacy_store_cap_recovery_makes_bounded_batch_progress(tmp_path, monkeypatch):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 100)
+    rows = {key: dict(_record(record_id=key, device_id=key), state="planned",
+                     timestamps={"planned_at": 1, "finished_at": None}) for key in ("first", "second")}
+    data = {"records": rows}
+    original_size = len(deployment_records._store_json(data))
+    transformed = json.loads(json.dumps(data))
+    transformed["records"]["first"].update(
+        state="unknown", recovery={"schema_version": 1, "interrupted_from": "planned", "interrupted_at": 100})
+    transformed["records"]["first"]["timestamps"]["finished_at"] = 100
+    one_recovery_size = len(deployment_records._store_json(transformed))
+    assert one_recovery_size > original_size
+    monkeypatch.setattr(deployment_records, "_STORE_MAX_BYTES", one_recovery_size)
+    deployment_records._atomic_write_json(store.path, data)
+    assert store.recover_interrupted() == ["first"]
+    assert store.get("second", strict=True) == rows["second"]
+    assert len(open(store.path, "rb").read()) == one_recovery_size
+    assert store.recover_interrupted() == []
+
+
+@pytest.mark.parametrize("operation", ["create", "adopt", "scheduled"])
+def test_all_new_record_paths_enforce_exact_lifecycle_reserve(tmp_path, operation):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 1)
+    draft = _record(record_id="near")
+    expected = dict(draft, state="planned", timestamps={"planned_at": 1, "finished_at": None})
+    if operation == "adopt":
+        expected.update(state="active", adopted=True,
+                        timestamps={"planned_at": 1, "finished_at": 1})
+    elif operation == "scheduled":
+        expected["schedule_provenance"] = _provenance()
+    _pad_record_to_size(expected, deployment_records._RECORD_MAX_BYTES - 511)
+    draft["padding"] = expected["padding"]
+    def admit():
+        if operation == "scheduled":
+            return store.admit_scheduled(draft, provenance=_provenance(), attempt=1,
+                                          authorize=lambda *args: None)["record"]
+        return getattr(store, operation)(draft)
+    with pytest.raises(ValueError, match="reserve"):
+        admit()
+    assert store.list(strict=True) == []
+    draft["padding"] = draft["padding"][:-1]
+    admitted = admit()
+    assert len(deployment_records._canonical_json(admitted)) == deployment_records._RECORD_MAX_BYTES - 512
+
+
+@pytest.mark.parametrize("operation", ["update_planned", "transition"])
+def test_payload_growth_cannot_consume_lifecycle_reserve(tmp_path, operation):
+    store = deployment_records.DeploymentRecordStore(str(tmp_path), now_fn=lambda: 1)
+    row = store.create(_record(record_id="mine"))
+    candidate = json.loads(json.dumps(row))
+    if operation == "update_planned":
+        candidate["resolved"]["padding"] = ""
+        destination = candidate["resolved"]
+    else:
+        candidate.update(state="applying", evidence={"padding": ""})
+        destination = candidate["evidence"]
+    destination["padding"] = "x" * (
+        deployment_records._RECORD_MAX_BYTES - 511 - len(deployment_records._canonical_json(candidate)))
+    assert len(deployment_records._canonical_json(candidate)) == deployment_records._RECORD_MAX_BYTES - 511
+    with pytest.raises(ValueError, match="reserve"):
+        if operation == "update_planned":
+            store.update_planned("mine", plan_hash=candidate["plan_hash"],
+                                 resolved=candidate["resolved"], preflight=candidate["preflight"],
+                                 resources=candidate["resources"])
+        else:
+            store.transition("mine", "applying", candidate["evidence"])
+    assert store.get("mine", strict=True) == row
+
+
+def test_legacy_full_iox_record_keeps_journal_and_provenance_during_restart(tmp_path):
+    store, journal, _, _ = _begin_iox(tmp_path)
+    legacy = store.get("iox-r1", strict=True)
+    legacy["schedule_provenance"] = _provenance()
+    _pad_record_to_size(legacy, deployment_records._RECORD_MAX_BYTES)
+    deployment_records._atomic_write_json(store.path, {"records": {"iox-r1": legacy}})
+    store.create(_record(record_id="other", device_id="edge-02"))
+    assert store.recover_interrupted() == ["other"]
+    assert store.get("iox-r1", strict=True) == legacy
+    assert store.get("iox-r1", strict=True)["iox_verification"] == journal
+    assert _scheduled(store, resume_record_id="iox-r1")["reason"] == "existing_deployment"
+    assert store.recover_interrupted() == []
+
+
+def test_iox_journal_growth_keeps_lifecycle_reserve(tmp_path, monkeypatch):
+    store, journal, _, _ = _begin_iox(tmp_path)
+    original = store.get("iox-r1", strict=True)
+    monkeypatch.setattr(deployment_records, "_RECORD_MAX_BYTES",
+                        len(deployment_records._canonical_json(original)) + 512)
+    with pytest.raises(ValueError, match="reserve"):
+        store.iox_event("iox-r1", journal["transaction_id"], 0, "observed", "error", {
+            "error": {"category": "transport", "detail": "bounded observation",
+                      "at": 101, "transcript_id": None}, "transcript_refs": []})
+    assert store.get("iox-r1", strict=True) == original
+    assert store.recover_interrupted() == ["iox-r1"]
+    assert store.get("iox-r1", strict=True)["iox_verification"] == journal
