@@ -256,7 +256,9 @@ def test_manual_assignment_generation_wins_after_prepared_intent(tmp_path):
     assert images.get_policy("edge-1")["approved_image_ids"] == ["manual"]
 
 
-def test_prepared_assignment_refuses_lost_revocation_authority(tmp_path):
+@pytest.mark.parametrize("authority_loss", ("missing", "missing-devices"))
+def test_prepared_assignment_refuses_lost_revocation_authority(
+        tmp_path, authority_loss):
     clock = _Clock()
     fleet = gui_fleet.FleetStore(str(tmp_path), now_fn=clock)
     fleet.upsert({"device_id": "edge-1", "device_ip": "192.0.2.1"})
@@ -281,7 +283,10 @@ def test_prepared_assignment_refuses_lost_revocation_authority(tmp_path):
             "value": "test-only", "created_at": NOW,
             "expires_at": 0, "revoked": True}}},
         "seeder": {}}))
-    secrets_path.unlink()
+    if authority_loss == "missing":
+        secrets_path.unlink()
+    else:
+        secrets_path.write_text("{}")
     clock.now += 1
     runner.run_once()
 

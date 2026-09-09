@@ -107,10 +107,11 @@ SEEDER_PREV_TTL = int(os.environ.get("IRIS_SEEDER_PREV_TTL") or 2592000)
 # ---------------------------------------------------------------------------
 
 class StoreCorruptError(ValueError):
-    """The store file at *path* exists but could not be read or parsed.
+    """The store at *path* could not be read as required authority.
 
-    Raised by load() instead of returning the empty skeleton. An empty store
-    and an unreadable one must never look alike: every writer does
+    Raised by load() instead of returning the empty skeleton for an unreadable
+    file or a required authority that is absent. An empty store and an
+    unavailable one must never look alike: every writer does
     load -> mutate -> persist_store, and persist_store encrypts durable-first,
     so a skeleton returned for a truncated/unreadable tmpfs copy would be
     re-encrypted over the only durable copy of every device and seeder
@@ -143,6 +144,9 @@ def load(path, *, require_existing=False):
         raise StoreCorruptError(
             "secrets store %s is unreadable (%s)"
             % (path, exc.__class__.__name__)) from exc
+    if require_existing and "devices" not in data:
+        raise StoreCorruptError(
+            "secrets store %s has no devices authority" % path)
     data.setdefault("devices", {})
     data.setdefault("seeder", {})
     _prune_previous_on_load(data)

@@ -29,6 +29,10 @@ def test_load_can_require_existing_authority(tmp_path):
     with pytest.raises(secrets_store.StoreCorruptError,
                        match="unavailable.*FileNotFoundError"):
         secrets_store.load(path, require_existing=True)
+    (tmp_path / "nope.json").write_text("{}")
+    with pytest.raises(secrets_store.StoreCorruptError,
+                       match="no devices authority"):
+        secrets_store.load(path, require_existing=True)
 
 
 def test_load_corrupt_raises_not_skeleton(tmp_path):
