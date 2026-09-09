@@ -68997,7 +68997,7 @@
                   "schedule_id": "s-boat",
                   "occurrences": [
                     {
-                      "id": "11111111111111111111111111111111",
+                      "id": "6f9753e0d633aab2c497b14f23d9bc21",
                       "schedule_id": "s-boat",
                       "schedule_generation": "00000000000000000000000000000000",
                       "schedule_rev": 1,
@@ -69045,7 +69045,7 @@
                         "status": "due",
                         "resolution": "normal",
                         "tz": "UTC",
-                        "local_time": "2026-09-09T00:01:00+00:00",
+                        "local_time": "2026-09-08T16:01:00+00:00",
                         "next_at": null
                       },
                       "scheduled_at": 1788883260,
@@ -76995,7 +76995,7 @@
                   "schedule_id": "s-boat",
                   "occurrences": [
                     {
-                      "id": "11111111111111111111111111111111",
+                      "id": "6f9753e0d633aab2c497b14f23d9bc21",
                       "schedule_id": "s-boat",
                       "schedule_generation": "00000000000000000000000000000000",
                       "schedule_rev": 1,
@@ -77043,7 +77043,7 @@
                         "status": "due",
                         "resolution": "normal",
                         "tz": "UTC",
-                        "local_time": "2026-09-09T00:01:00+00:00",
+                        "local_time": "2026-09-08T16:01:00+00:00",
                         "next_at": null
                       },
                       "scheduled_at": 1788883260,

@@ -651,19 +651,20 @@ def _schedule_occurrence_example():
     schedule = _schedule_view_example()
     schedule.pop("etag")
     schedule.pop("creator_exists")
+    scheduled_at = schedule["when"]["at"]
+    slot = schedules.occurrence_slot(schedule, scheduled_at)
     return {
-        "id": "1" * 32, "schedule_id": "s-boat",
+        "id": schedules.occurrence_id(schedule, scheduled_at),
+        "schedule_id": "s-boat",
         "schedule_generation": "0" * 32, "schedule_rev": 1,
         "schedule": schedule, "actor": "schedule:s-boat",
-        "slot": {"scheduled_at": 1788883260, "window_end": 1788886860,
-                 "status": "due", "resolution": "normal", "tz": "UTC",
-                 "local_time": "2026-09-09T00:01:00+00:00", "next_at": None},
-        "scheduled_at": 1788883260, "window_end": 1788886860,
+        "slot": slot, "scheduled_at": scheduled_at,
+        "window_end": slot["window_end"],
         "state": "completed", "preview": schedule["preview"],
-        "target_snapshot": {"revision": 3, "now": 1788883260,
+        "target_snapshot": {"revision": 3, "now": scheduled_at,
                             "device_ids": ["edge-01"]},
         "delta": {"added": 0, "removed": 0},
-        "created_at": 1788883260, "updated_at": 1788883300,
+        "created_at": scheduled_at, "updated_at": scheduled_at + 40,
     }
 
 

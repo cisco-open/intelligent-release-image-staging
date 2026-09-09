@@ -666,3 +666,6 @@ def test_schedule_examples_match_store_rows_and_if_match_rejects_invalid_tags():
                             stored = {key: value for key, value in receipt.items() if key not in (
                                 "schedule_id", "scheduled_at", "window_end", "occurrence_state", "schedule_rev")}
                             schedules._validate_receipt(stored["device_id"], stored)
+                        for occurrence in example.get("occurrences", []):
+                            schedules._validate_occurrence(
+                                occurrence["id"], occurrence)
