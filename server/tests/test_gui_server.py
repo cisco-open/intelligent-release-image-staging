@@ -2950,11 +2950,13 @@ def test_onboard_cancel_queued_endpoint_and_sse_end(tmp_path):
         stop()
 
 
-def test_devices_view_carries_onboard_state_and_overview_awaits_heartbeat(tmp_path):
+def test_devices_view_carries_onboard_state_and_overview_awaits_heartbeat(
+        tmp_path, monkeypatch):
     """After a successful onboard, the device has no heartbeat yet (the agent
     needs a couple of minutes to bootstrap) — the devices view must carry the
     job outcome so the UI shows 'waiting for heartbeat' instead of the
     misleading 'not enrolled', and the overview counts such devices."""
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
     host, port, stop = _serve_onboard(tmp_path, lambda p, e, on: 0)
     try:
         ck, csrf = _auth(host, port)
@@ -8495,9 +8497,9 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
     device: force must resolve to device/xr-uninstall.sh (not one of the
     IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
     same way it reaches the Guest Shell/IOx recipes. XR force never touches
-    a record -- os_family xr + platform xr-appmgr resolve straight to the
-    XR recipe with no probe or preflight involved, so a bare device record
-    is enough here, unlike an onboard test."""
+    a record -- model 8201 + platform xr-appmgr resolve straight to the XR
+    recipe with no probe or preflight involved, so a bare device record is
+    enough here, unlike an onboard test. os_family remains server-owned."""
     seen = {}
     ran_script = {}
 
@@ -8509,8 +8511,8 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
     host, port, stop = _serve_inband(
         tmp_path, run_fn,
         device={"device_id": "xr1", "device_ip": "10.0.0.9", "model": "8201",
-                "os_family": "xr", "platform": "xr-appmgr",
-                "management_type": "xr-host", "credential_profile_id": "lab"})
+                "platform": "xr-appmgr", "management_type": "xr-host",
+                "credential_profile_id": "lab"})
     try:
         ck, csrf = _auth(host, port)
         st, _, b = _req(host, port, "POST", "/api/devices/xr1/undeploy",
