@@ -352,6 +352,17 @@ case "$cmds" in
   *"more "*"guest-share/iris/iris-agent.conf"*)
     [ -n "${FAKE_LKG_KEY:-}" ] && echo "lkg_key = $FAKE_LKG_KEY"
     ;;
+  *"__IRIS_STAGE_WRITABLE__"*)
+    # IOS echoes submitted commands. Emit that echo independently from the
+    # success line so a test can prove the installer does not trust the echo.
+    printf '%s\n' "$cmds"
+    [ "${FAKE_STAGE_WRITABLE:-yes}" != yes ] \
+      || echo "__IRIS_STAGE_WRITABLE__"
+    ;;
+  *"show app-hosting list"*)
+    [ "${FAKE_EXISTING_GUESTSHELL:-no}" != yes ] \
+      || echo "guestshell RUNNING"
+    ;;
   *)
     echo "bytes free stub"
     ;;
@@ -468,6 +479,24 @@ run_with_timeout() {
 
   conf="$ARTDIR/staging/iris-agent-203.0.113.3-$TEST_CAP.conf"
   grep -qx "lkg_key = $key" "$conf"
+}
+
+@test "an echoed writable-stage command is not proof that its test succeeded" {
+  setup_stage_local
+  unset HOST_USER HOST_PASS
+
+  run_with_timeout 5 env IRIS_STAGE_LOCAL=1 IRIS_ARTIFACTS_DIR="$ARTDIR" \
+    DEVICE_IP=203.0.113.3 VLAN=666 SVI_IP=203.0.113.125 SVI_MASK=255.255.255.252 \
+    GUEST_IP=203.0.113.126 CATALOG_URL=https://192.0.2.10:8443 \
+    CATALOG_TOKEN=deadbeef DEVICE_ID=203.0.113.3 STAGE_HOST=192.0.2.10 \
+    IRIS_CRT_FILE="$CRTFILE" IRIS_STAGING_CAPABILITY="$TEST_CAP" \
+    FAKE_EXISTING_GUESTSHELL=yes FAKE_STAGE_WRITABLE=no \
+    bash "$STUBDIR/device/device-install.sh"
+
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  [[ "$output" == *"guest-share/iris is not writable by Guest Shell"* ]]
+  [[ "$output" != *"[3/6] configure IRIS"* ]]
 }
 
 @test "without IRIS_STAGE_LOCAL and a non-local STAGE_HOST, the remote ssh path still demands HOST_USER" {

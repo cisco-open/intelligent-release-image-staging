@@ -223,7 +223,9 @@ apphost_reply() {
 
 case "$cmds" in
   *"__IRIS_STAGE_WRITABLE__"*)
-    echo "__IRIS_STAGE_WRITABLE__"
+    printf '%s\n' "$cmds"
+    [ "${FAKE_STAGE_WRITABLE:-yes}" != yes ] \
+      || echo "__IRIS_STAGE_WRITABLE__"
     ;;
   *"__IRIS_VERIFY_RUNNING__"*)
     echo "terminal width 512"
@@ -320,6 +322,15 @@ _router_install_run_live() {
   [ "$status" -eq 0 ] || return 1
   grep -qx "lkg_key = $key" \
     "$ARTDIR/staging/iris-agent-router-1-$TEST_CAP.conf"
+}
+
+@test "router rejects an echoed writable-stage command without a success line" {
+  _router_install_stub_setup
+  FAKE_EXISTING_GUESTSHELL=yes FAKE_DESTROY_POLLS=1 \
+    FAKE_STAGE_WRITABLE=no run _router_install_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"guest-share/iris is not writable by Guest Shell"* ]]
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" 'configure terminal')" -eq 0 ]
 }
 
 # Counts call blocks in a FAKE_COMMAND_LOG whose body contains every given
