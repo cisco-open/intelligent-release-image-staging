@@ -9,7 +9,10 @@ import datetime as dt
 import email.utils
 import hashlib
 import http.client
+import importlib.machinery
+import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import threading
@@ -1284,3 +1287,40 @@ def test_bootstrap_materializer_fails_with_one_fixed_public_error(result):
             match=r"^instruction bootstrap unavailable$") as raised:
         instance.materialize_bootstrap_instruction("device-a")
     assert "private-response" not in str(raised.value)
+
+
+def test_direct_bootstrap_cli_writes_only_private_ciphertext(
+        tmp_path, monkeypatch, capsys):
+    cli_path = Path(__file__).resolve().parents[1] / \
+        "iris-instruction-bootstrap"
+    assert cli_path.is_file()
+    loader = importlib.machinery.SourceFileLoader(
+        "iris_instruction_bootstrap_test", str(cli_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+
+    store = object()
+    monkeypatch.setattr(module.catalog, "CatalogStore", lambda _state: store)
+
+    class Producer:
+        def __init__(self, actual_store, secrets_path):
+            assert actual_store is store
+            assert secrets_path == "/private/secrets.json"
+
+        def materialize_bootstrap_instruction(self, device_id):
+            assert device_id == "device-a"
+            return b"sealed-bootstrap"
+
+    monkeypatch.setattr(module.catalog, "Catalog", Producer)
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    monkeypatch.setenv("IRIS_SECRETS", "/private/secrets.json")
+    output = tmp_path / "bootstrap.envelope"
+    output.write_bytes(b"old")
+    output.chmod(0o644)
+
+    assert module.main(["device-a", "--output", str(output)]) == 0
+    assert output.read_bytes() == b"sealed-bootstrap"
+    assert output.stat().st_mode & 0o777 == 0o600
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
