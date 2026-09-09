@@ -80,6 +80,194 @@ def _instruction_integer(minimum=0):
     return {"type": "integer", "minimum": minimum, "maximum": instructions.MAX_I63}
 
 
+def _nullable_instruction_integer(minimum=0, maximum=None):
+    return {"type": ["integer", "null"], "minimum": minimum,
+            "maximum": instructions.MAX_I63 if maximum is None else maximum}
+
+
+_INSTRUCTION_DISPLAY_STATES = (
+    "applied", "lkg", "stale", "rejected", "tracker-only",
+    "pre-instructions", "unknown", "unavailable", "pending", "forbidden",
+    "floor_reset", "none", "revoked",
+)
+
+# Canonical nonnegative signed-63-bit decimal spelling. JSON object keys are
+# strings, so a digit-count-only pattern would admit values above MAX_I63.
+_DECIMAL_I63_PATTERN = (
+    r"^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|"
+    r"92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|"
+    r"92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|"
+    r"92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|"
+    r"9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|"
+    r"922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|"
+    r"92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|"
+    r"9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+)
+
+
+def _instruction_identity_schema():
+    names = ("epoch", "instr_serial", "policy_revision")
+    return {
+        "oneOf": [{
+            "type": "object", "required": list(names),
+            "additionalProperties": False,
+            "properties": {name: _instruction_integer() for name in names},
+        }, {"type": "null"}],
+        "description": (
+            "Complete accepted-envelope identity asserted by the agent. Null "
+            "means no complete accepted identity was reported."),
+    }
+
+
+def _instruction_evidence_schema():
+    return {"type": ["string", "null"],
+            "enum": ["agent-asserted", "server-observed", None]}
+
+
+def _instruction_device_schema():
+    fields = {
+        "display_state": {"type": "string",
+                          "enum": list(_INSTRUCTION_DISPLAY_STATES)},
+        "label": {"type": "string", "minLength": 1, "maxLength": 96},
+        "evidence": _instruction_evidence_schema(),
+        "underlying_state": {"type": ["string", "null"],
+                             "enum": sorted(instructions.INSTR_STATES) + [None]},
+        "underlying_label": {
+            "type": "string", "minLength": 1, "maxLength": 96},
+        "underlying_evidence": _instruction_evidence_schema(),
+        "reason": {"type": ["string", "null"],
+                   "enum": sorted(instructions.INSTR_REASONS) + [None]},
+        "reported_instr_serial": _nullable_instruction_integer(),
+        "accepted_identity": _instruction_identity_schema(),
+        "verify_level": {"type": ["string", "null"],
+                         "enum": ["sig", "none", None]},
+        "pointer_skew": {"type": ["boolean", "null"]},
+        "qos_drift_count": _nullable_instruction_integer(maximum=(
+            instructions.QOS_DRIFT_MAX_ROWS + 2)),
+        "report_age_seconds": _nullable_instruction_integer(),
+        "report_stale": {"type": ["boolean", "null"]},
+        "revoked": {"type": ["boolean", "null"]},
+        "revocation_evidence": _instruction_evidence_schema(),
+    }
+    return {
+        "type": "object", "properties": fields,
+        "required": list(fields), "additionalProperties": False,
+        "description": (
+            "Canonical bounded instruction display projection. Device facts "
+            "remain assertions; server-observed revocation and report age may "
+            "take display precedence while retaining the underlying report."),
+    }
+
+
+def _instruction_device_example():
+    maximum = instructions.MAX_I63
+    return {
+        "display_state": "applied",
+        "label": "applied r%d" % maximum,
+        "evidence": "agent-asserted",
+        "underlying_state": "applied",
+        "underlying_label": "applied r%d" % maximum,
+        "underlying_evidence": "agent-asserted",
+        "reason": None,
+        "reported_instr_serial": maximum,
+        "accepted_identity": {
+            "epoch": 11, "instr_serial": maximum, "policy_revision": 7},
+        "verify_level": "sig",
+        "pointer_skew": False,
+        "qos_drift_count": 0,
+        "report_age_seconds": 3,
+        "report_stale": False,
+        "revoked": False,
+        "revocation_evidence": "server-observed",
+    }
+
+
+def _instruction_fleet_rollup_schema():
+    states = {
+        name: _instruction_integer() for name in _INSTRUCTION_DISPLAY_STATES}
+    return {
+        "type": "object",
+        "properties": {
+            "issued_revision": _nullable_instruction_integer(),
+            "applied": {
+                "type": "object",
+                "propertyNames": {
+                    "type": "string", "pattern": _DECIMAL_I63_PATTERN},
+                "additionalProperties": _instruction_integer(),
+                "description": (
+                    "Agent-asserted accepted policy revisions as exact decimal "
+                    "string keys, mapped to inventory-device counts."),
+            },
+            "states": {
+                "type": "object", "properties": states,
+                "additionalProperties": False,
+            },
+        },
+        "required": ["issued_revision", "applied", "states"],
+        "additionalProperties": False,
+    }
+
+
+def _instruction_status_schema():
+    fields = {
+        "observed_at": {"type": "number", "minimum": 0,
+                        "maximum": instructions.MAX_I63},
+        "instr_stamp_missing": _nullable_instruction_integer(),
+        "pointer_skew": _nullable_instruction_integer(),
+        "issued_revision_label": {
+            "type": ["string", "null"], "maxLength": 20,
+            "pattern": "^r" + _DECIMAL_I63_PATTERN[1:]},
+    }
+    return {"type": "object", "properties": fields,
+            "required": list(fields), "additionalProperties": False}
+
+
+def _instruction_custody_schema():
+    nullable_signed = {
+        "type": ["integer", "null"],
+        "minimum": -instructions.MAX_I63, "maximum": instructions.MAX_I63}
+    fields = {
+        "schema": {"type": "string",
+                   "const": "iris-instruction-key-status/v1"},
+        "enabled": {"type": "boolean"},
+        "state": {"type": "string", "enum": [
+            "phase0", "ready", "renewal_due", "signing_refused",
+            "keylist_missing", "invalid", "error"]},
+        "certificate_days_to_expiry": nullable_signed,
+        "certificate_renewal_due": {"type": "boolean"},
+        "signing_refused": {"type": "boolean"},
+        "keylist_seq": _nullable_instruction_integer(minimum=1),
+        "keylist_age_days": _nullable_instruction_integer(),
+        "keylist_resign_due": {"type": "boolean"},
+        "roots_configured": {"type": "integer", "minimum": 0, "maximum": 2},
+        "roots_attested_180d": {
+            "type": "integer", "minimum": 0, "maximum": 2},
+        "root_ceremony_overdue": {"type": "string", "enum": [
+            "unknown", "ok", "warn", "critical"]},
+        "root_quorum_degraded": {"type": "boolean"},
+        "updated_at": _instruction_integer(),
+    }
+    available = {"type": "object", "properties": fields,
+                 "required": list(fields), "additionalProperties": False}
+    return {"oneOf": [available, {"type": "null"}],
+            "description": (
+                "Validated durable signing-custody status, or null when the "
+                "status snapshot is absent, invalid, stale or unavailable.")}
+
+
+def _instruction_custody_example():
+    return {
+        "schema": "iris-instruction-key-status/v1",
+        "enabled": True, "state": "ready",
+        "certificate_days_to_expiry": 14,
+        "certificate_renewal_due": False, "signing_refused": False,
+        "keylist_seq": 8, "keylist_age_days": 30,
+        "keylist_resign_due": False, "roots_configured": 2,
+        "roots_attested_180d": 2, "root_ceremony_overdue": "ok",
+        "root_quorum_degraded": False, "updated_at": 1788955200,
+    }
+
+
 def _instruction_pair_schema():
     return {
         "type": "object", "required": ["expected", "observed"],
@@ -98,6 +286,13 @@ def _instruction_attestation_request(schema, legacy):
     option["properties"]["option"] = {"type": "string", "enum": applied_names}
     properties = schema["properties"]
     properties.update({
+        "instr_protocol": {
+            "type": ["integer", "null"], "enum": [1, None],
+            "description": (
+                "Protocol 1 identifies the current instruction projection; "
+                "null records a present but unsupported or malformed marker. "
+                "Absence identifies a pre-instructions agent."),
+        },
         "applied": {
             "type": "object", "required": applied_names,
             "additionalProperties": False,
@@ -106,7 +301,10 @@ def _instruction_attestation_request(schema, legacy):
         },
         "instr_state": {"type": "string", "enum": sorted(instructions.INSTR_STATES)},
         "instr_reason": {"type": "string", "enum": sorted(instructions.INSTR_REASONS)},
+        "instr_epoch": _instruction_integer(),
         "instr_serial": _instruction_integer(),
+        "instr_policy_revision": _instruction_integer(),
+        "pointer_skew": {"type": ["boolean", "null"]},
         "verify_level": {"type": "string", "enum": ["sig", "none"]},
         "blocklist_rules": _instruction_integer(),
         "blocklist_revision": _instruction_integer(),
@@ -128,6 +326,8 @@ def _instruction_attestation_request(schema, legacy):
     schema["dependentRequired"] = {
         "blocklist_rules": ["blocklist_revision"],
         "blocklist_revision": ["blocklist_rules"],
+        "instr_epoch": ["instr_serial", "instr_policy_revision"],
+        "instr_policy_revision": ["instr_epoch", "instr_serial"],
     }
     schema["allOf"] = [{
         "if": {"required": ["instr_state"],
@@ -139,17 +339,23 @@ def _instruction_attestation_request(schema, legacy):
         "Instruction fields are optional device assertions, not verified compliance. "
         "The server omits invalid state/reason and blocklist pairs as units; legacy "
         "agents omit all instruction fields. Integers exclude Boolean values and "
-        "fractional or floating-point input. Device role/platform, keys, signatures, "
-        "peer lists and opaque aria2 option dictionaries are never accepted as attestation.")
-    applied = dict(legacy, instr_state="applied", instr_serial=7, verify_level="sig",
+        "fractional or floating-point input. The accepted identity is either the "
+        "complete epoch/serial/policy-revision triple or the legacy serial alone. "
+        "Device role/platform, keys, signatures, peer lists and opaque aria2 "
+        "option dictionaries are never accepted as attestation.")
+    applied = dict(legacy, instr_protocol=1, instr_state="applied",
+                   instr_epoch=11, instr_serial=7, instr_policy_revision=3,
+                   pointer_skew=False, verify_level="sig",
                    applied={name: index for index, name in enumerate(applied_names)},
                    blocklist_rules=12, blocklist_revision=3,
                    qos_drift={"options": [{"option": "max_upload_limit",
                                           "expected": 8192, "observed": 16384}]})
     return {"schema": schema, "examples": {
         "applied": {"value": applied},
-        "keyRejected": {"value": dict(legacy, instr_state="key_rejected",
-                                      instr_reason="unknown_key")},
+        "keyRejected": {"value": dict(
+            legacy, instr_protocol=1, instr_state="key_rejected",
+            instr_reason="unknown_key", pointer_skew=False)},
+        "unknownCapability": {"value": dict(legacy, instr_protocol=None)},
         "legacy": {"value": legacy},
     }}
 
@@ -1145,8 +1351,12 @@ def _json_success_example(route):
             "origin_qos": {"state": None, "global_option_count": 0,
                 "target_download_count": 0, "applied_download_count": 0,
                 "last_reconciled_at": None, "last_error": None},
-            "fleet_rollup": {"issued_revision": None, "applied": {},
-                "states": {"pre-instructions": 2}},
+            "fleet_rollup": {"issued_revision": 12, "applied": {"7": 1},
+                "states": {"applied": 1}},
+            "instruction_status": {
+                "observed_at": 1788470400, "instr_stamp_missing": 0,
+                "pointer_skew": 0, "issued_revision_label": "r12"},
+            "instruction_keys": _instruction_custody_example(),
             "enforcement": {"state": None, "stale": False,
                             "desired_ip_count": 1, "conflict_count": 0}},
         "/peer-policy/quarantine/{device_id}": {
@@ -1366,7 +1576,8 @@ def _json_success_example(route):
         return None
     if suffix == "/devices" and route.method == "GET":
         return {"devices": [{"device_id": "edge-01",
-                              "device_ip": "192.0.2.10"}],
+                              "device_ip": "192.0.2.10",
+                              "instruction": _instruction_device_example()}],
                 "total": 1, "offset": 0, "limit": None,
                 "revision": 7, "now": 1788470400}
     if suffix == "/devices" and route.method == "POST":
@@ -1815,7 +2026,17 @@ def _success(route):
         schema["properties"]["roles_supported"]["const"] = True
         schema["properties"]["roles"]["properties"]["members"] = {
             "type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
-        schema["properties"]["fleet_rollup"]["properties"]["issued_revision"] = {"type": "null"}
+        schema["properties"]["fleet_rollup"] = \
+            _instruction_fleet_rollup_schema()
+        schema["properties"]["instruction_status"] = \
+            _instruction_status_schema()
+        schema["properties"]["instruction_keys"] = \
+            _instruction_custody_schema()
+    if suffix == "/devices" and route.method == "GET":
+        row = schema["properties"]["devices"]["items"]
+        row["properties"]["instruction"] = _instruction_device_schema()
+        if "instruction" not in row["required"]:
+            row["required"].append("instruction")
     if suffix == "/devices/{device_id}/effective-qos":
         for row in schema["properties"]["qos"]["properties"].values():
             row["required"] = [key for key in row["required"] if key != "derived_from"]

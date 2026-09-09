@@ -435,14 +435,16 @@ def test_instruction_heartbeat_attestation_schema_and_examples_are_complete():
 
 
 def test_task19_heartbeat_capability_identity_and_pointer_contract_is_bounded():
+    from jsonschema import Draft202012Validator
+
     document = _load()
     media = document["paths"]["/v1/devices/{device_id}/heartbeat"]["post"][
         "requestBody"]["content"]["application/json"]
     schema = media["schema"]
     properties = schema["properties"]
 
-    assert properties["instr_protocol"] == {
-        "type": ["integer", "null"], "enum": [1, None]}
+    assert properties["instr_protocol"]["type"] == ["integer", "null"]
+    assert properties["instr_protocol"]["enum"] == [1, None]
     for name in ("instr_epoch", "instr_serial", "instr_policy_revision"):
         _assert_i63_schema(properties[name])
     assert properties["pointer_skew"] == {"type": ["boolean", "null"]}
@@ -452,19 +454,40 @@ def test_task19_heartbeat_capability_identity_and_pointer_contract_is_bounded():
         "instr_epoch", "instr_serial"]
     assert "instr_serial" not in schema["dependentRequired"]
 
-    examples = _media_examples(media)
-    current = next(example for example in examples
-                   if example.get("instr_protocol") == 1)
-    assert {current[name] for name in (
-        "instr_epoch", "instr_serial", "instr_policy_revision")} == {3, 7, 11}
+    current = media["examples"]["applied"]["value"]
+    assert {name: current[name] for name in (
+        "instr_epoch", "instr_serial", "instr_policy_revision")} == {
+            "instr_epoch": 11, "instr_serial": 7,
+            "instr_policy_revision": 3}
     assert current["pointer_skew"] is False
-    legacy = next(example for example in examples
-                  if "instr_protocol" not in example)
+    rejected = media["examples"]["keyRejected"]["value"]
+    assert rejected["instr_protocol"] == 1
+    assert rejected["pointer_skew"] is False
+    assert media["examples"]["unknownCapability"]["value"][
+        "instr_protocol"] is None
+    legacy = media["examples"]["legacy"]["value"]
     assert not {"instr_epoch", "instr_policy_revision", "pointer_skew"}.intersection(
         legacy)
+    validator = Draft202012Validator(schema)
+    for example in _media_examples(media):
+        assert not list(validator.iter_errors(example)), example
+    for valid in (
+            {"instr_serial": 7},
+            {"instr_protocol": None},
+            {"instr_protocol": 1, "instr_epoch": 11, "instr_serial": 7,
+             "instr_policy_revision": 3, "pointer_skew": False}):
+        assert not list(validator.iter_errors(valid)), valid
+    for invalid in (
+            {"instr_protocol": 2}, {"instr_protocol": True},
+            {"pointer_skew": 1},
+            {"instr_epoch": 11, "instr_serial": 7},
+            {"instr_policy_revision": 3, "instr_serial": 7}):
+        assert list(validator.iter_errors(invalid)), invalid
 
 
 def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
+    from jsonschema import Draft202012Validator
+
     document = _load()
     states = {
         "applied", "lkg", "stale", "rejected", "tracker-only",
@@ -525,9 +548,20 @@ def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
         assert set(example) == fields
         assert example["label"] == "applied r9223372036854775807"
         assert example["accepted_identity"]["instr_serial"] == (1 << 63) - 1
+        validator = Draft202012Validator(instruction)
+        assert not list(validator.iter_errors(example))
+        assert not list(Draft202012Validator(media["schema"]).iter_errors(
+            media["example"]))
+        invalid = dict(example, private="must-not-cross-projection")
+        assert list(validator.iter_errors(invalid))
+        invalid = dict(example, accepted_identity={
+            "epoch": 11, "instr_serial": 7})
+        assert list(validator.iter_errors(invalid))
 
 
 def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
+    from jsonschema import Draft202012Validator
+
     document = _load()
     states = {
         "applied", "lkg", "stale", "rejected", "tracker-only",
@@ -557,8 +591,15 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
                           "maximum": (1 << 63) - 1}
         applied = rollup["properties"]["applied"]
         assert applied["propertyNames"]["pattern"] == \
-            r"^(0|[1-9][0-9]{0,18})$"
+            openapi_contract._DECIMAL_I63_PATTERN
         _assert_i63_schema(applied["additionalProperties"])
+        decimal_pattern = re.compile(applied["propertyNames"]["pattern"])
+        assert decimal_pattern.fullmatch(str((1 << 63) - 1))
+        assert decimal_pattern.fullmatch(str(1 << 63)) is None
+        applied_validator = Draft202012Validator(applied)
+        assert not list(applied_validator.iter_errors({
+            str((1 << 63) - 1): 1}))
+        assert list(applied_validator.iter_errors({str(1 << 63): 1}))
         state_map = rollup["properties"]["states"]
         assert state_map["additionalProperties"] is False
         assert set(state_map["properties"]) == states
@@ -571,15 +612,24 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
         assert set(status["required"]) == {
             "observed_at", "instr_stamp_missing", "pointer_skew",
             "issued_revision_label"}
-        assert status["properties"]["observed_at"] == {"type": "number"}
+        assert status["properties"]["observed_at"] == {
+            "type": "number", "minimum": 0, "maximum": (1 << 63) - 1}
         for name in ("instr_stamp_missing", "pointer_skew"):
             count = status["properties"][name]
             assert count["type"] == ["integer", "null"]
             assert count["minimum"] == 0
             assert count["maximum"] == (1 << 63) - 1
-        assert status["properties"]["issued_revision_label"] == {
+        label_schema = status["properties"]["issued_revision_label"]
+        assert label_schema == {
             "type": ["string", "null"], "maxLength": 20,
-            "pattern": r"^r(0|[1-9][0-9]{0,18})$"}
+            "pattern": "^r" + openapi_contract._DECIMAL_I63_PATTERN[1:]}
+        label_pattern = re.compile(label_schema["pattern"])
+        assert label_pattern.fullmatch("r%d" % ((1 << 63) - 1))
+        assert label_pattern.fullmatch("r%d" % (1 << 63)) is None
+        label_validator = Draft202012Validator(label_schema)
+        assert not list(label_validator.iter_errors(
+            "r%d" % ((1 << 63) - 1)))
+        assert list(label_validator.iter_errors("r%d" % (1 << 63)))
 
         custody = schema["properties"]["instruction_keys"]
         assert custody["oneOf"][1] == {"type": "null"}
@@ -601,6 +651,20 @@ def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
             "issued_revision": 12, "applied": {"7": 1},
             "states": {"applied": 1}}
         assert set(example["instruction_keys"]) == custody_fields
+        assert not list(Draft202012Validator(schema).iter_errors(example))
+        assert not list(Draft202012Validator(rollup).iter_errors(
+            example["fleet_rollup"]))
+        assert not list(Draft202012Validator(status).iter_errors(
+            example["instruction_status"]))
+        custody_validator = Draft202012Validator(
+            schema["properties"]["instruction_keys"])
+        assert not list(custody_validator.iter_errors(example["instruction_keys"]))
+        expired = dict(example["instruction_keys"],
+                       certificate_days_to_expiry=-2)
+        assert not list(custody_validator.iter_errors(expired))
+        assert not list(custody_validator.iter_errors(None))
+        assert list(custody_validator.iter_errors(
+            dict(example["instruction_keys"], private="must-not-cross")))
 
 
 def test_problem_types_use_stable_anchors_on_the_documented_page():

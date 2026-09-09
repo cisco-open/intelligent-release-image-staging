@@ -225,31 +225,99 @@
                       "additionalProperties": true
                     },
                     "fleet_rollup": {
-                      "title": "ConsolePeerPolicyResponseFleet_Rollup",
                       "type": "object",
                       "properties": {
                         "issued_revision": {
-                          "type": "null"
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
                         },
                         "applied": {
-                          "title": "ConsolePeerPolicyResponseFleet_RollupApplied",
                           "type": "object",
-                          "properties": {},
-                          "required": [],
-                          "additionalProperties": true
+                          "propertyNames": {
+                            "type": "string",
+                            "pattern": "^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+                          },
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "description": "Agent-asserted accepted policy revisions as exact decimal string keys, mapped to inventory-device counts."
                         },
                         "states": {
-                          "title": "ConsolePeerPolicyResponseFleet_RollupStates",
                           "type": "object",
                           "properties": {
+                            "applied": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "lkg": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "stale": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "rejected": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "tracker-only": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
                             "pre-instructions": {
-                              "type": "integer"
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "unknown": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "unavailable": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "forbidden": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "floor_reset": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "none": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "revoked": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
                             }
                           },
-                          "required": [
-                            "pre-instructions"
-                          ],
-                          "additionalProperties": true
+                          "additionalProperties": false
                         }
                       },
                       "required": [
@@ -257,7 +325,157 @@
                         "applied",
                         "states"
                       ],
-                      "additionalProperties": true
+                      "additionalProperties": false
+                    },
+                    "instruction_status": {
+                      "type": "object",
+                      "properties": {
+                        "observed_at": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "instr_stamp_missing": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "pointer_skew": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "issued_revision_label": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 20,
+                          "pattern": "^r(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+                        }
+                      },
+                      "required": [
+                        "observed_at",
+                        "instr_stamp_missing",
+                        "pointer_skew",
+                        "issued_revision_label"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "instruction_keys": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "schema": {
+                              "type": "string",
+                              "const": "iris-instruction-key-status/v1"
+                            },
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "phase0",
+                                "ready",
+                                "renewal_due",
+                                "signing_refused",
+                                "keylist_missing",
+                                "invalid",
+                                "error"
+                              ]
+                            },
+                            "certificate_days_to_expiry": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": -9223372036854775807,
+                              "maximum": 9223372036854775807
+                            },
+                            "certificate_renewal_due": {
+                              "type": "boolean"
+                            },
+                            "signing_refused": {
+                              "type": "boolean"
+                            },
+                            "keylist_seq": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 1,
+                              "maximum": 9223372036854775807
+                            },
+                            "keylist_age_days": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "keylist_resign_due": {
+                              "type": "boolean"
+                            },
+                            "roots_configured": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            "roots_attested_180d": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            "root_ceremony_overdue": {
+                              "type": "string",
+                              "enum": [
+                                "unknown",
+                                "ok",
+                                "warn",
+                                "critical"
+                              ]
+                            },
+                            "root_quorum_degraded": {
+                              "type": "boolean"
+                            },
+                            "updated_at": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "enabled",
+                            "state",
+                            "certificate_days_to_expiry",
+                            "certificate_renewal_due",
+                            "signing_refused",
+                            "keylist_seq",
+                            "keylist_age_days",
+                            "keylist_resign_due",
+                            "roots_configured",
+                            "roots_attested_180d",
+                            "root_ceremony_overdue",
+                            "root_quorum_degraded",
+                            "updated_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Validated durable signing-custody status, or null when the status snapshot is absent, invalid, stale or unavailable."
                     },
                     "enforcement": {
                       "title": "ConsolePeerPolicyResponseEnforcement",
@@ -302,6 +520,8 @@
                     "outbox",
                     "origin_qos",
                     "fleet_rollup",
+                    "instruction_status",
+                    "instruction_keys",
                     "enforcement"
                   ],
                   "additionalProperties": true
@@ -345,11 +565,35 @@
                     "last_error": null
                   },
                   "fleet_rollup": {
-                    "issued_revision": null,
-                    "applied": {},
+                    "issued_revision": 12,
+                    "applied": {
+                      "7": 1
+                    },
                     "states": {
-                      "pre-instructions": 2
+                      "applied": 1
                     }
+                  },
+                  "instruction_status": {
+                    "observed_at": 1788470400,
+                    "instr_stamp_missing": 0,
+                    "pointer_skew": 0,
+                    "issued_revision_label": "r12"
+                  },
+                  "instruction_keys": {
+                    "schema": "iris-instruction-key-status/v1",
+                    "enabled": true,
+                    "state": "ready",
+                    "certificate_days_to_expiry": 14,
+                    "certificate_renewal_due": false,
+                    "signing_refused": false,
+                    "keylist_seq": 8,
+                    "keylist_age_days": 30,
+                    "keylist_resign_due": false,
+                    "roots_configured": 2,
+                    "roots_attested_180d": 2,
+                    "root_ceremony_overdue": "ok",
+                    "root_quorum_degraded": false,
+                    "updated_at": 1788955200
                   },
                   "enforcement": {
                     "state": null,
@@ -11758,11 +12002,224 @@
                           },
                           "device_ip": {
                             "type": "string"
+                          },
+                          "instruction": {
+                            "type": "object",
+                            "properties": {
+                              "display_state": {
+                                "type": "string",
+                                "enum": [
+                                  "applied",
+                                  "lkg",
+                                  "stale",
+                                  "rejected",
+                                  "tracker-only",
+                                  "pre-instructions",
+                                  "unknown",
+                                  "unavailable",
+                                  "pending",
+                                  "forbidden",
+                                  "floor_reset",
+                                  "none",
+                                  "revoked"
+                                ]
+                              },
+                              "label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              },
+                              "underlying_state": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "allowlist_expired",
+                                  "applied",
+                                  "audience_mismatch",
+                                  "floor_reset",
+                                  "instr_forbidden",
+                                  "instr_pending",
+                                  "instr_unavailable",
+                                  "key_rejected",
+                                  "lkg",
+                                  "lkg_rejected",
+                                  "lkg_unreadable",
+                                  "none",
+                                  "oversize",
+                                  "reasserted",
+                                  "rollback_rejected",
+                                  "stale_expired",
+                                  "tamper_rejected",
+                                  "tracker-only",
+                                  "verifier_missing",
+                                  null
+                                ]
+                              },
+                              "underlying_label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "underlying_evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              },
+                              "reason": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "bad_mac",
+                                  "unknown_key",
+                                  null
+                                ]
+                              },
+                              "reported_instr_serial": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 9223372036854775807
+                              },
+                              "accepted_identity": {
+                                "oneOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "epoch",
+                                      "instr_serial",
+                                      "policy_revision"
+                                    ],
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "epoch": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      },
+                                      "instr_serial": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      },
+                                      "policy_revision": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "description": "Complete accepted-envelope identity asserted by the agent. Null means no complete accepted identity was reported."
+                              },
+                              "verify_level": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "sig",
+                                  "none",
+                                  null
+                                ]
+                              },
+                              "pointer_skew": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "qos_drift_count": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 49
+                              },
+                              "report_age_seconds": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 9223372036854775807
+                              },
+                              "report_stale": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "revoked": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "revocation_evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              }
+                            },
+                            "required": [
+                              "display_state",
+                              "label",
+                              "evidence",
+                              "underlying_state",
+                              "underlying_label",
+                              "underlying_evidence",
+                              "reason",
+                              "reported_instr_serial",
+                              "accepted_identity",
+                              "verify_level",
+                              "pointer_skew",
+                              "qos_drift_count",
+                              "report_age_seconds",
+                              "report_stale",
+                              "revoked",
+                              "revocation_evidence"
+                            ],
+                            "additionalProperties": false,
+                            "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
                           }
                         },
                         "required": [
                           "device_id",
-                          "device_ip"
+                          "device_ip",
+                          "instruction"
                         ],
                         "additionalProperties": true
                       }
@@ -11800,7 +12257,29 @@
                   "devices": [
                     {
                       "device_id": "edge-01",
-                      "device_ip": "192.0.2.10"
+                      "device_ip": "192.0.2.10",
+                      "instruction": {
+                        "display_state": "applied",
+                        "label": "applied r9223372036854775807",
+                        "evidence": "agent-asserted",
+                        "underlying_state": "applied",
+                        "underlying_label": "applied r9223372036854775807",
+                        "underlying_evidence": "agent-asserted",
+                        "reason": null,
+                        "reported_instr_serial": 9223372036854775807,
+                        "accepted_identity": {
+                          "epoch": 11,
+                          "instr_serial": 9223372036854775807,
+                          "policy_revision": 7
+                        },
+                        "verify_level": "sig",
+                        "pointer_skew": false,
+                        "qos_drift_count": 0,
+                        "report_age_seconds": 3,
+                        "report_stale": false,
+                        "revoked": false,
+                        "revocation_evidence": "server-observed"
+                      }
                     }
                   ],
                   "total": 1,
@@ -29294,31 +29773,99 @@
                       "additionalProperties": true
                     },
                     "fleet_rollup": {
-                      "title": "ManagementPeerPolicyResponseFleet_Rollup",
                       "type": "object",
                       "properties": {
                         "issued_revision": {
-                          "type": "null"
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
                         },
                         "applied": {
-                          "title": "ManagementPeerPolicyResponseFleet_RollupApplied",
                           "type": "object",
-                          "properties": {},
-                          "required": [],
-                          "additionalProperties": true
+                          "propertyNames": {
+                            "type": "string",
+                            "pattern": "^(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+                          },
+                          "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "description": "Agent-asserted accepted policy revisions as exact decimal string keys, mapped to inventory-device counts."
                         },
                         "states": {
-                          "title": "ManagementPeerPolicyResponseFleet_RollupStates",
                           "type": "object",
                           "properties": {
+                            "applied": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "lkg": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "stale": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "rejected": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "tracker-only": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
                             "pre-instructions": {
-                              "type": "integer"
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "unknown": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "unavailable": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "pending": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "forbidden": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "floor_reset": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "none": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "revoked": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
                             }
                           },
-                          "required": [
-                            "pre-instructions"
-                          ],
-                          "additionalProperties": true
+                          "additionalProperties": false
                         }
                       },
                       "required": [
@@ -29326,7 +29873,157 @@
                         "applied",
                         "states"
                       ],
-                      "additionalProperties": true
+                      "additionalProperties": false
+                    },
+                    "instruction_status": {
+                      "type": "object",
+                      "properties": {
+                        "observed_at": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "instr_stamp_missing": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "pointer_skew": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 9223372036854775807
+                        },
+                        "issued_revision_label": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "maxLength": 20,
+                          "pattern": "^r(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$"
+                        }
+                      },
+                      "required": [
+                        "observed_at",
+                        "instr_stamp_missing",
+                        "pointer_skew",
+                        "issued_revision_label"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "instruction_keys": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "schema": {
+                              "type": "string",
+                              "const": "iris-instruction-key-status/v1"
+                            },
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "phase0",
+                                "ready",
+                                "renewal_due",
+                                "signing_refused",
+                                "keylist_missing",
+                                "invalid",
+                                "error"
+                              ]
+                            },
+                            "certificate_days_to_expiry": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": -9223372036854775807,
+                              "maximum": 9223372036854775807
+                            },
+                            "certificate_renewal_due": {
+                              "type": "boolean"
+                            },
+                            "signing_refused": {
+                              "type": "boolean"
+                            },
+                            "keylist_seq": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 1,
+                              "maximum": 9223372036854775807
+                            },
+                            "keylist_age_days": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            },
+                            "keylist_resign_due": {
+                              "type": "boolean"
+                            },
+                            "roots_configured": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            "roots_attested_180d": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 2
+                            },
+                            "root_ceremony_overdue": {
+                              "type": "string",
+                              "enum": [
+                                "unknown",
+                                "ok",
+                                "warn",
+                                "critical"
+                              ]
+                            },
+                            "root_quorum_degraded": {
+                              "type": "boolean"
+                            },
+                            "updated_at": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9223372036854775807
+                            }
+                          },
+                          "required": [
+                            "schema",
+                            "enabled",
+                            "state",
+                            "certificate_days_to_expiry",
+                            "certificate_renewal_due",
+                            "signing_refused",
+                            "keylist_seq",
+                            "keylist_age_days",
+                            "keylist_resign_due",
+                            "roots_configured",
+                            "roots_attested_180d",
+                            "root_ceremony_overdue",
+                            "root_quorum_degraded",
+                            "updated_at"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Validated durable signing-custody status, or null when the status snapshot is absent, invalid, stale or unavailable."
                     },
                     "enforcement": {
                       "title": "ManagementPeerPolicyResponseEnforcement",
@@ -29371,6 +30068,8 @@
                     "outbox",
                     "origin_qos",
                     "fleet_rollup",
+                    "instruction_status",
+                    "instruction_keys",
                     "enforcement"
                   ],
                   "additionalProperties": true
@@ -29414,11 +30113,35 @@
                     "last_error": null
                   },
                   "fleet_rollup": {
-                    "issued_revision": null,
-                    "applied": {},
+                    "issued_revision": 12,
+                    "applied": {
+                      "7": 1
+                    },
                     "states": {
-                      "pre-instructions": 2
+                      "applied": 1
                     }
+                  },
+                  "instruction_status": {
+                    "observed_at": 1788470400,
+                    "instr_stamp_missing": 0,
+                    "pointer_skew": 0,
+                    "issued_revision_label": "r12"
+                  },
+                  "instruction_keys": {
+                    "schema": "iris-instruction-key-status/v1",
+                    "enabled": true,
+                    "state": "ready",
+                    "certificate_days_to_expiry": 14,
+                    "certificate_renewal_due": false,
+                    "signing_refused": false,
+                    "keylist_seq": 8,
+                    "keylist_age_days": 30,
+                    "keylist_resign_due": false,
+                    "roots_configured": 2,
+                    "roots_attested_180d": 2,
+                    "root_ceremony_overdue": "ok",
+                    "root_quorum_degraded": false,
+                    "updated_at": 1788955200
                   },
                   "enforcement": {
                     "state": null,
@@ -39694,11 +40417,224 @@
                           },
                           "device_ip": {
                             "type": "string"
+                          },
+                          "instruction": {
+                            "type": "object",
+                            "properties": {
+                              "display_state": {
+                                "type": "string",
+                                "enum": [
+                                  "applied",
+                                  "lkg",
+                                  "stale",
+                                  "rejected",
+                                  "tracker-only",
+                                  "pre-instructions",
+                                  "unknown",
+                                  "unavailable",
+                                  "pending",
+                                  "forbidden",
+                                  "floor_reset",
+                                  "none",
+                                  "revoked"
+                                ]
+                              },
+                              "label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              },
+                              "underlying_state": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "allowlist_expired",
+                                  "applied",
+                                  "audience_mismatch",
+                                  "floor_reset",
+                                  "instr_forbidden",
+                                  "instr_pending",
+                                  "instr_unavailable",
+                                  "key_rejected",
+                                  "lkg",
+                                  "lkg_rejected",
+                                  "lkg_unreadable",
+                                  "none",
+                                  "oversize",
+                                  "reasserted",
+                                  "rollback_rejected",
+                                  "stale_expired",
+                                  "tamper_rejected",
+                                  "tracker-only",
+                                  "verifier_missing",
+                                  null
+                                ]
+                              },
+                              "underlying_label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 96
+                              },
+                              "underlying_evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              },
+                              "reason": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "bad_mac",
+                                  "unknown_key",
+                                  null
+                                ]
+                              },
+                              "reported_instr_serial": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 9223372036854775807
+                              },
+                              "accepted_identity": {
+                                "oneOf": [
+                                  {
+                                    "type": "object",
+                                    "required": [
+                                      "epoch",
+                                      "instr_serial",
+                                      "policy_revision"
+                                    ],
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "epoch": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      },
+                                      "instr_serial": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      },
+                                      "policy_revision": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 9223372036854775807
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "description": "Complete accepted-envelope identity asserted by the agent. Null means no complete accepted identity was reported."
+                              },
+                              "verify_level": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "sig",
+                                  "none",
+                                  null
+                                ]
+                              },
+                              "pointer_skew": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "qos_drift_count": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 49
+                              },
+                              "report_age_seconds": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ],
+                                "minimum": 0,
+                                "maximum": 9223372036854775807
+                              },
+                              "report_stale": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "revoked": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "revocation_evidence": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "enum": [
+                                  "agent-asserted",
+                                  "server-observed",
+                                  null
+                                ]
+                              }
+                            },
+                            "required": [
+                              "display_state",
+                              "label",
+                              "evidence",
+                              "underlying_state",
+                              "underlying_label",
+                              "underlying_evidence",
+                              "reason",
+                              "reported_instr_serial",
+                              "accepted_identity",
+                              "verify_level",
+                              "pointer_skew",
+                              "qos_drift_count",
+                              "report_age_seconds",
+                              "report_stale",
+                              "revoked",
+                              "revocation_evidence"
+                            ],
+                            "additionalProperties": false,
+                            "description": "Canonical bounded instruction display projection. Device facts remain assertions; server-observed revocation and report age may take display precedence while retaining the underlying report."
                           }
                         },
                         "required": [
                           "device_id",
-                          "device_ip"
+                          "device_ip",
+                          "instruction"
                         ],
                         "additionalProperties": true
                       }
@@ -39736,7 +40672,29 @@
                   "devices": [
                     {
                       "device_id": "edge-01",
-                      "device_ip": "192.0.2.10"
+                      "device_ip": "192.0.2.10",
+                      "instruction": {
+                        "display_state": "applied",
+                        "label": "applied r9223372036854775807",
+                        "evidence": "agent-asserted",
+                        "underlying_state": "applied",
+                        "underlying_label": "applied r9223372036854775807",
+                        "underlying_evidence": "agent-asserted",
+                        "reason": null,
+                        "reported_instr_serial": 9223372036854775807,
+                        "accepted_identity": {
+                          "epoch": 11,
+                          "instr_serial": 9223372036854775807,
+                          "policy_revision": 7
+                        },
+                        "verify_level": "sig",
+                        "pointer_skew": false,
+                        "qos_drift_count": 0,
+                        "report_age_seconds": 3,
+                        "report_stale": false,
+                        "revoked": false,
+                        "revocation_evidence": "server-observed"
+                      }
                     }
                   ],
                   "total": 1,
@@ -56976,6 +57934,17 @@
                   "telemetry_stream_enabled": {
                     "type": "boolean"
                   },
+                  "instr_protocol": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "enum": [
+                      1,
+                      null
+                    ],
+                    "description": "Protocol 1 identifies the current instruction projection; null records a present but unsupported or malformed marker. Absence identifies a pre-instructions agent."
+                  },
                   "applied": {
                     "type": "object",
                     "required": [
@@ -57058,10 +58027,26 @@
                       "unknown_key"
                     ]
                   },
+                  "instr_epoch": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
                   "instr_serial": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 9223372036854775807
+                  },
+                  "instr_policy_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9223372036854775807
+                  },
+                  "pointer_skew": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
                   },
                   "verify_level": {
                     "type": "string",
@@ -57198,6 +58183,14 @@
                   ],
                   "blocklist_revision": [
                     "blocklist_rules"
+                  ],
+                  "instr_epoch": [
+                    "instr_serial",
+                    "instr_policy_revision"
+                  ],
+                  "instr_policy_revision": [
+                    "instr_epoch",
+                    "instr_serial"
                   ]
                 },
                 "allOf": [
@@ -57226,7 +58219,7 @@
                     }
                   }
                 ],
-                "description": "Instruction fields are optional device assertions, not verified compliance. The server omits invalid state/reason and blocklist pairs as units; legacy agents omit all instruction fields. Integers exclude Boolean values and fractional or floating-point input. Device role/platform, keys, signatures, peer lists and opaque aria2 option dictionaries are never accepted as attestation."
+                "description": "Instruction fields are optional device assertions, not verified compliance. The server omits invalid state/reason and blocklist pairs as units; legacy agents omit all instruction fields. Integers exclude Boolean values and fractional or floating-point input. The accepted identity is either the complete epoch/serial/policy-revision triple or the legacy serial alone. Device role/platform, keys, signatures, peer lists and opaque aria2 option dictionaries are never accepted as attestation."
               },
               "examples": {
                 "applied": {
@@ -57234,8 +58227,12 @@
                     "agent_version": "2026.09.04",
                     "telemetry_enabled": true,
                     "telemetry_stream_enabled": true,
+                    "instr_protocol": 1,
                     "instr_state": "applied",
+                    "instr_epoch": 11,
                     "instr_serial": 7,
+                    "instr_policy_revision": 3,
+                    "pointer_skew": false,
                     "verify_level": "sig",
                     "applied": {
                       "bt_max_peers": 0,
@@ -57264,8 +58261,18 @@
                     "agent_version": "2026.09.04",
                     "telemetry_enabled": true,
                     "telemetry_stream_enabled": true,
+                    "instr_protocol": 1,
                     "instr_state": "key_rejected",
-                    "instr_reason": "unknown_key"
+                    "instr_reason": "unknown_key",
+                    "pointer_skew": false
+                  }
+                },
+                "unknownCapability": {
+                  "value": {
+                    "agent_version": "2026.09.04",
+                    "telemetry_enabled": true,
+                    "telemetry_stream_enabled": true,
+                    "instr_protocol": null
                   }
                 },
                 "legacy": {
