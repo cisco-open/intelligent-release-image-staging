@@ -854,8 +854,12 @@ def _compact(text):
 
 def _units(text):
     """Prose sentences, table rows, and paragraphs used for relationship tests."""
-    paragraphs = re.split(r"\n\s*\n", text)
-    sentences = re.split(r"(?<=[.!?])\s+", _compact(text))
+    paragraphs = [unit for unit in re.split(r"\n\s*\n", text)
+                  if unit.strip()]
+    sentences = []
+    for paragraph in paragraphs:
+        paragraph = re.sub(r"\s+", " ", paragraph).strip()
+        sentences.extend(re.split(r"(?<=[.!?])\s+", paragraph))
     return [unit for unit in list(text.splitlines()) + paragraphs + sentences
             if unit.strip()]
 
@@ -870,6 +874,16 @@ def _assert_ordered(text, terms, message, distance=500):
     pattern = ".{0,%d}" % distance
     expression = pattern.join(re.escape(term) for term in terms)
     assert re.search(expression, text, re.IGNORECASE | re.DOTALL), message
+
+
+def _section(text, heading, next_heading=None):
+    """Return one Markdown section so relationships cannot match elsewhere."""
+    parts = text.split(heading, 1)
+    assert len(parts) == 2, "missing section: %s" % heading
+    section = parts[1]
+    if next_heading:
+        section = section.split(next_heading, 1)[0]
+    return section
 
 
 def _assert_phase1_network_relationship(text):
@@ -939,12 +953,19 @@ def test_docs_phase1_honest_guarantee_and_admin_boundary():
 def test_docs_phase1_envelope_custody_and_failure_contract():
     """Envelope, key placement, credential widths, and failures are relational."""
     security = _page("security.md")
-    _assert_unit(security, ("per-device", "KDF", "audience"),
-                 "per-device derivation must bind the audience")
+    _assert_unit(security, ("SP800-108", "HMAC-SHA-256", "per-device",
+                            "audience"),
+                 "the named per-device KDF must bind the audience")
     _assert_unit(security, ("epoch", "instruction serial", "replay"),
                  "epoch and serial must explain replay rejection")
     _assert_unit(security, ("MAC", "before", "decrypt"),
                  "authentication must precede decryption")
+    _assert_unit(security, ("MAC", "signature", "before", "apply"),
+                 "authentication and signature checks must precede apply")
+    _assert_unit(security, ("256 KiB", "reject", "before", "cryptograph"),
+                 "the envelope cap must reject before cryptographic work")
+    _assert_unit(security, ("exactly two", "distinct", "offline roots"),
+                 "the trust set must contain exactly two distinct roots")
     _assert_unit(security, ("instruction key", "excluded", "platform configuration"),
                  "instruction private material must be excluded from platform config")
     _assert_unit(security, ("private keys", "instruction keys", "LKG key",
@@ -980,13 +1001,13 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
                  "instruction-rate-limit-exceeded"):
         assert "## %s" % code in problems
 
-    failures = _page("device-agents.md") + "\n" + _page("reference.md")
+    failures = _page("device-agents.md") + "\n\n" + _page("reference.md")
     for state, action in (
             ("none", "defaults"), ("applied", "serial"), ("lkg", "keep"),
             ("stale_expired", "on_stale"),
             ("allowlist_expired", "tracker-only"),
             ("rollback_rejected", "keep"), ("floor_reset", "floor"),
-            ("audience_mismatch", "keep"), ("key_rejected", "bad_mac"),
+            ("audience_mismatch", "keep"),
             ("tamper_rejected", "keep"), ("verifier_missing", "defaults"),
             ("lkg_rejected", "defaults"), ("lkg_unreadable", "defaults"),
             ("oversize", "next tick"), ("reasserted", "aria2 session"),
@@ -999,6 +1020,42 @@ def test_docs_phase1_envelope_custody_and_failure_contract():
                  "fetch/verify fallback must retain heartbeat and staging")
     _assert_unit(failures, ("RPC apply", "heartbeat", "staging", "skipped", "tick"),
                  "RPC apply failure must send heartbeat and skip staging that tick")
+    _assert_unit(failures, ("key_rejected", "unknown_key", "one",
+                            "unscheduled", "refresh", "latched key id"),
+                 "unknown keys must trigger one latched unscheduled refresh")
+    _assert_unit(failures, ("key_rejected", "bad_mac", "no", "refresh",
+                            "violation"),
+                 "known-key bad MAC must be a violation without refresh")
+    _assert_unit(failures, ("401", "403", "instr_forbidden", "one",
+                            "refresh", "no in-tick", "loop"),
+                 "forbidden responses need one refresh without an in-tick loop")
+    _assert_unit(failures, ("404", "instr_unavailable", "next tick"),
+                 "instruction 404 must wait until the next tick")
+    _assert_unit(failures, ("409", "stale_pointer", "instr_pending",
+                            "next tick", "no", "sleep"),
+                 "stale pointers must remain pending without an in-tick sleep")
+    _assert_unit(failures, ("429", "5xx", "transport", "instr_unavailable",
+                            "next tick"),
+                 "rate/server/transport failures must remain unavailable")
+    _assert_unit(failures, ("deny", "expired", "remain", "effective"),
+                 "expired deny posture must remain restrictive")
+    _assert_unit(failures, ("allow", "expired", "tracker-only",
+                            "independent", "on_stale"),
+                 "expired allow posture must fail to tracker-only")
+    _assert_unit(failures, ("on_stale=keep", "QoS", "retain"),
+                 "stale keep must retain verified QoS")
+    _assert_unit(failures, ("on_stale=defaults", "QoS", "defaults"),
+                 "stale defaults must restore fixed QoS defaults")
+    _assert_unit(failures, ("body serial", "higher", "pointer", "apply"),
+                 "a body ahead of its pointer must still apply")
+    _assert_unit(failures, ("body serial", "lower", "pointer", "fresh",
+                            "pointer_skew", "apply"),
+                 "a fresh body below its pointer must apply with skew evidence")
+    _assert_unit(failures, ("at or below", "accepted floor", "rollback",
+                            "reject"),
+                 "a body at or below the replay floor must be rejected")
+    _assert_unit(failures, ("equal identity", "different bytes", "reject"),
+                 "equal identity with changed bytes must be rejected")
 
 
 def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
@@ -1032,22 +1089,25 @@ def test_docs_phase1_runtime_knobs_and_guestshell_divergence():
 
 def test_docs_phase1_iox_verification_transaction():
     iox = _page("iox.md")
-    _assert_unit(iox, ("device-global", "app-hosting verification"),
+    transaction = _section(iox, "## App-hosting verification transaction",
+                           "## ")
+    _assert_unit(transaction, ("device-global", "app-hosting verification"),
                  "the IOx control scope must be named")
-    _assert_unit(iox, ("signed wrapper", "no", "state change"),
+    _assert_unit(transaction, ("signed wrapper", "no", "state change"),
                  "signed wrappers must leave verification unchanged")
-    _assert_ordered(iox, ("initially enabled", "record", "disable", "install",
-                          "restore", "read-back", "activate"),
+    _assert_ordered(transaction, ("initially enabled", "record", "disable",
+                                  "install", "restore", "read-back", "activate"),
                     "enabled-state transaction order is incomplete", 400)
-    _assert_unit(iox, ("initially disabled", "unchanged"),
+    _assert_unit(transaction, ("initially disabled", "unchanged"),
                  "pre-disabled state must remain disabled")
-    _assert_unit(iox, ("unknown", "refuse", "mutation", "install"),
+    _assert_unit(transaction, ("unknown", "refuse", "mutation", "install"),
                  "unknown state must refuse mutation and installation")
-    _assert_unit(iox, ("crash", "resume", "durable", "obligation"),
+    _assert_unit(transaction, ("crash", "resume", "durable", "obligation"),
                  "crash recovery must use the durable obligation")
-    _assert_unit(iox, ("uninstall", "IRIS-owned", "never", "blindly enable"),
+    _assert_unit(transaction,
+                 ("uninstall", "IRIS-owned", "never", "blindly enable"),
                  "uninstall may recover only owned obligations")
-    _assert_unit(iox, ("signature marker", "not", "cryptographic"),
+    _assert_unit(transaction, ("signature marker", "not", "cryptographic"),
                  "package markers must not be presented as verification")
 
     first = ("https://www.cisco.com/c/en/us/td/docs/switches/lan/"
@@ -1056,9 +1116,6 @@ def test_docs_phase1_iox_verification_transaction():
     second = ("https://www.cisco.com/c/en/us/support/docs/switches/"
               "catalyst-9500-series-switches/222780-understand-app-hosting-on-"
               "catalyst-9000.html")
-    transaction_start = iox.lower().find("app-hosting verification")
-    assert transaction_start >= 0
-    transaction = iox[transaction_start:transaction_start + 5000]
     assert first in transaction and second in transaction
 
     for name, terms in (
@@ -1072,15 +1129,29 @@ def test_docs_phase1_iox_verification_transaction():
 def test_docs_phase1_network_process_and_state_topology():
     _assert_phase1_network_relationship(_page("network-ports.md"))
     server = _page("server.md")
-    for root, path in (
-            ("IRIS_CONFIG", "instr/signing-key.age"),
-            ("IRIS_RUN", "instr/signing-key"),
-            ("IRIS_STATE", "instructions-epoch.json"),
-            ("IRIS_STATE", "instructions/keylist.current"),
-            ("IRIS_STATE", "instructions/roles.d"),
-            ("IRIS_STATE", "instruction-key-status.json"),
-            ("IRIS_STATE", "instruction-stamper-status.json")):
-        _assert_unit(server, (root, path), "%s belongs under %s" % (path, root))
+    for path, custody in (
+            ("$IRIS_CONFIG/instr/signing-key.age", "encrypted"),
+            ("$IRIS_RUN/instr/signing-key", "plaintext runtime"),
+            ("$IRIS_CONFIG/instr/signing-key.pub", "public"),
+            ("$IRIS_CONFIG/instr/signing-key-cert.pub", "public"),
+            ("$IRIS_CONFIG/instr/roots.d/", "public"),
+            ("$IRIS_RUN/instr/signing-key-cert.pub", "public runtime"),
+            ("$IRIS_STATE/instructions-epoch.json", "durable"),
+            ("$IRIS_STATE/instructions-epoch.json.lock", "lock"),
+            ("$IRIS_STATE/instructions/keylist.current", "durable"),
+            ("$IRIS_STATE/instructions/keylist-state.json", "durable"),
+            ("$IRIS_STATE/instructions/keylist.lock", "lock"),
+            ("$IRIS_STATE/instructions/roles.d/", "durable"),
+            ("$IRIS_STATE/instructions/role-state.json", "durable"),
+            ("$IRIS_STATE/instructions/activation.json", "durable"),
+            ("$IRIS_STATE/instructions/producer.lock", "lock"),
+            ("$IRIS_STATE/instructions/admitted-devices.json", "durable"),
+            ("$IRIS_STATE/instructions/serial-history.json", "durable"),
+            ("$IRIS_STATE/instructions/roles.lock", "lock"),
+            ("$IRIS_STATE/instruction-key-status.json", "status"),
+            ("$IRIS_STATE/instruction-stamper-status.json", "status")):
+        _assert_unit(server, (path, custody),
+                     "%s lacks its custody classification" % path)
     _assert_unit(server, ("stamper", "daemon thread", "management process",
                           "five", "not", "sixth service"),
                  "stamper process topology is missing")
@@ -1107,9 +1178,14 @@ def test_docs_phase1_kubernetes_and_split_host_custody():
 
     validation = _page("validation.md")
     for layout, terms in (
-            ("single-host Compose", ("8443", "9443", "apply", "package")),
-            ("split-host Compose", ("server host", "age identity", "Console")),
-            ("single-replica Kubernetes", ("PVC", "NetworkPolicy", "instruction")),
+            ("single-host Compose", ("custody", "stamp", "LKG", "drift",
+                                     "artifact provenance", "8443", "9443")),
+            ("split-host Compose", ("custody", "stamp", "LKG", "drift",
+                                    "artifact provenance", "server host",
+                                    "Console")),
+            ("single-replica Kubernetes", ("custody", "stamp", "LKG",
+                                            "drift", "artifact provenance",
+                                            "PVC", "NetworkPolicy")),
             ("multi-replica server tier", ("not covered", "unsupported"))):
         _assert_unit(validation, (layout,) + terms,
                      "%s validation is not operationally meaningful" % layout)
@@ -1154,9 +1230,11 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
                  "unavailable evidence must not be rendered as healthy zero")
     _assert_unit(observability, ("violation = 0", "does not mean compliant"),
                  "zero violation is not proof of compliance")
-    _assert_unit(observability, ("device-authored", "heartbeat",
-                                 "agent-asserted", "instruction"),
-                 "device and agent evidence classes must be distinguished")
+    _assert_unit(observability, ("announce", "uploaded", "downloaded",
+                                 "device-authored"),
+                 "announce counters must be labeled device-authored")
+    _assert_unit(observability, ("heartbeat", "instruction", "agent-asserted"),
+                 "heartbeat instruction facts must be labeled agent-asserted")
     _assert_unit(observability, ("policy_revision", "server-issued", "intent"),
                  "policy revision meaning is missing")
     _assert_unit(observability, ("instr_serial", "per-device", "freshness"),
@@ -1200,8 +1278,13 @@ def test_docs_phase1_changelog_and_release_boundary():
                  "Unreleased must summarize the Phase 1 operator change")
     _assert_unit(unreleased, ("server-observed", "agent-asserted", "Console"),
                  "Unreleased must identify the evidence-aware Console")
-    assert not re.search(r"Phase 1.{0,120}(?:released|deployed|live verified)",
-                         unreleased, re.IGNORECASE | re.DOTALL)
+    for unit in _units(unreleased):
+        if "phase 1" not in unit.lower():
+            continue
+        assert not re.search(
+            r"\b(?:is|was|has been|now)\s+(?:released|deployed)\b|"
+            r"\blive fleet\s+(?:is\s+|was\s+)?verified\b",
+            unit, re.IGNORECASE)
 
     boundary = (_page("security.md") + "\n" + _page("operations.md") +
                 "\n" + _page("observability.md"))
