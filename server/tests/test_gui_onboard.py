@@ -4373,6 +4373,7 @@ def test_scheduled_pool_reserves_manual_workers(limit):
         release.set()
         service.shutdown()
     assert service._scheduled_inflight == set()
+    assert service._scheduled_workers == set()
     assert service._active_work == 0
 
 
@@ -4482,7 +4483,8 @@ def test_authority_changes_after_reservation_are_rechecked_without_lock_inversio
         assert result["admission_reason"] == "device_revoked"
         assert checked == ["admission", "execution"]
         assert executions == [True]
-        assert _wait_for(lambda: not service._scheduled_inflight)
+        assert _wait_for(lambda: not service._scheduled_inflight
+                         and not service._scheduled_workers)
     finally:
         release.set()
         service.shutdown()
@@ -4512,11 +4514,16 @@ def test_cancellation_releases_reserved_scheduled_capacity_and_scopes_occurrence
         assert service.cancel_queued([first, second], occurrence_id="wrong") == 0
         assert service.cancel_queued([first, second], occurrence_id="occurrence-1") == 1
         assert service.get_job(first)["state"] == "cancelled"
-        assert _wait(service, second)["state"] == "done"
+        with service._condition:
+            assert not service._reserved and not service._scheduled_inflight
+            assert service._scheduled_workers == {first}
+            assert service._jobs[second]["state"] == "queued"
         release.set()
+        assert _wait(service, second)["state"] == "done"
         assert _wait_for(lambda: service._active_work == 0)
         assert ran == ["d2"]
         assert not service._reserved and not service._scheduled_inflight
+        assert not service._scheduled_workers
     finally:
         release.set()
         service.shutdown()
@@ -4716,3 +4723,63 @@ def test_iox_deferred_authority_recheck_releases_locks_for_controller_and_probe(
     finally:
         release.set()
         service.shutdown()
+
+
+
+def test_cancelled_authority_waiter_preserves_physical_manual_worker_slot(monkeypatch):
+    """A cancelled reservation cannot free a worker that is still lock-blocked."""
+    from contextlib import contextmanager
+    outer = threading.Lock()
+    first_waiting = threading.Event()
+    second_considered = threading.Event()
+    executed = []
+    service = _multi_svc(
+        3, lambda _p, env, _o: executed.append(env["DEVICE_ID"]) or 0,
+        max_concurrent=2)
+    reserve = service._reserve_work_locked
+
+    def observe_reservation():
+        job = reserve()
+        # Synchronize after an idle worker has considered the second scheduled
+        # job, before submitting manual work. This prevents manual-first dequeue
+        # from accidentally hiding the physical-occupancy regression.
+        if any(j["device_id"] == "d2" and j["state"] == "queued"
+               for j in service._jobs.values()):
+            second_considered.set()
+        return job
+
+    monkeypatch.setattr(service, "_reserve_work_locked", observe_reservation)
+
+    @contextmanager
+    def guard(phase):
+        if phase == "execution":
+            first_waiting.set()
+            with outer:
+                yield
+        else:
+            yield
+
+    outer.acquire()
+    try:
+        first = service.start("d1", schedule_context=_schedule_context("d1"),
+                              authority_guard=guard)
+        assert first_waiting.wait(2)
+        assert service.cancel_queued([first]) == 1
+        second = service.start("d2", schedule_context=_schedule_context("d2"),
+                               authority_guard=guard)
+        assert second_considered.wait(2)
+        manual = service.start("d3")
+        # No authority guard performs slow work. The first cancelled worker
+        # merely contends on a lock held by this thread. Manual work must finish
+        # before that lock is released, while the second schedule stays pending.
+        assert _wait(service, manual, timeout=2)["state"] == "done"
+        with service._condition:
+            assert not service._reserved and not service._scheduled_inflight
+            assert service._scheduled_workers == {first}
+            assert service._jobs[second]["state"] == "queued"
+        assert executed == ["d3"]
+    finally:
+        outer.release()
+        service.shutdown()
+    assert not service._scheduled_inflight and not service._scheduled_workers
+    assert not service._reserved and service._active_work == 0

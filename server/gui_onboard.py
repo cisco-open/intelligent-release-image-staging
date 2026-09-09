@@ -1200,6 +1200,10 @@ class OnboardService:
         self._manual_reservation = (self.max_concurrent + 1) // 2
         self._scheduled_limit = self.max_concurrent // 2
         self._scheduled_inflight = set()
+        # Cancellation releases logical reservations immediately, but a worker
+        # blocked entering outer authority still physically occupies the pool.
+        # Keep that occupancy until its execution wrapper actually unwinds.
+        self._scheduled_workers = set()
         self._reserved = set()
         self._active_work = 0
         self._work_queue = _WorkQueueView(self)
@@ -1392,9 +1396,11 @@ class OnboardService:
         if self._manual_queue:
             jid = self._manual_queue.popleft()
         elif (self._scheduled_queue and
-              len(self._scheduled_inflight) < self._scheduled_limit):
+              len(self._scheduled_inflight) < self._scheduled_limit and
+              len(self._scheduled_workers) < self._scheduled_limit):
             jid = self._scheduled_queue.popleft()
             self._scheduled_inflight.add(jid)
+            self._scheduled_workers.add(jid)
         else:
             return None
         self._reserved.add(jid)
@@ -1437,6 +1443,7 @@ class OnboardService:
             with self._condition:
                 self._reserved.discard(jid)
                 self._scheduled_inflight.discard(jid)
+                self._scheduled_workers.discard(jid)
                 self._active_work -= 1
                 job.pop("_work", None)
                 self._condition.notify_all()
