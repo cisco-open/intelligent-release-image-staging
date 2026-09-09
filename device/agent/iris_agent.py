@@ -450,8 +450,10 @@ def _public_drift(value):
 def _heartbeat_with_instruction(payload, attestation):
     """Copy only the bounded public instruction facts into a heartbeat."""
     if not isinstance(attestation, dict):
-        return payload
-    clean = {}
+        attestation = {}
+    # Wire capability is unconditional, including failed instruction/RPC
+    # work. Heartbeat version continues to describe IOS software.
+    clean = {"instr_protocol": 1}
     if "applied" in attestation:
         try:
             clean["applied"] = _public_integer_unit(
@@ -469,10 +471,15 @@ def _heartbeat_with_instruction(payload, attestation):
                              instr_reason=instr_reason)
         elif "instr_reason" not in attestation:
             clean["instr_state"] = instr_state
-    instr_serial = attestation.get("instr_serial")
-    if (not isinstance(instr_serial, bool) and isinstance(instr_serial, int)
-            and 0 <= instr_serial <= _MAX_I63):
-        clean["instr_serial"] = instr_serial
+    identity_fields = ("instr_epoch", "instr_serial", "instr_policy_revision")
+    identity = {name: attestation[name] for name in identity_fields
+                if name in attestation}
+    try:
+        clean.update(_public_integer_unit(identity, identity_fields))
+    except (KeyError, TypeError, ValueError):
+        pass
+    if type(attestation.get("pointer_skew")) is bool:
+        clean["pointer_skew"] = attestation["pointer_skew"]
     verify_level = attestation.get("verify_level")
     if verify_level in ("sig", "none"):
         clean["verify_level"] = verify_level
@@ -491,11 +498,17 @@ def _heartbeat_with_instruction(payload, attestation):
             clean["qos_drift"] = _public_drift(attestation["qos_drift"])
         except (KeyError, TypeError, ValueError):
             pass
-    if not clean:
-        return payload
     result = dict(payload)
     result.update(clean)
     return result
+
+
+def _instruction_unavailable_fact(state):
+    """Keep detector context without claiming a failed RPC applied policy."""
+    import instr
+    fact = {"instr_state": "instr_unavailable"}
+    fact.update(instr.pointer_skew_fact(state))
+    return fact
 
 
 def _send_heartbeat(deps, sid, payload, instruction_attestation=None):
@@ -3416,7 +3429,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
                 "instruction": None, "effective": None,
                 "effective_peers": {"mode": "tracker-only",
                                     "include_origin": False},
-                "attestation": {"instr_state": "instr_unavailable"},
+                "attestation": _instruction_unavailable_fact(state),
             }
         _qos, preview_control = _instruction_values(preview)
         interval = preview_control.get("catalog_tick_s", 60)
@@ -3438,8 +3451,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
                 deps.emit("INSTRUCTION-APPLY-FAIL",
                           "instruction apply failed: %s"
                           % type(e).__name__)
-                instruction_attestation = {
-                    "instr_state": "instr_unavailable"}
+                instruction_attestation = _instruction_unavailable_fact(state)
                 _contained_cadence_heartbeat(
                     cfg, deps, state, ids, tele_on, stream_on,
                     instruction_attestation)
@@ -3474,8 +3486,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
                 deps.emit("INSTRUCTION-APPLY-FAIL",
                           "instruction apply failed: %s"
                           % type(apply_error).__name__)
-                instruction_attestation = {
-                    "instr_state": "instr_unavailable"}
+                instruction_attestation = _instruction_unavailable_fact(state)
                 _contained_cadence_heartbeat(
                     cfg, deps, state, ids, tele_on, stream_on,
                     instruction_attestation)
@@ -3507,7 +3518,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
                 "instruction": None, "effective": None,
                 "effective_peers": {"mode": "tracker-only",
                                     "include_origin": False},
-                "attestation": {"instr_state": "instr_unavailable"},
+                "attestation": _instruction_unavailable_fact(state),
             }
         bag = state.get("instructions")
         if not isinstance(bag, dict):
@@ -3525,7 +3536,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
         except Exception as e:
             deps.emit("INSTRUCTION-APPLY-FAIL",
                       "instruction apply failed: %s" % type(e).__name__)
-            instruction_attestation = {"instr_state": "instr_unavailable"}
+            instruction_attestation = _instruction_unavailable_fact(state)
             _contained_cadence_heartbeat(
                 cfg, deps, state, ids, tele_on, stream_on,
                 instruction_attestation)
@@ -3568,8 +3579,7 @@ def run_once(cfg, deps, state, tick_seconds=60):
                 deps.emit("INSTRUCTION-FAIL",
                           "instruction step failed (ignored): %s"
                           % type(e).__name__)
-                instruction_attestation = {
-                    "instr_state": "instr_unavailable"}
+                instruction_attestation = _instruction_unavailable_fact(state)
     if not task16:
         # Older servers and policy rows carry only the singular assignment.
         # Keep this permissive parsing only on the compatibility path; Task 16

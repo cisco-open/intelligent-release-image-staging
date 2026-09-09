@@ -1364,8 +1364,8 @@ def test_task19_attestation_raw_policy_snapshot_is_bulk_copied_and_structurally_
     assert store.list_raw_policies() == raw
     with pytest.raises(catalog.StateFileError):
         store.list_policies()
-    shard = Path(store._raw_policies.dir) / ("%03x.json" % keyed_state.bucket_of(
-        "device-a", store._raw_policies.shards))
+    shard = Path(store._raw_policies._shard_path(keyed_state.bucket_of(
+        "device-a", store._raw_policies.shards)))
     # A structurally bad row never becomes an empty or all-missing snapshot.
     shard.write_text(json.dumps({"device-a": []}))
     with pytest.raises(catalog.StateFileError):

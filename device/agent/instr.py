@@ -1345,10 +1345,26 @@ def _refresh_instruction_keys(cfg, catalog, persist_config):
 def _fact(state, header=None, reason=None):
     result = {"instr_state": state}
     if header is not None:
-        result.update(instr_serial=header["instr_serial"], verify_level=header["verify_level"])
+        result.update(instr_epoch=header["epoch"],
+                      instr_serial=header["instr_serial"],
+                      instr_policy_revision=header["policy_revision"],
+                      verify_level=header["verify_level"])
     if state == "key_rejected" and reason in ("unknown_key", "bad_mac"):
         result["instr_reason"] = reason
     return result
+
+
+def pointer_skew_fact(state):
+    """Project the existing observation latch without changing its state.
+
+    A missing or damaged latch is unknown; it is not evidence of no skew.
+    Only the detector establishes/reset its bounded observation count.
+    """
+    bag = state.get("instructions") if isinstance(state, dict) else None
+    count = bag.get("pointer_skew_count") if isinstance(bag, dict) else None
+    if type(count) is int and 0 <= count <= 3:
+        return {"pointer_skew": count == 3}
+    return {}
 
 
 def _effective(verified):
@@ -1670,5 +1686,11 @@ def run_instruction_step(cfg, state, catalog, hints, catalog_date, platform,
         if bootstrap_applied:
             return result
         message = str(exc).lower()
-        result["attestation"] = _fact("oversize" if "exceeds" in message and "bytes" in message else "instr_unavailable")
+        result["attestation"] = _fact(
+            "oversize" if "exceeds" in message and "bytes" in message
+            else "instr_unavailable", header)
         return result
+    finally:
+        # Include the current latch after all detector updates, including
+        # cached, pending, rejected, and transport-failure early returns.
+        result["attestation"].update(pointer_skew_fact(state))

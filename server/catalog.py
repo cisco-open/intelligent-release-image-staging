@@ -1351,6 +1351,17 @@ class CatalogStore:
         rec = self._policies.get(device_id)
         return self.device_policy_view_from_row(device_id, rec)
 
+    def list_raw_policies(self):
+        """One copied, structurally checked policy snapshot for bulk readers.
+
+        Present instruction stamps remain unmodified for canonical validation
+        by the caller. Invalid storage never becomes an empty snapshot.
+        """
+        try:
+            return self._raw_policies.snapshot()
+        except (RecursionError, OverflowError) as exc:
+            raise StateFileError("policy state is structurally invalid") from exc
+
     def list_policies(self):
         """Every device's raw policy row. O(fleet) by nature — console tables
         and the quarantine auto-unassign sweep, never a per-device request."""

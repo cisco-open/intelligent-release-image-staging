@@ -400,6 +400,11 @@ def sanitize_instruction_attestation(data):
     if not isinstance(data, dict):
         return {}
     clean = {}
+    if "instr_protocol" in data:
+        # Null is the bounded unknown marker. Preserve present-invalid versus
+        # absent so malformed or future agents are never presented as legacy.
+        marker = data["instr_protocol"]
+        clean["instr_protocol"] = 1 if type(marker) is int and marker == 1 else None
     if "applied" in data:
         try:
             clean["applied"] = _attestation_integers(data["applied"], APPLIED_FIELDS)
@@ -413,11 +418,21 @@ def sanitize_instruction_attestation(data):
                 clean.update(instr_state=state, instr_reason=reason)
         elif "instr_reason" not in data:
             clean["instr_state"] = state
-    if "instr_serial" in data:
+    identity_fields = ("instr_epoch", "instr_serial", "instr_policy_revision")
+    if "instr_epoch" in data or "instr_policy_revision" in data:
+        identity = {name: data[name] for name in identity_fields if name in data}
+        try:
+            clean.update(_attestation_integers(identity, identity_fields))
+        except InstructionError:
+            pass
+    elif "instr_serial" in data:
+        # Preserve old stored reports without inventing an accepted identity.
         try:
             clean["instr_serial"] = _i63(data["instr_serial"], "instr_serial")
         except InstructionError:
             pass
+    if type(data.get("pointer_skew")) is bool:
+        clean["pointer_skew"] = data["pointer_skew"]
     level = data.get("verify_level")
     if isinstance(level, str) and level in ("sig", "none"):
         clean["verify_level"] = level
