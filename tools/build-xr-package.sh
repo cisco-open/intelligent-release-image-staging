@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Wrap the canonical amd64 IRIS device manifest as an IOS-XR appmgr RPM.
-# device/iox/build.sh selects from the same signed multi-platform OCI index.
+# device/iox/build.sh selects from the same signable multi-platform OCI index.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
