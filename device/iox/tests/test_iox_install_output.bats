@@ -384,9 +384,12 @@ def request(value):
     trace.flush()
     counts[name]=counts.get(name,0)+1
     assert sum(counts.values())<=128,'unbounded recipe requests'
-    if scenario=='signal_during_ipc' and not signal_sent:
+    if scenario in ('signal_during_ipc','second_signal_during_cleanup') and not signal_sent:
         os.kill(child.pid,signal.SIGTERM)
         signal_sent=True
+        time.sleep(0.05)
+    elif scenario=='second_signal_during_cleanup' and operation=='cleanup':
+        os.kill(child.pid,signal.SIGTERM)
         time.sleep(0.05)
     code=0
     category=None
@@ -840,6 +843,14 @@ ASSERTIONS
 @test "handled TERM during an IPC request commits its ready binding before cleanup and finish" {
   _iox_fixture_setup
   run _iox_controller_run install signal_during_ipc
+  [ "$status" -eq 143 ]
+  _iox_assert_trace ordered upload_wrapper cleanup finish
+  _iox_assert_trace artifact_clean
+}
+
+@test "a second TERM during cleanup cannot interrupt the mandatory finish" {
+  _iox_fixture_setup
+  run _iox_controller_run install second_signal_during_cleanup
   [ "$status" -eq 143 ]
   _iox_assert_trace ordered upload_wrapper cleanup finish
   _iox_assert_trace artifact_clean
