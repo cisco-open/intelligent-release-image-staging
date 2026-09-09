@@ -9,7 +9,7 @@ The rename retired `attachment`/`network_attachment` (-> management type),
 deployment `receipt` (-> deployment record), and peer `receipt` (-> peer
 transfer record) everywhere except a short, explicit set of fenced sites
 (RFC 6266, an IOS logging discriminator, a CSV rejection guard, the
-time-of-receipt sense of "receipt", Task 22's distinct schedule receipts,
+time-of-receipt sense of "receipt", Tasks 22–23's distinct schedule receipts,
 append-only history, and a handful of deliberate hard-break regression pins).
 This test scans every TRACKED file
 (``git ls-files`` -- untracked/ignored paths such as HANDOFF.md and
@@ -46,6 +46,11 @@ word. Unlike a whole-file ALLOWLIST entry, these exemptions suppress only the
 named pattern: for example, a schedule file exempted for ``receipt`` still
 fails immediately if ``attachment`` appears in it.
 
+TERM_SCOPE_ALLOWLIST entries are ``(path, scope, terms, reason)``. A dotted
+Python class/function name fences a term exemption inside a shared module.
+The AST supplies its current extent, so moving code does not widen the
+exception into neighboring features or require brittle line-number pins.
+
 A companion test (test_terminology_allowlist_entries_are_still_needed)
 keeps this list honest: every entry must still point at an existing tracked
 path, every anchor must still match at least one line, and every line an
@@ -54,9 +59,12 @@ over-broad entry fails loudly instead of silently widening the guard's
 blind spot.
 """
 
+import ast
 import os
 import re
 import subprocess
+
+import pytest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -262,6 +270,11 @@ ALLOWLIST = [
       "schedules._validate_receipt"),
      "Task 22 schedule-receipt schema validation and generated-example "
      "checks in the shared OpenAPI validation suite"),
+    ("server/assignment_service.py",
+     ("A result can precede its durable terminal runner receipt.",
+      "acknowledgement after the runner saves its terminal receipt."),
+     "Task 23 schedule-result retention comments inside the shared manual/"
+     "scheduled assignment transaction; deployment records retain their name"),
     ("server/tests/test_gui_onboard.py",
      ('attachment/management_type to "routed"',
       "attachment -> management_type -> network_attachment",
@@ -283,7 +296,7 @@ ALLOWLIST = [
 ]
 
 
-# Task 22's dedicated schedule implementation/tests and the generated OpenAPI
+# Tasks 22–23's dedicated schedule implementation/tests and generated OpenAPI
 # document use "receipt" as a new, intentionally separate domain term. Exempt
 # only that pattern; the attachment guard remains active in every listed file.
 TERM_FILE_ALLOWLIST = [
@@ -299,6 +312,33 @@ TERM_FILE_ALLOWLIST = [
      "Task 22 schedule runner tests"),
     ("server/tests/test_schedules.py", ("receipt",),
      "Task 22 schedule store tests"),
+    ("server/tests/test_scheduled_execution.py", ("receipt",),
+     "Task 23 scheduled assignment/onboarding receipt and recovery tests"),
+]
+
+
+# Task 23 consumes the approved Task 22 per-device schedule-receipt contract.
+# These scopes belong to that domain; the rest of each shared file remains
+# guarded against retired deployment/peer vocabulary. No attachment exemption
+# is implied, even inside these scopes.
+TERM_SCOPE_ALLOWLIST = [
+    ("server/assignment_service.py",
+     "AssignmentService.acknowledge_schedule_result", ("receipt",),
+     "Task 23 releases occurrence claims only after durable schedule receipts"),
+    ("server/assignment_service.py", "AssignmentService._schedule_request",
+     ("receipt",), "Task 23 preserves legacy schedule-receipt replay bindings"),
+    ("server/deployment_records.py", "DeploymentRecordStore.admit_scheduled",
+     ("receipt",), "Task 23 checks schedule-receipt ownership at record admission"),
+    ("server/gui_onboard.py", "OnboardService.jobs_for_occurrence", ("receipt",),
+     "Task 23 locates occurrence-owned jobs for schedule-receipt reconciliation"),
+    ("server/management_api.py", "_ScheduledExecutor", ("receipt",),
+     "Task 23 executor implements the approved dispatch/poll receipt contract"),
+    ("server/tests/test_iris_assign.py",
+     "test_recurring_claims_remain_until_explicit_acknowledgement", ("receipt",),
+     "Task 23 pins schedule-result retention until receipt acknowledgement"),
+    ("server/tests/test_iris_assign.py",
+     "test_terminal_receipt_acknowledgement_reclaims_ambiguous_claim",
+     ("receipt",), "Task 23 pins terminal schedule-receipt claim cleanup"),
 ]
 
 
@@ -316,7 +356,7 @@ def _tracked_files():
 
 
 def _allowlist_index():
-    """Return whole-file, line-anchor, and term-specific file exemptions."""
+    """Return whole-file, line-anchor, term-file, and term-scope exemptions."""
     whole = set()
     by_anchor = {}
     for path, anchors, _reason in ALLOWLIST:
@@ -327,13 +367,38 @@ def _allowlist_index():
     by_term = {}
     for path, terms, _reason in TERM_FILE_ALLOWLIST:
         by_term[path] = by_term.get(path, frozenset()) | frozenset(terms)
-    return whole, by_anchor, by_term
+    by_scope = {}
+    for path, scope, terms, _reason in TERM_SCOPE_ALLOWLIST:
+        by_scope.setdefault(path, []).append((scope, terms))
+    return whole, by_anchor, by_term, by_scope
+
+
+def _scope_ranges(text, entries):
+    """Resolve explicit Python scopes; missing/ambiguous scopes fail closed."""
+    if not entries:
+        return []
+    tree = ast.parse(text)
+    ranges = []
+    for scope, terms in entries:
+        body = tree.body
+        for name in scope.split("."):
+            matches = [node for node in body
+                       if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                            ast.AsyncFunctionDef))
+                       and node.name == name]
+            assert len(matches) == 1, (
+                "term-scope allowlist %r is missing or ambiguous" % scope)
+            node = matches[0]
+            body = node.body
+        start = min([node.lineno] + [item.lineno for item in node.decorator_list])
+        ranges.append((start, node.end_lineno, frozenset(terms)))
+    return ranges
 
 
 def _iter_hits():
     """Yield (path, lineno, term, matched_text, line) for every retired-
     vocabulary occurrence in a tracked file that is not allowlisted."""
-    whole, by_anchor, by_term = _allowlist_index()
+    whole, by_anchor, by_term, by_scope = _allowlist_index()
     for path in _tracked_files():
         if path in whole:
             continue
@@ -344,11 +409,14 @@ def _iter_hits():
             continue          # binary or unreadable; not a vocabulary source
         anchors = by_anchor.get(path, ())
         allowed_terms = by_term.get(path, frozenset())
+        scope_ranges = _scope_ranges(text, by_scope.get(path, ()))
         for lineno, line in enumerate(text.splitlines(), start=1):
             if any(anchor in line for anchor in anchors):
                 continue
             for term, pattern in _PATTERNS.items():
-                if term in allowed_terms:
+                if term in allowed_terms or any(
+                        start <= lineno <= end and term in terms
+                        for start, end, terms in scope_ranges):
                     continue
                 m = pattern.search(line)
                 if m:
@@ -419,3 +487,65 @@ def test_terminology_allowlist_entries_are_still_needed():
             assert _PATTERNS[term].search(text), (
                 "%s: term-file allowlist pattern %r has ZERO hits left -- "
                 "drop it (%s)" % (path, term, reason))
+
+    for path, scope, terms, reason in TERM_SCOPE_ALLOWLIST:
+        assert path in tracked, (
+            "%s: term-scope allowlisted but not tracked (%s)" % (path, reason))
+        with open(os.path.join(REPO, path), "r", encoding="utf-8") as fh:
+            text = fh.read()
+        start, end, _terms = _scope_ranges(text, [(scope, terms)])[0]
+        scoped_text = "\n".join(text.splitlines()[start - 1:end])
+        for term in terms:
+            assert term in _PATTERNS, (
+                "%s: unknown term-scope pattern %r (%s)" % (path, term, reason))
+            assert _PATTERNS[term].search(scoped_text), (
+                "%s:%s: term-scope pattern %r has ZERO hits left -- drop it (%s)"
+                % (path, scope, term, reason))
+
+
+def test_schedule_receipt_exemptions_preserve_other_domains(tmp_path, monkeypatch):
+    sources = {
+        "server/management_api.py": (
+            "receipt = None\n"
+            "class _ScheduledExecutor:\n"
+            "    receipt = None\n"
+            "    network_attachment = None\n"
+            "class Other:\n"
+            "    receipt = None\n"
+            "class _ScheduledExecutorExtra:\n"
+            "    receipt = None\n"),
+        "server/deployment_records.py": (
+            "class DeploymentRecordStore:\n"
+            "    def admit_scheduled(self):\n"
+            "        receipt = None\n"
+            "    def create(self):\n"
+            "        receipt = None\n"),
+        "server/tests/test_scheduled_execution.py": (
+            "receipt = None\nnetwork_attachment = None\n"),
+        "server/unrelated.py": "receipt = None\n",
+    }
+    for path, text in sources.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", str(tmp_path))
+    monkeypatch.setitem(globals(), "_tracked_files", lambda: list(sources))
+    assert [(path, line, term) for path, line, term, *_rest in _iter_hits()] == [
+        ("server/management_api.py", 1, "receipt"),
+        ("server/management_api.py", 4, "attachment"),
+        ("server/management_api.py", 6, "receipt"),
+        ("server/management_api.py", 8, "receipt"),
+        ("server/deployment_records.py", 5, "receipt"),
+        ("server/tests/test_scheduled_execution.py", 2, "attachment"),
+        ("server/unrelated.py", 1, "receipt"),
+    ]
+
+
+@pytest.mark.parametrize("source", [
+    "class Other:\n    receipt = None\n",
+    "class _ScheduledExecutorExtra:\n    receipt = None\n",
+    "class _ScheduledExecutor:\n    receipt = None\n" * 2,
+])
+def test_schedule_scope_exemptions_reject_stale_or_ambiguous_names(source):
+    with pytest.raises(AssertionError, match="missing or ambiguous"):
+        _scope_ranges(source, [("_ScheduledExecutor", ("receipt",))])
