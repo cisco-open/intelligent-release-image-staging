@@ -32,6 +32,64 @@ setup() {
 
 teardown() { rm -rf "$TMP"; }
 
+bundle_file_list() {
+  cat <<'EOF'
+agent/agent_config.py
+agent/catalog_client.py
+agent/cli_ssh.py
+agent/flash_target.py
+agent/flashcheck.py
+agent/instr.py
+agent/iris_agent.py
+agent/peer-transfer-hook.sh
+agent/telemetry_report.py
+agent/verify_image.py
+agent/xr_deps.py
+aria2c
+bootstrap.sh
+guestshell-start.sh
+iris-root.allowed_signers
+iris-signers.allowed_signers
+rotate-logs.sh
+EOF
+}
+
+make_valid_bundle_tree() {
+  BUNDLE_TREE="$TMP/bundle-src"
+  rm -rf "$BUNDLE_TREE"
+  mkdir -p "$BUNDLE_TREE/agent"
+  while IFS= read -r name; do
+    mkdir -p "$(dirname "$BUNDLE_TREE/$name")"
+    printf 'fixture:%s\n' "$name" > "$BUNDLE_TREE/$name"
+  done < <(bundle_file_list)
+  printf 'open(r"%s/new-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$BUNDLE_TREE/agent/iris_agent.py"
+  printf '#!/usr/bin/env bash\necho new-started >> "%s/new-gss.log"\n' "$TMP" \
+    > "$BUNDLE_TREE/guestshell-start.sh"
+  { printf '#!/usr/bin/env bash\n'
+    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
+  } > "$BUNDLE_TREE/bootstrap.sh"
+}
+
+pack_valid_bundle() {
+  local out="$1"
+  make_valid_bundle_tree
+  # Match the production packer's explicit top-level list: no leading ./ entry.
+  tar czf "$out" -C "$BUNDLE_TREE" agent bootstrap.sh guestshell-start.sh \
+    rotate-logs.sh aria2c iris-signers.allowed_signers iris-root.allowed_signers
+}
+
+write_bundle_digest() {
+  local bundle="$1" digest="$2"
+  sha256sum "$bundle" | awk '{print $1}' > "$digest"
+}
+
+install_prior_agent() {
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/prior-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+}
+
 @test "bootstrap syncs rpc-secret from conf and bounces aria2c when it changed" {
   printf 'rpc_secret = REALSECRET123\nrpc_port = 6800\n' > "$STAGE/iris-agent.conf"
   printf '\n' > "$STAGE/rpc-secret"   # baked empty
@@ -229,7 +287,7 @@ teardown() { rm -rf "$TMP"; }
   [ -f "$TMP/gss.log" ]
 }
 
-@test "a bundle upgrade replaces bootstrap.sh by rename so the running tick still reaches the agent" {
+@test "a verified bundle commits atomically, retains one prior footprint, and updates bootstrap by rename" {
   # bootstrap.sh runs FROM $SRC/bootstrap.sh (the EEM applet's path) and, on
   # a bundle drop, replaces that very file. `cp -f` rewrote the same inode,
   # so the bash still executing it resumed at its old byte offset inside the
@@ -240,21 +298,127 @@ teardown() { rm -rf "$TMP"; }
   cp "$BATS_TEST_DIRNAME/bootstrap.sh" "$SRC/bootstrap.sh"
   printf 'rpc_secret = SAME\n' > "$STAGE/iris-agent.conf"
   printf 'SAME\n' > "$STAGE/rpc-secret"
-  BUNDLE="$TMP/bundle-src"; mkdir -p "$BUNDLE/agent"
-  { printf '#!/usr/bin/env bash\n'
-    for _ in $(seq 1 400); do printf 'exit 99 # upgraded-bootstrap padding line\n'; done
-  } > "$BUNDLE/bootstrap.sh"
-  printf 'open(r"%s/agent-invoked", "w").write("ran")\n' "$TMP" \
-    > "$BUNDLE/agent/iris_agent.py"
-  tar czf "$SRC/bundle.tgz" -C "$BUNDLE" bootstrap.sh agent
+  install_prior_agent
+  printf 'persistent\n' > "$STAGE/iris-instructions.lkg"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
   run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
       bash "$SRC/bootstrap.sh"
   [ "$status" -eq 0 ]
   # the tick that performed the upgrade still ran the agent...
-  [ -f "$TMP/agent-invoked" ]
+  [ -f "$TMP/new-agent-invoked" ]
   # ...and the next tick will read the bundled bootstrap
-  cmp -s "$SRC/bootstrap.sh" "$BUNDLE/bootstrap.sh"
+  cmp -s "$SRC/bootstrap.sh" "$BUNDLE_TREE/bootstrap.sh"
   [ ! -e "$SRC/bootstrap.sh.new" ]
+  [ ! -e "$STAGE/bundle.tgz" ]
+  [ ! -e "$STAGE/bundle.tgz.sha256" ]
+  [ "$(cat "$STAGE/iris-instructions.lkg")" = persistent ]
+  grep -q 'prior-agent-invoked' "$STAGE/.bundle-previous/files/agent/iris_agent.py"
+}
+
+@test "a digest without a bundle waits without discarding the evidence" {
+  install_prior_agent
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$STAGE/bundle.tgz.sha256" ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" != *"bundle rejected"* ]]
+}
+
+@test "a bundle without a digest is rejected while the prior agent continues" {
+  install_prior_agent
+  pack_valid_bundle "$SRC/bundle.tgz"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/prior-agent-invoked" ]
+  [ ! -e "$SRC/bundle.tgz" ]
+  [ ! -e "$STAGE/bundle.tgz" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (missing-digest)"* ]]
+}
+
+@test "malformed and mismatched digests are bounded and never replace the prior runtime" {
+  install_prior_agent
+  cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf 'NOT-A-DIGEST secret-material-that-must-not-be-logged\n' \
+    > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-digest)"* ]]
+  [[ "$output" != *"secret-material"* ]]
+  [ "${#output}" -lt 512 ]
+
+  rm -f "$TMP/prior-agent-invoked"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  [ -f "$TMP/prior-agent-invoked" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (digest-mismatch)"* ]]
+}
+
+@test "a hash-matching archive with a symlink is rejected before extraction" {
+  install_prior_agent
+  cp "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  make_valid_bundle_tree
+  rm -f "$BUNDLE_TREE/aria2c"
+  ln -s /etc/passwd "$BUNDLE_TREE/aria2c"
+  tar czf "$SRC/bundle.tgz" -C "$BUNDLE_TREE" agent bootstrap.sh \
+    guestshell-start.sh rotate-logs.sh aria2c iris-signers.allowed_signers \
+    iris-root.allowed_signers
+  write_bundle_digest "$SRC/bundle.tgz" "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  cmp -s "$STAGE/agent/iris_agent.py" "$TMP/prior-agent.py"
+  [ ! -L "$STAGE/aria2c" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (invalid-archive)"* ]]
+}
+
+@test "an incomplete promotion is rolled back before anything launches" {
+  TX="$STAGE/.bundle-transaction"
+  mkdir -p "$TX/prior/files/agent" "$TX/prior/files" \
+    "$TX/prior/absent/agent"
+  printf 'open(r"%s/recovered-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$TX/prior/files/agent/iris_agent.py"
+  cp "$STAGE/guestshell-start.sh" "$TX/prior/files/guestshell-start.sh"
+  while IFS= read -r name; do
+    case "$name" in agent/iris_agent.py|guestshell-start.sh) continue ;; esac
+    mkdir -p "$(dirname "$TX/prior/absent/$name")"
+    : > "$TX/prior/absent/$name"
+  done < <(bundle_file_list)
+  printf 'promoting\n' > "$TX/phase"
+  mkdir -p "$STAGE/agent"
+  printf 'open(r"%s/partial-agent-invoked", "w").write("ran")\n' "$TMP" \
+    > "$STAGE/agent/iris_agent.py"
+  printf 'partial\n' > "$STAGE/aria2c"
+
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/recovered-agent-invoked" ]
+  [ ! -e "$TMP/partial-agent-invoked" ]
+  [ ! -e "$STAGE/aria2c" ]
+  [ ! -e "$TX" ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: recovered interrupted bundle install"* ]]
+}
+
+@test "a bad initial bundle fails after one fixed diagnostic" {
+  rm -f "$STAGE/guestshell-start.sh"
+  pack_valid_bundle "$SRC/bundle.tgz"
+  printf '%064d\n' 0 > "$SRC/bundle.tgz.sha256"
+  run env PATH="$BIN:$PATH" SRC="$SRC" STAGE="$STAGE" \
+      bash "$BATS_TEST_DIRNAME/bootstrap.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"IRIS-BOOTSTRAP: bundle rejected (digest-mismatch)"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c 'bundle rejected')" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------

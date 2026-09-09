@@ -30,6 +30,14 @@ setup() {
   [[ "$output" != *"IRIS-NAT-"* ]]
 }
 
+@test "router teardown removes and verifies interrupted integrity-stage inputs" {
+  run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/bundle.tgz.sha256"* ]] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/iris-instructions.bootstrap"* ]] || return 1
+  [[ "$output" == *"delete /force bootflash:guest-share/iris-signers.allowed_signers"* ]]
+}
+
 @test "router NAT teardown removes record-owned NAT rules" {
   MANAGEMENT_TYPE=router-nat NAT_INTERFACE=GigabitEthernet1 \
     run bash "$UNINSTALL" --dry-run
