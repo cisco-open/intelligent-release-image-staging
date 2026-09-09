@@ -4134,3 +4134,48 @@ def test_assignment_result_and_unchanged_cas_are_decided_inside_policy_callback(
     with pytest.raises(catalog.PolicyConflict):
         store.set_policy("d1", approved_image_ids=["b"],
                          expect_image_ids=["a", "b"], skip_unchanged=True)
+
+
+def test_purge_device_serializes_with_low_level_assignment(tmp_path, monkeypatch):
+    """Retirement must not delete just before an in-flight policy write lands."""
+    store = _store(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    purged = threading.Event()
+    errors = []
+    original_update = store._policies.update
+
+    def paused_update(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original_update(*args, **kwargs)
+
+    monkeypatch.setattr(store._policies, "update", paused_update)
+
+    def assign():
+        try:
+            store.set_policy("d1", approved_image_ids=["img1"])
+        except Exception as exc:
+            errors.append(exc)
+
+    def purge():
+        try:
+            store.purge_device("d1")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            purged.set()
+
+    assigning = threading.Thread(target=assign)
+    deleting = threading.Thread(target=purge)
+    assigning.start()
+    assert entered.wait(2)
+    deleting.start()
+    blocked = not purged.wait(0.05)
+    release.set()
+    assigning.join(2)
+    deleting.join(2)
+
+    assert not errors
+    assert blocked, "purge bypassed the image-policy transaction lock"
+    assert store.read_policy_row_snapshot("d1") is None

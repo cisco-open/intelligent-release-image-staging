@@ -1103,13 +1103,19 @@ class CatalogStore:
         come back unassigned, or a stale assignment would silently restage the
         old image. Contrast forget_device(), which drops only the heartbeat
         record on undeploy and deliberately keeps the assignment. Returns
-        True iff any state existed."""
-        existed = self.forget_device(device_id)
-        for state in (self._policies, self._reports, self._pulls,
-                      self._report_ids, self._attestations):
-            if state.delete(device_id):
-                existed = True
-        return existed
+        True iff any state existed.
+
+        Serialize with low-level policy writers as well as fleet-aware
+        AssignmentService callers. Retirement holds the fleet membership
+        guard outside this lock; set_policy acquires only this lock, preserving
+        membership -> image-policy -> shard lock order."""
+        with self.image_policy_lock():
+            existed = self.forget_device(device_id)
+            for state in (self._policies, self._reports, self._pulls,
+                          self._report_ids, self._attestations):
+                if state.delete(device_id):
+                    existed = True
+            return existed
 
     # --- policy (per-device staging approval) ---
     def image_policy_lock(self):
