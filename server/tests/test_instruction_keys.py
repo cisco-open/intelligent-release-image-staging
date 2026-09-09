@@ -425,6 +425,89 @@ def test_two_root_ca_and_bare_signer_files_are_separate_verify_any_sets(tmp_path
         keys.INSTRUCTION_NAMESPACE, verify_time=NOW)
 
 
+def test_device_trust_renderer_is_deterministic_exact_and_verifiable(tmp_path):
+    roots = _root_map(tmp_path)
+    roots_dir = tmp_path / "roots.d"
+    roots_dir.mkdir()
+    # Deliberately create these out of lexical order. The rendered bytes must
+    # use the root ID, not directory enumeration order or key comments.
+    for root_id in ("root-b", "root-a"):
+        public = Path(str(roots[root_id]) + ".pub").read_text().split()
+        (roots_dir / (root_id + ".pub")).write_text(
+            "%s %s ignored-comment\n" % (public[0], public[1]),
+            encoding="ascii")
+    output = tmp_path / "trust"
+
+    keys.render_device_trust(roots_dir, output)
+    ca = output / "iris-signers.allowed_signers"
+    root_allowed = output / "iris-root.allowed_signers"
+    canonical = {
+        root_id: Path(str(roots[root_id]) + ".pub").read_text().split()[1]
+        for root_id in roots
+    }
+    assert ca.read_text(encoding="ascii") == "".join(
+        'iris-server cert-authority,namespaces="iris-instructions-v1" '
+        "ssh-ed25519 %s\n" % canonical[root_id]
+        for root_id in ("root-a", "root-b"))
+    assert root_allowed.read_text(encoding="ascii") == "".join(
+        'iris-root:%s namespaces="iris-keylist-v1" ssh-ed25519 %s\n'
+        % (root_id, canonical[root_id])
+        for root_id in ("root-a", "root-b"))
+    assert stat.S_IMODE(ca.stat().st_mode) == 0o644
+    assert stat.S_IMODE(root_allowed.stat().st_mode) == 0o644
+
+    first = (ca.read_bytes(), root_allowed.read_bytes())
+    keys.render_device_trust(roots_dir, output)
+    assert (ca.read_bytes(), root_allowed.read_bytes()) == first
+
+    for root_id in ("root-a", "root-b"):
+        message = ("keylist-" + root_id).encode()
+        signature = _root_sign(message, roots[root_id])
+        assert keys.verify_signature(
+            message, signature, root_allowed, "iris-root:" + root_id,
+            keys.KEYLIST_NAMESPACE)
+        assert not keys.verify_signature(
+            message, signature, root_allowed, "iris-root:wrong",
+            keys.KEYLIST_NAMESPACE)
+        assert not keys.verify_signature(
+            message, signature, root_allowed, "iris-root:" + root_id,
+            keys.INSTRUCTION_NAMESPACE)
+
+
+@pytest.mark.parametrize("layout", ["missing", "one", "three", "symlink-dir",
+                                     "symlink-key", "unexpected", "duplicate"])
+def test_device_trust_renderer_fails_closed_on_ambiguous_root_input(
+        tmp_path, layout):
+    roots = _root_map(tmp_path)
+    real = tmp_path / "real-roots"
+    roots_dir = tmp_path / "roots.d"
+    if layout == "symlink-dir":
+        real.mkdir()
+        for root_id in roots:
+            shutil.copyfile(str(roots[root_id]) + ".pub",
+                            real / (root_id + ".pub"))
+        roots_dir.symlink_to(real, target_is_directory=True)
+    elif layout != "missing":
+        roots_dir.mkdir()
+        shutil.copyfile(str(roots["root-a"]) + ".pub",
+                        roots_dir / "root-a.pub")
+        if layout == "symlink-key":
+            (roots_dir / "root-b.pub").symlink_to(
+                Path(str(roots["root-b"]) + ".pub"))
+        elif layout not in ("one",):
+            source = roots["root-a"] if layout == "duplicate" else roots["root-b"]
+            shutil.copyfile(str(source) + ".pub", roots_dir / "root-b.pub")
+        if layout == "three":
+            extra = _key(tmp_path / "offline-c")
+            shutil.copyfile(str(extra) + ".pub", roots_dir / "root-c.pub")
+        if layout == "unexpected":
+            (roots_dir / "README").write_text("ambiguous input\n")
+
+    with pytest.raises(keys.InstructionKeyError):
+        keys.render_device_trust(roots_dir, tmp_path / "trust")
+    assert not (tmp_path / "trust").exists()
+
+
 def test_krl_empty_missing_and_revocation_by_key_and_certificate(tmp_path):
     root = _key(tmp_path / "offline")
     online = _key(tmp_path / "online")

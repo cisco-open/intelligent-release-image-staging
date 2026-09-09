@@ -17,6 +17,7 @@ setup() {
   mkdir -p "$TMP/server" "$TMP/run"
   cp "$PROV" "$TMP/server/provision-served.sh"
   cp "$BATS_TEST_DIRNAME/../pack-agent-bundle.sh" "$TMP/server/pack-agent-bundle.sh"
+  cp "$BATS_TEST_DIRNAME/../instruction_keys.py" "$TMP/server/instruction_keys.py"
   PROV="$TMP/server/provision-served.sh"
   python3 - "$TMP/aria2c" <<'PYTHON'
 import pathlib,sys
@@ -26,29 +27,52 @@ PYTHON
   chmod +x "$TMP/aria2c"
   printf '%s  x86_64\n' "$(sha256sum "$TMP/aria2c" | awk '{print $1}')" > "$TMP/aria2c.sha256"
   mkdir -p "$TMP/config/tls"; printf 'CRTPEM\n' > "$TMP/config/tls/crt.pem"
+  mkdir -p "$TMP/config/instr/roots.d"
+  for name in root-b root-a; do
+    ssh-keygen -q -t ed25519 -N '' -C test-only -f "$TMP/$name"
+    cp "$TMP/$name.pub" "$TMP/config/instr/roots.d/$name.pub"
+  done
   run_prov() {
     IRIS_DEVICE_DIR="$DEVICE" IRIS_ARIA2="$TMP/aria2c" \
       IRIS_ARIA2_SUMS="$TMP/aria2c.sha256" IRIS_RUN="$TMP/run" \
       IRIS_CRT_SRC="$TMP/config/tls/crt.pem" \
+      IRIS_INSTRUCTION_ROOTS_DIR="$TMP/config/instr/roots.d" \
       bash "$PROV" "$ART"
   }
 }
 teardown() { rm -rf "$TMP"; }
 
-@test "stages the Guest Shell bundle, bootstrap.sh, and iris-catalog.pem" {
+@test "served bundle publication writes the archive before its adjacent digest" {
+  bundle_line="$(grep -n 'stage_atomic .*iris-agent.tgz" iris-agent.tgz' "$PROV" | cut -d: -f1)"
+  sidecar_line="$(grep -n 'stage_atomic .*iris-agent.tgz.sha256" iris-agent.tgz.sha256' "$PROV" | cut -d: -f1)"
+  [ -n "$bundle_line" ] && [ -n "$sidecar_line" ]
+  [ "$bundle_line" -lt "$sidecar_line" ]
+}
+
+@test "stages a digest- and trust-bound Guest Shell publication" {
   run run_prov
   [ "$status" -eq 0 ]
   [ -f "$ART/iris-agent.tgz" ]
+  [ -f "$ART/iris-agent.tgz.sha256" ]
   [ -f "$ART/bootstrap.sh" ]
   [ -f "$ART/iris-catalog.pem" ]
+  [ -f "$ART/iris-signers.pem" ]
+  [ "$(wc -c < "$ART/iris-agent.tgz.sha256" | tr -d ' ')" -eq 65 ]
+  [ "$(cat "$ART/iris-agent.tgz.sha256")" = \
+    "$(sha256sum "$ART/iris-agent.tgz" | awk '{print $1}')" ]
   # the cert is the server's public cert, verbatim
   run cat "$ART/iris-catalog.pem"
   [[ "$output" == "CRTPEM" ]]
   # This is public certificate material and the documented host-side XR build
   # reads it directly even when the container runs with umask 077.
   [ "$(stat -c '%a' "$ART/iris-catalog.pem" 2>/dev/null || stat -f '%Lp' "$ART/iris-catalog.pem")" = "644" ]
+  [ "$(stat -c '%a' "$ART/iris-signers.pem" 2>/dev/null || stat -f '%Lp' "$ART/iris-signers.pem")" = "644" ]
   # the bundle carries the agent code
   tar tzf "$ART/iris-agent.tgz" | grep -q "agent/iris_agent.py"
+  tar tzf "$ART/iris-agent.tgz" | grep -qx "iris-signers.allowed_signers"
+  tar tzf "$ART/iris-agent.tgz" | grep -qx "iris-root.allowed_signers"
+  cmp "$ART/iris-signers.pem" \
+    <(tar xOf "$ART/iris-agent.tgz" iris-signers.allowed_signers)
 }
 
 @test "rebuilds the bundle every run so it can't go stale" {
@@ -113,6 +137,33 @@ PYTHON
   check_guest_status stale
   cp "$TMP/verified.tgz" "$ART/iris-agent.tgz"
   printf 'changed bootstrap\n' >> "$ART/bootstrap.sh"
+  check_guest_status stale
+}
+
+@test "verified bundle readiness binds sidecar and public trust bytes" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  printf '%064d\n' 0 > "$ART/iris-agent.tgz.sha256"
+  check_guest_status stale
+
+  run run_prov
+  [ "$status" -eq 0 ]
+  printf 'changed trust\n' >> "$ART/iris-signers.pem"
+  check_guest_status stale
+}
+
+@test "missing instruction roots fails closed and preserves prior publication" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  cp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  cp "$ART/iris-agent.tgz.sha256" "$TMP/prior.sha256"
+  cp "$ART/iris-signers.pem" "$TMP/prior-signers.pem"
+  rm "$TMP/config/instr/roots.d/root-b.pub"
+  run run_prov
+  [ "$status" -ne 0 ]
+  cmp "$ART/iris-agent.tgz" "$TMP/prior.tgz"
+  cmp "$ART/iris-agent.tgz.sha256" "$TMP/prior.sha256"
+  cmp "$ART/iris-signers.pem" "$TMP/prior-signers.pem"
   check_guest_status stale
 }
 
@@ -184,6 +235,7 @@ PYTHON
   export IRIS_DEVICE_DIR="$DEVICE" IRIS_ARIA2="$TMP/aria2c"
   export IRIS_ARIA2_SUMS="$TMP/aria2c.sha256" IRIS_RUN="$TMP/run"
   export IRIS_CRT_SRC="$TMP/config/tls/crt.pem" IRIS_ARTIFACTS_DIR="$ART"
+  export IRIS_INSTRUCTION_ROOTS_DIR="$TMP/config/instr/roots.d"
   bash() {
     if [ "$1" = /opt/iris/server/provision-served.sh ]; then
       command bash "$PROV" "$ART"

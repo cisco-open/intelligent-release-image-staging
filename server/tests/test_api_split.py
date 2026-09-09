@@ -707,11 +707,19 @@ def test_guest_shell_legacy_artifacts_are_narrow_and_not_cacheable(tmp_path):
     staging = root / "staging"
     staging.mkdir(parents=True)
     (root / "bootstrap.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "iris-signers.pem").write_text("public trust\n", encoding="utf-8")
     (root / "private.txt").write_text("not public", encoding="utf-8")
     capability = "iris-agent-d1-" + "ab" * 16 + ".conf"
     staged = staging / capability
     staged.write_text("catalog_token=secret\n", encoding="utf-8")
     staged.chmod(0o600)
+    envelope = "iris-instructions-d1-" + "cd" * 16 + ".envelope"
+    digest = "bundle-sha256-" + "ef" * 16
+    for name, body in ((envelope, b"sealed instructions\n"),
+                       (digest, (b"0" * 64) + b"\n")):
+        target = staging / name
+        target.write_bytes(body)
+        target.chmod(0o600)
     server = artifact_server.make_server(
         "127.0.0.1", 0, str(root), secrets_path=str(secret_path))
     _thread(server)
@@ -720,14 +728,31 @@ def test_guest_shell_legacy_artifacts_are_narrow_and_not_cacheable(tmp_path):
         status, headers, _ = _request(port, "/bootstrap.sh")
         assert status == 200
         assert headers["Deprecation"] == "true"
+        status, headers, body = _request(port, "/iris-signers.pem")
+        assert status == 200 and body == b"public trust\n"
+        assert headers["Deprecation"] == "true"
+        assert _request(port, "/iris-signers.pem", method="HEAD")[0] == 200
         status, headers, body = _request(
             port, "/%73taging/" + capability)
         assert status == 200
         assert body == b"catalog_token=secret\n"
         assert headers["Cache-Control"] == "private, no-store"
         assert headers["Deprecation"] == "true"
+        for name in (envelope, digest):
+            status, headers, _ = _request(port, "/staging/" + name)
+            assert status == 200
+            assert headers["Cache-Control"] == "private, no-store"
+            assert _request(port, "/staging/" + name, method="HEAD")[0] == 200
         assert _request(port, "/private.txt")[0] == 401
         assert _request(port, "/staging/not-a-capability.conf")[0] == 401
+        for near in (
+            envelope.replace("cd", "CD"), envelope + ".extra",
+            "iris-instructions-d1-" + "a" * 31 + ".envelope",
+            digest.replace("ef", "EF"), digest + ".sha256",
+            "bundle-sha256-" + "f" * 31,
+            "iris-agent.tgz.sha256",
+        ):
+            assert _request(port, "/staging/" + near)[0] == 401, near
     finally:
         server.shutdown()
         server.server_close()
@@ -741,7 +766,23 @@ def test_route_registry_does_not_widen_guest_shell_staging_capabilities():
         "artifact", "HEAD",
         "/staging/rpc-secret-0123456789abcdef0123456789abcdef")
     assert api_routes.match(
+        "artifact", "GET",
+        "/staging/iris-instructions-edge-01-0123456789abcdef0123456789abcdef.envelope")
+    assert api_routes.match(
+        "artifact", "HEAD",
+        "/staging/bundle-sha256-0123456789abcdef0123456789abcdef")
+    assert api_routes.match("artifact", "GET", "/iris-signers.pem")
+    assert api_routes.match("artifact", "HEAD", "/iris-signers.pem")
+    assert api_routes.match(
         "artifact", "GET", "/staging/not-a-capability.conf") is None
+    for path in (
+        "/staging/iris-instructions-edge-01-0123456789ABCDEF0123456789ABCDEF.envelope",
+        "/staging/iris-instructions-edge-01-0123456789abcdef0123456789abcdef.envelope/extra",
+        "/staging/bundle-sha256-0123456789ABCDEF0123456789ABCDEF",
+        "/staging/bundle-sha256-0123456789abcdef0123456789abcdef.sha256",
+        "/iris-agent.tgz.sha256",
+    ):
+        assert api_routes.match("artifact", "GET", path) is None, path
 
 
 def test_list_devices_get_is_side_effect_free(tmp_path):

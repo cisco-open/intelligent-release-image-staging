@@ -31,6 +31,8 @@ setup() {
   cat > "$ROOT/server/pack-agent-bundle.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "packed" > "$3"
+sha256sum "$3" | awk '{print $1}' > "$3.sha256"
+printf '%s\n' "${5:-}" > "${3}.roots-arg"
 EOF
   chmod +x "$ROOT/server/pack-agent-bundle.sh"
   # the handed-in "binary"
@@ -65,6 +67,18 @@ EOF
   run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" < /dev/null
   [ "$status" -eq 0 ]
   [ -f "$ROOT/artifacts/iris-agent.tgz" ]
+  [ "$(wc -c < "$ROOT/artifacts/iris-agent.tgz.sha256" | tr -d ' ')" -eq 65 ]
+}
+
+@test "bundler forwards an explicit instruction roots directory" {
+  cat > "$ROOT/tools/aria2c.sha256" <<EOF
+$ARIA2_SHA  x86_64
+EOF
+  roots="$BATS_TEST_TMPDIR/roots.d"; mkdir "$roots"
+  run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" \
+    --instruction-roots-dir "$roots" < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$(cat "$ROOT/artifacts/iris-agent.tgz.roots-arg")" = "$roots" ]
 }
 
 @test "bundler fails closed when the manifest has no x86_64 entry" {
@@ -165,6 +179,7 @@ STUB
   cat > "$ROOT/server/pack-agent-bundle.sh" <<'PACK'
 #!/usr/bin/env bash
 cp "$2" "$3"
+sha256sum "$3" | awk '{print $1}' > "$3.sha256"
 PACK
   run env PATH="$BIN:$PATH" bash "$ROOT/tools/make-agent-bundle.sh" \
     --arch arm64 --aria2 "$ROOT/bin/aria2c-arm64" < /dev/null

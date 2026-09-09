@@ -103,7 +103,8 @@ def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility()
         ("artifact", method, path)
         for method in ("GET", "HEAD")
         for path in ("/bootstrap.sh", "/iris-agent.tgz",
-                     "/iris-agent-arm.tgz", "/iris-catalog.pem")}
+                     "/iris-agent-arm.tgz", "/iris-catalog.pem",
+                     "/iris-signers.pem")}
     guest_shell_capabilities = {
         ("artifact", method, "/staging/{legacy_artifact}")
         for method in ("GET", "HEAD")}
@@ -121,6 +122,16 @@ def test_anonymous_routes_are_probes_or_exact_guest_shell_static_compatibility()
                 if r.path == "/api/v1/login").security == "consolePassword"
     assert next(r for r in api_routes.ROUTES
                 if r.path == "/api/v1/setup").security == "setupGrant"
+
+    capability = _load()["paths"]["/staging/{legacy_artifact}"]["get"]
+    patterns = [item["pattern"] for item in capability["parameters"][0][
+        "schema"]["oneOf"]]
+    assert patterns == [
+        r"^iris-agent-[A-Za-z0-9._:-]+-[0-9A-Fa-f]{32}\.conf$",
+        r"^rpc-secret-[0-9A-Fa-f]{32}$",
+        r"^iris-instructions-[A-Za-z0-9._:-]+-[0-9a-f]{32}\.envelope$",
+        r"^bundle-sha256-[0-9a-f]{32}$",
+    ]
 
 
 def test_every_operation_has_auth_schemas_statuses_and_examples():

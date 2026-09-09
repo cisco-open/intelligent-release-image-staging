@@ -11,7 +11,8 @@ _build_stub_setup() {
   STUBDIR="$BATS_TEST_TMPDIR/stub"
   BIN="$BATS_TEST_TMPDIR/bin"
   mkdir -p "$STUBDIR/device/container" "$STUBDIR/device/agent" "$STUBDIR/tools" \
-    "$STUBDIR/artifacts" "$STUBDIR/deliverables" "$BIN"
+    "$STUBDIR/artifacts" "$STUBDIR/deliverables" "$STUBDIR/server" \
+    "$STUBDIR/roots.d" "$BIN"
   ln -s "$BATS_TEST_DIRNAME/../../../tools/build-device-image.sh" \
     "$STUBDIR/tools/build-device-image.sh"
   for file in Dockerfile entrypoint.sh reconcile.sh; do
@@ -21,6 +22,12 @@ _build_stub_setup() {
   printf '#!/bin/sh\nexit 0\n' > "$STUBDIR/device/agent/peer-transfer-hook.sh"
   touch "$STUBDIR/device/verify_image.py"
   echo "0.0.0-test" > "$STUBDIR/VERSION"
+  cp "$BATS_TEST_DIRNAME/../../../server/instruction_keys.py" \
+    "$STUBDIR/server/instruction_keys.py"
+  for name in root-a root-b; do
+    ssh-keygen -q -t ed25519 -N '' -C test-only -f "$STUBDIR/$name"
+    cp "$STUBDIR/$name.pub" "$STUBDIR/roots.d/$name.pub"
+  done
   printf 'fake amd64 aria2c\n' > "$STUBDIR/deliverables/aria2c-x86_64"
   printf 'fake arm64 aria2c\n' > "$STUBDIR/deliverables/aria2c-aarch64"
   chmod +x "$STUBDIR/deliverables/aria2c-x86_64" \
@@ -71,7 +78,8 @@ _run_build() {
   local context="$1"
   shift
   mkdir -p "$context"
-  run env PATH="$BIN:$PATH" IRIS_NO_PULL=1 "$@" \
+  run env PATH="$BIN:$PATH" IRIS_NO_PULL=1 \
+    IRIS_INSTRUCTION_ROOTS_DIR="$STUBDIR/roots.d" "$@" \
     bash "$BUILD" --context "$context" --output "$OUT"
 }
 
@@ -83,6 +91,8 @@ _run_build() {
   [ "$status" -eq 0 ]
   [ -f "$OUT" ]
   ! grep -q 'iris-catalog.pem' "$DOCKER_CONTEXT_FILES"
+  grep -qx 'agent/iris-signers.allowed_signers' "$DOCKER_CONTEXT_FILES"
+  grep -qx 'agent/iris-root.allowed_signers' "$DOCKER_CONTEXT_FILES"
 }
 
 @test "catalog certificate rotation does not change canonical source identity" {

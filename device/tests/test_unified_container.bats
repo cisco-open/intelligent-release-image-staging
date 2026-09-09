@@ -46,6 +46,30 @@ _xr() {
     "$DEVICE/container/Dockerfile"
 }
 
+@test "canonical image embeds rendered instruction trust and explicit verifier tooling" {
+  dockerfile="$DEVICE/container/Dockerfile"
+  grep -Eq '^RUN apk add .*openssh-keygen' "$dockerfile"
+  grep -q '^COPY agent/iris-signers.allowed_signers /opt/iris/agent/iris-signers.allowed_signers$' \
+    "$dockerfile"
+  grep -q '^COPY agent/iris-root.allowed_signers /opt/iris/agent/iris-root.allowed_signers$' \
+    "$dockerfile"
+  grep -Eq 'chmod 0444 .*iris-signers.allowed_signers' "$dockerfile"
+  ! grep -q 'IRIS_MAX_PEERS=' "$dockerfile"
+  ! grep -q 'IRIS_MAX_CONCURRENT=' "$dockerfile"
+}
+
+@test "all container package builders forward one root directory to the common renderer" {
+  common="$REPO/tools/build-device-image.sh"
+  iox="$DEVICE/iox/build.sh"
+  xr="$REPO/tools/build-xr-package.sh"
+  grep -q -- '--instruction-roots-dir' "$common"
+  grep -q 'render_device_trust' "$common"
+  grep -q 'iris-signers.allowed_signers' "$common"
+  grep -q 'iris-root.allowed_signers' "$common"
+  grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$iox"
+  grep -Eq 'build-device-image\.sh.*--instruction-roots-dir' "$xr"
+}
+
 @test "missing and unknown platform values fail before any config write" {
   run _base
   [ "$status" -ne 0 ]

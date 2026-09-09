@@ -164,7 +164,14 @@ run_start_aria2c() {
   # the only route an updated hook has onto a Catalyst or a router.
   out="$BATS_TEST_TMPDIR/iris-agent.tgz"
   printf 'fake-aria2c\n' > "$BATS_TEST_TMPDIR/aria2c"
-  run bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" "$BATS_TEST_TMPDIR/aria2c" "$out"
+  roots="$BATS_TEST_TMPDIR/roots.d"; mkdir "$roots"
+  for name in root-a root-b; do
+    ssh-keygen -q -t ed25519 -N '' -C test-only \
+      -f "$BATS_TEST_TMPDIR/$name"
+    cp "$BATS_TEST_TMPDIR/$name.pub" "$roots/$name.pub"
+  done
+  run bash "$REPO/server/pack-agent-bundle.sh" "$DEVICE" \
+    "$BATS_TEST_TMPDIR/aria2c" "$out" --instruction-roots-dir "$roots"
   [ "$status" -eq 0 ]
   tar tzf "$out" | grep -qx "agent/peer-transfer-hook.sh"
   x="$BATS_TEST_TMPDIR/x"; mkdir -p "$x"

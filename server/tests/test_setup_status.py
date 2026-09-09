@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Post-install setup status: runtime trust and package provenance."""
 import hashlib
+import io
+import json
 import os
+import tarfile
 
 import setup_status
 
@@ -96,6 +99,82 @@ def test_package_readiness_binds_readable_bytes_to_provenance(tmp_path):
     assert item["provenance"]["canonical_index_digest"] == \
         expected["canonical_index_digest"]
     assert "contents and native signatures are not inspected" in item["detail"]
+
+
+def _write_served_bundle_fixture(tmp_path, root_bytes=b"root trust\n"):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    bundle = artifacts / "iris-agent.tgz"
+    embedded = {
+        "iris-signers.allowed_signers": b"ca trust\n",
+        "iris-root.allowed_signers": root_bytes,
+    }
+    with tarfile.open(bundle, "w:gz") as archive:
+        for name, data in embedded.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    (artifacts / "iris-agent.tgz.sha256").write_text(digest + "\n")
+    (artifacts / "bootstrap.sh").write_bytes(b"bootstrap\n")
+    (artifacts / "iris-signers.pem").write_bytes(
+        embedded["iris-signers.allowed_signers"])
+    status = tmp_path / "served-bundle.json"
+    record = {"format": "iris-served-bundle-v1", "state": "ok",
+              "reason": "ready"}
+    for name in ("iris-agent.tgz", "iris-agent.tgz.sha256",
+                 "bootstrap.sh", "iris-signers.pem"):
+        record[name] = hashlib.sha256((artifacts / name).read_bytes()).hexdigest()
+    for name, data in embedded.items():
+        record[name] = hashlib.sha256(data).hexdigest()
+    status.write_text(json.dumps(record) + "\n")
+    return artifacts, status, record
+
+
+def test_served_bundle_readiness_binds_raw_sidecar_and_embedded_trust(tmp_path):
+    artifacts, status, record = _write_served_bundle_fixture(tmp_path)
+    item = setup_status.served_bundle_readiness(
+        str(artifacts), str(status), startup_state="ok")
+    assert item["state"] == "ok", item
+
+    # Model a replaced bundle whose adjacent digest and top-level provenance
+    # were both updated, while its embedded offline-root trust changed.
+    _write_served_bundle_fixture(tmp_path, root_bytes=b"substituted root\n")
+    bundle = artifacts / "iris-agent.tgz"
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    sidecar = artifacts / "iris-agent.tgz.sha256"
+    sidecar.write_text(digest + "\n")
+    record["iris-agent.tgz"] = digest
+    record["iris-agent.tgz.sha256"] = hashlib.sha256(
+        sidecar.read_bytes()).hexdigest()
+    status.write_text(json.dumps(record) + "\n")
+    item = setup_status.served_bundle_readiness(
+        str(artifacts), str(status), startup_state="ok")
+    assert item["state"] == "stale"
+
+
+def test_served_bundle_readiness_rejects_noncanonical_digest_sidecar(tmp_path):
+    artifacts, status, record = _write_served_bundle_fixture(tmp_path)
+    sidecar = artifacts / "iris-agent.tgz.sha256"
+    sidecar.write_text(sidecar.read_text().upper())
+    record["iris-agent.tgz.sha256"] = hashlib.sha256(
+        sidecar.read_bytes()).hexdigest()
+    status.write_text(json.dumps(record) + "\n")
+    item = setup_status.served_bundle_readiness(
+        str(artifacts), str(status), startup_state="ok")
+    assert item["state"] == "stale"
+
+
+def test_served_bundle_readiness_bounds_digest_sidecar_before_read(tmp_path):
+    artifacts, status, record = _write_served_bundle_fixture(tmp_path)
+    sidecar = artifacts / "iris-agent.tgz.sha256"
+    sidecar.write_bytes(b"x" * 66)
+    record["iris-agent.tgz.sha256"] = hashlib.sha256(
+        sidecar.read_bytes()).hexdigest()
+    status.write_text(json.dumps(record) + "\n")
+    item = setup_status.served_bundle_readiness(
+        str(artifacts), str(status), startup_state="ok")
+    assert item["state"] == "stale"
 
 
 def test_package_readiness_absent_and_empty_are_not_ok(tmp_path):
