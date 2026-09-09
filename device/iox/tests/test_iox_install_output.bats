@@ -304,9 +304,11 @@ signal_case=scenario.split('_') if scenario.startswith(('group_', 'direct_')) el
 uploaded=False
 remote_wrapper=False
 remote_certificate=False
+remote_instructions=False
 admitted=False
 resolved=False
 certificate=False
+instructions=False
 state='RUNNING' if scenario in ('routing_missing','preserve_existing') else ''
 counts={}
 last_ready=None
@@ -354,8 +356,8 @@ def command_names():
 
 
 def request(value):
-    global sequence,finished,expected_exit,uploaded,admitted,resolved,certificate,state,revision,phase
-    global signal_sent,remote_wrapper,remote_certificate
+    global sequence,finished,expected_exit,uploaded,admitted,resolved,certificate,instructions,state,revision,phase
+    global signal_sent,remote_wrapper,remote_certificate,remote_instructions
     keys=set('version sequence attempt_id action teardown_mode record_id transaction_id expected_revision board_identity wrapper_sha256 operation arguments'.split())
     assert set(value)==keys,'request is not the exact closed schema'
     assert type(value['sequence']) is int and value['sequence']==sequence
@@ -365,7 +367,7 @@ def request(value):
     operation=value['operation']
     arguments=value['arguments']
     assert type(arguments) is dict
-    assert operation in ('command','upload_wrapper','upload_certificate','begin_install','deployed','cleanup','finish')
+    assert operation in ('command','upload_wrapper','upload_certificate','begin_install','deployed','stage_instructions','cleanup','finish')
     name=operation
     if operation=='command':
         assert set(arguments)=={'name'} and arguments['name'] in command_names()
@@ -379,7 +381,7 @@ def request(value):
     else:
         assert arguments=={}
     if action=='uninstall':
-        assert operation not in ('upload_wrapper','upload_certificate','begin_install','deployed')
+        assert operation not in ('upload_wrapper','upload_certificate','begin_install','deployed','stage_instructions')
         assert name not in ('app_install','app_activate','configure_app','configure_network','copy_certificate','app_start')
     trace.write(json.dumps(dict(event='request',request=value),sort_keys=True)+'\n')
     trace.flush()
@@ -481,6 +483,14 @@ def request(value):
         assert admitted and resolved,'activation preceded restoration acknowledgement'
         if scenario!='activation_timeout': state='ACTIVATED'
         stdout='Application activation requested\n' if scenario=='activation_timeout' else 'Application activated\n'
+    elif name=='stage_instructions':
+        assert state=='ACTIVATED','instructions staged before activation'
+        remote_instructions=True
+        if scenario=='instruction_stage_failure':
+            code,category,detail=4,'transport','instruction staging failed'
+        else:
+            instructions=True
+        remote_instructions=False
     elif name=='copy_certificate':
         assert state=='ACTIVATED','certificate copied before activation'
         if scenario in ('certificate_copy_failure','copy_failure_cleanup_failure'):
@@ -490,7 +500,7 @@ def request(value):
             certificate=True
             stdout='Successfully copied file /flash/iris-catalog.pem to iris as iris-catalog.pem\n'
     elif name=='app_start':
-        assert certificate and state=='ACTIVATED'
+        assert certificate and instructions and state=='ACTIVATED'
         state='RUNNING'
     elif name=='save': stdout='[OK]\n'
     elif name=='remove_wrapper': remote_wrapper=False
@@ -525,7 +535,8 @@ def request(value):
         if action=='install' and code==0:
             remote_wrapper=False
             remote_certificate=False
-            trace.write(json.dumps(dict(event='artifact_cleanup',wrapper=False,certificate=False))+'\n')
+            remote_instructions=False
+            trace.write(json.dumps(dict(event='artifact_cleanup',wrapper=False,certificate=False,instructions=False))+'\n')
             trace.flush()
         if scenario=='completion_order': stdout='fixture finish acknowledged\n'
         finished=True
@@ -714,7 +725,7 @@ ASSERTIONS
   [[ "$output" == *'onboard complete: 192.0.2.10'* ]]
   [[ "$output" == *'Installing package'* ]]
   [[ "$output" == *'%IOX: application installation accepted'* ]]
-  _iox_assert_trace ordered upload_wrapper begin_install app_install deployed app_activate copy_certificate app_start save finish
+  _iox_assert_trace ordered upload_wrapper begin_install app_install deployed app_activate stage_instructions copy_certificate app_start save finish
   _iox_assert_trace finish RUNNING
 }
 
@@ -722,7 +733,7 @@ ASSERTIONS
   _iox_fixture_setup
   run _iox_controller_run install marker_present
   [ "$status" -eq 0 ]
-  _iox_assert_trace ordered upload_wrapper begin_install app_stop app_install deployed app_activate
+  _iox_assert_trace ordered upload_wrapper begin_install app_stop app_install deployed app_activate stage_instructions
   _iox_assert_trace absent verification_enable verification_disable
 }
 
@@ -740,6 +751,33 @@ ASSERTIONS
   [ "$status" -ne 0 ]
   _iox_assert_trace ordered app_activate copy_certificate finish
   _iox_assert_trace absent app_start
+  _iox_assert_trace finish ACTIVATED
+}
+
+@test "instruction staging is one opaque empty recipe operation after activation" {
+  _iox_fixture_setup
+  run _iox_controller_run install success
+  [ "$status" -eq 0 ] || return 1
+  python3 - "$IOX_REQUEST_LOG" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+requests = [row["request"] for row in rows if row.get("event") == "request"]
+stage = [row for row in requests if row["operation"] == "stage_instructions"]
+assert len(stage) == 1
+assert stage[0]["arguments"] == {}
+serialized = json.dumps(stage[0], sort_keys=True)
+for forbidden in ("envelope", "bootstrap", "ciphertext", "/tmp/", "instruction key"):
+    assert forbidden not in serialized
+PY
+  _iox_assert_trace ordered app_activate stage_instructions copy_certificate app_start
+}
+
+@test "instruction staging failure leaves the activated app unstarted" {
+  _iox_fixture_setup
+  run _iox_controller_run install instruction_stage_failure
+  [ "$status" -ne 0 ]
+  _iox_assert_trace ordered app_activate stage_instructions finish
+  _iox_assert_trace absent copy_certificate app_start
   _iox_assert_trace finish ACTIVATED
 }
 

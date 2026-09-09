@@ -128,6 +128,45 @@ _xr() {
   grep -qF "catalog_ca = $STAGE/iris-catalog.pem" "$CONF"
 }
 
+@test "fixed IOx and XR bootstrap candidates import privately into persistent work" {
+  appdata="$BATS_TEST_TMPDIR/appdata"
+  mkdir -p "$appdata"
+  printf '%s' 'iox-private-envelope' > "$appdata/iris-instructions.bootstrap"
+  chmod 600 "$appdata/iris-instructions.bootstrap"
+  run _iox CAF_APP_APPDATA_DIR="$appdata"
+  [ -f "$STAGE/iris-instructions.bootstrap" ]
+  [ "$(stat -c %a "$STAGE/iris-instructions.bootstrap")" = 600 ]
+  [ "$(cat "$STAGE/iris-instructions.bootstrap")" = iox-private-envelope ]
+  [ ! -e "$appdata/iris-instructions.bootstrap" ]
+  [ ! -e "$STAGE/iris-instructions.lkg" ]
+
+  rm -rf "$STAGE" "$CONF"
+  mkdir -p "$STAGE"
+  printf '%s' 'xr-private-envelope' > "$STAGE/iris-instructions.bootstrap"
+  chmod 600 "$STAGE/iris-instructions.bootstrap"
+  run _xr
+  [ -f "$STAGE/iris-work/iris-instructions.bootstrap" ]
+  [ "$(stat -c %a "$STAGE/iris-work/iris-instructions.bootstrap")" = 600 ]
+  [ "$(cat "$STAGE/iris-work/iris-instructions.bootstrap")" = xr-private-envelope ]
+  [ ! -e "$STAGE/iris-instructions.bootstrap" ]
+  [ ! -e "$STAGE/iris-work/iris-instructions.lkg" ]
+}
+
+@test "invalid bootstrap candidate cannot replace an existing pending envelope" {
+  mkdir -p "$STAGE/iris-work"
+  printf '%s' 'existing-pending-envelope' > \
+    "$STAGE/iris-work/iris-instructions.bootstrap"
+  target="$BATS_TEST_TMPDIR/symlink-target"
+  printf '%s' 'replacement-envelope' > "$target"
+  ln -s "$target" "$STAGE/iris-instructions.bootstrap"
+  run _xr
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"instruction bootstrap candidate is invalid"* ]]
+  [ "$(cat "$STAGE/iris-work/iris-instructions.bootstrap")" = \
+    existing-pending-envelope ]
+  [ -L "$STAGE/iris-instructions.bootstrap" ]
+}
+
 @test "production IOx requires CAF app-data and refuses a catalog path override" {
   run env -i PATH="$PATH" IRIS_DEVICE_PLATFORM=iox \
     IRIS_CATALOG_URL=https://192.0.2.1:8443 IRIS_CATALOG_TOKEN=test-token \

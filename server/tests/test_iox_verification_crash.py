@@ -660,6 +660,8 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
         "session_seconds": 7200,
         "restoration_reserve_seconds": 180,
         "application_id": "iris",
+        "instruction_bootstrap_materializer": lambda _device_id:
+            b"fixture-instruction-envelope",
     })
     config.update(overrides)
     if test_limits is not None:

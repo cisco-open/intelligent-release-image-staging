@@ -660,6 +660,8 @@ def _authority(tmp_path, **overrides):
                  credential_resolver=credential_resolver,
                  enrollment_token_minter=lambda _device_id:
                      "fixture-catalog-token-SECRET",
+                 instruction_bootstrap_materializer=lambda _device_id:
+                     b"fixture-instruction-envelope",
                  catalog_certificate_path=str(certificate))
     value.update(overrides)
     return value
@@ -917,6 +919,7 @@ def _install_operations():
         ("command", {"name": "app_install"}),
         ("deployed", {}),
         ("command", {"name": "app_activate"}),
+        ("stage_instructions", {}),
         ("upload_certificate", {}),
         ("command", {"name": "app_start"}),
         ("command", {"name": "save"}),
@@ -1234,7 +1237,7 @@ def test_unknown_or_changed_pre_disable_read_refuses_before_ownership(
         assert journal["pre_disable_observation"]["state"] == read_states[-1]
 
 
-def test_runtime_credentials_are_resolved_without_raw_request_and_token_mints_last(
+def test_runtime_credentials_are_resolved_without_raw_request_and_bootstrap_mints_last(
         tmp_path):
     timeline = []
     wrapper_seen = []
@@ -1266,8 +1269,13 @@ def test_runtime_credentials_are_resolved_without_raw_request_and_token_mints_la
 
     def minter(device_id):
         timeline.append(("enrollment_token_minter", device_id))
-        assert wrapper_seen and not os.path.exists(wrapper_seen[0])
+        assert os.path.exists(wrapper_path)
         return secrets[2]
+
+    def materializer(device_id):
+        timeline.append(("instruction_bootstrap_materializer", device_id))
+        assert device_id == "edge-01"
+        return b"fixture-instruction-envelope"
 
     def prepare(request, identity):
         timeline.append(("prepare", request, identity))
@@ -1298,6 +1306,7 @@ def test_runtime_credentials_are_resolved_without_raw_request_and_token_mints_la
     controller = _controller(
         tmp_path, store, factory, credential_resolver=resolver,
         enrollment_token_minter=minter,
+        instruction_bootstrap_materializer=materializer,
         recipe_argv_by_action={"install": ["/bin/bash", recipe]})
     try:
         result = controller.run_install(
@@ -1321,9 +1330,11 @@ def test_runtime_credentials_are_resolved_without_raw_request_and_token_mints_la
     assert len(predecessor_events) == 1
     assert predecessor_events[0][1] == "restored"
     assert names.count("enrollment_token_minter") == 1
+    assert names.count("instruction_bootstrap_materializer") == 1
     assert names.index("predecessor_terminal") < names.index("preflight") < \
-        names.index("prepare") < \
-        names.index("enrollment_token_minter")
+        names.index("enrollment_token_minter") < \
+        names.index("instruction_bootstrap_materializer") < \
+        names.index("prepare")
     assert store.records["old-r1"]["iox_verification"]["phase"] == "restored"
 
 
@@ -1385,6 +1396,129 @@ def test_install_orders_upload_ownership_and_restoration_before_activation(tmp_p
     assert (preflight_at < prepare_at < begin_at < upload_at < intent_at <
             confirmed_at < stop_at < install_at < probe_at <
             restore_intent_at < enable_at < restored_at < activate_at)
+
+
+def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
+        tmp_path):
+    timeline = []
+    payload = b"ciphertext-fixture-that-must-not-leak"
+    store = _StatefulStore(tmp_path, calls=timeline)
+    factory = _TransportFactory(calls=timeline)
+    wrapper_path = _write_unsigned_wrapper(tmp_path)
+    recipe = _write_recipe_peer(
+        tmp_path, operations=_install_operations(), cleanup_on_error=True)
+
+    def minter(device_id):
+        timeline.append(("enrollment_token_minter", device_id))
+        return "fresh-catalog-token-SECRET"
+
+    def materializer(device_id):
+        timeline.append(("instruction_bootstrap_materializer", device_id))
+        assert device_id == "edge-01"
+        return payload
+
+    def prepare(request, identity):
+        timeline.append(("prepare", request, identity))
+        record = _record(record_id="new-r1")
+        record["state"] = "planned"
+        store.records["new-r1"] = record
+        return "new-r1"
+
+    prepare_cb, preflight, on_output = _callbacks(timeline)
+    del prepare_cb
+    controller = _controller(
+        tmp_path, store, factory, enrollment_token_minter=minter,
+        instruction_bootstrap_materializer=materializer,
+        recipe_argv_by_action={"install": ["/bin/bash", recipe]})
+    try:
+        result = controller.run_install(
+            _request(wrapper_path=wrapper_path), prepare, preflight, on_output,
+            _Cancel())
+    finally:
+        controller.close()
+
+    assert result["result_code"] == 0
+    names = [call[0] for call in timeline]
+    assert names.index("enrollment_token_minter") < \
+        names.index("instruction_bootstrap_materializer") < \
+        names.index("prepare") < names.index("iox_begin")
+    uploads = [call for call in timeline if call[0] == "upload"]
+    wrapper_upload = next(call for call in uploads if call[4] == "upload_wrapper")
+    instruction_upload = next(
+        call for call in uploads if call[4] == "upload_instructions")
+    assert instruction_upload[1] == (
+        "flash:iris-instructions-%s.envelope" %
+        store.records["new-r1"]["iox_verification"]["transaction_id"])
+    assert instruction_upload[2] == payload
+    assert instruction_upload[3] != wrapper_upload[3]
+
+    def command_position(purpose):
+        return next(index for index, call in enumerate(timeline)
+                    if call[0] == "command" and call[4] == purpose)
+
+    assert (command_position("app_activate") <
+            next(index for index, call in enumerate(timeline)
+                 if call[0] == "upload" and call[4] == "upload_instructions") <
+            command_position("copy_instructions") <
+            command_position("remove_instructions") <
+            command_position("app_start"))
+    public = json.dumps({"result": result, "store_calls": store.calls},
+                        sort_keys=True, default=str).encode("utf-8")
+    assert payload not in public
+    assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
+
+
+@pytest.mark.parametrize("outcome", ["raises", "empty", "oversize"])
+def test_instruction_materialization_failure_precedes_prepare_journal_and_mutation(
+        tmp_path, outcome):
+    timeline = []
+    store = _StatefulStore(tmp_path, calls=timeline)
+    factory = _TransportFactory(calls=timeline)
+    wrapper_path = _write_unsigned_wrapper(tmp_path)
+
+    def materializer(device_id):
+        timeline.append(("instruction_bootstrap_materializer", device_id))
+        if outcome == "raises":
+            raise RuntimeError("sensitive materialization detail")
+        if outcome == "empty":
+            return b""
+        return b"x" * (256 * 1024 + 1)
+
+    prepare, preflight, on_output = _callbacks(timeline)
+    controller = _controller(
+        tmp_path, store, factory,
+        instruction_bootstrap_materializer=materializer)
+    try:
+        result = controller.run_install(
+            _request(wrapper_path=wrapper_path), prepare, preflight, on_output,
+            _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 2
+    assert result["error_category"] == "rejected"
+    assert result["detail"] == "IOx install controller failed"
+    assert not [call for call in timeline if call[0] in ("prepare", "iox_begin")]
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+    assert not [call for call in timeline if call[0] == "upload"]
+    assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
+
+
+def test_instruction_copy_failure_removes_only_transaction_source_and_never_starts(
+        tmp_path):
+    factory = _TransportFactory(
+        command_outcomes={"copy_instructions": ["transport"]})
+    result, store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory)
+    assert result["result_code"] == 4
+    assert result["error_category"] == "transport"
+    assert _command_calls(factory, "remove_instructions")
+    assert _command_calls(factory, "app_start") == []
+    rendered = b"\n".join(call[2] for call in timeline
+                           if call[0] == "command")
+    assert b"iris-instructions.bootstrap" in rendered
+    assert b"delete /force flash:iris-instructions-" in rendered
+    assert b"delete /force iris-instructions.bootstrap" not in rendered
+    assert store.records["new-r1"]["iox_verification"]["unresolved"] is False
 
 
 def test_wrapper_upload_failure_is_primary_and_never_reaches_disable_or_teardown(

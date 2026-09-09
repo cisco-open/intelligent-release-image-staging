@@ -95,6 +95,7 @@ setup() {
   [[ "$output" == *'/harddisk:/iris-xr.rpm'* ]]
   [[ "$output" == *"appmgr package install rpm /harddisk:/iris-xr.rpm"* ]]
   [[ "$output" == *"scp -O <public-certificate> <user>@192.0.2.10:/harddisk:/iris-catalog.pem"* ]]
+  [[ "$output" == *"scp -O <instruction-envelope> <user>@192.0.2.10:/harddisk:/iris-instructions.bootstrap"* ]]
 }
 
 @test "dry-run never emits a startup-config persist step" {
@@ -202,11 +203,11 @@ EOF
 # never a direct ssh call of its own.
 # ---------------------------------------------------------------------------
 
-@test "the installer opens no SSH session of its own other than the two scp pushes" {
-  # One push carries the RPM and one carries the runtime certificate. Every
+@test "the installer opens no SSH session of its own other than the three scp pushes" {
+  # The pushes carry the RPM, runtime certificate, and bootstrap envelope. Every
   # other device interaction goes through RUN(), which wraps lab/xr-run.sh.
   count="$(grep -c 'sshpass' "$INSTALL")"
-  [ "$count" -eq 2 ]
+  [ "$count" -eq 3 ]
   grep -q 'sshpass -e scp' "$INSTALL"
 }
 
@@ -283,6 +284,9 @@ STUB
 if [ -n "${FAKE_COMMAND_LOG:-}" ]; then
   echo "=== SCP: $* ===" >> "$FAKE_COMMAND_LOG"
 fi
+case "$*" in
+  *"${FAKE_SCP_FAIL_MATCH:-__no_match__}"*) exit 1 ;;
+esac
 exit "${FAKE_SCP_STATUS:-0}"
 STUB
   chmod +x "$STUBDIR/bin/sshpass"
@@ -295,11 +299,15 @@ STUB
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$BATS_TEST_TMPDIR/catalog.key" -out "$CRTFILE" \
     -days 1 -subj '/CN=iris-test' >/dev/null 2>&1
+  INSTRUCTION_FILE="$BATS_TEST_TMPDIR/iris-instructions.envelope"
+  printf '%s' 'private-bootstrap-ciphertext' > "$INSTRUCTION_FILE"
+  chmod 600 "$INSTRUCTION_FILE"
 }
 
 _xr_install_run_live() {
   env PATH="$STUBDIR/bin:$PATH" DEVICE_USER=admin DEVICE_PASS=pw \
     XR_RPM_FILE="$RPMFILE" IRIS_CRT_FILE="$CRTFILE" \
+    IRIS_INSTRUCTION_BOOTSTRAP_FILE="$INSTRUCTION_FILE" \
     ACTIVATE_TIMEOUT="${ACTIVATE_TIMEOUT:-30}" \
     ACTIVATE_POLL="${ACTIVATE_POLL:-1}" \
     bash "$STUBDIR/device/xr-install.sh"
@@ -321,6 +329,51 @@ _xr_install_run_live() {
   activate_line="$(grep -n 'appmgr application iris activate' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
   [ -n "$cert_line" ] && [ -n "$activate_line" ]
   [ "$cert_line" -lt "$activate_line" ]
+}
+
+@test "live: uploads package certificate and bootstrap before registration" {
+  _xr_install_stub_setup
+  run _xr_install_run_live
+  [ "$status" -eq 0 ] || return 1
+  rpm_line="$(grep -n '/harddisk:/iris-xr.rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  cert_line="$(grep -n '/harddisk:/iris-catalog.pem' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  instruction_line="$(grep -n '/harddisk:/iris-instructions.bootstrap' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  register_line="$(grep -n 'appmgr package install rpm' "$FAKE_COMMAND_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$rpm_line" ] && [ -n "$cert_line" ] && \
+    [ -n "$instruction_line" ] && [ -n "$register_line" ]
+  [ "$rpm_line" -lt "$cert_line" ]
+  [ "$cert_line" -lt "$instruction_line" ]
+  [ "$instruction_line" -lt "$register_line" ]
+  ! grep -q 'private-bootstrap-ciphertext' "$FAKE_COMMAND_LOG"
+}
+
+@test "real install validates the bootstrap snapshot before device contact" {
+  _xr_install_stub_setup
+  for shape in missing empty symlink oversized; do
+    : > "$FAKE_COMMAND_LOG"
+    candidate="$BATS_TEST_TMPDIR/bootstrap-$shape"
+    rm -f "$candidate"
+    case "$shape" in
+      missing) ;;
+      empty) : > "$candidate" ;;
+      symlink) ln -s "$INSTRUCTION_FILE" "$candidate" ;;
+      oversized) dd if=/dev/zero of="$candidate" bs=262145 count=1 status=none ;;
+    esac
+    chmod 600 "$candidate" 2>/dev/null || true
+    IRIS_INSTRUCTION_BOOTSTRAP_FILE="$candidate" run _xr_install_run_live
+    [ "$status" -ne 0 ] || { echo "$shape unexpectedly accepted"; return 1; }
+    [[ "$output" == *"instruction bootstrap snapshot is invalid"* ]] || return 1
+    [ ! -s "$FAKE_COMMAND_LOG" ] || return 1
+  done
+}
+
+@test "live: bootstrap upload failure prevents package registration and activation" {
+  _xr_install_stub_setup
+  FAKE_SCP_FAIL_MATCH=iris-instructions.bootstrap run _xr_install_run_live
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"XR package/catalog/bootstrap upload failed"* ]]
+  ! grep -q 'appmgr package install rpm' "$FAKE_COMMAND_LOG"
+  ! grep -q 'appmgr application iris activate' "$FAKE_COMMAND_LOG"
 }
 
 @test "live: parses the running version out of its own preflight show version" {

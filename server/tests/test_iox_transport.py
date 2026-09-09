@@ -1052,7 +1052,8 @@ def _transport(tmp_path, peer, purpose="verification_read", cancel=None,
     known_hosts.write_text("test fixture only\n")
     known_hosts.chmod(384)
     command_context = _start(purpose=purpose) if context is None else context
-    if purpose == "upload_wrapper":
+    if purpose in ("upload_wrapper", "upload_certificate",
+                   "upload_instructions"):
         command_context["kind"] = "scp"
     config = {
         "host": "192.0.2.10", "user": "fixture-user", "state_dir": str(state),
@@ -1274,6 +1275,75 @@ def test_upload_uses_original_snapshot_fd_after_path_replacement(tmp_path, peer_
         assert uploaded == [{"event": "uploaded", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}]
         assert not any(event["event"] == "unstable_upload_source" for event in peer.events())
     peer.assert_reaped()
+
+
+def test_instruction_upload_accepts_only_the_transaction_bound_envelope_path(
+        tmp_path, peer_factory):
+    peer = peer_factory()
+    transport, unused = _transport(
+        tmp_path, peer, purpose="upload_instructions")
+    source = tmp_path / "instruction.envelope"
+    source.write_bytes(b"private bootstrap ciphertext")
+    source.chmod(0o600)
+    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        exact = "flash:iris-instructions-%s.envelope" % TRANSACTION
+        result = transport.upload(descriptor, exact, time.monotonic() + 1.5)
+        assert _value(result, "returncode") == 0
+        uploaded = [event for event in peer.events()
+                    if event["event"] == "uploaded"]
+        assert uploaded == [{
+            "event": "uploaded",
+            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "size": source.stat().st_size,
+        }]
+    finally:
+        os.close(descriptor)
+    peer.assert_reaped()
+
+
+@pytest.mark.parametrize("remote", [
+    "flash:iris-instructions.envelope",
+    "flash:iris-instructions-%s.envelope.bak" % TRANSACTION,
+    "flash:iris-instructions-%s/escape.envelope" % TRANSACTION,
+    "flash:iris-instructions-%s.envelope" % ("A" * 32),
+    "bootflash:other-%s.envelope" % TRANSACTION,
+])
+def test_instruction_upload_rejects_every_near_match_before_scp(
+        tmp_path, peer_factory, remote):
+    peer = peer_factory()
+    transport, unused = _transport(
+        tmp_path, peer, purpose="upload_instructions")
+    source = tmp_path / "instruction.envelope"
+    source.write_bytes(b"private bootstrap ciphertext")
+    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        result = transport.upload(descriptor, remote, time.monotonic() + 1.5)
+    finally:
+        os.close(descriptor)
+    assert _value(result, "error_category") == "unsupported_syntax"
+    assert not [event for event in peer.events()
+                if event["event"] == "uploaded"]
+
+
+def test_instruction_upload_has_its_own_256_kib_source_bound(
+        tmp_path, peer_factory):
+    peer = peer_factory()
+    transport, unused = _transport(
+        tmp_path, peer, purpose="upload_instructions")
+    source = tmp_path / "instruction.envelope"
+    source.write_bytes(b"x" * (256 * 1024 + 1))
+    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        result = transport.upload(
+            descriptor,
+            "flash:iris-instructions-%s.envelope" % TRANSACTION,
+            time.monotonic() + 1.5)
+    finally:
+        os.close(descriptor)
+    assert _value(result, "error_category") == "unsupported_syntax"
+    assert not [event for event in peer.events()
+                if event["event"] == "uploaded"]
 
 
 @pytest.mark.parametrize("command", [b"x" * 321, b"show\x00infra", b"show\rinfra", b"show\x7finfra", b"show\tinfra"])
