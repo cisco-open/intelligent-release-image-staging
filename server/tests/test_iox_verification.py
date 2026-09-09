@@ -1986,6 +1986,7 @@ def test_successful_predecessor_recovery_does_not_bind_force_recipe_to_record(
     assert result["result_code"] == 0
     assert result["record_id"] is None
     assert result["iox_verification"] is None
+    assert result["recovery_code"] == 0
 
 
 def test_successful_predecessor_recovery_restores_recorded_uninstall_binding(
@@ -2016,6 +2017,7 @@ def test_successful_predecessor_recovery_restores_recorded_uninstall_binding(
     assert result["result_code"] == 0
     assert result["record_id"] == "selected-r2"
     assert result["iox_verification"] is None
+    assert result["recovery_code"] == 0
 
 
 def test_same_record_recovery_is_the_only_allowed_recorded_binding_change(
@@ -2042,6 +2044,7 @@ def test_same_record_recovery_is_the_only_allowed_recorded_binding_change(
         controller.close()
     assert result["result_code"] == 0
     assert result["record_id"] == "selected-r1"
+    assert result["recovery_code"] == 0
     recovered = store.records["selected-r1"]["iox_verification"]
     assert recovered["phase"] == "relinquished"
     assert recovered["unresolved"] is False
@@ -2223,7 +2226,9 @@ def test_failed_reaped_fence_write_keeps_public_session_active(
     assert result["error_category"] == "journal_durability"
     assert result["iox_session"]["state"] == "active"
     assert result["iox_session"]["mutation_blocked"] is True
-    assert json.loads(open(failed[0]).read())["state"] == "active"
+    with open(failed[0]) as stream:
+        on_disk = json.load(stream)
+    assert on_disk["state"] == ("reaped" if after_replace else "active")
     assert not [call for call in store.calls if call[0] == "retire_device"]
 
 
