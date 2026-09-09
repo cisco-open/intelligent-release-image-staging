@@ -606,3 +606,18 @@ def test_weekly_prior_window_remains_due_before_fall_back_slot():
     assert schedules.next_fire(schedule, previous + 7 * 86400) == future
     schedule["created_at"] = previous + 1
     assert schedules.next_fire(schedule, now) == future
+
+
+def test_an_absent_preceding_occurrence_can_never_open_a_wave_gate():
+    """Zero counts from no evidence are a hold, never an all-clear."""
+    wave = {"schedule_id": "s-before", "occurrence_id": None, "total": 0,
+            "staged": 0, "errored": 0, "missing": 0, "gate": "held",
+            "observed_at": 1788955200}
+    assert schedules.normalize_wave(wave) == wave
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_wave(dict(wave, gate="open"))
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_wave(dict(wave, total=1))
+    with pytest.raises(schedules.ScheduleValidationError):
+        schedules.normalize_wave(dict(wave, occurrence_id="c" * 32, total=2,
+                                      staged=2, missing=1))

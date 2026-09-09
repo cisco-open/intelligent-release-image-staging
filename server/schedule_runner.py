@@ -335,6 +335,13 @@ class ScheduleRunner:
             return None
         after = occurrence["schedule"]["after"]
         now = self._now()
+        stored = ((self.occurrences.get(oid) or {}).get("annotations") or {}).get("wave")
+        if stored is not None and stored["gate"] == "open":
+            # A pass can open the gate and be interrupted before it admits
+            # anything. The decision is durable, so it is not re-litigated
+            # against counts that moved after it was taken.
+            return {"gate": "open", "counts": stored,
+                    "expired": now >= occurrence["scheduled_at"] + after["deadline_seconds"]}
         expired = now >= occurrence["scheduled_at"] + after["deadline_seconds"]
         # A throttled wake is necessarily still held: the latch above returns
         # early once anything has been admitted. The deadline is never
@@ -353,7 +360,6 @@ class ScheduleRunner:
             # deadline, and it may never be reported as an all-clear.
             if not expired:
                 raise
-            stored = ((self.occurrences.get(oid) or {}).get("annotations") or {}).get("wave")
             return {"gate": "held", "expired": True,
                     "counts": stored or self._wave_record(occurrence, {
                         "schedule_id": after["schedule_id"],

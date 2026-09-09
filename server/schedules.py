@@ -188,6 +188,9 @@ def normalize_wave(value):
         raise ScheduleValidationError("wave counts exceed the preceding target")
     if value["gate"] not in WAVE_GATES:
         raise ScheduleValidationError("invalid wave gate state")
+    if value["gate"] == "open" and value["occurrence_id"] is None:
+        raise ScheduleValidationError(
+            "an absent preceding occurrence cannot open a gate")
     return dict(counts, schedule_id=value["schedule_id"],
                 occurrence_id=value["occurrence_id"], total=total,
                 gate=value["gate"],

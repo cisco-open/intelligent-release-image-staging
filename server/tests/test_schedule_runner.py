@@ -912,3 +912,31 @@ def test_wave_gate_rereads_on_its_own_cadence_not_every_wake(setup):
     assert occurrence(store)["state"] == "stalled"
     assert all(row["wave"]["staged"] == 4
                for row in receipts(store, occurrence(store)))
+
+
+def test_wave_gate_that_opened_stays_open_across_an_interrupted_pass(
+        wave_setup):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(), window=300)
+    executor.counted = counts(staged=10)
+    answered = executor.wave_counts
+
+    def stop_after_the_decision(schedule, occurrence):
+        result = answered(schedule, occurrence)
+        runner.stop()
+        return result
+
+    executor.wave_counts = stop_after_the_decision
+    runner.run_once()
+    assert not receipts(store, occurrence(store))
+    assert annotated(store)["gate"] == "open"
+
+    # The decision is durable, so a pass that admitted nothing before it was
+    # interrupted does not re-litigate it against counts that moved since.
+    executor.wave_counts = lambda *_: pytest.fail("the gate reopened")
+    runner._stop.clear()
+    executor.counted = counts(staged=0, errored=10)
+    clock.now += 1
+    runner.run_once()
+    assert len(executor.dispatched) == 2
+    assert occurrence(store)["state"] == "completed"
