@@ -1363,6 +1363,121 @@ def test_router_execution_preflight_runs_before_mint_and_refreshes_env(tmp_path)
     assert seen["EXPECTED_DEVICE_IDENTITY"] == "9ABC123"
 
 
+# --- fire-time instruction bootstrap custody (Task 18) ------------------
+
+def test_guestshell_materializes_private_envelope_after_mint_before_applying(
+        tmp_path):
+    events = []
+    observed = {}
+
+    def preflight(dev, env, resolved):
+        events.append("preflight")
+        return {"status": "passed", "device_identity": "FOC0000TEST"}
+
+    def mint(device_id):
+        events.append("mint")
+        return "TOK-" + device_id
+
+    def bootstrap(device_id):
+        events.append("materialize")
+        assert events[-2:] == ["mint", "materialize"]
+        return b"sealed-bootstrap-envelope"
+
+    def run(_path, env, _line):
+        events.append("run")
+        capability = env["IRIS_STAGING_CAPABILITY"]
+        assert re.fullmatch(r"[0-9a-f]{32}", capability)
+        path = (tmp_path / "staging" /
+                ("iris-instructions-d1-%s.envelope" % capability))
+        assert path.read_bytes() == b"sealed-bootstrap-envelope"
+        assert path.stat().st_mode & 0o777 == 0o600
+        observed["path"] = path
+        return 0
+
+    svc = _svc(
+        run, artifacts_dir=str(tmp_path), mint_fn=mint,
+        instruction_bootstrap_fn=bootstrap,
+        guestshell_preflight_fn=preflight)
+    svc._transition_or_note = lambda _jid, _rid, state: (
+        events.append(state) or True)
+
+    job = _wait(svc, svc.start("d1", record_id="record-1"))
+
+    assert job["state"] == "done", job["lines"]
+    assert events[:5] == [
+        "preflight", "mint", "materialize", "applying", "run"]
+    assert not observed["path"].exists()
+
+
+def test_bootstrap_failure_removes_planned_record_before_device_touch(tmp_path):
+    events = []
+    svc = _svc(
+        lambda *_args: events.append("run") or 0,
+        artifacts_dir=str(tmp_path),
+        mint_fn=lambda _device_id: events.append("mint") or "TOK",
+        instruction_bootstrap_fn=lambda _device_id: (_ for _ in ()).throw(
+            RuntimeError("private-ciphertext-must-not-escape")))
+    svc._transition_or_note = lambda _jid, _rid, state: (
+        events.append(state) or True)
+
+    job = _wait(svc, svc.start("d1", record_id="record-1"))
+
+    assert job["state"] == "error"
+    assert events == ["mint", "removed"]
+    assert not any("private-ciphertext" in line for line in job["lines"])
+    assert any("instruction bootstrap unavailable" in line
+               for line in job["lines"])
+
+
+def test_queued_onboard_materializes_only_when_its_worker_fires(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    materialized = []
+
+    def run(_path, env, _line):
+        if env["DEVICE_ID"] == "d1":
+            entered.set()
+            release.wait(5)
+        return 0
+
+    svc = _multi_svc(
+        2, run, max_concurrent=1, artifacts_dir=str(tmp_path),
+        instruction_bootstrap_fn=lambda device_id: (
+            materialized.append(device_id) or b"envelope"))
+    first = svc.start("d1")
+    assert entered.wait(5)
+    second = svc.start("d2")
+    assert svc.get_job(second)["state"] == "queued"
+    assert materialized == ["d1"]
+    release.set()
+    assert _wait(svc, first)["state"] == "done"
+    assert _wait(svc, second)["state"] == "done"
+    assert materialized == ["d1", "d2"]
+
+
+def test_xr_runner_gets_bounded_private_snapshot_and_service_cleans_it(
+        tmp_path):
+    observed = {}
+
+    def run(_path, env, _line):
+        snapshot = env["IRIS_INSTRUCTION_BOOTSTRAP_FILE"]
+        observed["path"] = snapshot
+        assert os.path.isfile(snapshot)
+        assert os.stat(snapshot).st_mode & 0o777 == 0o600
+        assert open(snapshot, "rb").read() == b"xr-envelope"
+        return 0
+
+    svc = _xr_svc(
+        run, artifacts_dir=str(tmp_path),
+        instruction_bootstrap_fn=lambda _device_id: b"xr-envelope")
+    job = _wait(svc, svc.start(
+        "d1", resolved={"platform": "xr-appmgr",
+                         "management_type": "xr-host"}))
+
+    assert job["state"] == "done", job["lines"]
+    assert not os.path.exists(observed["path"])
+
+
 def test_router_execution_preflight_failure_never_mints_or_runs(tmp_path):
     fleet = _Fleet({"r1": {
         "device_id": "r1", "device_ip": "192.0.2.10", "model": "C8000V",

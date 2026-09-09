@@ -1194,3 +1194,93 @@ def test_heartbeat_resolves_one_cadence_for_storage_retention_and_response(
         assert fixture.catalog.instruction_counters()["instr_cadence_failures"] == 1
     finally:
         fixture.close()
+
+
+class _BootstrapStamperError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def _bootstrap_catalog(outcomes, timeline):
+    """Build the narrow Catalog seam used by the fire-time producer tests."""
+    instance = object.__new__(catalog.Catalog)
+    instance.store = object()
+
+    class FakeStamper:
+        def __init__(self, *, paths, catalog_store):
+            assert paths == "paths"
+            assert catalog_store is instance.store
+
+        def stamp_device(self, device_id):
+            timeline.append(("stamp", device_id))
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    module = type("FakeStamperModule", (), {
+        "InstructionStamper": FakeStamper,
+        "StamperError": _BootstrapStamperError,
+    })
+    instance._stamper_paths = lambda: (module, "paths")
+    return instance
+
+
+def test_bootstrap_materializer_stamps_then_reuses_catalog_envelope():
+    timeline = []
+    instance = _bootstrap_catalog(["updated"], timeline)
+
+    def resource(device_id, kind):
+        timeline.append(("resource", device_id, kind))
+        return catalog._InstructionResult(200, body=b"sealed-ciphertext")
+
+    instance._instruction_resource = resource
+
+    assert instance.materialize_bootstrap_instruction("device-a") == \
+        b"sealed-ciphertext"
+    assert timeline == [
+        ("stamp", "device-a"),
+        ("resource", "device-a", "instructions"),
+    ]
+
+
+@pytest.mark.parametrize("retry_at", ("stamp", "resource"))
+def test_bootstrap_materializer_retries_one_key_supersession(retry_at):
+    timeline = []
+    outcomes = ([_BootstrapStamperError("key_superseded"), "updated"]
+                if retry_at == "stamp" else ["updated", "unchanged"])
+    instance = _bootstrap_catalog(outcomes, timeline)
+    resources = [
+        catalog._InstructionResult(409, body=b"must-not-escape"),
+        catalog._InstructionResult(200, body=b"fresh-envelope"),
+    ] if retry_at == "resource" else [
+        catalog._InstructionResult(200, body=b"fresh-envelope")]
+
+    def resource(device_id, kind):
+        timeline.append(("resource", device_id, kind))
+        return resources.pop(0)
+
+    instance._instruction_resource = resource
+
+    assert instance.materialize_bootstrap_instruction("device-a") == \
+        b"fresh-envelope"
+    assert [event[0] for event in timeline].count("stamp") == 2
+
+
+@pytest.mark.parametrize("result", (
+    catalog._InstructionResult(503, body=b"private-response"),
+    catalog._InstructionResult(200, body=None),
+    catalog._InstructionResult(200, body=b""),
+    catalog._InstructionResult(
+        200, body=b"x" * (instructions.INSTR_RESPONSE_MAX + 1)),
+))
+def test_bootstrap_materializer_fails_with_one_fixed_public_error(result):
+    instance = _bootstrap_catalog(["updated"], [])
+    instance._instruction_resource = lambda *_args: result
+
+    with pytest.raises(
+            catalog.InstructionBootstrapUnavailable,
+            match=r"^instruction bootstrap unavailable$") as raised:
+        instance.materialize_bootstrap_instruction("device-a")
+    assert "private-response" not in str(raised.value)
