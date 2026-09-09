@@ -434,6 +434,175 @@ def test_instruction_heartbeat_attestation_schema_and_examples_are_complete():
                for example in examples)
 
 
+def test_task19_heartbeat_capability_identity_and_pointer_contract_is_bounded():
+    document = _load()
+    media = document["paths"]["/v1/devices/{device_id}/heartbeat"]["post"][
+        "requestBody"]["content"]["application/json"]
+    schema = media["schema"]
+    properties = schema["properties"]
+
+    assert properties["instr_protocol"] == {
+        "type": ["integer", "null"], "enum": [1, None]}
+    for name in ("instr_epoch", "instr_serial", "instr_policy_revision"):
+        _assert_i63_schema(properties[name])
+    assert properties["pointer_skew"] == {"type": ["boolean", "null"]}
+    assert schema["dependentRequired"]["instr_epoch"] == [
+        "instr_serial", "instr_policy_revision"]
+    assert schema["dependentRequired"]["instr_policy_revision"] == [
+        "instr_epoch", "instr_serial"]
+    assert "instr_serial" not in schema["dependentRequired"]
+
+    examples = _media_examples(media)
+    current = next(example for example in examples
+                   if example.get("instr_protocol") == 1)
+    assert {current[name] for name in (
+        "instr_epoch", "instr_serial", "instr_policy_revision")} == {3, 7, 11}
+    assert current["pointer_skew"] is False
+    legacy = next(example for example in examples
+                  if "instr_protocol" not in example)
+    assert not {"instr_epoch", "instr_policy_revision", "pointer_skew"}.intersection(
+        legacy)
+
+
+def test_task19_device_instruction_projection_contract_is_exact_and_bounded():
+    document = _load()
+    states = {
+        "applied", "lkg", "stale", "rejected", "tracker-only",
+        "pre-instructions", "unknown", "unavailable", "pending",
+        "forbidden", "floor_reset", "none", "revoked",
+    }
+    fields = {
+        "display_state", "label", "evidence", "underlying_state",
+        "underlying_label", "underlying_evidence", "reason",
+        "reported_instr_serial", "accepted_identity", "verify_level",
+        "pointer_skew", "qos_drift_count", "report_age_seconds",
+        "report_stale", "revoked", "revocation_evidence",
+    }
+    raw_states = set(openapi_contract.instructions.INSTR_STATES)
+
+    for prefix in ("/api/v1", "/internal/v1"):
+        media = document["paths"][prefix + "/devices"]["get"]["responses"][
+            "200"]["content"]["application/json"]
+        row = media["schema"]["properties"]["devices"]["items"]
+        assert "instruction" in row["required"]
+        instruction = row["properties"]["instruction"]
+        assert instruction["additionalProperties"] is False
+        assert set(instruction["required"]) == fields
+        assert set(instruction["properties"]) == fields
+        props = instruction["properties"]
+        assert set(props["display_state"]["enum"]) == states
+        for name in ("label", "underlying_label"):
+            assert props[name]["type"] == "string"
+            assert props[name]["minLength"] == 1
+            assert props[name]["maxLength"] == 96
+        for name in ("evidence", "underlying_evidence", "revocation_evidence"):
+            assert props[name]["type"] == ["string", "null"]
+            assert set(props[name]["enum"]) == {
+                "agent-asserted", "server-observed", None}
+        assert set(props["underlying_state"]["enum"]) == raw_states | {None}
+        assert set(props["reason"]["enum"]) == {
+            "unknown_key", "bad_mac", None}
+        for name in ("reported_instr_serial", "report_age_seconds"):
+            assert props[name]["type"] == ["integer", "null"]
+            assert props[name]["minimum"] == 0
+            assert props[name]["maximum"] == (1 << 63) - 1
+        assert props["qos_drift_count"] == {
+            "type": ["integer", "null"], "minimum": 0, "maximum": 49}
+        for name in ("pointer_skew", "report_stale", "revoked"):
+            assert props[name] == {"type": ["boolean", "null"]}
+        assert set(props["verify_level"]["enum"]) == {"sig", "none", None}
+
+        identity = props["accepted_identity"]
+        assert identity["oneOf"][1] == {"type": "null"}
+        accepted = identity["oneOf"][0]
+        assert accepted["additionalProperties"] is False
+        assert set(accepted["required"]) == {
+            "epoch", "instr_serial", "policy_revision"}
+        for value in accepted["properties"].values():
+            _assert_i63_schema(value)
+
+        example = media["example"]["devices"][0]["instruction"]
+        assert set(example) == fields
+        assert example["label"] == "applied r9223372036854775807"
+        assert example["accepted_identity"]["instr_serial"] == (1 << 63) - 1
+
+
+def test_task19_peer_policy_rollup_status_and_custody_are_exact_and_bounded():
+    document = _load()
+    states = {
+        "applied", "lkg", "stale", "rejected", "tracker-only",
+        "pre-instructions", "unknown", "unavailable", "pending",
+        "forbidden", "floor_reset", "none", "revoked",
+    }
+    custody_fields = {
+        "schema", "enabled", "state", "certificate_days_to_expiry",
+        "certificate_renewal_due", "signing_refused", "keylist_seq",
+        "keylist_age_days", "keylist_resign_due", "roots_configured",
+        "roots_attested_180d", "root_ceremony_overdue",
+        "root_quorum_degraded", "updated_at",
+    }
+    for prefix in ("/api/v1", "/internal/v1"):
+        media = document["paths"][prefix + "/peer-policy"]["get"][
+            "responses"]["200"]["content"]["application/json"]
+        schema = media["schema"]
+        assert {"fleet_rollup", "instruction_status", "instruction_keys"} <= set(
+            schema["required"])
+
+        rollup = schema["properties"]["fleet_rollup"]
+        assert rollup["additionalProperties"] is False
+        assert set(rollup["required"]) == {
+            "issued_revision", "applied", "states"}
+        issued = rollup["properties"]["issued_revision"]
+        assert issued == {"type": ["integer", "null"], "minimum": 0,
+                          "maximum": (1 << 63) - 1}
+        applied = rollup["properties"]["applied"]
+        assert applied["propertyNames"]["pattern"] == \
+            r"^(0|[1-9][0-9]{0,18})$"
+        _assert_i63_schema(applied["additionalProperties"])
+        state_map = rollup["properties"]["states"]
+        assert state_map["additionalProperties"] is False
+        assert set(state_map["properties"]) == states
+        assert not state_map.get("required")
+        for count in state_map["properties"].values():
+            _assert_i63_schema(count)
+
+        status = schema["properties"]["instruction_status"]
+        assert status["additionalProperties"] is False
+        assert set(status["required"]) == {
+            "observed_at", "instr_stamp_missing", "pointer_skew",
+            "issued_revision_label"}
+        assert status["properties"]["observed_at"] == {"type": "number"}
+        for name in ("instr_stamp_missing", "pointer_skew"):
+            count = status["properties"][name]
+            assert count["type"] == ["integer", "null"]
+            assert count["minimum"] == 0
+            assert count["maximum"] == (1 << 63) - 1
+        assert status["properties"]["issued_revision_label"] == {
+            "type": ["string", "null"], "maxLength": 20,
+            "pattern": r"^r(0|[1-9][0-9]{0,18})$"}
+
+        custody = schema["properties"]["instruction_keys"]
+        assert custody["oneOf"][1] == {"type": "null"}
+        custody = custody["oneOf"][0]
+        assert custody["additionalProperties"] is False
+        assert set(custody["required"]) == custody_fields
+        assert set(custody["properties"]) == custody_fields
+        assert set(custody["properties"]["state"]["enum"]) == {
+            "phase0", "ready", "renewal_due", "signing_refused",
+            "keylist_missing", "invalid", "error"}
+        assert set(custody["properties"]["root_ceremony_overdue"]["enum"]) == {
+            "unknown", "ok", "warn", "critical"}
+        assert custody["properties"]["certificate_days_to_expiry"]["minimum"] == \
+            -((1 << 63) - 1)
+
+        example = media["example"]
+        assert example["instruction_status"]["issued_revision_label"] == "r12"
+        assert example["fleet_rollup"] == {
+            "issued_revision": 12, "applied": {"7": 1},
+            "states": {"applied": 1}}
+        assert set(example["instruction_keys"]) == custody_fields
+
+
 def test_problem_types_use_stable_anchors_on_the_documented_page():
     assert api_problem.TYPE_BASE.endswith("/docs/problems/#")
     sample = api_problem.document(400, "invalid-request", "Invalid request")
