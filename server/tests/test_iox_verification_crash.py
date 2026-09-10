@@ -739,8 +739,10 @@ def _direct_fence_attempt(controller, board, attempt_id):
 
 
 def _host_boot_id():
-    with open("/proc/sys/kernel/random/boot_id") as stream:
-        return stream.read().strip()
+    """This boot's fence identity: the host boot id folded with pid 1's
+    start, exactly as the controller computes it."""
+    import iox_verification
+    return iox_verification._boot_id()
 
 
 def _board_key(board_identity):

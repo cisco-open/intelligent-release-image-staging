@@ -938,7 +938,7 @@ def _write_active_fence(tmp_path, transcript_ref, board=_BOARD):
     os.chmod(str(sessions), 0o700)
     lock_name = hashlib.sha256(
         b"IRIS-IOX-BOARD-v1\0" + board.encode("ascii")).hexdigest() + ".lock"
-    boot_id = open("/proc/sys/kernel/random/boot_id").read().strip()
+    boot_id = _module()._boot_id()
     fields = open("/proc/%d/stat" % os.getpid()).read().split()
     fence = {
         "schema_version": 1, "controller_id": _CONTROLLER_ID,
@@ -2875,31 +2875,41 @@ def test_reconcile_requires_ack_and_fresh_enabled_read(tmp_path):
                 call[1] == "reconcile_enabled"]
 
 
-def test_fence_supervisor_alive_requires_the_same_process(tmp_path):
+def test_boot_identity_changes_with_the_container_instance(monkeypatch):
     module = _module()
-    ticks = int(open("/proc/%d/stat" % os.getpid()).read().split()[21])
-    live = {"supervisor_pid": os.getpid(), "supervisor_start_ticks": ticks}
-    assert module._fence_supervisor_alive(live) is True
-    assert module._fence_supervisor_alive(
-        dict(live, supervisor_start_ticks=ticks + 1)) is False
-    assert module._fence_supervisor_alive(
-        dict(live, supervisor_pid=2 ** 22 - 1)) is False
-    assert module._fence_supervisor_alive({}) is False
+    host = open("/proc/sys/kernel/random/boot_id").read().strip().lower()
+    first = module._boot_id()
+    assert module._BOOT_ID.fullmatch(first) and first != host
+    real = module._process_start_ticks
+    monkeypatch.setattr(module, "_process_start_ticks",
+                        lambda pid: real(pid) + 1 if pid == 1 else real(pid))
+    assert module._boot_id() != first
+    monkeypatch.setattr(module, "_process_start_ticks",
+                        lambda pid: (_ for _ in ()).throw(FileNotFoundError(pid)))
+    assert module._boot_id() == host
 
 
-def test_a_same_boot_fence_whose_supervisor_died_no_longer_blocks_the_board(tmp_path):
+def test_a_fence_from_a_previous_container_instance_no_longer_blocks_the_board(tmp_path, monkeypatch):
     """The server runs in a container: a restart keeps the host boot id but
     kills every supervisor. An attempt cut off that way used to leave its
     device refusing every later attempt with 'active same-boot IOx session
-    fence' until the fence was deleted by hand (IE-3400, 2026-09-10)."""
+    fence' until the fence was deleted by hand (IE-3400, 2026-09-10). The
+    fence's boot identity now folds in pid 1's start, so the restarted
+    container sees a fence from another boot and reaps it; a supervisor
+    that crashed inside THIS container still fails closed (see the crash
+    suite)."""
+    module = _module()
     journal = _journal(phase="indeterminate", state="unknown", revision=7)
     store = _StatefulStore(tmp_path, records=[_record(journal=journal)],
                            obligations=[journal])
     transcript_ref = _write_header_transcript(tmp_path, "3" * 32)
     fence_path = _write_active_fence(tmp_path, transcript_ref)
     fence = json.loads(fence_path.read_text())
-    fence["supervisor_start_ticks"] += 1     # same pid number, another process
+    fence["boot_id"] = module._boot_id()      # written by the previous instance
     fence_path.write_text(json.dumps(fence, sort_keys=True))
+    real = module._process_start_ticks
+    monkeypatch.setattr(module, "_process_start_ticks",
+                        lambda pid: real(pid) + 1 if pid == 1 else real(pid))
     factory = _TransportFactory(verification="enabled")
     controller = _controller(tmp_path, store, factory)
     try:
@@ -2908,9 +2918,6 @@ def test_a_same_boot_fence_whose_supervisor_died_no_longer_blocks_the_board(tmp_
     finally:
         controller.close()
     assert result["error_category"] != "descendant_unreaped"
-    assert json.loads(fence_path.read_text())["supervisor_start_ticks"] != \
-        fence["supervisor_start_ticks"] or \
-        json.loads(fence_path.read_text())["state"] == "reaped"
 
 
 def test_reconciliation_does_not_clear_an_active_process_fence(tmp_path):

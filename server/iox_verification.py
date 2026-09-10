@@ -33,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 try:
     from urllib.parse import urlsplit
@@ -865,35 +866,35 @@ def _revalidate_board_lock(directory, board, descriptor):
 
 
 def _boot_id():
+    """The identity a session fence binds its supervisor to.
+
+    A same-boot active fence is taken as a live descendant: the supervisor,
+    or a device session it spawned, may still be running, and nothing short
+    of a reboot proves otherwise. The server runs in a container, and a
+    container restart keeps the host boot id while killing every process in
+    the namespace -- an attempt cut off by a redeploy left its device
+    refusing every later attempt with 'active same-boot IOx session fence'
+    until the fence was removed by hand (2026-09-10). Fold pid 1's start
+    ticks into the identity: pid 1 is the container's entrypoint, so a
+    restart is a new boot and the fence it orphaned is stale, while a
+    supervisor crash inside a running container still fails closed.
+    """
     with open("/proc/sys/kernel/random/boot_id") as stream:
         value = stream.read().strip().lower()
     if not _BOOT_ID.fullmatch(value):
         raise ValueError("invalid host boot identity")
-    return value
+    try:
+        epoch = _process_start_ticks(1)
+    except (OSError, ValueError, IndexError):
+        return value
+    # A name-based UUID keeps the RFC 4122 shape the fence schema requires.
+    return str(uuid.uuid5(uuid.UUID(value), "pid1:%d" % epoch))
 
 
 def _process_start_ticks(pid):
     with open("/proc/%d/stat" % pid) as stream:
         return int(stream.read().split()[21])
 
-
-def _fence_supervisor_alive(fence):
-    """True only when the fence's supervisor is still this exact process.
-
-    A same-boot active fence used to be taken as a live descendant on the
-    boot id alone. The server runs in a container: a container restart
-    keeps the host boot id but kills every supervisor, so an attempt cut
-    off by a restart left its device refusing every later attempt with
-    'active same-boot IOx session fence' until the fence was removed by
-    hand (2026-09-10). The fence records the supervisor's pid and start
-    ticks; a pid that is gone, or reused by a process started at another
-    tick, is dead and its fence is stale.
-    """
-    try:
-        return (_process_start_ticks(fence["supervisor_pid"]) ==
-                fence["supervisor_start_ticks"])
-    except (OSError, ValueError, IndexError, TypeError, KeyError):
-        return False
 
 
 def _supervisor_send(peer, value, descriptors=()):
@@ -2926,8 +2927,7 @@ class IoxController(object):
                     old = _read_json_strict(path, _SESSION_FILE_BYTES)
                     self._validate_fence(old, path)
                     if (old["state"] == "active" and
-                            old["boot_id"] == _boot_id() and
-                            _fence_supervisor_alive(old)):
+                            old["boot_id"] == _boot_id()):
                         attempt.fence = old
                         attempt.fence_path = path
                         raise _ControllerFailure(
@@ -4133,8 +4133,7 @@ class IoxController(object):
                         "IOx session fence is unreadable")
                 dummy.fence = fence
                 if (fence["state"] == "active" and
-                        fence["boot_id"] == _boot_id() and
-                        _fence_supervisor_alive(fence)):
+                        fence["boot_id"] == _boot_id()):
                     return self._base_result(
                         dummy, 5, "descendant_unreaped",
                         "active same-boot IOx session fence")
