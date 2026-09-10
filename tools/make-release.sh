@@ -79,6 +79,7 @@ SHIP=(
   kubernetes
   # fleet: EXAMPLES ONLY (the real csv/conf carry tokens + passwords)
   fleet/README.md fleet/devices.csv.example fleet/assignments.csv.example
+  fleet/roles.csv.example fleet/schedules.csv.example
 )
 
 # Copy every tracked file under the allowlist, preserving the relative path.

@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Release archives include the documented role and schedule CSV templates
+  and verify their exact contents in the archive regression (#286).
 - QoS documentation matches the available write APIs and minimum nonzero
   rate; IOx share-failure guidance distinguishes preserved IOS images from
   reserved temporary-file cleanup (#283, #284, #285).

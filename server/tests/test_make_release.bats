@@ -34,7 +34,7 @@
   [ "$status" -ne 0 ]
 }
 
-@test "release archive carries linked docs and every current device package builder" {
+@test "release archive carries linked docs, fleet templates and every current device package builder" {
   # Exercise the real assembler without replacing the owner's prepared release.
   _make_release_fixture
   run env SCRUB_PASS= SCRUB_USER= bash "$FIX/tools/make-release.sh"
@@ -49,6 +49,8 @@
     iris/DEVELOPMENT.md \
     iris/CONTRIBUTING.md \
     iris/TESTING.md \
+    iris/fleet/roles.csv.example \
+    iris/fleet/schedules.csv.example \
     iris/lab/device-run.sh \
     iris/lab/xr-run.sh \
     iris/lab/xr-dialogue.pl \
@@ -61,6 +63,10 @@
     iris/tools/build-xr-package.sh \
     iris/tools/check-package-freshness.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
+  done
+  for template in roles.csv.example schedules.csv.example; do
+    tar xOzf "$FIX/release/iris.tgz" "iris/fleet/$template" \
+      | cmp "$FIX/fleet/$template" - || return 1
   done
 }
 
@@ -117,6 +123,9 @@ _make_release_fixture() {
   echo "# fleet" > "$FIX/fleet/README.md"
   for f in devices.csv.example assignments.csv.example; do
     echo "example" > "$FIX/fleet/$f"
+  done
+  for f in roles.csv.example schedules.csv.example; do
+    cp "$repo/fleet/$f" "$FIX/fleet/$f"
   done
   git -C "$FIX" add -A
   git -C "$FIX" commit -q -m fixture
