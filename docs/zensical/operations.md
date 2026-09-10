@@ -924,6 +924,102 @@ IRIS, while retaining adopted files and files of unknown origin. See
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
 
+### Recovering an IOx attempt cut off mid-run
+
+An IOx onboard or undeploy that the server did not finish — typically a
+server redeploy or restart while the job was running — can leave the device's
+IOx verification journal in phase `indeterminate`. The symptom is that every
+later job on the device, onboard, undeploy and **Force** alike, ends in
+`error` with a job-log line of the form
+
+```
+IOx controller: predecessor recovery failed: IOx verification journal for record <record-id> (transaction <transaction-id>, revision <revision>) is indeterminate; enable app signature verification on the device, then run iox_verification.py reconcile-enabled with these values (...)
+```
+
+with `error_category` `reconciliation_required` and result code 3, while the
+deployment record the cut-off attempt left behind stays recoverable rather
+than `active` (`unknown` after a server restart, `needs-reconcile` after a
+failed job). Force does not get past this:
+Force is read before the deployment record, but the outstanding verification
+obligation lives on the board, and the controller recovers it under the board
+lock before any teardown.
+
+What happened: the wrapper was unsigned and the device had app signature
+verification enabled, so the controller recorded the obligation to restore it
+(the journal's `prior_state` is `enabled`), disabled device-global
+verification for the install, and was cut off before it could restore
+verification and read the result back. On recovery it cannot tell whether
+its disable took effect or what else changed the state since, so it refuses
+to issue a blind enable, and the refusal is durable: the phase stays
+`indeterminate` until an operator resolves it. Resolution is a two-part
+acknowledgement — you put the device back into the enabled state yourself,
+then tell the controller that you did.
+
+1. **Read the binding.** Take the record id, transaction id and revision
+   from the job-log line above, or from the device's deployment record:
+   `GET /api/v1/devices/<id>/deployment` returns `record.iox_verification`
+   with `record_id`, `transaction_id`, `revision`, `phase`, `prior_state`
+   and `unresolved` (the same summary is listed under
+   `iox_verification_obligations`). Inside the server container the same
+   fields are in `$IRIS_STATE/deployment_records.json` under
+   `records.<record-id>.iox_verification` — read it, never edit it. `phase`
+   must be `indeterminate` and `prior_state` `enabled`. Use the journal's
+   current revision: the recovery that declared the journal indeterminate
+   wrote an event, and every event advances the revision, so an older number
+   from an earlier log is refused as a stale binding.
+
+2. **Restore verification on the device.** In privileged EXEC:
+
+   ```
+   show app-hosting infra | include App signature verification
+   app-hosting verification enable
+   show app-hosting infra | include App signature verification
+   ```
+
+   The second read must report `App signature verification: enabled`.
+   Verification is device-global, so check the other IOx applications on the
+   device first ([IOx prerequisites](iox.md#device-global-package-verification)).
+   This restores a setting IRIS itself disabled; it stages nothing and changes
+   no software state.
+
+3. **Reconcile the journal** from inside the server container, as the service
+   user (the control socket under `$IRIS_STATE/iox/` is mode 0600 and only the
+   server's own uid may connect):
+
+   ```bash
+   docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris \
+     python3 iox_verification.py reconcile-enabled \
+       --record-id <record-id> --transaction-id <transaction-id> \
+       --revision <revision> --acknowledge-external-resolution \
+       --wait --wait-timeout 600
+   ```
+
+   Without the compose file, `docker exec -e IRIS_STATE=/var/lib/iris -w
+   /opt/iris/server iris python3 iox_verification.py reconcile-enabled ...`
+   is the same command. It queues an `iox-reconcile-enabled` job that takes
+   the board lock, performs one fresh verification read over SSH, and only
+   when the device reports `enabled` writes a `reconcile_enabled` event that
+   closes the journal (`phase: relinquished`, `unresolved: false`). It sends
+   no enable or disable command of its own. Exit status `0` means resolved.
+   `3` means the fresh read did not find verification enabled (the job log
+   says `fresh read did not establish enabled`) — go back to step 2. `2`
+   with `{"error": "request rejected"}` means the
+   binding is stale or mistyped (the revision moved, the phase is no longer
+   `indeterminate`, or an id is wrong) — re-read it. `4` is a wait timeout
+   or a transport failure — read the job (`job --job-id <id> --wait`, or the
+   Console's job list) before retrying. `5` is a journal or authority fault —
+   read the server log.
+
+4. **Clear what the cut-off attempt left behind.** Run **Undeploy** with
+   **Force** from the Console (or `submit-uninstall --device-id <id>
+   --force-agent-only --wait`). With the obligation resolved it proceeds,
+   removes the IRIS-named footprint and retires the device's leftover
+   records; then onboard again.
+
+This procedure was validated on a Catalyst 8000V IOx device on 2026-09-10.
+The Console has no control for step 3 yet; the CLI is documented under
+[IOx control CLI](reference.md#iox-control-cli).
+
 ## Rebuilding the catalog from images already on disk
 
 A catalog reset does not delete image files, and operators often stage images on

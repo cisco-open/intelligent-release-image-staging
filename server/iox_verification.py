@@ -1899,6 +1899,38 @@ def _public_journal(journal):
     return value
 
 
+# The operator runbook for a journal the controller cannot resolve on its
+# own (docs/zensical/operations.md, "Recovering an IOx attempt cut off
+# mid-run"). Carried in the refusal's detail because a forced teardown's
+# result reports the operation's own null binding, not the predecessor's,
+# so the log line is the only place the operator sees which record to
+# reconcile (issue #231).
+_RECONCILE_RUNBOOK = ("https://cisco-open.github.io/intelligent-release-image-staging/"
+                      "docs/operations/#recovering-an-iox-attempt-cut-off-mid-run")
+# gui_onboard refuses a controller detail longer than this.
+_DETAIL_LIMIT = 512
+
+
+def _reconciliation_detail(summary, journal):
+    """Name the exact reconcile-enabled binding in a reconciliation refusal.
+
+    The binding must be the journal's *current* revision: reconcile-enabled
+    compares record id, transaction id and revision against the stored
+    journal and refuses a stale triple, and recovery may have just written
+    an ``indeterminate`` event that advanced the revision.
+    """
+    if not isinstance(journal, dict):
+        return summary
+    return _bounded_text(
+        "%s: IOx verification journal for record %s (transaction %s, "
+        "revision %s) is %s; enable app signature verification on the "
+        "device, then run iox_verification.py reconcile-enabled with these "
+        "values (%s)" % (
+            summary, journal.get("record_id"), journal.get("transaction_id"),
+            journal.get("revision"), journal.get("phase"), _RECONCILE_RUNBOOK),
+        _DETAIL_LIMIT)
+
+
 def _session_summary(fence):
     keys = ("attempt_id", "job_id", "device_id", "board_identity",
             "operation", "teardown_mode", "record_id", "state")
@@ -3452,9 +3484,14 @@ class IoxController(object):
             # request target after the old obligation is discharged.
             attempt.target = incoming_target
         attempt.recovery_code = code
+        if code == 3:
+            raise _ControllerFailure(
+                "reconciliation_required",
+                _reconciliation_detail("predecessor recovery failed",
+                                       attempt.journal), code)
         if code:
-            raise _ControllerFailure("reconciliation_required" if code == 3 else
-                                     "readback_unknown", "predecessor recovery failed", code)
+            raise _ControllerFailure(
+                "readback_unknown", "predecessor recovery failed", code)
         return obligations[0]
 
     def _strict_recovery_binding(self, attempt, journal):
@@ -4195,9 +4232,14 @@ class IoxController(object):
             self._revalidate_known_identity(attempt, journal)
             code = self._recover_journal(attempt, journal, initiating=False)
             attempt.recovery_code = code
-            if code:
-                category = "reconciliation_required" if code == 3 else "readback_unknown"
-                attempt.primary = _ControllerFailure(category, "recovery unresolved", code)
+            if code == 3:
+                attempt.primary = _ControllerFailure(
+                    "reconciliation_required",
+                    _reconciliation_detail("recovery unresolved",
+                                           attempt.journal), code)
+            elif code:
+                attempt.primary = _ControllerFailure(
+                    "readback_unknown", "recovery unresolved", code)
             return self._finalize(attempt)
         except _ControllerFailure as exc:
             if attempt is None:
@@ -4272,7 +4314,11 @@ class IoxController(object):
             observation, result, unused = self._verification_read(attempt)
             if observation["state"] != "enabled":
                 attempt.primary = _ControllerFailure(
-                    "reconciliation_required", "fresh read did not establish enabled", 3)
+                    "reconciliation_required",
+                    "fresh read did not establish enabled: run "
+                    "'app-hosting verification enable' on the device, "
+                    "confirm 'show app-hosting infra' reports it enabled, "
+                    "then retry reconcile-enabled", 3)
             else:
                 refs = [_get(result, "transcript_ref")]
                 self._event(attempt, "reconcile_enabled", {

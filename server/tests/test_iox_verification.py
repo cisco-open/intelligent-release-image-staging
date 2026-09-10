@@ -15,6 +15,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 
@@ -2822,6 +2823,127 @@ def test_unresolved_target_board_obligation_blocks_force_before_cleanup(tmp_path
                 b"verification enable" in call[2].lower()]
 
 
+def _assert_console_safe_detail(detail):
+    # gui_onboard refuses a controller detail over 512 UTF-8 bytes or one
+    # carrying control characters; a refusal the operator cannot read in
+    # the job log is no better than a bare one.
+    assert len(detail.encode("utf-8")) <= 512
+    assert not any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in detail)
+
+
+_BINDING = re.compile(
+    r"record ([A-Za-z0-9_-]+) \(transaction ([0-9a-f]{32}), revision (\d+)\)")
+
+
+@pytest.mark.parametrize("operation", ["forced-undeploy", "onboard"])
+def test_indeterminate_predecessor_refusal_names_the_reconcile_binding(
+        tmp_path, operation):
+    """Two server redeploys cut IOx attempts off mid-run on Iris-c8kv-102
+    (2026-09-10) and left its journal in phase 'indeterminate'. Every later
+    onboard, undeploy and forced undeploy failed with a bare 'predecessor
+    recovery failed', and a forced teardown's result reports its own null
+    binding rather than the predecessor's, so the operator could not learn
+    the record id, transaction id and revision that reconcile-enabled
+    demands (issue #231). The refusal now quotes the binding, the device
+    step, and the runbook."""
+    journal = _journal(phase="indeterminate", state="unknown", revision=7)
+    store = _StatefulStore(tmp_path, records=[_record(journal=journal)],
+                           obligations=[journal])
+    factory = _TransportFactory(verification="disabled")
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    controller = _controller(tmp_path, store, factory)
+    try:
+        if operation == "forced-undeploy":
+            result = controller.run_uninstall(
+                _request(action="uninstall", teardown_mode="force_agent_only"),
+                prepare, preflight, on_output, _Cancel())
+            assert result["record_id"] is None
+        else:
+            result = controller.run_install(
+                _request(wrapper_path=_write_unsigned_wrapper(tmp_path)),
+                prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 3
+    assert result["error_category"] == "reconciliation_required"
+    detail = result["detail"]
+    assert detail.startswith("predecessor recovery failed: ")
+    assert _BINDING.search(detail).groups() == (
+        "r1", journal["transaction_id"], "7")
+    assert "is indeterminate" in detail
+    assert "enable app signature verification on the device" in detail
+    assert "iox_verification.py reconcile-enabled" in detail
+    assert ("docs/operations/#recovering-an-iox-attempt-cut-off-mid-run"
+            in detail)
+    _assert_console_safe_detail(detail)
+    assert not [call for call in factory.calls if call[0] == "command" and
+                b"verification enable" in call[2].lower()]
+
+
+def test_quoted_reconcile_binding_is_the_current_revision_and_is_accepted(
+        tmp_path):
+    """Recovering a disable_intent journal whose device now reads disabled
+    writes an 'indeterminate' event, which advances the revision. The
+    refusal must quote that advanced revision -- reconcile-enabled compares
+    the triple against the stored journal and refuses a stale one -- and
+    the quoted triple must be exactly what reconcile-enabled then accepts
+    once the operator has re-enabled verification on the device."""
+    journal = _journal(phase="disable_intent", state="enabled", revision=4)
+    store = _StatefulStore(tmp_path, records=[_record(journal=journal)],
+                           obligations=[journal])
+    prepare, preflight, on_output = _callbacks([], record_id=None)
+    controller = _controller(
+        tmp_path, store, _TransportFactory(verification="disabled"))
+    try:
+        result = controller.run_uninstall(
+            _request(action="uninstall", teardown_mode="force_agent_only"),
+            prepare, preflight, on_output, _Cancel())
+    finally:
+        controller.close()
+    stored = store.records["r1"]["iox_verification"]
+    assert stored["phase"] == "indeterminate" and stored["revision"] == 5
+    assert result["result_code"] == 3
+    record_id, transaction_id, revision = _BINDING.search(
+        result["detail"]).groups()
+    assert (record_id, transaction_id, int(revision)) == (
+        "r1", stored["transaction_id"], 5)
+
+    # The operator ran 'app-hosting verification enable' by hand; the
+    # quoted binding resolves the journal without another device mutation.
+    factory = _TransportFactory(verification="enabled")
+    controller = _controller(tmp_path, store, factory)
+    try:
+        resolved = controller.reconcile_enabled(
+            record_id, transaction_id, int(revision), True, _Cancel())
+    finally:
+        controller.close()
+    assert resolved["result_code"] == 0
+    assert store.records["r1"]["iox_verification"]["unresolved"] is False
+    assert not [call for call in factory.calls if call[0] == "command" and
+                b"verification enable" in call[2].lower()]
+
+
+def test_recover_board_unresolved_refusal_names_the_reconcile_binding(
+        tmp_path):
+    journal = _journal(phase="indeterminate", state="unknown", revision=7)
+    store = _StatefulStore(tmp_path, records=[_record(journal=journal)],
+                           obligations=[journal])
+    controller = _controller(
+        tmp_path, store, _TransportFactory(verification="disabled"))
+    try:
+        result = controller.recover_board(_BOARD, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 3
+    assert result["error_category"] == "reconciliation_required"
+    detail = result["detail"]
+    assert detail.startswith("recovery unresolved: ")
+    assert _BINDING.search(detail).groups() == (
+        "r1", journal["transaction_id"], "7")
+    assert "reconcile-enabled" in detail
+    _assert_console_safe_detail(detail)
+
+
 @pytest.mark.parametrize("deployment_state", ["removed", "abandoned",
                                                "superseded"])
 def test_terminal_deployment_record_does_not_hide_recoverable_board_obligation(
@@ -2913,6 +3035,12 @@ def test_reconcile_requires_ack_and_fresh_enabled_read(tmp_path):
     result = controller.reconcile_enabled(
         "r1", journal["transaction_id"], 7, True, _Cancel())
     assert result["result_code"] == 3
+    assert result["error_category"] == "reconciliation_required"
+    assert result["detail"].startswith(
+        "fresh read did not establish enabled: ")
+    assert "'app-hosting verification enable'" in result["detail"]
+    assert "retry reconcile-enabled" in result["detail"]
+    _assert_console_safe_detail(result["detail"])
     assert not [call for call in store.calls if call[0] == "iox_event" and
                 call[1] == "reconcile_enabled"]
 

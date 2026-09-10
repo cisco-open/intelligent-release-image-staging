@@ -286,6 +286,22 @@ The requested byte range cannot be served.
 The caller exceeded an operation's rate limit. Retry only after the duration
 in `Retry-After`.
 
+## reconciliation_required
+
+Not an HTTP problem type but the `error_category` an IOx onboard, undeploy, or
+forced undeploy job ends with (result code 3) when the device's IOx
+verification journal is in phase `indeterminate`: an earlier attempt was cut
+off after IRIS began disabling device-global app signature verification and
+before it could restore it, so the controller refuses to guess. The job log's
+`IOx controller: predecessor recovery failed: ...` line names the record id,
+transaction id and revision. No retry clears it, Force included: restore
+verification on the device and run `reconcile-enabled` with that binding, as
+described in
+[Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
+The same category with `conflicting board verification obligations` is a
+different condition — two unresolved journals claim one board — and is not
+resolved by that procedure.
+
 ## request-body-not-supported
 
 This operation does not accept a request body.

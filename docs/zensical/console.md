@@ -555,6 +555,15 @@ has no other way to clear an agent with no deployment record — it cannot be ad
 its preflight refuses to re-onboard over an already-enabled Guest Shell.
 Recorded in Audit as `undeploy_forced`.
 
+Force does not get past an unresolved IOx verification obligation on the board
+itself. The controller recovers that obligation under the board lock before any
+teardown, forced or not, and a journal in phase `indeterminate` — an attempt
+cut off after IRIS began disabling device-global app signature verification
+and before it could restore it — refuses every attempt with
+`predecessor recovery failed` (`reconciliation_required`). Restore verification
+on the device and reconcile the journal first:
+[Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run).
+
 An IOx onboard that failed while the app was activating is also **not** a case
 for Force. It leaves the app installed but never started, which preflight reads
 as a resumable retry: press Onboard again and the second attempt finds the

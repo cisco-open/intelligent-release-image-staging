@@ -25,6 +25,7 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
 | `device/iox/install.sh` | Install the IOx app path. |
 | `device/iox/uninstall.sh` | Remove the IOx app path. |
+| `docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris python3 iox_verification.py <operation> ...` | Local IOx control client: submit, recover, reconcile, or read an IOx job from inside the server container. See [IOx control CLI](#iox-control-cli). |
 | `device/iox/build.sh --image-only` | Build or verify the one persisted OCI archive containing both linux/amd64 and linux/arm64 device images. |
 | `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
 | `tools/build-xr-package.sh --out artifacts/` | Build the deployment-neutral IOS-XR appmgr RPM and its canonical-image provenance manifest. |
@@ -684,6 +685,46 @@ closed or idle stream as a job failure.
 
 Successful logs end with `onboard complete: <IP>` or
 `undeploy complete: <IP>`. Use the job's `state` and `rc` for automation.
+Two maintenance actions, `iox-recover` and `iox-reconcile-enabled`, are
+queued only by the [IOx control CLI](#iox-control-cli) below.
+
+### IOx control CLI
+
+`server/iox_verification.py` doubles as a local control client for the IOx
+authority. It talks to the running server over `$IRIS_STATE/iox/control.sock`,
+a mode-0600 Unix socket that only the server's own uid may open, so it runs
+inside the server container as the service user with the server's
+`IRIS_STATE`:
+
+```bash
+docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris \
+  python3 iox_verification.py <operation> [arguments] [--wait [--wait-timeout <seconds>]]
+```
+
+There is no network endpoint for it and no Console equivalent yet.
+
+| Operation | Arguments | What it does |
+| --- | --- | --- |
+| `submit-install` | `--device-id <id>` | Queues the IOx device's onboard, as `POST /api/v1/devices/<id>/onboard` would, with actor `local-control`. |
+| `submit-uninstall` | `--device-id <id>` `[--force-agent-only]` | Queues the IOx device's undeploy. `--force-agent-only` is the Console's **Force** ([Bulk device actions](console.md#bulk-device-actions)) and is accepted by this operation only. |
+| `recover` | `--device-id <id>` | Queues an `iox-recover` job that replays the device's one outstanding verification obligation under the board lock — the same recovery every onboard and undeploy runs first. Refused when the device's obligations and sessions do not name exactly one board and at most one record. |
+| `reconcile-enabled` | `--record-id <id>` `--transaction-id <hex32>` `--revision <n>` `--acknowledge-external-resolution` | Queues an `iox-reconcile-enabled` job: after the operator has restored app signature verification on the device by hand, one fresh read that reports `enabled` closes a journal in phase `indeterminate`. All four arguments are required, and the record id, transaction id and revision must match the stored journal exactly or the request is rejected. See [Recovering an IOx attempt cut off mid-run](operations.md#recovering-an-iox-attempt-cut-off-mid-run). |
+| `job` | `--job-id <hex16>` | Reads one job by id, or waits for it with `--wait`. |
+
+Every operation accepts `--wait` and `--wait-timeout <seconds>` (1 through
+7200, default 7200; the timeout is checked only with `--wait`). Without
+`--wait` a submit returns as soon as the job is queued, with `accepted: true`.
+
+The command prints one JSON line, the job projection: `job_id`, `state`,
+`record_id`, `terminal`, `result_code`, and on a terminal job `returncode` and
+`recovery_code`; `wait_timed_out: true` when the wait expired; or
+`{"error": ...}` — `request rejected`, `authority unavailable`, or `job not
+found`. The job's log lines are not included: read them in the Console or
+with `GET /api/v1/onboard/jobs/<id>`. Exit status is `2` on an `error`
+response, `4` when the wait timed out, the job's `result_code` once it is
+terminal (`0` done, `2` request refused at admission, `3` reconciliation
+required, `4` device or transport failure, `5` journal or authority fault,
+`130` cancelled), and otherwise `0`.
 
 ### Credentials
 
