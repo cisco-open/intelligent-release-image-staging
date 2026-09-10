@@ -12,32 +12,73 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
-- Define roles from the Console. The Peer policy panel on the Devices page
-  gains a Role definitions table with New role, Edit and Delete, an editor
-  for peer roles, networks, the restricted and origin switches and every
-  role-scoped QoS value including the speed limits, and Import CSV / Export
-  CSV in the `iris-role` grammar. Every write keeps the Set role contract
-  (strong ETag, preview, confirmation token). Two new routes back the file
-  round trip: `GET /api/v1/peer-policy/roles/export-csv` and
-  `POST /api/v1/peer-policy/roles/import-csv`, which replaces every
-  definition atomically and reports grammar problems as `invalid_roles_csv`
-  with the offending row or field in `detail` (issue #222).
-- Run the IOx agent on Catalyst 8000 routers. Platform `iox` on a
-  `router-routed` or `router-nat` row attaches the app through the same
-  IRIS-owned VirtualPortGroup (and NAT footprint) the Guest Shell router
-  recipe uses, stages to `bootflash:`, and tears down symmetrically under the
-  same ownership rules. The Console offers IOx alongside Guest Shell for those
-  rows; package verification is handled by the existing controller.
-- Make `tools/start-compose-server.sh` the complete first start. It lists every
-  handed-in input a fresh clone is missing — `bin/aria2c`, `ioxclient`, the
-  per-architecture `aria2c` deliverables, and the two instruction-root public
-  keys — in one report before building anything, installs the public roots
-  from `IRIS_INSTRUCTION_ROOTS_DIR` into the config volume so the server
-  self-provisions a trust-bound Guest Shell bundle on first start, and builds
-  the XR RPM alongside both IOx packages (`IRIS_SKIP_XR=1` to omit). It never
-  creates roots; those come from the custody ceremony (issue #204).
+- The catalog logs one bounded, token-free line for every refused device
+  bearer on any route (method, route template, device id, source IP, reason
+  such as `unknown_token`, `expired`, `revoked`, `wrong_principal`),
+  de-duplicated per minute and capped, so a device arriving with a stale
+  token is no longer indistinguishable from one that never called home (#233).
+- Telemetry: `iris.device.peer_transfer_record` rows carry `iris.image.name`
+  (catalog filename) and `iris.peer.device_id` (the sender: a device id,
+  `origin`, or absent when unknown). The Splunk "Bytes received from each
+  peer" search groups by sender and image name.
+- IOx: a job refused because the device's verification journal is
+  `indeterminate` names the record id, transaction id and revision that
+  `reconcile-enabled` needs, plus the device-side step and the runbook
+  (Operations → Recovering an IOx attempt cut off mid-run); a
+  `reconciliation_required` problem entry and the IOx control CLI reference
+  are new (#231).
+- Tests pin the IOS-XE dialects fixed on 2026-09-10 with verbatim IE-3400
+  17.15.4 and Catalyst 8000V 17.15.5 fixtures replayed through the IOx
+  transport and controller classifiers (#226).
+
+### Changed
+- IOx onboarding no longer pushes the package over SCP. The device fetches
+  its package, catalog certificate and instruction envelope from the artifact
+  server with `copy https:` over the catalog trustpoint, authenticating with
+  its own enrollment credential (`ip http client username`/`password`, set
+  for each copy and removed after it). Preflight refuses a device that
+  already carries operator HTTP client credentials. `ip scp server enable`
+  remains only for the agent's runtime image hand-off into IOS flash (#229).
+- aria2c rebuilt with patch 0007 (seeder good-bye grace): a seeder-to-seeder
+  connection survives 5 s past completion on both ends, so the device
+  completion hook can read per-peer transfer bytes over RPC and Catalyst
+  8000V downloads no longer report zero attributed bytes; `tools/aria2c.sha256`
+  pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Device agent: a per-image staging failure (for example no provable writable
+  IOS staging filesystem) no longer suppresses the heartbeat. The device
+  registers with stage_state `error` and the bounded, redacted exception text
+  as `stage_error` (#235). A tick whose catalog policy fetch fails outright
+  exits non-zero so the launchers' documented failure backoff engages for
+  catalog outages on IOx, XR and Guest Shell (#232).
+- An IOx device whose target filesystem root already holds the assigned image
+  (IE-3x00 on `sdflash:`) no longer fails placement on IOS's
+  `rename ... (File exists)` refusal: the agent attests the existing file
+  natively (size and SHA-512), adopts it, reclaims its pushed scratch, and
+  reports an explicit rename refusal when one does occur.
+- Guest Shell agent: an ssh-keygen without `-Y verify` (OpenSSH 7.4 on the
+  Catalyst 9300 Guest Shell) is reported as `verifier_missing` with
+  tracker-only peers instead of `tamper_rejected`, and the bootstrap
+  instruction is kept for retry rather than deleted.
+- IOx onboard and undeploy job logs are step-level again: the recipe's
+  headers, prerequisite notices and poll outcomes plus one timed line per
+  controller operation, streamed as each step completes. A failed step names
+  itself and quotes the device's `% ...` verdict. The raw IOS session is
+  echoed only with the job's `IRIS_LOG=on` opt-in and otherwise stays in the
+  persisted transcript.
+- Telemetry: a report replayed after a server restart carries the same
+  sender attribution as its first export instead of a second `unknown` row
+  under the same `event.id`; the per-report classification is pinned in
+  `<state>/report-attribution.json`.
+- Swarm map nodes show the heartbeat-reported model under the device id, no
+  longer repeat an IOS-XR router's announce IP behind its identical id, and
+  the Console's image labels show an IOS-XR image (whose id is its filename)
+  once instead of twice.
+- Bundle-mode low-space reclaim recognises Catalyst 8000V image artifacts
+  (`c8000v-*` .bin/.pkg and `packages.conf`), so a stale staged image or a
+  crashed root-copy leftover on a C8000V can be freed; install-mode devices
+  are unaffected (#237).
 - Leave a router enough flash to stage onto. When IOx runs on a router the
   app's `persist-disk` is carved out of the same `bootflash:` the image is
   staged to, and placement transiently needs the IOS-side scratch and the
