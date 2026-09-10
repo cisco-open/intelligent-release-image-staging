@@ -2159,7 +2159,9 @@ class IoxController(object):
                                            _TRANSCRIPT_FILE_BYTES)
         active = 0
         for path in sessions:
-            fence = _read_json_strict(path, _SESSION_FILE_BYTES)
+            fence = self._read_sibling_fence(path)
+            if fence is None:
+                continue
             self._validate_fence(fence, path)
             active += fence["state"] == "active"
         if active > self.limits["active_fences"]:

@@ -384,6 +384,16 @@ def _ensure_state_directory(path):
     _sync_directory(parent)
 
 
+_STORE_READ_ATTEMPTS = 6
+
+
+def _transient_authority_read(exc):
+    """A sibling's atomic replacement, as distinct from a bad file."""
+    text = str(exc)
+    return (text.startswith("unsafe deployment authority file: ") or
+            text.startswith("deployment authority file disappeared after open"))
+
+
 def _validate_authority_file(fd, path, required_mode=None):
     """Require a stable, private regular inode without following a link."""
     opened = os.fstat(fd)
@@ -802,24 +812,43 @@ class DeploymentRecordStore:
         The strict failure is a RecordStoreUnreadable, so a reader that cannot
         safely treat "unreadable" as "empty" -- the console's undeploy gate --
         can ask for strict and report the real fault instead of "no record"."""
+        # Writers replace the file atomically (temporary + rename), so a
+        # reader that opened the previous inode a moment earlier sees it
+        # unlinked, or sees the name point at a different inode after its
+        # read. That is a sibling attempt committing, not a corrupt store;
+        # re-open a bounded number of times before reporting it. Type, owner
+        # and mode refusals are reported at once.
+        for attempt in range(_STORE_READ_ATTEMPTS):
+            try:
+                fd, metadata = _open_existing_authority_file(self.path, os.O_RDONLY)
+            except FileNotFoundError:
+                return {"records": {}}
+            except (OSError, ValueError) as exc:
+                if (_transient_authority_read(exc) and
+                        attempt + 1 < _STORE_READ_ATTEMPTS):
+                    time.sleep(0.02)
+                    continue
+                if strict:
+                    raise RecordStoreUnreadable(
+                        "deployment record store %s is unreadable (%s); refusing "
+                        "to overwrite it -- repair or remove the file"
+                        % (self.path, exc))
+                return {"records": {}}
+            try:
+                with os.fdopen(fd, "rb") as stream:
+                    size = metadata.st_size
+                    if size > _STORE_MAX_BYTES:
+                        raise ValueError("deployment record store exceeds size limit")
+                    raw = stream.read(_STORE_MAX_BYTES + 1)
+                    _validate_authority_file(stream.fileno(), self.path)
+            except ValueError as exc:
+                if (_transient_authority_read(exc) and
+                        attempt + 1 < _STORE_READ_ATTEMPTS):
+                    time.sleep(0.02)
+                    continue
+                raise
+            break
         try:
-            fd, metadata = _open_existing_authority_file(self.path, os.O_RDONLY)
-        except FileNotFoundError:
-            return {"records": {}}
-        except (OSError, ValueError) as exc:
-            if strict:
-                raise RecordStoreUnreadable(
-                    "deployment record store %s is unreadable (%s); refusing "
-                    "to overwrite it -- repair or remove the file"
-                    % (self.path, exc))
-            return {"records": {}}
-        try:
-            with os.fdopen(fd, "rb") as stream:
-                size = metadata.st_size
-                if size > _STORE_MAX_BYTES:
-                    raise ValueError("deployment record store exceeds size limit")
-                raw = stream.read(_STORE_MAX_BYTES + 1)
-                _validate_authority_file(stream.fileno(), self.path)
             if len(raw) > _STORE_MAX_BYTES:
                 raise ValueError("deployment record store exceeds size limit")
             data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs_object,

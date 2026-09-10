@@ -1947,3 +1947,38 @@ def test_iox_journal_growth_keeps_lifecycle_reserve(tmp_path, monkeypatch):
     assert store.get("iox-r1", strict=True) == original
     assert store.recover_interrupted() == ["iox-r1"]
     assert store.get("iox-r1", strict=True)["iox_verification"] == journal
+
+
+def test_read_retries_a_store_replaced_by_a_sibling_writer(tmp_path, monkeypatch):
+    """Writers replace the store atomically; a reader that opened the previous
+    inode sees it unlinked. That is a sibling committing, not corruption:
+    re-open, do not report an unreadable store (a concurrent IE-3400 undeploy
+    failed admission on exactly this on 2026-09-10)."""
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="d1"))
+    real_open = deployment_records._open_existing_authority_file
+    calls = []
+
+    def flaky_open(path, flags, required_mode=None):
+        calls.append(path)
+        if len(calls) == 1:
+            raise ValueError("unsafe deployment authority file: %s" % path)
+        return real_open(path, flags, required_mode)
+    monkeypatch.setattr(deployment_records, "_open_existing_authority_file", flaky_open)
+    data = store._read(strict=True)
+    assert "d1" in data["records"]
+    assert len(calls) == 2
+
+    # A file that never settles is still reported, and a mode refusal is
+    # never retried.
+    calls.clear()
+    monkeypatch.setattr(deployment_records, "_open_existing_authority_file",
+                        lambda path, flags, required_mode=None: (_ for _ in ()).throw(
+                            ValueError("unsafe deployment authority file: %s" % path)))
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store._read(strict=True)
+    monkeypatch.setattr(deployment_records, "_open_existing_authority_file",
+                        lambda path, flags, required_mode=None: (_ for _ in ()).throw(
+                            ValueError("unsafe deployment authority file mode: %s" % path)))
+    with pytest.raises(deployment_records.RecordStoreUnreadable):
+        store._read(strict=True)

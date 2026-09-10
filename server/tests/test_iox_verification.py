@@ -1084,6 +1084,29 @@ _APPLICATION_MUTATIONS = (
     "configure_app", "app_install", "app_activate", "app_start", "save")
 
 
+def test_read_sibling_fence_tolerates_an_atomic_rewrite_and_a_reaped_fence(monkeypatch, tmp_path):
+    """Fences are replaced by rename; a sibling updating its fence while this
+    attempt is admitted gives the strict reader a changed file once. Re-read;
+    a fence that disappeared was reaped; anything else is still refused."""
+    module = _module()
+    outcomes = [ValueError("authority file changed during read"), {"state": "active"}]
+    monkeypatch.setattr(module, "_read_json_strict",
+                        lambda path, maximum: (_ for _ in ()).throw(outcomes.pop(0))
+                        if isinstance(outcomes[0], Exception) else outcomes.pop(0))
+    assert module.IoxController._read_sibling_fence("x.lock.json") == {"state": "active"}
+    monkeypatch.setattr(module, "_read_json_strict",
+                        lambda path, maximum: (_ for _ in ()).throw(FileNotFoundError(path)))
+    assert module.IoxController._read_sibling_fence("gone.lock.json") is None
+    monkeypatch.setattr(module, "_read_json_strict",
+                        lambda path, maximum: (_ for _ in ()).throw(ValueError("malformed IOx session fence")))
+    with pytest.raises(ValueError, match="malformed"):
+        module.IoxController._read_sibling_fence("bad.lock.json")
+    monkeypatch.setattr(module, "_read_json_strict",
+                        lambda path, maximum: (_ for _ in ()).throw(ValueError("unsafe authority file")))
+    with pytest.raises(ValueError, match="unsafe authority file"):
+        module.IoxController._read_sibling_fence("never.lock.json")
+
+
 def test_command_failure_detail_names_the_step_and_quotes_the_device_verdict():
     """A refused recipe command used to end the job with only 'IOx command
     failed'; the router's own first '%' line is the verdict the operator
