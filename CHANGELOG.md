@@ -58,6 +58,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Kubernetes preserves private authority-file permissions on PVC remounts;
+  documented storage preparation prevents setgid inheritance into authority
+  directories and provides a targeted recovery procedure (#257).
 - Recorded IOx undeploy honors the current job's detailed-log option while
   preserving record-owned device addresses and cleanup resources (#255).
 - IOx job logs name the package and certificate steps `fetch_wrapper` and

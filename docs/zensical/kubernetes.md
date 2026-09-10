@@ -158,7 +158,14 @@ restrict the Console's `loadBalancerSourceRanges` to operator networks. See
 [MetalLB configuration](https://metallb.io/configuration/).
 
 For local storage, create a dedicated directory owned by `10001:10001` with
-mode `0700`. Bind it through a local PersistentVolume with node affinity,
+mode `2770` at the volume root, before any server pod mounts it. Also
+pre-create its `state` child (`/data/state` in the pod), owned by
+`10001:10001` with exact mode `0700` and setgid explicitly cleared. Only the
+volume root needs setgid; `state` must not pass it into private authority
+directories. Otherwise, a fresh IOx directory inherits mode `2700` and fails
+its strict `0700` check. Keep other private files and subdirectories at their
+own required modes; the root mode is not a recursive permission setting.
+Bind it through a local PersistentVolume with node affinity,
 `Retain` reclaim policy, and a storage class using `WaitForFirstConsumer`.
 Match the PVC's storage class and request to that volume. The base request is
 `50Gi`; a smaller lab overlay can use `10Gi` if its images and artifacts fit.
@@ -179,9 +186,19 @@ Both pods run as uid/gid `10001`, drop all capabilities, disallow privilege
 escalation, and inherit `RuntimeDefault` seccomp. The namespace enforces the
 restricted Pod Security profile. All listeners bind above 1024.
 
-The server uses `fsGroup: 10001` so its PVC and age-key projection are usable
-by the non-root process. The Console has no PVC. Whether a PVC honors `fsGroup`
-depends on the storage driver's `fsGroupPolicy`; verify it before first deploy:
+The server uses `fsGroup: 10001` with `fsGroupChangePolicy: OnRootMismatch`.
+For kubelet-managed volume permissions, preparing the root as above prevents
+recursive permission changes on mount. The default `Always` behavior widens
+private `0600` authority files to `0660`, which IRIS correctly rejects.
+`OnRootMismatch` still permits a recursive change if the root does not match;
+it does not repair files changed by an earlier mount. It does not alter the
+group handling of Secret, ConfigMap, or `emptyDir` volumes, so the age-key
+projection remains readable. The Console has no PVC.
+
+Verify the storage driver's behavior before first deploy. CSI drivers that
+delegate `VOLUME_MOUNT_GROUP` handle permissions themselves and do not use
+`fsGroupChangePolicy`; they must preserve IRIS's private file modes. See
+[Kubernetes volume permission controls](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods).
 
 ```bash
 kubectl get csidriver \
@@ -194,6 +211,34 @@ kubectl -n iris exec deployment/iris-seed-server -- \
 If the driver does not apply the group, pre-create volume ownership out of band
 or use a storage class that supports it. Do not make either container root to
 work around storage ownership.
+
+### Recover a volume whose private modes were changed
+
+If startup reports an unsafe deployment-authority or transcript mode after a
+mount, retain the failure evidence and repair the storage before retrying:
+
+1. Stop new job admission and wait for all onboard, undeploy, and scheduled
+   work to finish. Then stop the server pod and any maintenance pods mounting
+   the PVC. Do not restart or change permissions while a job is running.
+2. Inspect ownership, modes, inode/link metadata, and trusted backup evidence
+   without printing file contents. Confirm the problem is a permission change;
+   an unexplained content or identity change requires investigation.
+3. Restore only the verified, explicitly identified paths to their required
+   ownership and modes: UID/GID `10001:10001`, `0600` for
+   `/data/state/deployment_records.json`, its `.lock`, and IOx transcript files;
+   `0700` with setgid explicitly cleared for `/data/state`, the private
+   `/data/state/iox` directory, and its authority subdirectories. Restore the
+   public catalog certificate `/data/config/tls/crt.pem` to `0644`; startup
+   rejects group-writable modes such as `0660` or `0664` left by a recursive
+   mount rewrite. Check
+   other affected authority files and public instruction roots against their
+   own validation rules. Never use recursive `chmod`/`chown`, delete authority
+   evidence, or weaken the validators to make startup pass.
+4. Verify the dedicated volume root is `10001:10001` with mode `2770` and
+   `/data/state` is `10001:10001` with exact mode `0700`, without setgid.
+   Apply the `OnRootMismatch` Deployment policy before starting the server.
+   Recheck the private modes after mounting, then verify management API health
+   and deployment-record access before admitting jobs.
 
 ## Secrets and storage
 
