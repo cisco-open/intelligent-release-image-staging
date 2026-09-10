@@ -1008,11 +1008,11 @@ _assert_signal_finalization() {
 }
 
 @test "router-nat dry-run un-marks the NAT outside interface only when IRIS marked it" {
-  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=0 run bash "$UNINSTALL" --dry-run
+  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 NAT_OUTSIDE_OWNED=0 run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"no ip access-list standard IRIS-NAT-2"* ]] && \
   [[ "$output" != *"no ip nat outside"* ]]
-  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 run bash "$UNINSTALL" --dry-run
+  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 APP_IP=10.8.0.2 NAT_OUTSIDE_OWNED=1 run bash "$UNINSTALL" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"no ip nat outside"* ]]
 }

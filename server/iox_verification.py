@@ -4233,6 +4233,30 @@ class IoxController(object):
         share_ios = target.get("share_ios_path")
         force = _get(attempt.request, "teardown_mode") == "force_agent_only"
         vpg = target.get("vpg_number")
+
+        def emptied_app_block():
+            # A Catalyst 8000V (IOS-XE 17.15.5) keeps an app's resource
+            # profile association after `app-hosting uninstall`, even though
+            # the running-config already shows the block bare. Removing the
+            # block in that state poisons the name: every later
+            # `app-hosting appid <name>` answers "IOxMan: Resource
+            # Profile-names is not specified" until the router reloads
+            # (issue #230; the IE-3400 does not care). Explicitly taking the
+            # profile, docker options, gateway and vnic back out of the block
+            # first clears that association; on a device where the block
+            # never existed this creates and removes an empty block, which
+            # the same router accepts. Every line answers silently.
+            if router:
+                vnic = (" no app-vnic gateway0 virtualportgroup %s "
+                        "guest-interface 0" % vpg_plan())
+            else:
+                vnic = " no app-vnic %s trunk" % app_intf
+            return ["app-hosting appid %s" % appid,
+                    " no app-resource docker",
+                    " no app-resource profile custom",
+                    " no app-default-gateway %s guest-interface 0" % gateway,
+                    vnic,
+                    "exit"]
         nat_interface = target.get("nat_interface", "")
         bt_port = target.get("bt_listen_port", 6881)
         nat_outside_owned = target.get("nat_outside_owned") in (True, 1, "1")
@@ -4265,7 +4289,7 @@ class IoxController(object):
         instruction_name = ("iris-instructions-" + transaction +
                             ".envelope" if transaction else None)
         stage_dir = target_fs + "guest-share/iris"
-        cleanup_common = [
+        cleanup_common = emptied_app_block() + [
             "no app-hosting appid %s" % appid,
             "no event manager applet IRIS-AGENT",
             "no event manager applet IRIS-COPYROOT",
@@ -4345,8 +4369,8 @@ class IoxController(object):
             verb = name.split("_", 1)[1]
             lines = ["app-hosting %s appid %s" % (verb, appid)]
         elif name == "remove_app_config":
-            lines = ["configure terminal", "no app-hosting appid %s" % appid,
-                     "end"]
+            lines = (["configure terminal"] + emptied_app_block() +
+                     ["no app-hosting appid %s" % appid, "end"])
         elif name == "configure_app":
             catalog_url = self.config.get("catalog_url")
             if catalog_url is None:

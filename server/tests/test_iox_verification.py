@@ -2448,6 +2448,55 @@ def test_same_record_recovery_still_rejects_unrelated_record_drift(
     assert not recipe_started.exists()
 
 
+@pytest.mark.parametrize("name,action,teardown_mode", [
+    ("remove_app_config", "install", None),
+    ("cleanup_config", "uninstall", "recorded"),
+])
+@pytest.mark.parametrize("router", [True, False])
+def test_app_block_is_emptied_before_it_is_removed(tmp_path, name, action,
+                                                    teardown_mode, router):
+    """Issue #230: a Catalyst 8000V keeps the app's resource-profile
+    association after uninstall and then refuses every later
+    `app-hosting appid iris` until it reloads, unless the block's profile,
+    docker options, gateway and vnic are taken out explicitly before the
+    block itself. Both teardown paths do that, on routers and switches."""
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    kwargs = {"action": action}
+    if teardown_mode:
+        kwargs.update(teardown_mode=teardown_mode, record_id="new-r1")
+    request = _request(**kwargs)
+    attempt = module._Attempt(controller, action, request, _Cancel(), False)
+    attempt.target = {
+        "package_fs": "bootflash:" if router else "flash:",
+        "target_fs": "bootflash:" if router else "sdflash:",
+        "pkg": "iris-amd64.tar" if router else "iris-arm64.tar",
+        "management_type": "router-routed" if router else "routed",
+        "app_gateway": "100.90.171.1", "svi_ip": "10.66.6.1",
+        "vpg_number": "1", "app_intf": "AppGigabitEthernet1/1",
+    }
+    if action == "uninstall":
+        attempt.journal = _journal(
+            record_id="new-r1", phase="unchanged", state="disabled",
+            revision=2, unresolved=False)
+    try:
+        rendered = controller._render_command(attempt, name).decode("ascii")
+    finally:
+        controller.close()
+    lines = rendered.splitlines()
+    vnic = (" no app-vnic gateway0 virtualportgroup 1 guest-interface 0"
+            if router else " no app-vnic AppGigabitEthernet1/1 trunk")
+    gateway = "100.90.171.1" if router else "10.66.6.1"
+    emptied = ["app-hosting appid iris", " no app-resource docker",
+               " no app-resource profile custom",
+               " no app-default-gateway %s guest-interface 0" % gateway,
+               vnic, "exit", "no app-hosting appid iris"]
+    start = lines.index("app-hosting appid iris")
+    assert lines[start:start + len(emptied)] == emptied
+    assert lines.count("no app-hosting appid iris") == 1
+
+
 def test_cleanup_stage_probe_uses_ios_filename_without_filesystem_prefix(
         tmp_path):
     module = _module()

@@ -38,6 +38,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Re-onboard a Catalyst 8000V after an undeploy. IOS-XE 17.15.5 on the
+  C8000V keeps the app's resource-profile association after
+  `app-hosting uninstall`, and removing the `app-hosting appid iris` block
+  in that state poisoned the name: every later onboard failed at the app
+  block with "IOxMan: Resource Profile-names is not specified" until the
+  router was reloaded. Both teardown paths now take the block's profile,
+  docker options, gateway and vnic out explicitly before removing the
+  block, which the router accepts; the IE-3400 was never affected. The
+  router preflight also accepts IRIS's own marked VirtualPortGroup left by
+  a failed attempt, and a refused IOx step now quotes the device's own
+  verdict line in the job log instead of only "IOx command failed"
+  (issue #230).
 - Onboard several IOx devices at once. Every IOx attempt validates the whole
   deployment record store, and the transcript loader demanded that the
   state, IOx and transcript directories keep byte-identical metadata while

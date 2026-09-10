@@ -55,6 +55,15 @@ if [ -n "${NETWORK_ATTACHMENT:-}" ] && [ -z "${MANAGEMENT_TYPE:-}" ]; then
   exit 1
 fi
 MANAGEMENT_TYPE="${MANAGEMENT_TYPE:-routed}"
+# Dry-run text for the block-emptying lines (issue #230): the live teardown
+# renders them from the deployment record; here they mirror the installer's
+# own defaults so an operator reads the same sequence the router will get.
+APP_GATEWAY="${APP_GATEWAY:-${SVI_IP:-<app-gateway>}}"
+case "$MANAGEMENT_TYPE" in
+  router-routed|router-nat)
+    VNIC_REMOVAL="gateway0 virtualportgroup ${VPG_NUMBER:-<vpg>} guest-interface 0" ;;
+  *) VNIC_REMOVAL="${APP_INTF:-AppGigabitEthernet1/1} trunk" ;;
+esac
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
 # See header: force preserves only the operator's VLAN/SVI network. Everything
@@ -145,6 +154,12 @@ config_cleanup() {
 # preflight refuses while any of them is present.
 if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
 cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
@@ -168,6 +183,12 @@ if [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-na
 # the residue probe reports that rather than guessing); a NAT outside
 # interface is only un-marked when the record says IRIS marked it.
 cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
@@ -197,6 +218,12 @@ EOF
 return
 fi
 cat <<EOF
+app-hosting appid $APPID
+ no app-resource docker
+ no app-resource profile custom
+ no app-default-gateway $APP_GATEWAY guest-interface 0
+ no app-vnic $VNIC_REMOVAL
+exit
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
 no event manager applet IRIS-COPYROOT
