@@ -291,13 +291,26 @@ _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 _C9K_MODEL = r"^C9[0-9]{3}"
 # Catalyst 8000 -> amd64 IOx package attached through the IRIS VirtualPortGroup
 # (device/iox/install.sh derives the vnic form from the router management
-# type); no AppGig, no SSD share, staging straight to bootflash:.
+# type); no AppGig, staging straight to bootflash:. Like the C9300 it hands
+# the image to IOS through a bind-mounted host share plus an IOS-internal
+# plain `copy`, so no image bytes cross the punted control plane and the
+# device's SCP server stays off (issue #228: SCP is for IE-3x00 only, the one
+# IOx platform that cannot bind-mount its staging filesystem into the app).
+#
+# THE one place the Catalyst 8000 share pair is defined. A router's bootflash:
+# IS the app-hosting host filesystem, so the host side is /bootflash/<dir> and
+# the IOS side bootflash:<dir>. If CAF refuses this host path on some router,
+# change these TWO values here and nowhere else -- nothing downstream
+# hard-codes them (device/iox/install.sh and the controller recipe take them
+# as SHARE_HOST_PATH / SHARE_IOS_PATH inputs).
 _C8K_MODEL = r"^C8[0-9]{3}"
 _ROUTER_MANAGEMENT_TYPES = frozenset(("router-routed", "router-nat"))
 _C8K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "PKG_FS": "bootflash:",
     "TARGET_FS": "bootflash:",
+    "SHARE_HOST_PATH": "/bootflash/iox_host_data_share",
+    "SHARE_IOS_PATH": "bootflash:iox_host_data_share",
 }
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",

@@ -35,11 +35,12 @@ transcript), and the envelope is published under `staging/<device-id>/` for
 that one fetch. Nothing is pushed to the device and no service is enabled on
 it for onboarding's sake; a device whose running-config already carries an
 operator's `ip http client username` or `password` is refused at preflight
-rather than having them overwritten. `ip scp server enable` is still
-configured, for the agent, not the installer: the runtime image hand-off
-described below pushes the downloaded image to `guest-share` through the
-device's SCP server on IE-3400 and Catalyst 8000, and as the Catalyst 9300
-share fallback.
+rather than having them overwritten. `ip scp server enable` is configured for
+the agent, not the installer, and only on a platform with no bind-mounted
+share (IE-3400): the runtime image hand-off described below pushes the
+downloaded image to `guest-share` through the device's SCP server there. A
+Catalyst 9300 or Catalyst 8000 job hands the image over through its share
+instead, and onboarding leaves that device's SCP server untouched.
 
 ## Catalyst 8000 routers
 
@@ -49,7 +50,9 @@ IRIS-owned `VirtualPortGroup<N>` (and, for `router-nat`, the same NAT ACL,
 overload rule and BitTorrent static translation) that the Guest Shell router
 recipe creates, attaches the app with `app-vnic gateway0 virtualportgroup N`,
 and points its SSH-to-self at the VPG address. The package is the amd64 IOx
-tar and the staging target is `bootflash:`; there is no shared-disk transfer.
+tar and the staging target is `bootflash:`, reached through a bind-mounted
+share on that same filesystem (`bootflash:iox_host_data_share`) exactly as on
+a Catalyst 9300 — see the hand-off section below.
 Teardown removes the app and the VPG, and un-marks a NAT outside interface
 only when the deployment record says IRIS marked it. Package verification is
 handled exactly as below — the controller disables and restores the
@@ -143,16 +146,28 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   itself on this platform) and confines
   itself to `iris-` prefixed filenames: each attempt sweeps only its own
   leftovers, a tiny probe proves IOS can actually read the share before any
-  multi-GB copy is committed (falling back to scp otherwise), the transient
-  copy is removed after placement, and undeploy deletes the prefixed files.
+  multi-GB copy is committed, the transient copy is removed after placement,
+  and undeploy deletes the prefixed files.
+- **Catalyst 8000V (share mount)**: the same mechanism on the router's own
+  filesystem — the share is `bootflash:iox_host_data_share`, host-side
+  `/bootflash/iox_host_data_share`, and the IOS-internal copy places the
+  image at the `bootflash:` root. The two paths are defined in one place,
+  `server/gui_onboard.py`'s `_C8K_IOX_ENV`.
 - **IE-3400 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
   SCP server and then runs a plain `copy` for the final placement, attested
   afterward by the agent polling for an exact byte-size match at the
-  destination. The agent also falls back to this path automatically if the
-  share mount is absent or unreadable from IOS. This scp traffic is addressed
-  to the device itself, so default CoPP caps it at roughly 1.4 MB/s; IRIS
-  never modifies CoPP.
+  destination. This scp traffic is addressed to the device itself, so default
+  CoPP caps it at roughly 1.4 MB/s; IRIS never modifies CoPP.
+
+There is no fallback between the two. Onboarding enables the device's SCP
+server (`ip scp server enable`) **only on a platform with no share** — that is
+the one platform whose agent needs it. Where a share is configured, an
+unusable share (not mounted, unreadable from IOS, or a failed local copy into
+it) fails the placement with a `ROOTCOPY-FAIL` naming what the share probe
+found, rather than pushing the same bytes over a control plane the device is
+not even listening on. Nothing is deleted and no placement command runs in
+that case; the agent retries on later ticks.
 
 Both platforms drive IOS over the app's SSH-to-self CLI, for the placement copy and
 for the one-shot EEM applets that place and reclaim files at the target-FS root. That

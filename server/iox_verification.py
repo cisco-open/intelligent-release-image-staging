@@ -4532,14 +4532,22 @@ class IoxController(object):
             lines = ["show clock"]
         elif name == "prepare_iox_scp":
             # `file prompt quiet` lets the device-side `copy https:` below
-            # run without a destination prompt. `ip scp server enable` is no
-            # longer for the package (nothing is pushed to the device any
-            # more): the agent's runtime image hand-off on IE-3x00 and on a
-            # Catalyst 8000 -- and the Catalyst 9300 share fallback -- SCP-
-            # pushes the downloaded image to guest-share through the device's
-            # SCP server (device/agent/iris_agent.py, _push_scratch).
-            lines = ["configure terminal", "iox", "file prompt quiet",
-                     "ip scp server enable", "end"]
+            # run without a destination prompt, on every platform -- it is
+            # not part of the SCP decision.
+            #
+            # `ip scp server enable` is no longer for the package (nothing is
+            # pushed to the device any more) and is now rendered ONLY for a
+            # target with NO bind-mounted share: an IE-3x00 cannot mount
+            # sdflash: into the app, so its agent hands the image over by
+            # SCP-pushing to guest-share (device/agent/iris_agent.py,
+            # _push_scratch). Every share-configured target (Catalyst 9300,
+            # Catalyst 8000) hands the image to IOS through the mount plus an
+            # IOS-internal plain `copy` and has NO scp fallback, so IRIS must
+            # not switch the device's SCP server on there (issue #228).
+            lines = ["configure terminal", "iox", "file prompt quiet"]
+            if not share_ios:
+                lines.append("ip scp server enable")
+            lines.append("end")
         elif name == "configure_trustpoint":
             # The block device/device-install.sh pastes: drop any earlier
             # IRIS trustpoint, re-add it, paste the public catalog
@@ -4632,7 +4640,13 @@ class IoxController(object):
                     "interface %s" % app_intf,
                     " switchport mode trunk",
                     " switchport trunk allowed vlan add %s" % vlan])
-            lines.extend(["file prompt quiet", "ip scp server enable", "end"])
+            # Same rule as prepare_iox_scp above: the SCP server goes on only
+            # where the app has no bind-mounted share to hand the image
+            # through (IE-3x00). Issue #228.
+            lines.append("file prompt quiet")
+            if not share_ios:
+                lines.append("ip scp server enable")
+            lines.append("end")
         elif name == "mkdir_share":
             lines = (["mkdir %s" % share_ios] if share_ios
                      else ["dir %s" % target_fs])

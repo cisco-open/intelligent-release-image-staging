@@ -5060,9 +5060,11 @@ def _reclaim_bundle_impl(target_prefix, names, cli_configure_fn, cli_execute_fn)
 
 
 def _share_settings(cfg):
-    """(share_dir, share_ios_path) for the C9k SSD share mount. The app-hosting
-    run-opts set the environment (the normal path); conf keys are the fallback
-    so a hand-dropped config can steer it too. Empty strings = no share."""
+    """(share_dir, share_ios_path) for the bind-mounted app-hosting share
+    (C9300: the SSD share; Catalyst 8000: bootflash). The app-hosting run-opts
+    set the environment (the normal path); conf keys are the fallback so a
+    hand-dropped config can steer it too. Empty strings = no share, which is
+    what selects the IE-3x00 scp hand-off."""
     return (os.environ.get("IRIS_SHARE_DIR") or cfg.get("share_dir") or "",
             os.environ.get("IRIS_SHARE_IOS_PATH")
             or cfg.get("share_ios_path") or "")
@@ -5086,6 +5088,29 @@ _SHARE_PROBE_BODY = "iris"      # the probe's exact bytes; `dir` must report len
 _SHARE_STAGE = "iris-staged.bin"
 
 
+class _ShareUnavailable(object):
+    """Why the bind-mounted share could not carry this placement.
+
+    _stage_via_share_impl returns one of these INSTEAD of a placement
+    verdict, carrying the precise reason (share not mounted in the app, IOS
+    cannot read the share, the local copy into it failed, ...). It is never a
+    verdict: callers test for it by type, never for truthiness.
+
+    It exists because the reason has to reach the operator. On a platform
+    whose app block configures a share (Catalyst 9300, Catalyst 8000) there
+    is NO scp fallback — the device's SCP server is not even enabled there
+    (issue #228) — so _iox_place_impl turns this into a terminal
+    ROOTCOPY-FAIL that names what the probe found."""
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason):
+        self.reason = reason
+
+    def __str__(self):
+        return self.reason
+
+
 def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                           copy_direct_fn, emit_fn, cli_execute_fn):
     """Land the downloaded scratch in the bind-mounted app-hosting share
@@ -5104,18 +5129,23 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
     `dir`-checked THROUGH IOS: the bind mount proves only the container side,
     not that share_ios_path names this box's view of the same directory (a
     stacked C9300 can enumerate the SSD differently; an operator override can
-    be wrong). An IOS-unreadable share must fall back to scp — without the
-    probe it burned a full SSD write plus a ~15-minute reverify timeout per
-    tick, wedging the device while the working fallback sat suppressed.
+    be wrong). Without the probe an IOS-unreadable share burned a full SSD
+    write plus a ~15-minute reverify timeout per tick.
 
-    Returns None when the share cannot be used (unconfigured, not mounted,
-    probe failed, or the local copy failed) so the caller falls back to the
-    scp push. Otherwise returns copy_direct_fn's bool verdict: an IOS-side
-    placement failure AFTER a good probe is FINAL — scp would push the
-    same bytes. The transient share copy is always removed (the swarm seeds
-    from the scratch under stage_dir, not from the share)."""
-    if not (share_dir and share_ios_path and os.path.isdir(share_dir)):
-        return None
+    Returns a _ShareUnavailable carrying the reason when the share cannot be
+    used (unconfigured, not mounted, probe failed, or the local copy failed);
+    what the caller does with that is platform policy (_iox_place_impl).
+    Otherwise returns copy_direct_fn's verdict: an IOS-side placement failure
+    AFTER a good probe is FINAL — scp would push the same bytes. The
+    transient share copy is always removed (the swarm seeds from the scratch
+    under stage_dir, not from the share)."""
+    if not share_dir:
+        return _ShareUnavailable("no container share directory is configured")
+    if not share_ios_path:
+        return _ShareUnavailable("no IOS share path is configured")
+    if not os.path.isdir(share_dir):
+        return _ShareUnavailable(
+            "share %s is not mounted in the app" % share_dir)
 
     def _sweep():
         # ONLY files carrying OUR prefix, at the share root — operator and
@@ -5146,10 +5176,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
                 or _dir_size_of(listing, _SHARE_PROBE) != len(_SHARE_PROBE_BODY)):
             raise OSError("IOS cannot read %s" % share_ios_path)
     except Exception as e:
-        emit_fn("SHARE-FALLBACK",
-                "%s share probe failed (%s); falling back to scp" % (fname, e))
+        emit_fn("SHARE-UNUSABLE",
+                "%s share probe failed (%s)" % (fname, e))
         _sweep()
-        return None
+        return _ShareUnavailable("share probe failed (%s)" % e)
     local = os.path.join(stage_dir, fname)
     staged = os.path.join(share_dir, _SHARE_STAGE)
     part = os.path.join(share_dir, _SHARE_STAGE + ".part")
@@ -5160,10 +5190,10 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
             shutil.copyfileobj(src, dst, length=1 << 20)
         os.replace(part, staged)
     except OSError as e:
-        emit_fn("SHARE-FALLBACK",
-                "%s share copy failed (%s); falling back to scp" % (fname, e))
+        emit_fn("SHARE-UNUSABLE",
+                "%s local copy into the share failed (%s)" % (fname, e))
         _sweep()
-        return None
+        return _ShareUnavailable("local copy into the share failed (%s)" % e)
     try:
         # The final copy reads the fixed staged name and writes the REAL
         # image name to the target FS (the caller's dst) — the source name
@@ -5173,6 +5203,55 @@ def _stage_via_share_impl(fname, stage_dir, share_dir, share_ios_path,
             lambda f, target_prefix: "%s/%s" % (share_ios_path, _SHARE_STAGE))
     finally:
         _sweep()
+
+
+def _iox_place_impl(fname, target_prefix, share_dir, share_ios_path,
+                    stage_via_share_fn, push_scratch_fn, direct_copy_fn,
+                    emit_fn):
+    """Hand the verified scratch to IOS from inside the IOx container, by the
+    ONE route this target's app block configured. Issue #228.
+
+    A target whose app block carries a share (both run-opts set: Catalyst
+    9300 via the SSD share, Catalyst 8000 via bootflash:) hands the image
+    over through that bind mount plus an IOS-internal plain `copy`. There is
+    NO scp fallback for it: IRIS does not enable the device's SCP server on a
+    share-configured target at all (server/iox_verification.py,
+    prepare_iox_scp), so a push would only fail late, after a full-size
+    transfer, with a less useful error than the share probe already produced.
+    An unusable share therefore FAILS the placement, naming what the probe
+    found.
+
+    That failure returns ROOT_COPY_NOT_ATTEMPTED, not plain False: only the
+    read-only `dir` probe ran, so the delete-first never cleared the target
+    name and nothing may authorise the terminal reclaim. It still counts as
+    an attempt, so the operator still reaches the terminal state.
+
+    A target with no share (IE-3x00: IOx cannot bind-mount sdflash: into the
+    app) keeps the scp push to guest-share exactly as before."""
+    if share_dir and share_ios_path:
+        shared = stage_via_share_fn()
+        if not isinstance(shared, _ShareUnavailable):
+            return shared
+        # ASCII only: _emit_impl encodes the syslog line with errors=replace.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s share hand-off to %s unusable: %s; this platform stages "
+                "only through the share (no scp fallback). Nothing was "
+                "deleted, no IOS placement command ran."
+                % (fname, share_ios_path, shared.reason))
+        return ROOT_COPY_NOT_ATTEMPTED
+    try:
+        push_scratch_fn(fname, target_prefix)
+    except Exception as e:
+        # Pure container-side transfer failure: no IOS command ran, so no
+        # delete-first cleared the target name.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s scp push to %s failed before any IOS work: %s"
+                % (fname, target_prefix, e))
+        return ROOT_COPY_NOT_ATTEMPTED
+    # NOTE: like the Guest Shell path, placement transiently needs ~2x the
+    # image on the target FS (scratch + root copy); the verified-delete in
+    # the direct copy reclaims the scratch afterwards.
+    return direct_copy_fn()
 
 
 # ---- on-box wiring (not exercised by unit tests) ----
@@ -5337,7 +5416,9 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     # same as the SSH-to-self CLI), then the SSH vty runs a plain
     # `copy sdflash:guest-share/iris/<img> sdflash:<img>` — byte-identical
     # to the C9300 flash:guest-share -> flash: flow. Guest Shell (C9300) writes its
-    # scratch via the in-VM mount, so it pushes nothing here.
+    # scratch via the in-VM mount, so it pushes nothing here, and a
+    # share-configured IOx target (C9300, Catalyst 8000) never reaches this
+    # push at all: its SCP server is not even enabled (issue #228).
     _legacy_runtime = (os.environ.get("IRIS_RUNTIME_MODE")
                        or cfg.get("runtime_mode") or "guestshell")
     _container_iox = (platform == "iox"
@@ -5390,47 +5471,36 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         # basename safety decision made before any destructive command.
         confirmed_running = lambda: running
         if _container_iox and _transport is not None:
-            # C9k container: the SSD share (usbflash1:iox_host_data_share) is
-            # bind-mounted at IRIS_SHARE_DIR, so the scratch lands there at
-            # disk speed and IOS places it with an internal disk-to-disk plain
-            # `copy` — no scp, no CoPP-policed punt traffic. None =
-            # share unusable -> fall through to the scp push below.
+            # Share-configured container (C9300 SSD share, Catalyst 8000
+            # bootflash share): the share is bind-mounted at IRIS_SHARE_DIR,
+            # so the scratch lands there at disk speed and IOS places it with
+            # an internal disk-to-disk plain `copy` — no scp, no CoPP-policed
+            # punt traffic, and no fallback if the share is unusable. Only a
+            # share-LESS container (IE-3x00) scp-pushes the scratch onto the
+            # IOS-visible SD and then runs a plain `copy` DIRECTLY over the
+            # SSH-to-self vty. (The EEM applet offload is only needed for the
+            # C9300 Guest Shell cli module, which can't drive an interactive
+            # copy; a real vty runs copy fine and EEM's `cli command "copy"`
+            # is a no-op here — so the direct path is both correct and
+            # necessary.) _iox_place_impl owns that decision.
             share_dir, share_ios_path = _share_settings(cfg)
-            if share_dir:
-                shared = _stage_via_share_impl(
+            return _iox_place_impl(
+                fname, target_prefix, share_dir, share_ios_path,
+                lambda: _stage_via_share_impl(
                     fname, cfg["stage_dir"], share_dir, share_ios_path,
                     lambda copy_source: _copy_to_root_direct_impl(
                         fname, target_prefix, cli_execute, emit,
                         copy_source=copy_source,
                         running_image_fn=confirmed_running,
                         expected_size=expected_size),
-                    emit, cli_execute)
-                if shared is not None:
-                    return shared
-            # IE-3x00 / container fallback: push the scratch onto the
-            # IOS-visible SD, then run a plain `copy` DIRECTLY over the
-            # SSH-to-self vty. The EEM applet offload is only needed for the
-            # C9300 Guest Shell cli module (can't drive interactive copy); a
-            # real vty runs copy fine, and the EEM `cli command "copy"` action
-            # is a no-op on this platform — so the direct path is both correct
-            # and necessary.
-            try:
-                _push_scratch(fname, target_prefix)
-            except Exception as e:
-                # Pure container-side transfer failure: no IOS command ran, so
-                # no delete-first cleared the target name.
-                emit("ROOTCOPY-FAIL",
-                     "%s scp push to %s failed before any IOS work: %s"
-                     % (fname, target_prefix, e))
-                return ROOT_COPY_NOT_ATTEMPTED
-            # NOTE: like the Guest Shell path, placement transiently needs
-            # ~2x the image on the target FS (scratch + root copy); the
-            # verified-delete below reclaims the scratch afterwards.
-            return _copy_to_root_direct_impl(fname, target_prefix,
-                                             cli_execute, emit,
-                                             delete_source_on_success=True,
-                                             running_image_fn=confirmed_running,
-                                             expected_size=expected_size)
+                    emit, cli_execute),
+                _push_scratch,
+                lambda: _copy_to_root_direct_impl(
+                    fname, target_prefix, cli_execute, emit,
+                    delete_source_on_success=True,
+                    running_image_fn=confirmed_running,
+                    expected_size=expected_size),
+                emit)
         return _copy_to_root_impl(fname, target_prefix,
                                   cli_configure, cli_execute, emit,
                                   running_image_fn=confirmed_running,

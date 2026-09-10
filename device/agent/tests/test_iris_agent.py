@@ -2841,23 +2841,26 @@ def test_stage_via_share_lands_file_then_copy_verifies_from_share(tmp_path):
     assert _iris_share_files(share) == []
 
 
-def test_stage_via_share_returns_none_when_share_dir_missing(tmp_path):
+def test_stage_via_share_reports_unavailable_when_share_dir_missing(tmp_path):
     stage = _mk_scratch(tmp_path)
     calls = []
     result = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(tmp_path / "nope"), "usbflash1:iox_host_data_share",
         lambda copy_source: calls.append(1) or True, lambda m, msg: None,
         _cli_probe_ok)
-    assert result is None          # None = share unavailable -> caller falls back
+    # NOT a verdict: a reason the caller can put in front of an operator.
+    assert isinstance(result, iris_agent._ShareUnavailable)
+    assert "not mounted" in result.reason
     assert calls == []
 
 
-def test_stage_via_share_returns_none_when_share_unset(tmp_path):
+def test_stage_via_share_reports_unavailable_when_share_unset(tmp_path):
     stage = _mk_scratch(tmp_path)
     result = iris_agent._stage_via_share_impl(
         "img1.bin", stage, "", "usbflash1:iox_host_data_share",
         lambda copy_source: True, lambda m, msg: None, _cli_probe_ok)
-    assert result is None
+    assert isinstance(result, iris_agent._ShareUnavailable)
+    assert "no container share directory" in result.reason
 
 
 def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
@@ -2879,9 +2882,10 @@ def test_stage_via_share_probe_failure_falls_back_before_big_copy(tmp_path):
         lambda m, msg: emitted.append((m, msg)),
         lambda cmd: "%Error opening usbflash1:WRONG/iris-probe.txt "
                     "(No such file or directory)")
-    assert result is None          # -> scp fallback
+    assert isinstance(result, iris_agent._ShareUnavailable)
+    assert "IOS cannot read usbflash1:WRONG" in result.reason
     assert calls == []             # the copy was never attempted
-    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert any(m == "SHARE-UNUSABLE" for m, _ in emitted)
     assert _iris_share_files(share) == []  # probe cleaned, image never copied
 
 
@@ -2896,7 +2900,8 @@ def test_stage_via_share_probe_transport_error_falls_back(tmp_path):
     result = iris_agent._stage_via_share_impl(
         "img1.bin", stage, str(share), "usbflash1:iox_host_data_share",
         lambda copy_source: True, lambda m, msg: None, cli_raises)
-    assert result is None
+    assert isinstance(result, iris_agent._ShareUnavailable)
+    assert "ssh transport failed" in result.reason
     assert _iris_share_files(share) == []
 
 
@@ -2933,9 +2938,10 @@ def test_stage_via_share_local_copy_failure_falls_back(tmp_path):
         "img1.bin", str(stage), str(share), "usbflash1:iox_host_data_share",
         lambda copy_source: calls.append(1) or True,
         lambda m, msg: emitted.append((m, msg)), _cli_probe_ok)
-    assert result is None
+    assert isinstance(result, iris_agent._ShareUnavailable)
+    assert "local copy into the share failed" in result.reason
     assert calls == []
-    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert any(m == "SHARE-UNUSABLE" for m, _ in emitted)
     assert _iris_share_files(share) == []   # no partial left behind
 
 
@@ -2951,6 +2957,113 @@ def test_stage_via_share_copy_verify_failure_is_final_and_cleans_up(tmp_path):
         lambda copy_source: False, lambda m, msg: None, _cli_probe_ok)
     assert ok is False
     assert _iris_share_files(share) == []
+
+
+# =====================================================================
+# Issue #228: SCP is the IE-3x00 hand-off ONLY. A target whose app block
+# configures a share (C9300, Catalyst 8000) has no scp fallback at all --
+# IRIS never enables the device's SCP server there.
+# =====================================================================
+
+def _place_probe():
+    """Callables for _iox_place_impl, recording what it actually drove."""
+    seen = {"pushed": [], "direct": 0, "emitted": []}
+
+    def push(fname, target_prefix):
+        seen["pushed"].append((fname, target_prefix))
+
+    def direct():
+        seen["direct"] += 1
+        return True
+
+    return seen, push, direct
+
+
+def test_configured_share_that_fails_its_probe_never_falls_back_to_scp():
+    seen, push, direct = _place_probe()
+    reason = "share probe failed (IOS cannot read bootflash:iox_host_data_share)"
+    out = iris_agent._iox_place_impl(
+        "img1.bin", "bootflash:", "/mnt/share", "bootflash:iox_host_data_share",
+        lambda: iris_agent._ShareUnavailable(reason),
+        push, direct,
+        lambda m, msg: seen["emitted"].append((m, msg)))
+    # No scp push, no placement copy: the SCP server is not even enabled on a
+    # share-configured target, so pushing could only fail later and worse.
+    assert seen["pushed"] == [] and seen["direct"] == 0
+    # Not plain False: only the read-only probe ran, so nothing may authorise
+    # the terminal reclaim to delete the file at the image name.
+    assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED
+    fails = [msg for m, msg in seen["emitted"] if m == "ROOTCOPY-FAIL"]
+    assert len(fails) == 1
+    assert reason in fails[0]                       # names what the probe found
+    assert "bootflash:iox_host_data_share" in fails[0]
+    assert "no scp fallback" in fails[0]
+
+
+def test_configured_share_not_mounted_fails_the_placement_with_the_reason():
+    seen, push, direct = _place_probe()
+    out = iris_agent._iox_place_impl(
+        "img1.bin", "bootflash:", "/mnt/share", "bootflash:iox_host_data_share",
+        lambda: iris_agent._ShareUnavailable(
+            "share /mnt/share is not mounted in the app"),
+        push, direct,
+        lambda m, msg: seen["emitted"].append((m, msg)))
+    assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED
+    assert seen["pushed"] == [] and seen["direct"] == 0
+    assert any(m == "ROOTCOPY-FAIL" and "is not mounted in the app" in msg
+               for m, msg in seen["emitted"])
+
+
+def test_configured_share_that_works_returns_the_share_verdict():
+    for verdict in (True, False):
+        seen, push, direct = _place_probe()
+        out = iris_agent._iox_place_impl(
+            "img1.bin", "bootflash:", "/mnt/share",
+            "bootflash:iox_host_data_share", lambda: verdict, push, direct,
+            lambda m, msg: seen["emitted"].append((m, msg)))
+        assert out is verdict
+        assert seen["pushed"] == [] and seen["direct"] == 0
+        assert [m for m, _ in seen["emitted"]] == []
+
+
+def test_no_share_configured_keeps_the_ie3x00_scp_push():
+    # IE-3x00: IOx cannot bind-mount sdflash:, so the scp push to guest-share
+    # followed by the plain placement copy is unchanged.
+    seen, push, direct = _place_probe()
+    out = iris_agent._iox_place_impl(
+        "img1.bin", "sdflash:", "", "",
+        lambda: pytest.fail("the share must not be probed without one"),
+        push, direct, lambda m, msg: seen["emitted"].append((m, msg)))
+    assert seen["pushed"] == [("img1.bin", "sdflash:")]
+    assert seen["direct"] == 1 and out is True
+    assert [m for m, _ in seen["emitted"]] == []
+
+
+def test_half_configured_share_still_takes_the_scp_push():
+    # A share_dir with no IOS path (or the reverse) is not a share: the
+    # pre-#228 behaviour -- scp -- is what keeps such a box staging at all.
+    for share_dir, share_ios in (("/mnt/share", ""), ("", "bootflash:iris")):
+        seen, push, direct = _place_probe()
+        out = iris_agent._iox_place_impl(
+            "img1.bin", "sdflash:", share_dir, share_ios,
+            lambda: pytest.fail("half a share must not be probed"),
+            push, direct, lambda m, msg: seen["emitted"].append((m, msg)))
+        assert seen["pushed"] == [("img1.bin", "sdflash:")] and out is True
+
+
+def test_scp_push_failure_is_still_not_attempted():
+    seen, _push, direct = _place_probe()
+
+    def push(fname, target_prefix):
+        raise OSError("connection reset")
+
+    out = iris_agent._iox_place_impl(
+        "img1.bin", "sdflash:", "", "", lambda: None, push, direct,
+        lambda m, msg: seen["emitted"].append((m, msg)))
+    assert out is iris_agent.ROOT_COPY_NOT_ATTEMPTED
+    assert seen["direct"] == 0
+    assert any(m == "ROOTCOPY-FAIL" and "scp push to sdflash: failed" in msg
+               for m, msg in seen["emitted"])
 
 
 def test_share_settings_env_wins_over_conf(monkeypatch):
@@ -5094,8 +5207,8 @@ def test_stage_via_share_probe_rejects_a_row_of_the_wrong_size(tmp_path):
         lambda copy_source: calls.append(1) or True,
         lambda m, msg: emitted.append((m, msg)),
         lambda cmd: "  12 -rw-  0  " + cmd.split("/")[-1])   # present, 0 bytes
-    assert result is None and calls == []
-    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert isinstance(result, iris_agent._ShareUnavailable) and calls == []
+    assert any(m == "SHARE-UNUSABLE" for m, _ in emitted)
     assert _iris_share_files(share) == []
 
 
@@ -5112,8 +5225,8 @@ def test_stage_via_share_probe_rejects_a_name_mention_without_a_dir_row(tmp_path
         lambda m, msg: emitted.append((m, msg)),
         lambda cmd: "Directory of usbflash1:iox_host_data_share/iris-probe.txt\n"
                     "\nNo files in directory\n")
-    assert result is None and calls == []
-    assert any(m == "SHARE-FALLBACK" for m, _ in emitted)
+    assert isinstance(result, iris_agent._ShareUnavailable) and calls == []
+    assert any(m == "SHARE-UNUSABLE" for m, _ in emitted)
 
 
 # =====================================================================

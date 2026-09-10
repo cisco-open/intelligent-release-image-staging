@@ -1301,17 +1301,49 @@ _assert_signal_finalization() {
   [ "$set_at" -lt "$copy_at" ] && [ "$copy_at" -lt "$clear_at" ]
 }
 
-@test "dry-run keeps the SCP server line for the agent's runtime hand-off, not for onboarding" {
-  # Onboarding pushes nothing over SCP any more; the device's SCP server is
-  # what the agent's guest-share image hand-off uses at runtime (IE-3x00,
-  # Catalyst 8000, and the Catalyst 9300 share fallback).
+@test "dry-run keeps the SCP server line only where there is no share (IE-3x00)" {
+  # Issue #228. Onboarding pushes nothing over SCP on any platform; the
+  # device's SCP server exists for the agent's runtime guest-share hand-off,
+  # and only a platform that cannot bind-mount its staging filesystem into
+  # the app needs it. `file prompt quiet` is not part of that decision -- the
+  # device-side `copy https:` fetch needs it everywhere.
   VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
     run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"ip scp server enable"* ]]
-  MANAGEMENT_TYPE=router-routed VPG_NUMBER=0 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
-    APP_GATEWAY=192.0.2.1 run bash "$INSTALL" --dry-run
+  [[ "$output" == *"file prompt quiet"* ]]
+  MANAGEMENT_TYPE=inband INBAND_VLAN=120 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 IOS_SSH_HOST=192.0.2.1 \
+    run bash "$INSTALL" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" == *"ip scp server enable"* ]]
-  [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/iris-amd64.tar bootflash:iris-<transaction>.tar"* ]]
+  # A C9300 job carries the SSD share, so the same switch template drops it.
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    SHARE_HOST_PATH=/vol/usb1/iox_host_data_share \
+    SHARE_IOS_PATH=usbflash1:iox_host_data_share \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ip scp server enable"* ]]
+  [[ "$output" == *"file prompt quiet"* ]]
+}
+
+@test "dry-run stages a Catalyst 8000 through the bootflash share, never over scp" {
+  # The share pair is gui_onboard._C8K_IOX_ENV's; the installer only renders
+  # what it is given. With it the router bind-mounts the share, creates it,
+  # and leaves the device's SCP server alone (issue #228).
+  for mode in router-routed router-nat; do
+    MANAGEMENT_TYPE=$mode VPG_NUMBER=0 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+      APP_GATEWAY=192.0.2.1 NAT_INTERFACE=GigabitEthernet1 \
+      SHARE_HOST_PATH=/bootflash/iox_host_data_share \
+      SHARE_IOS_PATH=bootflash:iox_host_data_share \
+      run bash "$INSTALL" --dry-run
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ip scp server enable"* ]]
+    [[ "$output" == *"file prompt quiet"* ]]
+    [[ "$output" == *'run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"'* ]]
+    [[ "$output" == *'run-opts 13 "-e IRIS_SHARE_IOS_PATH=bootflash:iox_host_data_share"'* ]]
+    [[ "$output" == *'run-opts 14 "-v /bootflash/iox_host_data_share:/mnt/share"'* ]]
+    [[ "$output" == *"mkdir bootflash:iox_host_data_share"* ]]
+    [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/iris-amd64.tar bootflash:iris-<transaction>.tar"* ]]
+  done
 }

@@ -86,6 +86,21 @@ name (`usbflash1:iox_host_data_share`) itself. A Catalyst package supplies only
 the corresponding `-v` mount. Direct deployments may retain the existing
 overrides, but the entrypoint validates both before use; XR rejects them.
 
+The share the Console configures for a job depends on the platform, and it is
+what decides the image hand-off (issue #228):
+
+| Platform | `SHARE_HOST_PATH` | `SHARE_IOS_PATH` | Hand-off |
+| --- | --- | --- | --- |
+| Catalyst 9300 | `/vol/usb1/iox_host_data_share` | `usbflash1:iox_host_data_share` | share mount + IOS-internal `copy` |
+| Catalyst 8000 | `/bootflash/iox_host_data_share` | `bootflash:iox_host_data_share` | share mount + IOS-internal `copy` |
+| IE-3x00 / IR1x01 | *(none)* | *(none)* | scp push to `guest-share/iris` |
+
+Both pairs live in `server/gui_onboard.py` (`_C9K_IOX_ENV`, `_C8K_IOX_ENV`) —
+change them there and nowhere else. `install.sh` renders `ip scp server enable`
+**only** when no share is set, and a share-configured agent has no scp
+fallback: an unusable share fails the placement with a `ROOTCOPY-FAIL` naming
+what the share probe found.
+
 The IOx agent reuses one short-lived SSH control connection for CLI and SCP
 work. This avoids opening a new VTY login for every filesystem check, transfer,
 and verification call during an agent tick.
@@ -181,8 +196,10 @@ itself remains unchanged and does not need rebuilding.
    amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
    `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` (run-opts 11 above; also
    `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
-   target exists). IE-3x00 defaults remain ARM64, `AppGigabitEthernet1/1`, and
-   `sdflash:` with no share mount.
+   target exists). A Catalyst 8000 uses the same shape with
+   `SHARE_HOST_PATH=/bootflash/iox_host_data_share` and
+   `SHARE_IOS_PATH=bootflash:iox_host_data_share`. IE-3x00 defaults remain
+   ARM64, `AppGigabitEthernet1/1`, and `sdflash:` with no share mount.
 
 5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
    iris` (Status 0). The device then refreshes its token, downloads the assigned
@@ -203,12 +220,20 @@ How the agent hands the downloaded image to IOS depends on the platform:
   path. IRIS uses only `iris-` prefixed filenames at the share root
   (container-created subdirs lock the container out on this platform).
   Before the multi-GB copy the agent probes that IOS can actually read the
-  share and otherwise falls back to the scp push below; the transient share
-  copy is removed after a verified placement.
+  share; the transient share copy is removed after a verified placement.
+- **C8k (share mount)**: the same mechanism against the router's own
+  `bootflash:iox_host_data_share` (host-side `/bootflash/…`).
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
-  SCP server (`ip scp server enable`, set by `install.sh`), then places it at
-  the target-FS root with the same two-phase sequence.
+  SCP server (`ip scp server enable`, set by `install.sh` **only** for a
+  share-less target), then places it at the target-FS root with the same
+  two-phase sequence.
+
+The two are exclusive. A share-configured target has no scp fallback — its
+SCP server is never enabled — so an unusable share (not mounted, unreadable
+from IOS, or a failed local copy into it) fails the placement with a
+`ROOTCOPY-FAIL` naming what the probe found, having deleted nothing and run
+no placement command.
 
 Both container paths place the image by running plain `copy`/`rename`
 commands DIRECTLY over the SSH-to-self vty rather than through the

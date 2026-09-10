@@ -2517,6 +2517,95 @@ def test_same_record_recovery_still_rejects_unrelated_record_drift(
     assert not recipe_started.exists()
 
 
+def _share_render_target(share=True, router=True):
+    """The renderer inputs gui_onboard builds for a Catalyst 8000 IOx job
+    (with the share) or an IE-3x00 one (without)."""
+    target = {
+        "package_fs": "bootflash:" if router else "flash:",
+        "target_fs": "bootflash:" if router else "sdflash:",
+        "pkg": "iris-amd64.tar" if router else "iris-arm64.tar",
+        "management_type": "router-routed" if router else "routed",
+        "app_ip": "100.90.171.2", "app_mask": "255.255.255.252",
+        "app_gateway": "100.90.171.1", "svi_ip": "10.66.6.1",
+        "svi_mask": "255.255.255.252", "guest_ip": "10.66.6.2",
+        "vlan": "666", "vpg_number": "1",
+        "app_intf": "AppGigabitEthernet1/1",
+        "nat_interface": "GigabitEthernet1", "bt_listen_port": "6881",
+        "ios_ssh_host": "100.90.171.1",
+        "telemetry": "on", "telemetry_stream": "off", "log": "off",
+    }
+    if share:
+        target["share_host_path"] = "/bootflash/iox_host_data_share"
+        target["share_ios_path"] = "bootflash:iox_host_data_share"
+    return target
+
+
+def _render_with_target(tmp_path, name, target):
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    attempt = module._Attempt(
+        controller, "install", _request(action="install"), _Cancel(), False)
+    attempt.target = target
+    attempt.credentials = {"device_user": "operator", "device_pass": "pw",
+                           "catalog_token": "0123456789abcdef"}
+    try:
+        return controller._render_command(attempt, name).decode("ascii")
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("name", ["prepare_iox_scp", "configure_network"])
+def test_scp_server_is_enabled_only_where_there_is_no_share(tmp_path, name):
+    """#228: the device's SCP server exists for ONE thing -- the agent's
+    runtime image hand-off on a platform that cannot bind-mount its staging
+    filesystem into the app (IE-3x00). A share-configured target (C9300,
+    Catalyst 8000) hands the image over through the mount plus an
+    IOS-internal copy and has no scp fallback, so IRIS must not switch its
+    SCP server on. `file prompt quiet` is NOT part of that decision: every
+    platform needs it for the device-side `copy https:` fetch."""
+    shared = _render_with_target(
+        tmp_path, name, _share_render_target(share=True)).splitlines()
+    bare = _render_with_target(
+        tmp_path, name, _share_render_target(share=False, router=False)
+    ).splitlines()
+    assert "ip scp server enable" not in shared
+    assert "ip scp server enable" in bare
+    assert "file prompt quiet" in shared and "file prompt quiet" in bare
+    # the rest of the step is untouched, and it still ends cleanly
+    assert shared[-1] == "end" and bare[-1] == "end"
+    assert "iox" in shared and "iox" in bare
+    if name == "prepare_iox_scp":
+        assert shared == ["configure terminal", "iox", "file prompt quiet",
+                          "end"]
+
+
+def test_router_app_block_renders_the_share_run_opts_and_mkdir(tmp_path):
+    """A Catalyst 8000 IOx target carries the bootflash share, so the app
+    block bind-mounts it (run-opts 12-14) and the recipe creates it."""
+    target = _share_render_target(share=True)
+    app = _render_with_target(tmp_path, "configure_app", target).splitlines()
+    assert '  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"' in app
+    assert ('  run-opts 13 "-e IRIS_SHARE_IOS_PATH=bootflash:'
+            'iox_host_data_share"') in app
+    assert ('  run-opts 14 "-v /bootflash/iox_host_data_share:/mnt/share"'
+            ) in app
+    # inside the docker block, before the block closes
+    assert app.index('  run-opts 11 "-e IRIS_LOG=off"') < app.index(
+        '  run-opts 12 "-e IRIS_SHARE_DIR=/mnt/share"')
+    assert app[-1] == "end"
+    assert _render_with_target(tmp_path, "mkdir_share", target) == \
+        "mkdir bootflash:iox_host_data_share"
+    # an IE-3x00 target gets neither
+    bare = _render_with_target(
+        tmp_path, "configure_app", _share_render_target(share=False,
+                                                        router=False))
+    assert "IRIS_SHARE_DIR" not in bare and "/mnt/share" not in bare
+    assert _render_with_target(
+        tmp_path, "mkdir_share",
+        _share_render_target(share=False, router=False)) == "dir sdflash:"
+
+
 @pytest.mark.parametrize("router,mode,expected", [
     (True, "router-routed", 1024),
     (True, "router-nat", 1024),

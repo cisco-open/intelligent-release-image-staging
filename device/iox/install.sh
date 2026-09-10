@@ -905,6 +905,25 @@ fetch_block() {
   clear_http_client
 }
 
+scp_server_block() {  # the device's SCP server -- ONLY where there is no share
+# IRIS enables it for exactly one reason: the agent's runtime image hand-off
+# on a platform that cannot bind-mount its staging filesystem into the app
+# (IE-3x00 and sdflash:). There the agent scp-pushes the downloaded image to
+# guest-share and a plain copy places it. Every share-configured platform
+# (Catalyst 9300, Catalyst 8000) hands the image over through the mount plus
+# an IOS-internal copy and has NO scp fallback, so the SCP server must stay
+# off there -- issue #228. Onboarding itself pushes nothing over SCP on any
+# platform (the device fetches its own package over https).
+if [ -n "$SHARE_IOS_PATH" ]; then return 0; fi
+cat <<EOF
+! SCP server: the agent's runtime image hand-off on a share-less platform
+! (IE-3x00) pushes the scratch to guest-share through it, then the plain copy
+! places it. Not used by onboarding.
+ip scp server enable
+!
+EOF
+}
+
 ios_net() {           # networking + IOx enable (idempotent)
 if [ "$APP_VNIC" = "vpg" ]; then
 # Router: the same VirtualPortGroup and NAT footprint device/router-install.sh
@@ -948,11 +967,9 @@ fi
 cat <<EOF
 file prompt quiet
 !
-! SCP server: not for onboarding (the router fetches the package itself);
-! the agent's runtime image hand-off scp-pushes the downloaded image to
-! bootflash:guest-share/iris through it, then the plain copy places it.
-ip scp server enable
-!
+EOF
+scp_server_block
+cat <<EOF
 end
 EOF
 return
@@ -972,10 +989,9 @@ interface $APP_INTF
 !
 file prompt quiet
 !
-! SCP server: the scp fallback hand-off (primary on IE-3x00; C9k uses the
-! bind-mounted SSD share) pushes the scratch here, then the plain copy places it.
-ip scp server enable
-!
+EOF
+scp_server_block
+cat <<EOF
 end
 EOF
 return
@@ -996,11 +1012,9 @@ interface Vlan$VLAN
 !
 file prompt quiet
 !
-! SCP server: the scp hand-off (primary on IE-3x00, where IOx cannot
-! bind-mount sdflash:; the C9k default is the SSD share) pushes the scratch to
-! guest-share, then the plain copy places it.
-ip scp server enable
-!
+EOF
+scp_server_block
+cat <<EOF
 end
 EOF
 }
