@@ -28,6 +28,26 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Make IOx on Catalyst 8000 actually reach the device. The recipe understood
+  the router management types, but the two components a live onboard runs
+  through did not: the Console's plan gate refused platform `iox` on a router
+  row, and the IOx controller rejected the router management types and
+  rendered no VirtualPortGroup or NAT commands. The controller now validates
+  and renders the router target (VPG vnic, `bootflash:` defaults, NAT ACL,
+  overload and swarm-port translation), the plan gate accepts `router` or
+  `iox` on those rows, and the deployment record claims the VPG/NAT footprint
+  it can actually take back.
+- Remove the router NAT footprint in the order IOS accepts. The IOx teardown
+  deleted the NAT ACL while the overload rule and swarm-port translation still
+  referenced it, and refused nothing when `VPG_NUMBER` was unset. Teardown now
+  removes the static translation and overload rule before the ACL, un-marks a
+  NAT outside interface only when the record says IRIS marked it, and
+  validates its inputs.
+- Say why a preflight could not run. A device that was unreachable, rejected
+  the login, or presented an untrusted host key all produced the same bare
+  "preflight could not run", and a refused IOx request said only that the
+  controller rejected it. Both now carry the reason — the runner's own
+  diagnostic, or the field the controller refused.
 - Offer only the agent installs a device row can take. Picking IOx for a
   Catalyst 8000V on a router management type was refused by the fleet store
   and the dropdown snapped back on the next refresh, with the reason parked in

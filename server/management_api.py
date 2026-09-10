@@ -3393,9 +3393,15 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     and not router_management_type:
                 raise ValueError("Catalyst 8000 models require management_type "
                                  "router-routed or router-nat")
-            if (platform == "router") != router_management_type:
+            if platform == "router" and not router_management_type:
                 raise ValueError("platform router requires management_type "
                                  "router-routed or router-nat")
+            # Guest Shell (router) or the IOx app: both attach to the
+            # IRIS-owned VirtualPortGroup, so either may plan a router row.
+            # Nothing else has a VPG recipe.
+            if router_management_type and platform not in ("router", "iox"):
+                raise ValueError("management_type %s requires platform router "
+                                 "or iox" % management_type)
             if platform == "router" and device.get("model") and not re.match(
                     r"^C8[0-9]{3}", device["model"], re.IGNORECASE):
                 raise ValueError("router modes support the Catalyst 8000 family only; "
@@ -3499,7 +3505,9 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             directory. Every other management type here is IOS-XE and runs its
             agent inside a guestshell resource; IOS-XR has no such feature,
             so xr-host must NOT claim one."""
-            if resolved.get("platform") == "iox":
+            iox = resolved.get("platform") == "iox"
+            if iox and resolved.get("management_type") not in (
+                    "router-routed", "router-nat"):
                 return [{"kind": "iox-app", "ownership": "iris-created"}]
             management_type = resolved["management_type"]
             if management_type == "xr-host":
@@ -3553,6 +3561,19 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                    if resolved.get("file_prompt_quiet_preexisting") == "1"
                                    else "iris-added-preserved")},
                 ] + resources
+                if iox:
+                    # An IOx app on a router rides the same IRIS-owned
+                    # VirtualPortGroup and NAT footprint, but
+                    # device/iox/install.sh writes no EEM applets,
+                    # guest-share files or logging discriminator and runs no
+                    # Guest Shell, so the record claims the app instead of
+                    # those -- exactly what device/iox/uninstall.sh removes.
+                    resources = [
+                        resource for resource in resources
+                        if resource["kind"] not in (
+                            "eem-applets", "agent-files",
+                            "logging-discriminator", "guestshell")
+                    ] + [{"kind": "iox-app", "ownership": "iris-created"}]
                 if management_type == "router-nat":
                     outside_ownership = ("iris-created"
                                          if resolved.get("nat_outside_owned") in (True, 1, "1")

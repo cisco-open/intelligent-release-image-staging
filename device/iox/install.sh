@@ -566,7 +566,23 @@ case "$MANAGEMENT_TYPE" in
       || { echo "ERROR: VPG_NUMBER must be between 0 and 31" >&2; exit 1; }
     if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
       : "${NAT_INTERFACE:?set NAT_INTERFACE}"; BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
+      [[ "$NAT_INTERFACE" =~ ^[A-Za-z][A-Za-z0-9./_-]{0,127}$ ]] \
+        || { echo "ERROR: NAT_INTERFACE must be an interface name" >&2; exit 1; }
+      [[ "$BT_LISTEN_PORT" =~ ^[0-9]+$ ]] && [ "$BT_LISTEN_PORT" -ge 1 ] && [ "$BT_LISTEN_PORT" -le 65535 ] \
+        || { echo "ERROR: BT_LISTEN_PORT must be between 1 and 65535" >&2; exit 1; }
     fi
+    # The same address check device/router-install.sh makes: the app and its
+    # gateway are two distinct usable addresses of one subnet.
+    python3 - "$APP_IP" "$APP_MASK" "$APP_GATEWAY" <<'SUBNET' || { echo "ERROR: APP_IP and APP_GATEWAY must be distinct usable addresses in the same subnet" >&2; exit 1; }
+import ipaddress, sys
+network = ipaddress.IPv4Network("%s/%s" % (sys.argv[1], sys.argv[2]), strict=False)
+ip, gateway = ipaddress.IPv4Address(sys.argv[1]), ipaddress.IPv4Address(sys.argv[3])
+unusable = (network.network_address, network.broadcast_address)
+sys.exit(0 if (network.prefixlen <= 30 and gateway in network and gateway != ip
+               and ip not in unusable and gateway not in unusable) else 1)
+SUBNET
+    # A Catalyst 8000 stages to bootflash: and runs the amd64 package.
+    PKG="${PKG:-iris-amd64.tar}"; PKG_FS="${PKG_FS:-bootflash:}"; TARGET_FS="${TARGET_FS:-bootflash:}"
     VLAN=""; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY"
     IOS_SSH_HOST="${IOS_SSH_HOST:-$APP_GATEWAY}"; APP_VNIC="vpg" ;;
   *) echo "ERROR: MANAGEMENT_TYPE must be routed, inband, router-routed, or router-nat" >&2; exit 1 ;;

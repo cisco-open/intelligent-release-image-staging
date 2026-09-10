@@ -661,6 +661,40 @@ def _check_iris_named_collisions(running, extra=(), waive=()):
 # retry until the operator undeployed by hand).
 _IOX_RESUMABLE_APP_STATES = ("DEPLOYED", "ACTIVATED")
 
+# The description the IOx recipe writes into the VirtualPortGroup it creates
+# on a router (server/iox_verification.py renders it; device/iox/install.sh
+# prints the same literal in its dry run). Not the Guest Shell recipe's
+# marker on purpose: device/router-uninstall.sh's record-less reclaim must
+# never remove the group an IOx app is still attached to.
+_IOX_VPG_DESCRIPTION = "description IRIS IOx VPG"
+
+
+def _iox_own_router_footprint(resolved, sections):
+    """True when the VirtualPortGroup the plan wants already exists AND is
+    provably IRIS's own from a half-finished IOx onboard of this same plan:
+    the app is installed but was never started (_IOX_RESUMABLE_APP_STATES)
+    and the group carries the IOx recipe's description with exactly the
+    planned address. That retry is the documented idempotent re-install, so
+    the VPG/subnet/NAT collision checks must not refuse it the way they
+    refuse an operator's group -- the router spelling of scrubber #78."""
+    if resolved.get("platform") != "iox":
+        return False
+    appid = str(resolved.get("iox_appid") or "iris")
+    if _iox_app_state(sections["apps"], appid) not in _IOX_RESUMABLE_APP_STATES:
+        return False
+    vpg = str(resolved.get("vpg_number", ""))
+    block = re.search(
+        r"(?ms)^interface VirtualPortGroup%s\s*$\n(.*?)(?=^\S|\Z)" % re.escape(vpg),
+        sections["running"])
+    if not block:
+        return False
+    body = block.group(1)
+    return bool(
+        re.search(r"(?m)^\s*%s\s*$" % re.escape(_IOX_VPG_DESCRIPTION), body) and
+        re.search(r"(?m)^\s*ip address %s %s\s*$" % (
+            re.escape(str(resolved.get("app_gateway", ""))),
+            re.escape(str(resolved.get("app_mask", "")))), body))
+
 # The IRIS-named artifacts device/iox/install.sh re-establishes on every run:
 # step [4/9] pastes `no crypto pki trustpoint IRIS` before re-adding the
 # trustpoint and re-binding the HTTP client to it. Those are the only
@@ -680,6 +714,33 @@ def _iox_app_state(apps, appid):
     return match.group(1).upper() if match else ""
 
 
+def _runner_failure_reason(out):
+    """The last line the runner wrote to stderr, printable-only and bounded,
+    so a preflight that could not even log in says WHY ("Connection timed
+    out", "Permission denied", "Host key verification failed") instead of
+    leaving the operator to guess between a dead device, a wrong password
+    and a changed host key. sshpass reads the password from its environment
+    and never echoes it; the runner's own diagnostics name files, not
+    secrets."""
+    # sshpass reports a rejected password as exit 5 and an untrusted host key
+    # as exit 6 without writing a word; ssh's own connection failures land on
+    # stderr after an accept-new "Permanently added" warning that is not the
+    # reason.
+    if out.returncode == 5:
+        return "the device rejected the login credentials"
+    if out.returncode == 6:
+        return "the device's SSH host key is not trusted"
+    # Injected transport doubles carry no stderr; a missing channel is simply
+    # no reason to report, never an error of its own.
+    lines = [line.strip()
+             for line in (getattr(out, "stderr", "") or "").splitlines()
+             if line.strip() and "Permanently added" not in line]
+    if not lines:
+        return ""
+    reason = "".join(ch for ch in lines[-1] if 32 <= ord(ch) < 127)
+    return reason[:160]
+
+
 def _probe_sections(runner, env, commands, label):
     """Run every command in ONE ssh login and split the output on echoed
     markers. One login per device is what makes a large fleet submission
@@ -693,7 +754,9 @@ def _probe_sections(runner, env, commands, label):
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
                          capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
-        raise ValueError("%s preflight could not run" % label)
+        reason = _runner_failure_reason(out)
+        raise ValueError("%s preflight could not run%s" % (
+            label, ": " + reason if reason else ""))
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
@@ -782,7 +845,9 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     out = subprocess.run(["bash", runner, env["DEVICE_IP"]], input=request,
                          capture_output=True, text=True, env=env, timeout=90)
     if out.returncode != 0:
-        raise ValueError("router preflight could not run")
+        reason = _runner_failure_reason(out)
+        raise ValueError("router preflight could not run%s" % (
+            ": " + reason if reason else ""))
     sections = {}
     for name, _command in commands:
         start = "%s%s__" % (marker, name.upper())
@@ -812,7 +877,11 @@ def _default_router_preflight(dev, env, resolved, repo_root):
 
     running = sections["running"]
     vpg = str(resolved.get("vpg_number", ""))
-    if re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running):
+    # An IOx retry over its own half-finished footprint is not a collision;
+    # anything that does not match the plan exactly still is.
+    own_footprint = _iox_own_router_footprint(resolved, sections)
+    if (re.search(r"(?m)^interface VirtualPortGroup%s\s*$" % re.escape(vpg), running)
+            and not own_footprint):
         raise ValueError("VirtualPortGroup%s already exists" % vpg)
 
     candidate = ipaddress.IPv4Network(
@@ -825,7 +894,8 @@ def _default_router_preflight(dev, env, resolved, repo_root):
             configured = ipaddress.IPv4Network("%s/%s" % (address, mask), strict=False)
         except (ipaddress.AddressValueError, ipaddress.NetmaskValueError):
             continue
-        if candidate.overlaps(configured):
+        if candidate.overlaps(configured) and not (
+                own_footprint and configured == candidate):
             raise ValueError("router app subnet %s is already configured" % candidate)
 
     # An IOx app on this router shares the VPG/subnet/NAT checks above but
@@ -867,11 +937,17 @@ def _default_router_preflight(dev, env, resolved, repo_root):
     evidence["nat_outside_preexisting"] = bool(
         block and re.search(r"(?m)^\s*ip nat outside\s*$", block.group(1)))
     acl = "IRIS-NAT-%s" % vpg
-    if re.search(r"(?m)^ip access-list standard %s\s*$" % re.escape(acl), running):
+    if (re.search(r"(?m)^ip access-list standard %s\s*$" % re.escape(acl), running)
+            and not own_footprint):
         raise ValueError("NAT ACL %s already exists" % acl)
-    if re.search(r"(?m)^ip nat inside source list %s\s" % re.escape(acl), running):
-        raise ValueError("NAT overload rule for %s already exists" % acl)
+    own_overload = "ip nat inside source list %s interface %s overload" % (acl, outside)
+    for line in re.findall(r"(?m)^ip nat inside source list %s\s.*$" % re.escape(acl),
+                           running):
+        if not (own_footprint and line.strip() == own_overload):
+            raise ValueError("NAT overload rule for %s already exists" % acl)
     port = str(resolved.get("swarm_port", "6881"))
+    own_static = "ip nat inside source static tcp %s %s interface %s %s" % (
+        resolved["app_ip"], port, outside, port)
     for line in re.findall(r"(?m)^ip nat inside source static tcp\s+.*$", running):
         fields = line.split()
         # ip nat inside source static tcp <inside-ip> <inside-port>
@@ -885,6 +961,8 @@ def _default_router_preflight(dev, env, resolved, repo_root):
             outside_port = fields[9]
         if ((inside_ip == resolved["app_ip"] and inside_port == port)
                 or outside_port == port):
+            if own_footprint and line.strip() == own_static:
+                continue
             raise ValueError("NAT static mapping collides with swarm port %s" % port)
     return evidence
 
@@ -1808,6 +1886,7 @@ class OnboardService:
             "nat_outside_owned": "NAT_OUTSIDE_OWNED",
             "ios_ssh_host": "IOS_SSH_HOST",
             "target_fs": "TARGET_FS",
+            "package_fs": "PKG_FS",
             "share_host_path": "SHARE_HOST_PATH",
             "share_ios_path": "SHARE_IOS_PATH",
             "app_intf": "APP_INTF",
@@ -2243,6 +2322,27 @@ class OnboardService:
                                  else getattr(identity, source_key, None))
                         if value not in (None, ""):
                             callback_dev[destination_key] = value
+                    plan = j.get("resolved") or resolved or callback_dev
+                    router_evidence = None
+                    if (action == "onboard" and plan.get("management_type")
+                            in _ROUTER_MANAGEMENT_TYPES):
+                        # An IOx app on a router: the controller's own
+                        # preflight owns the app-hosting facts, but the
+                        # VirtualPortGroup/subnet/NAT collision checks and
+                        # the ownership facts bind_preflight records
+                        # (nat_interface, what pre-existed) belong to the
+                        # router preflight and must be observed, never
+                        # assumed. Its refusals name the collision, so they
+                        # are worth surfacing verbatim.
+                        try:
+                            router_evidence = self._router_preflight(
+                                callback_dev, env, plan)
+                        except Exception as exc:
+                            self._persist_os_family(
+                                device_id, callback_dev, prior_family)
+                            preflight_diagnostic[0] = (
+                                "preflight failed: %s" % exc)
+                            raise ValueError("IOx preflight rejected") from None
                     try:
                         if self._iox_preflight_is_default:
                             board = callback_dev.get("device_identity")
@@ -2274,6 +2374,18 @@ class OnboardService:
                         raise ValueError("IOx preflight rejected") from None
                     self._persist_os_family(
                         device_id, callback_dev, prior_family)
+                    if router_evidence is not None:
+                        # Both preflights read a box; they must agree which.
+                        if ((router_evidence.get("device_identity") or "") !=
+                                (evidence.get("device_identity") or "")):
+                            preflight_diagnostic[0] = (
+                                "preflight failed: router and IOx preflights "
+                                "saw different devices")
+                            raise ValueError("IOx preflight rejected")
+                        merged = dict(router_evidence)
+                        merged.update({key: value for key, value in evidence.items()
+                                       if key != "detected_model"})
+                        evidence = merged
                     preflight_evidence[0] = copy.deepcopy(evidence)
                     bound = apply_iox_preflight(
                         j.get("resolved") or resolved or callback_dev,
@@ -2371,9 +2483,13 @@ class OnboardService:
                             current["error_category"] = (
                                 "rejected" if result_code == 2 else
                                 "journal_unreadable")
+                    # The controller's admission refusals are fixed strings
+                    # naming the invalid field ("invalid credential
+                    # reference", "invalid IOx target pkg"), never device
+                    # output or a secret: an operator needs the field name.
                     self._append(job_id, "ERROR: " + (
                         preflight_diagnostic[0] or
-                        ("IOx controller rejected the request"
+                        ("IOx controller rejected the request: %s" % exc
                          if isinstance(exc, ValueError) else
                          "IOx authority operation failed")))
                 finally:

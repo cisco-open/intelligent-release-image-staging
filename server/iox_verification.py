@@ -107,6 +107,28 @@ _TARGET_KEYS = frozenset((
     "telemetry", "telemetry_stream", "log"))
 _SECRET_TARGET_FRAGMENTS = ("pass", "password", "secret", "token",
                             "credential", "private", "key")
+# A Catalyst 8000 has no AppGigabitEthernet: on a router the app attaches to
+# the IRIS-owned VirtualPortGroup the Guest Shell router recipe also creates,
+# the target carries the VPG/NAT plan instead of a VLAN, and staging goes to
+# bootflash:. These are the management types that select that path.
+_ROUTER_MODES = frozenset(("router-routed", "router-nat"))
+_IOX_APP_RESOURCE = {"kind": "iox-app", "ownership": "iris-created"}
+# The ownership claims a router record may carry for an IOx app: the
+# VirtualPortGroup/NAT footprint device/iox/install.sh creates and
+# device/iox/uninstall.sh removes, plus the device-global settings it
+# preserves. Anything else is not something the IOx recipe can take back.
+_ROUTER_RESOURCE_KINDS = frozenset((
+    "iox-app", "virtualportgroup", "pki-trustpoint", "http-client-trustpoint",
+    "iox-global", "file-prompt-quiet", "nat-acl", "nat-overload",
+    "nat-static", "nat-outside-marking"))
+_RESOURCE_OWNERSHIPS = frozenset(
+    ("iris-created", "iris-added-preserved", "pre-existing"))
+# Written into every VirtualPortGroup the IOx recipe creates on a router, the
+# same literal device/iox/install.sh prints and gui_onboard's router preflight
+# recognises on a resumable retry. Deliberately not the Guest Shell recipe's
+# marker: device/router-uninstall.sh's record-less reclaim must never remove
+# the group an IOx app is still attached to.
+_VPG_DESCRIPTION = "description IRIS IOx VPG"
 _SAFE_HOST = re.compile(r"^[A-Za-z0-9._:-]{1,255}$")
 _SAFE_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_USER = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$")
@@ -264,6 +286,44 @@ def _https_url(value):
             ((":" + str(port)) if port is not None else "")):
         raise ValueError("invalid IOx catalog URL")
     return value
+
+
+def _validate_resources(resources, router):
+    """The record's ownership claims, closed to what the IOx recipe can take
+    back. Off a router the app is the only thing IRIS ever claims. On a
+    router the record must also claim the VirtualPortGroup the app rides and
+    may claim only the footprint device/iox/uninstall.sh removes."""
+    if not isinstance(resources, list):
+        raise ValueError("invalid IOx target resources")
+    if not router:
+        if resources != [_IOX_APP_RESOURCE]:
+            raise ValueError("invalid IOx target resources")
+        return
+    kinds = []
+    for resource in resources:
+        if (not isinstance(resource, dict) or
+                resource.get("kind") not in _ROUTER_RESOURCE_KINDS or
+                resource.get("ownership") not in _RESOURCE_OWNERSHIPS):
+            raise ValueError("invalid IOx target resources")
+        kinds.append(resource["kind"])
+    if (len(kinds) != len(set(kinds)) or "virtualportgroup" not in kinds or
+            not any(resource == _IOX_APP_RESOURCE for resource in resources)):
+        raise ValueError("invalid IOx target resources")
+
+
+def _router_subnet_check(app_ip, app_mask, app_gateway):
+    """The app and its VirtualPortGroup gateway must be two distinct usable
+    addresses of one subnet -- the check the router recipe makes before it
+    writes the group, so a plan that passed the Console never reaches the
+    device with an address IOS would refuse or route nowhere."""
+    network = ipaddress.IPv4Network("%s/%s" % (app_ip, app_mask), strict=False)
+    address = ipaddress.IPv4Address(app_ip)
+    gateway = ipaddress.IPv4Address(app_gateway)
+    unusable = (network.network_address, network.broadcast_address)
+    if (network.prefixlen > 30 or gateway not in network or
+            gateway == address or address in unusable or gateway in unusable):
+        raise ValueError("IOx router target app_ip and app_gateway must be "
+                         "distinct usable addresses in the app subnet")
 
 
 def _command_bytes(lines):
@@ -3288,7 +3348,7 @@ class IoxController(object):
         projected.setdefault("platform", "iox")
         if resolved.get("pkg") in (None, "") and resolved.get("model"):
             projected["pkg"] = ("iris-amd64.tar" if re.match(
-                r"^C9", resolved["model"], re.I) else "iris-arm64.tar")
+                r"^C[89]", resolved["model"], re.I) else "iris-arm64.tar")
         projected["resources"] = copy.deepcopy(record.get("resources") or [])
         validated = self._validate_target(projected, action)
         # Inventory/request values select the durable record; they never
@@ -3451,9 +3511,16 @@ class IoxController(object):
         mode = normalized.get("management_type", "routed")
         if mode == "legacy_routed":
             mode = "routed"
-        if mode not in ("routed", "inband"):
+        if mode not in ("routed", "inband") and mode not in _ROUTER_MODES:
             raise ValueError("invalid IOx target management_type")
         normalized["management_type"] = mode
+        router = mode in _ROUTER_MODES
+        if router:
+            if not re.match(r"^C8[0-9]{3}", normalized.get("model", ""), re.I):
+                raise ValueError(
+                    "IOx router target requires a Catalyst 8000 model")
+            if "vlan" in normalized or "inband_vlan" in normalized:
+                raise ValueError("IOx router target carries a VLAN")
         appid = normalized.get("iox_appid", self.application_id)
         if appid != self.application_id:
             raise ValueError("IOx application authority changed")
@@ -3463,10 +3530,10 @@ class IoxController(object):
             if value is not None and re.fullmatch(
                     r"[A-Za-z][A-Za-z0-9_-]{0,31}:", value) is None:
                 raise ValueError("invalid IOx target %s" % key)
-        normalized.setdefault("package_fs", "flash:")
-        normalized.setdefault("target_fs", "sdflash:")
+        normalized.setdefault("package_fs", "bootflash:" if router else "flash:")
+        normalized.setdefault("target_fs", "bootflash:" if router else "sdflash:")
         default_pkg = ("iris-amd64.tar" if re.match(
-            r"^C9", normalized.get("model", ""), re.I) else
+            r"^C[89]", normalized.get("model", ""), re.I) else
             "iris-arm64.tar")
         pkg = normalized.get("pkg", default_pkg)
         if (not isinstance(pkg, str) or
@@ -3511,7 +3578,24 @@ class IoxController(object):
                 normalized.setdefault("svi_mask", normalized["app_mask"])
             if "app_ip" in normalized:
                 normalized.setdefault("guest_ip", normalized["app_ip"])
-        for key, low, high in (("vpg_number", 0, 4096),
+        if router:
+            # The app SSHes to IOS at the VirtualPortGroup address, the same
+            # way the Guest Shell router recipe does.
+            if "app_gateway" in normalized:
+                normalized.setdefault("ios_ssh_host", normalized["app_gateway"])
+            if {"app_ip", "app_mask", "app_gateway"} <= set(normalized):
+                _router_subnet_check(normalized["app_ip"],
+                                     normalized["app_mask"],
+                                     normalized["app_gateway"])
+            if "vpg_number" not in normalized:
+                raise ValueError("IOx router target has no vpg_number")
+            if mode == "router-nat":
+                if "nat_interface" not in normalized:
+                    raise ValueError(
+                        "IOx router-nat target has no nat_interface")
+                normalized.setdefault("bt_listen_port", 6881)
+                normalized.setdefault("nat_outside_owned", False)
+        for key, low, high in (("vpg_number", 0, 31 if router else 4096),
                                ("bt_listen_port", 1, 65535)):
             if key in normalized:
                 value = normalized[key]
@@ -3547,20 +3631,27 @@ class IoxController(object):
                 raise ValueError("invalid IOx target share_ios_path")
         resources = normalized.get("resources")
         if resources is not None:
-            if (not isinstance(resources, list) or resources != [{
-                    "kind": "iox-app", "ownership": "iris-created"}]):
-                raise ValueError("invalid IOx target resources")
+            _validate_resources(resources, router)
         for key in ("telemetry", "telemetry_stream", "log"):
             normalized[key] = _boolean_word(
                 normalized.get(key, "on" if key == "telemetry" else "off"),
                 key)
-        required = {"model", vlan_key, "resources", "pkg", "target_fs",
-                    "package_fs", "app_intf",
+        required = {"model", "resources", "pkg", "target_fs", "package_fs",
                     "app_ip", "app_mask", "app_gateway", "ios_ssh_host"}
+        if router:
+            required.add("vpg_number")
+            if mode == "router-nat":
+                required.update(("nat_interface", "bt_listen_port",
+                                 "nat_outside_owned"))
+        else:
+            required.update((vlan_key, "app_intf"))
         if mode == "routed":
             required.update(("svi_ip", "svi_mask", "guest_ip"))
         if self._strict_target and not required.issubset(normalized):
-            raise ValueError("incomplete IOx target plan")
+            # Field names only -- what the operator has to fill in on the
+            # fleet row, never a value.
+            raise ValueError("incomplete IOx target plan: missing %s" %
+                             ", ".join(sorted(required - set(normalized))))
         return normalized
 
     def _preselect(self, request, action):
@@ -4055,16 +4146,35 @@ class IoxController(object):
         package_fs = target.get("package_fs", "flash:")
         target_fs = target.get("target_fs", "sdflash:")
         app_intf = target.get("app_intf", "AppGigabitEthernet1/1")
+        router = mode in _ROUTER_MODES
+        # routed derives the app's addressing from the SVI it creates; inband
+        # and the router modes carry it directly.
+        app_keys = mode != "routed"
         vlan = target.get("inband_vlan" if mode == "inband" else "vlan", 666)
-        guest_ip = target.get("app_ip" if mode == "inband" else "guest_ip",
+        guest_ip = target.get("app_ip" if app_keys else "guest_ip",
                               "192.0.2.2")
-        mask = target.get("app_mask" if mode == "inband" else "svi_mask",
+        mask = target.get("app_mask" if app_keys else "svi_mask",
                           "255.255.255.252")
-        gateway = target.get("app_gateway" if mode == "inband" else "svi_ip",
+        gateway = target.get("app_gateway" if app_keys else "svi_ip",
                              "192.0.2.1")
         ios_ssh_host = target.get("ios_ssh_host", gateway)
         share_host = target.get("share_host_path")
         share_ios = target.get("share_ios_path")
+        force = _get(attempt.request, "teardown_mode") == "force_agent_only"
+        vpg = target.get("vpg_number")
+        nat_interface = target.get("nat_interface", "")
+        bt_port = target.get("bt_listen_port", 6881)
+        nat_outside_owned = target.get("nat_outside_owned") in (True, 1, "1")
+
+        def vpg_plan():
+            # Every command that touches the router footprint needs the group
+            # number (and, with NAT, the outside interface); a target without
+            # them is refused here rather than rendered as garbage.
+            if vpg is None or (mode == "router-nat" and not nat_interface):
+                raise _ControllerFailure(
+                    "unsupported_syntax",
+                    "IOx router target has no VirtualPortGroup plan", 2)
+            return vpg
         transaction = attempt.journal.get("transaction_id") if attempt.journal else None
         wrapper = (package_fs + "iris-" + transaction + ".tar"
                    if transaction else package_fs + target.get(
@@ -4125,6 +4235,31 @@ class IoxController(object):
                     " description IRIS IOx app inline",
                     " ip address %s %s" % (gateway, mask),
                     " no shutdown"])
+            elif router:
+                # The VirtualPortGroup and NAT footprint device/router-install.sh
+                # creates for Guest Shell, described so an operator can tell
+                # whose it is; only a record-backed teardown removes it.
+                vpg_plan()
+                lines.extend([
+                    "interface VirtualPortGroup%s" % vpg,
+                    " " + _VPG_DESCRIPTION,
+                    " ip address %s %s" % (gateway, mask)])
+                if mode == "router-nat":
+                    lines.append(" ip nat inside")
+                lines.append(" no shutdown")
+                if mode == "router-nat":
+                    network = ipaddress.IPv4Network(
+                        "%s/%s" % (guest_ip, mask), strict=False)
+                    lines.extend([
+                        "interface %s" % nat_interface,
+                        " ip nat outside",
+                        "ip access-list standard IRIS-NAT-%s" % vpg,
+                        " permit %s %s" % (network.network_address,
+                                            network.hostmask),
+                        "ip nat inside source list IRIS-NAT-%s interface %s "
+                        "overload" % (vpg, nat_interface),
+                        "ip nat inside source static tcp %s %s interface %s %s"
+                        % (guest_ip, bt_port, nat_interface, bt_port)])
             else:
                 lines.extend([
                     "interface %s" % app_intf,
@@ -4159,12 +4294,20 @@ class IoxController(object):
                 raise _ControllerFailure(
                     "unsupported_syntax_local",
                     "IOx application credentials are invalid", 2)
+            if router:
+                vpg_plan()
+                vnic = [
+                    " app-vnic gateway0 virtualportgroup %s guest-interface 0"
+                    % vpg,
+                    "  guest-ipaddress %s netmask %s" % (guest_ip, mask)]
+            else:
+                vnic = [
+                    " app-vnic AppGigabitEthernet trunk",
+                    "  vlan %s guest-interface 0" % vlan,
+                    "   guest-ipaddress %s netmask %s" % (guest_ip, mask)]
             lines = [
                 "configure terminal",
-                "app-hosting appid %s" % appid,
-                " app-vnic AppGigabitEthernet trunk",
-                "  vlan %s guest-interface 0" % vlan,
-                "   guest-ipaddress %s netmask %s" % (guest_ip, mask),
+                "app-hosting appid %s" % appid] + vnic + [
                 " app-default-gateway %s guest-interface 0" % gateway,
                 " app-resource profile custom",
                 "  cpu 400", "  memory 768", "  persist-disk 2048",
@@ -4226,10 +4369,29 @@ class IoxController(object):
                      (package_fs, re.escape(instruction_name))]
         elif name == "cleanup_config":
             lines = ["configure terminal"] + cleanup_common
-            if (mode == "inband" or
-                    _get(attempt.request, "teardown_mode") ==
-                    "force_agent_only"):
+            if mode == "inband" or force:
                 lines.extend(cleanup_named)
+            elif router:
+                # device/router-uninstall.sh's order: the swarm-port static
+                # translation and the overload rule before the ACL they
+                # reference, the outside marking only when the record says
+                # IRIS added it, then the group itself. IOS keeps an overload
+                # rule while translations still reference it; the residue
+                # probe below reports that instead of guessing.
+                vpg_plan()
+                if mode == "router-nat":
+                    lines.extend([
+                        "no ip nat inside source static tcp %s %s interface "
+                        "%s %s" % (guest_ip, bt_port, nat_interface, bt_port),
+                        "no ip nat inside source list IRIS-NAT-%s interface "
+                        "%s overload" % (vpg, nat_interface),
+                        "no ip access-list standard IRIS-NAT-%s" % vpg])
+                    if nat_outside_owned:
+                        lines.extend(["interface %s" % nat_interface,
+                                      " no ip nat outside", "exit"])
+                lines.extend(["no interface VirtualPortGroup%s" % vpg,
+                              "no ip http client secure-trustpoint IRIS",
+                              "no crypto pki trustpoint IRIS"])
             else:
                 lines.extend(["no interface Vlan%s" % vlan,
                               "no vlan %s" % vlan,
@@ -4251,9 +4413,17 @@ class IoxController(object):
         elif name == "cleanup_config_probe":
             include = ("app-hosting appid %s|applet IRIS-|crypto pki "
                        "trustpoint IRIS|discriminator IRISQ" % appid)
-            if mode == "routed" and _get(
-                    attempt.request, "teardown_mode") != "force_agent_only":
+            if mode == "routed" and not force:
                 include += "|interface Vlan%s|^vlan %s$" % (vlan, vlan)
+            elif router and not force:
+                vpg_plan()
+                include += "|interface VirtualPortGroup%s$" % vpg
+                if mode == "router-nat":
+                    include += (
+                        "|ip access-list standard IRIS-NAT-%s$"
+                        "|ip nat inside source list IRIS-NAT-%s "
+                        "|ip nat inside source static tcp %s "
+                        % (vpg, vpg, guest_ip))
             lines = ["show app-hosting list",
                      "show running-config | include %s" % include]
         elif name == "cleanup_stage_probe":

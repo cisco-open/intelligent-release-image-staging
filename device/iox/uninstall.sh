@@ -94,6 +94,21 @@ _dry_validate() {
   case "$FORCE_AGENT_ONLY" in 0|1) ;; *)
     echo "ERROR: IRIS_FORCE_AGENT_ONLY must be 0 or 1" >&2; exit 2 ;;
   esac
+  if { [ "$MANAGEMENT_TYPE" = router-routed ] || [ "$MANAGEMENT_TYPE" = router-nat ]; } \
+      && [ "$FORCE_AGENT_ONLY" != 1 ]; then
+    # The router footprint is only removed under a record, and the record
+    # names the group; a dry run must say what is missing rather than die on
+    # an unbound variable inside a heredoc.
+    [[ "${VPG_NUMBER:-}" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] && [ "$VPG_NUMBER" -le 31 ] || {
+      echo "ERROR: VPG_NUMBER must be an integer from 0 to 31" >&2; exit 2; }
+    if [ "$MANAGEMENT_TYPE" = router-nat ]; then
+      [ -n "${NAT_INTERFACE:-}" ] || { echo "ERROR: router-nat needs NAT_INTERFACE" >&2; exit 2; }
+      [ -n "${APP_IP:-}" ] || { echo "ERROR: router-nat needs APP_IP for the swarm-port translation" >&2; exit 2; }
+      [[ "${BT_LISTEN_PORT:-6881}" =~ ^[0-9]+$ ]] && [ "${BT_LISTEN_PORT:-6881}" -ge 1 ] \
+        && [ "${BT_LISTEN_PORT:-6881}" -le 65535 ] || {
+        echo "ERROR: BT_LISTEN_PORT must be an integer from 1 to 65535" >&2; exit 2; }
+    fi
+  fi
   if [ "$MANAGEMENT_TYPE" = routed ] && [ "$FORCE_AGENT_ONLY" != 1 ]; then
     [[ "$VLAN" =~ ^[0-9]+$ ]] && [ "${#VLAN}" -le 4 ] &&
       [ "$VLAN" -ge 1 ] && [ "$VLAN" -le 4094 ] || {
@@ -146,9 +161,11 @@ return
 fi
 if [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 # Router: remove the VirtualPortGroup and NAT footprint the install created,
-# under the same ownership rules as device/router-uninstall.sh -- a NAT outside
+# in device/router-uninstall.sh's order and under its ownership rules: the
+# swarm-port static translation and the overload rule go before the ACL they
+# reference (IOS keeps an overload rule while translations still use it, and
+# the residue probe reports that rather than guessing); a NAT outside
 # interface is only un-marked when the record says IRIS marked it.
-: "${VPG_NUMBER:?set VPG_NUMBER}"
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -158,11 +175,13 @@ no event manager applet IRIS-RECLAIM-BUNDLE
 EOF
 if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
 cat <<EOF
+no ip nat inside source static tcp $APP_IP ${BT_LISTEN_PORT:-6881} interface $NAT_INTERFACE ${BT_LISTEN_PORT:-6881}
+no ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload
 no ip access-list standard IRIS-NAT-$VPG_NUMBER
 EOF
   if [ "${NAT_OUTSIDE_OWNED:-0}" = "1" ]; then
 cat <<EOF
-interface ${NAT_INTERFACE:?set NAT_INTERFACE}
+interface $NAT_INTERFACE
  no ip nat outside
 exit
 EOF
@@ -282,7 +301,7 @@ uninstall_recipe() {
   # authorized to remove its bound routed VLAN. The real recipe deliberately
   # receives no target values in its environment, so treat any VLAN returned
   # by that filtered probe as residue instead of consulting dry-run defaults.
-  if printf '%s\n' "$out" | grep -Eq '^[[:space:]]*(iris[[:space:]]+[A-Za-z0-9_-]+|app-hosting appid iris|event manager applet IRIS-|logging ((buffered|console|monitor)[[:space:]]+)?discriminator IRISQ|ip http client secure-trustpoint IRIS|crypto pki trustpoint IRIS|interface Vlan[0-9]+|vlan[[:space:]]+[0-9]+)([[:space:]]|$)'; then
+  if printf '%s\n' "$out" | grep -Eq '^[[:space:]]*(iris[[:space:]]+[A-Za-z0-9_-]+|app-hosting appid iris|event manager applet IRIS-|logging ((buffered|console|monitor)[[:space:]]+)?discriminator IRISQ|ip http client secure-trustpoint IRIS|crypto pki trustpoint IRIS|interface Vlan[0-9]+|vlan[[:space:]]+[0-9]+|interface VirtualPortGroup[0-9]+|ip access-list standard IRIS-NAT-[0-9]+|ip nat inside source (list IRIS-NAT-[0-9]+|static tcp))([[:space:]]|$)'; then
     echo "ERROR: IRIS configuration remains after cleanup" >&2
     return 4
   fi
