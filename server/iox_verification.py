@@ -3989,7 +3989,9 @@ class IoxController(object):
                 raise ValueError("invalid IOx target share_host_path")
             if (not isinstance(share_ios, str) or re.fullmatch(
                     r"[A-Za-z][A-Za-z0-9_-]{0,31}:[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*",
-                    share_ios) is None):
+                    share_ios) is None or
+                    any(part in (".", "..")
+                        for part in share_ios.split(":", 1)[1].split("/"))):
                 raise ValueError("invalid IOx target share_ios_path")
         resources = normalized.get("resources")
         if resources is not None:

@@ -2183,6 +2183,53 @@ def test_legacy_and_adopted_uninstall_use_the_recorded_target_without_a_journal(
     assert all(call[2] is True for call in store.calls if call[0] == "get")
 
 
+@pytest.mark.parametrize("share_ios", [
+    "flash:..", "flash:share/../operator", "flash:share/./operator",
+])
+@pytest.mark.parametrize("action", ["install", "recorded", "force_agent_only"])
+def test_native_share_dot_segments_are_rejected_before_device_contact(
+        tmp_path, share_ios, action):
+    record = _record()
+    share = dict(share_host_path="/iox_data/share", share_ios_path=share_ios)
+    if action == "recorded":
+        record["resolved"].update(share)
+    factory = _TransportFactory()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path, records=[record]), factory)
+    calls = []
+    prepare, preflight, on_output = _callbacks(calls)
+    try:
+        if action == "install":
+            request = _request(wrapper_path=_write_wrapper(tmp_path))
+            request["target"].update(share)
+            run = controller.run_install
+        else:
+            request = _request(action="uninstall", teardown_mode=action,
+                               record_id="r1" if action == "recorded" else None)
+            if action == "force_agent_only":
+                request["target"].update(share)
+            run = controller.run_uninstall
+        with pytest.raises(ValueError, match="invalid IOx target share_ios_path"):
+            run(request, prepare, preflight, on_output, _Cancel())
+        assert not factory.calls
+        assert not calls
+    finally:
+        controller.close()
+
+
+@pytest.mark.parametrize("share_ios", [
+    "flash:iris.share/sub-dir", "bootflash:guest-share/iris",
+])
+def test_native_share_paths_preserve_ordinary_filename_dots(tmp_path, share_ios):
+    controller = _controller(tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    target = _request()["target"]
+    target.update(share_host_path="/iox_data/share", share_ios_path=share_ios)
+    try:
+        assert controller._validate_target(target, "install")["share_ios_path"] == share_ios
+    finally:
+        controller.close()
+
+
 def test_recorded_teardown_never_inherits_unrecorded_cleanup_paths(tmp_path):
     record = _record(address="192.0.2.10")
     seed = _request(action="uninstall", record_id="r1")["target"]
