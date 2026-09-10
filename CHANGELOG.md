@@ -51,6 +51,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx undeploy retries accept IOS's exact already-absent VirtualPortGroup
+  response and the revocation reminder after removing an enrolled IRIS
+  trustpoint. Cleanup can finish after a partial teardown on Catalyst 8000V
+  and IE-3400; unrelated errors still stop the job.
 - Devices seed again after a container is recreated: when aria2 no longer
   holds a staged image the agent already finished and verified, the agent
   re-adds it (`RESEED`) instead of reporting the image ready while announcing

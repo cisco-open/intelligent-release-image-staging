@@ -1797,6 +1797,26 @@ def _vlan_already_absent(purpose, line, payload):
     return b"% Invalid input" in payload
 
 
+def _cleanup_removal_advisory(purpose, line, payload):
+    """Recognize the complete replies from two retried cleanup commands.
+
+    A C8000V reports invalid input for an already-removed VirtualPortGroup,
+    just as the IE-3400 does for an absent SVI. Removing an enrolled IRIS
+    trustpoint answers the confirmation, then prints a revocation reminder.
+    Neither is an error, but a different command or any extra payload must
+    retain its ordinary failure classification.
+    """
+    if purpose != "cleanup_config":
+        return False
+    lines = [entry.strip() for entry in payload.split(b"\n") if entry.strip()]
+    if line.strip() == _TRUSTPOINT_REMOVE:
+        return lines == [
+            b"% Be sure to ask the CA administrator to revoke your certificates."]
+    if re.fullmatch(br"no interface VirtualPortGroup[0-9]+", line.strip()):
+        return lines == [b"^", b"% Invalid input detected at '^' marker."]
+    return False
+
+
 # Deleting a staged file that is already gone is benign during teardown.
 # cleanup_files removes the wrapper, certificates and share unconditionally,
 # so on a retry (or after a partial teardown) the files are absent and IOS
@@ -2612,6 +2632,7 @@ class IoxTransport(object):
                     if (_app_already_absent(purpose, payload) or
                             _cleanup_absent(purpose, payload) or
                             _vlan_already_absent(purpose, line, payload) or
+                            _cleanup_removal_advisory(purpose, line, payload) or
                             _delete_absent(purpose, payload) or
                             _dir_absent(purpose, line, payload) or
                             _trustpoint_removal(purpose, line)):
@@ -2633,6 +2654,7 @@ class IoxTransport(object):
                           payload_error is None and
                           not _only_ios_warnings(payload) and
                           not _cleanup_absent(purpose, payload) and
+                          not _cleanup_removal_advisory(purpose, line, payload) and
                           not _vlan_already_absent(purpose, line, payload)):
                         raise IoxTransportError("unsupported_response", "configuration command returned payload")
                     if (purpose == "save" and line == b"write memory" and
@@ -2686,7 +2708,9 @@ class IoxTransport(object):
             # classification runs on the final payload and would otherwise
             # re-impose the rejection the loop just forgave.
             if (_app_already_absent(purpose, response_payload) or
-                    _delete_absent(purpose, response_payload)):
+                    _delete_absent(purpose, response_payload) or
+                    (len(executable) == 1 and _cleanup_removal_advisory(
+                        purpose, executable[0], response_payload))):
                 ios_error = None
             if ios_error is not None:
                 category = ios_error

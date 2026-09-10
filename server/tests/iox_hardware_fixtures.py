@@ -302,6 +302,17 @@ DISCRIMINATOR_ABSENT = b'Specified MD by the name IRISQ does not exist.\n\n'
 # `no interface Vlan666` for an absent SVI: the same reply as a syntax
 # error, caret line included (7cc6dc12 cmd 7).
 IE3400_VLAN_ABSENT_INVALID_INPUT = b"                             ^\n% Invalid input detected at '^' marker.\n\n"
+# 5c6bce8aa403b39ccd4b00879a3b1e82, cleanup retry on Iris-c8kv-104:
+# VirtualPortGroup1 was already removed by the earlier partial teardown.
+C8000V_VPG_ABSENT_INVALID_INPUT = b"                                          ^\n% Invalid input detected at '^' marker.\n\n"
+# 8a383b7e9479f835cb198f5a8594095a and the C8000V retry above:
+# the confirmation is followed by this separate informational payload.
+ENROLLED_TRUSTPOINT_REMOVAL_QUESTION = (
+    b"% Removing an enrolled trustpoint will destroy all certificates\n"
+    b" received from the related Certificate Authority.\n\n"
+    b"Are you sure you want to do this? [yes/no]: ")
+ENROLLED_TRUSTPOINT_REMOVED = (
+    b"% Be sure to ask the CA administrator to revoke your certificates.\n\n")
 
 # 8f972895 cmd 7: the switch teardown with the app already gone.
 IE3400_CLEANUP_CONFIG_STEPS = (

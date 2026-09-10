@@ -3335,3 +3335,54 @@ def test_cleanup_answers_the_enrolled_trustpoint_removal_question(tmp_path, peer
     assert _value(result, "timed_out") is False
     assert _value(result, "framing_complete") is True
     assert _value(result, "error_category") is None
+
+
+@pytest.mark.parametrize("host", [hw.IE3400_HOST, hw.C8000V_HOST])
+def test_hardware_cleanup_accepts_the_post_confirmation_trustpoint_advisory(
+        tmp_path, peer_factory, host):
+    """The live retry answered yes, then rejected IOS's revocation reminder."""
+    steps = ((b"configure terminal", hw.CONFIG_BANNER),
+             (b"no crypto pki trustpoint IRIS", hw.ENROLLED_TRUSTPOINT_REMOVED),
+             (b"end", b""))
+    result, peer = _replay(
+        tmp_path, peer_factory, "cleanup_config", steps, host,
+        question=hw.ENROLLED_TRUSTPOINT_REMOVAL_QUESTION.decode("ascii"),
+        question_index=1)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert peer.received().count("yes") == 1
+    assert hw.ENROLLED_TRUSTPOINT_REMOVED in _value(result, "stdout")
+
+
+def test_hardware_cleanup_retry_accepts_an_already_absent_virtual_port_group(
+        tmp_path, peer_factory):
+    steps = ((b"configure terminal", hw.CONFIG_BANNER),
+             (b"no interface VirtualPortGroup1", hw.C8000V_VPG_ABSENT_INVALID_INPUT),
+             (b"end", b""))
+    result, unused = _replay(tmp_path, peer_factory, "cleanup_config", steps, hw.C8000V_HOST)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+
+
+@pytest.mark.parametrize("purpose,command,payload", [
+    ("cleanup_config", b"no interface GigabitEthernet1", hw.C8000V_VPG_ABSENT_INVALID_INPUT),
+    ("cleanup_config", b"no interface VirtualPortGroup1", hw.C8000V_RESOURCE_PROFILE_REFUSAL),
+    ("cleanup_config", b"no interface VirtualPortGroup1",
+     hw.C8000V_VPG_ABSENT_INVALID_INPUT + b"% Authorization failed\n"),
+    ("configure_app", b"no interface VirtualPortGroup1", hw.C8000V_VPG_ABSENT_INVALID_INPUT),
+    ("cleanup_config", b"no event manager applet IRIS-AGENT", hw.ENROLLED_TRUSTPOINT_REMOVED),
+    ("cleanup_config", b"no crypto pki trustpoint OTHER", hw.ENROLLED_TRUSTPOINT_REMOVED),
+    ("cleanup_config", b"no crypto pki trustpoint IRIS",
+     hw.ENROLLED_TRUSTPOINT_REMOVED + b"% Authorization failed\n"),
+    ("cleanup_config", b"no crypto pki trustpoint IRIS",
+     hw.ENROLLED_TRUSTPOINT_REMOVED + b"Unexpected residue\n"),
+    ("configure_app", b"no crypto pki trustpoint IRIS", hw.ENROLLED_TRUSTPOINT_REMOVED),
+], ids=["physical-interface", "vpg-different-error", "vpg-extra-error", "vpg-wrong-purpose",
+        "wrong-removal-command", "other-trustpoint", "trustpoint-extra-error",
+        "trustpoint-extra-payload", "trustpoint-wrong-purpose"])
+def test_hardware_cleanup_retry_allowances_reject_unrelated_or_extra_payload(
+        tmp_path, peer_factory, purpose, command, payload):
+    steps = ((b"configure terminal", hw.CONFIG_BANNER), (command, payload), (b"end", b""))
+    result, unused = _replay(tmp_path, peer_factory, purpose, steps, hw.C8000V_HOST)
+    assert _value(result, "framing_complete") is False
+    assert _value(result, "error_category") is not None
