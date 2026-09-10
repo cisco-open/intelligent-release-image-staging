@@ -270,6 +270,14 @@ names on purpose — `iris.device.peer_transfer_record` (exact, device-reported)
 `iris.swarm.peer_bytes` (sampled, origin-side estimate) — so a backend `sum`
 cannot silently mix them. Do not merge the two record names in a custom panel.
 
+On the Splunk view the exact side has its own row, *Peer-to-peer evidence*:
+*Bytes received, by source* stacks received bytes per hour as origin / peer
+device / unknown, *Share of bytes from peer devices* is that peer-device share
+of the window as a percentage, and *Peer-to-peer transfers* lists the
+individual device-to-device legs. It is the only place on either board where
+peer-to-peer traffic is observed rather than derived — and, being device-side
+capture, a missing row there is a capture gap, not zero traffic.
+
 The origin seeder is an ordinary BitTorrent peer of every device, so its bytes
 must never be counted as peer-to-peer bytes. The device cannot tell which peer
 is the origin; the server can, and classifies each edge origin / device /

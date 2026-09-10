@@ -588,6 +588,98 @@
     </panel>
   </row>
 
+  <!-- ===================== ROW 4b — PEER-TO-PEER EVIDENCE (measured on the receiving device) ===================== -->
+  <!-- The three panels above this row are ORIGIN-side: they see what the
+       seeder sent and are structurally blind to device-to-device traffic.
+       This row is the other half, and the only direct evidence on the board
+       that peers served each other. iris.device.peer_transfer_record is written
+       by the RECEIVING device from aria2's per-connection counters at
+       completion, one row per (transfer, peer), and the server classifies each
+       peer origin | device | unknown before export. Exact, not sampled — which
+       is also why it must never be summed together with iris.swarm.peer_bytes
+       (the origin-side sampled estimate of the same bytes): one transfer would
+       be counted twice, once exactly and once badly.
+       A MISSING ROW IS A CAPTURE GAP, NOT ZERO TRAFFIC. A peer that
+       disconnected before the completion snapshot is erased from aria2's peer
+       storage and leaves no row at all, and a device that filed no peer
+       transfer records contributes nothing here. Read every total in this row
+       as a floor, and read iris.transfer_record.capture_complete=false as
+       "this block is short", not as "this row is wrong" — the row itself is
+       exact either way.
+       Records dedupe on event.id: a report re-exported after a server restart
+       repeats it, and the sender class is pinned on first export, so the
+       copies are identical.
+       Span is 1h, not the 60s/300s used by the sampled series above: these are
+       one-shot completion events, not a polled series, and a 60s bucket draws
+       a comb of single columns instead of a shape. -->
+  <row>
+    <panel>
+      <title>Bytes received, by source</title>
+      <description>Bytes each device reported receiving, bucketed by hour and stacked by who sent them: origin (the seeder), peer device (another IRIS device), unknown (a peer the server could not name — a normal outcome, not an error). A visible "peer device" band is the direct evidence that peer-to-peer distribution carried load. An empty bucket is a bucket no transfer completed in, not proof of zero traffic.</description>
+      <chart>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval source=case('iris.peer.attribution'=="origin","origin",'iris.peer.attribution'=="device","peer device",1==1,"unknown") | eval MiB=tonumber('iris.transfer.session_bytes_from_peer')/1048576 | timechart span=1h sum(MiB) BY source</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.axisTitleY.text">MiB received per hour, by source</option>
+        <option name="charting.chart.nullValueMode">zero</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.drilldown">none</option>
+        <!-- The record is device-side, so its iris.image.id is the CATALOG id
+             (.SPA.bin/.bin stripped) while the $img$ token carries aria2
+             basenames from the metric index — hence the same replace() the
+             device-report panels use. Nothing joins the two forms of the id.
+             tonumber() is mandatory: iris.transfer.session_bytes_from_peer is
+             an int64 and rides the OTLP/JSON wire as a STRING, so an
+             un-coerced sum is silently wrong rather than empty.
+             The case() default is "unknown": a BY on an absent field drops the
+             event outright, and a dropped row would quietly shrink the very
+             total this panel exists to show. -->
+      </chart>
+    </panel>
+    <panel>
+      <title>Share of bytes from peer devices</title>
+      <single>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval b=tonumber('iris.transfer.session_bytes_from_peer') | stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes, sum(b) AS all_bytes | eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),round(100*coalesce(peer_bytes,0)/all_bytes,1)) | fields pct</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="unit">%</option>
+        <option name="underLabel">bytes from peer devices ÷ all bytes devices reported receiving, in this window. MEASURED on the receiving devices, unlike "Peer share of delivery (derived, %)" above, which subtracts two totals — the two will not match, and when they disagree this one is the observation. The denominator carries every classified source, origin and unknown included, so an unnamed peer never inflates the share.</option>
+        <option name="numberPrecision">0.0</option>
+      </single>
+      <!-- Reads "no data", never 0%, when nothing landed in the window: a 0%
+           tile would assert that peers served nothing, which is exactly what a
+           capture gap looks like too. A measured zero (records present, none of
+           them from a peer device) does print 0.0%. -->
+    </panel>
+    <panel>
+      <title>Peer-to-peer transfers (measured, device-reported)</title>
+      <table>
+        <search>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" "iris.peer.attribution"="device" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval "MiB from this peer"=round(tonumber('iris.transfer.session_bytes_from_peer')/1048576,1) | eval Image=coalesce('iris.image.name','iris.image.id') | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver, "iris.transfer_record.capture_complete" AS "Capture complete" | table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete" | sort - _time | head 100 | appendpipe [ stats count AS n | where n==0 | eval Sender="— no device-to-device peer transfer records in this window (none captured, which is not the same as none happened) —" | fields Sender ]</query>
+          <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">25</option>
+        <!-- One row per (transfer, peer) the server named as a device.
+             Sender is iris.peer.device_id — the sending device's id on a device
+             row, the literal "origin" on the seeder's row (filtered out here),
+             absent on an unknown row. Receiver is device.id, the device that
+             measured the bytes.
+             _time is the hook's own captured_at, the instant the counters were
+             read on the device, not the server's ingest time.
+             Image falls back to iris.image.id for an image that has since left
+             the catalog, so a row is never printed nameless.
+             Newest first, 100 rows: widen the window rather than the head to
+             see further back. -->
+      </table>
+    </panel>
+  </row>
+
   <!-- ===================== ROW 5 — the per-device split that kills the even-split estimate ===================== -->
   <row>
     <panel>

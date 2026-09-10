@@ -380,6 +380,66 @@ classification is pinned on first export, so the copies are identical and
 view of traffic; summing it with device peer records would count the same
 traffic twice.
 
+### Peer-to-peer evidence
+
+These three searches back the *Peer-to-peer evidence* row of the shipped view.
+They read the same device-measured record as the search above, split by who
+sent the bytes, so a peer-to-peer claim rests on an observation rather than on
+a subtraction of two origin-side totals.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval source=case('iris.peer.attribution'=="origin","origin",
+    'iris.peer.attribution'=="device","peer device",1==1,"unknown")
+| eval MiB=tonumber('iris.transfer.session_bytes_from_peer')/1048576
+| timechart span=1h sum(MiB) BY source
+```
+
+Read the stacked columns as bytes arriving per hour: a visible *peer device*
+band is the traffic devices served each other, *origin* is the seeder's share
+of the same hour, and *unknown* is a peer the server could not name.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record"
+| dedup "event.id"
+| eval b=tonumber('iris.transfer.session_bytes_from_peer')
+| stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes,
+    sum(b) AS all_bytes
+| eval pct=if(isnull(all_bytes) OR all_bytes<=0,null(),
+    round(100*coalesce(peer_bytes,0)/all_bytes,1))
+| fields pct
+```
+
+Read the single number as the share of received bytes that came from a peer
+device over the window, measured on the receiving devices; the denominator
+carries origin and unknown rows too, so an unnamed peer never inflates it.
+
+```spl
+index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
+  "otel.log.name"="iris.device.peer_transfer_record" "iris.peer.attribution"="device"
+| dedup "event.id"
+| eval "MiB from this peer"=round(tonumber('iris.transfer.session_bytes_from_peer')/1048576,1)
+| eval Image=coalesce('iris.image.name','iris.image.id')
+| rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver,
+    "iris.transfer_record.capture_complete" AS "Capture complete"
+| table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete"
+| sort - _time
+```
+
+Read each row as one device-to-device transfer leg: *Sender* served those bytes
+to *Receiver*, `_time` is when the receiver read its counters, and
+`Capture complete` false marks a snapshot that missed peers rather than a wrong
+byte count.
+
+The caveat from the search above applies to all three: a peer that disconnected
+before the completion snapshot leaves no row at all, so a missing row is a
+capture gap, not zero traffic, and every total here is a floor. Do not add
+`iris.swarm.peer_bytes` to these sums — it is the origin-side sampled view of
+the same bytes, and the two together count one transfer twice.
+
 ### Assignment to confirmed seeding
 
 ```spl
@@ -408,9 +468,10 @@ Its default searches use `iris_logs` and `iris_metrics`; edit them if you
 chose different index names.
 
 Both the OTLP log pipeline and the Prometheus scrape pipeline are required.
-The view's peer-share panels use the origin's sampled records. The device
-peer search above exposes the separate device measurements. Read
-[Telemetry Export](telemetry-export.md#known-limits) before interpreting
+The view's peer-share panels use the origin's sampled records, while its
+*Peer-to-peer evidence* row uses the device-measured peer transfer records.
+The device peer searches above expose those same separate device measurements.
+Read [Telemetry Export](telemetry-export.md#known-limits) before interpreting
 missing records, untraced bytes, or peer-share estimates.
 
 ## Troubleshooting
