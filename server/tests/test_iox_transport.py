@@ -635,6 +635,35 @@ def _end(stdout=0, stderr=0, dropped=0, command_id=1):
     }
 
 
+def test_load_transcript_prefix_trusts_stored_classification_across_a_classifier_change(tmp_path):
+    """Issue #227: _load_transcript_prefix must NOT re-derive a command's
+    classification with the current classifier and reject a stored value that
+    differs. A classifier improvement (e.g. accepting a new device's
+    verification wording) legitimately changes the recompute, and demanding
+    equality bricked the server on restart -- an interrupted record's or a
+    session fence's transcript recomputed differently and aborted startup for
+    the whole store. The stored value is the write-time authority every other
+    reader uses; the parser trusts it and keeps only the structural checks."""
+    writer = _writer(tmp_path)
+    payload = b"App signature verification disabled successfully\n"
+    writer.append(_start(purpose="verification_disable"))
+    writer.append(_stream(payload))
+    # Stored under an OLDER classifier that did not recognise this wording:
+    # transition_response "other", which today's _classify_transition would
+    # instead call "disabled_successfully". The recompute disagrees; the load
+    # must still succeed and return the STORED value.
+    assert _module()._classify_transition("verification_disable", payload)[0] == "disabled_successfully"
+    end = _end(stdout=len(payload), command_id=1)
+    end["observed_state"] = None
+    end["transition_response"] = "other"
+    writer.append(end)
+
+    loaded = _module()._load_transcript_prefix(
+        str(tmp_path), writer.reference(), CONTROLLER)
+    command = loaded["commands"][1]
+    assert command["end"]["transition_response"] == "other"
+
+
 def test_transcript_is_canonical_private_and_reference_counts_physical_prefix(tmp_path):
     writer = _writer(tmp_path)
     path = _transcript_path(tmp_path)

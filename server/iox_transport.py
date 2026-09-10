@@ -1455,13 +1455,24 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
                         raise IoxTransportError(
                             "journal_unreadable",
                             "verification framing contradicts payload spans")
-                observed_state, transition_response = _recompute_end(
-                    entry["start"], entry["end"], entry["stdout"])
-                if (record["observed_state"] != observed_state or
-                        record["transition_response"] != transition_response):
-                    raise IoxTransportError(
-                        "journal_unreadable",
-                        "stored command classification contradicts retained evidence")
+                # The command's observed_state / transition_response were
+                # classified at WRITE time and are the authority every reader
+                # uses (the journal<->transcript cross-check in
+                # deployment_records._validate_journal_relations, the
+                # disable/enable confirmations, the caf_transient retry). This
+                # parser must NOT re-derive them from the retained bytes with
+                # the CURRENT classifier and demand equality: that is a
+                # "the classifier never changed" build invariant, not a
+                # per-record integrity check -- the real per-record protection
+                # is the private 0600 transcript, the structural base64/span/
+                # framing checks above, and the stored-value cross-checks. The
+                # equality could not even distinguish an improved classifier
+                # from tampering (the raw bytes are not signed), and it
+                # bricked the server on restart after any classifier change:
+                # an interrupted record's transcript recomputed differently
+                # and RecordStoreUnreadable / a failed fence scan aborted
+                # startup for the whole store (issue #227). Trust the stored
+                # classification; keep the structural checks strict.
                 commands[command_id] = entry
             elif kind == "journal_ack":
                 acknowledgements.append({"record": copy.deepcopy(record), "order": order})
@@ -1802,30 +1813,6 @@ def _classify_transition(purpose, payload):
             b"the process for the command is not responding or is otherwise unavailable"):
         return "caf_transient", "caf_transient"
     return "other", "unsupported_response"
-
-
-def _recompute_end(start, end, stdout):
-    """Recompute the two authority-bearing classifications from retained data."""
-    purpose = start["purpose"]
-    spans = end["payload_spans"]
-    payloads = [stdout[item["offset"]:item["offset"] + item["length"]]
-                for item in spans]
-    payload = payloads[0] if len(payloads) == 1 else b""
-    authoritative = (
-        end["returncode"] == 0 and not end["timed_out"] and
-        not end["stdout_truncated"] and not end["stderr_truncated"] and
-        end["framing_complete"] and len(spans) == 1)
-    observed = None
-    transition = None
-    if purpose == "verification_read":
-        observed = "unknown"
-        if authoritative:
-            observed = _classify_read(payload)[0]
-    elif purpose in ("verification_disable", "verification_enable"):
-        transition = "other"
-        if authoritative:
-            transition = _classify_transition(purpose, payload)[0]
-    return observed, transition
 
 
 _SSH_SHIM = r'''
