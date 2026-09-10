@@ -384,8 +384,11 @@ does not.
 
 ## schedule_state_unavailable
 
-The durable schedule store could not be read or written. No schedule state was
-changed, and nothing was fired on the strength of an unreadable store.
+The durable schedule store could not be read or a write could not be confirmed.
+A failed write may already be visible; this response does not guarantee
+rollback. Repair the storage problem, then reread the definition, ETag and
+occurrence evidence before retrying. Unreadable authority does not authorize
+new scheduled work.
 
 ## schedule_target_heartbeat_unavailable
 

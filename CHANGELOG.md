@@ -60,6 +60,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Documentation explains uncertain schedule writes, the limits of encrypted
+  instructions when an offline copy contains device keys, and the replay
+  attribution consequences of losing derived pins (#280, #281, #282).
 - Device deletion finishes record retirement and job cancellation before a
   replacement can register under the same name, preserving its new deployment
   and job (#279).

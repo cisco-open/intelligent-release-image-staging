@@ -256,7 +256,13 @@ remains authoritative for those server controls.
 
 ### Device administrator trust boundary
 
-The encrypted instruction file is confidential against users below privilege 15, against offline copies of flash and `show tech`, against swarm peers and network observers, and against reuse on another device. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.
+The encrypted instruction file is confidential against users below privilege 15, against swarm peers and network observers, against reuse on another device, and against envelope-only copies that do not include device private keys. It is not, and cannot be, confidential against the device's own administrator, who is root where the agent runs and holds every key the agent holds. Its integrity and authenticity hold against everyone including that administrator once the verification root is pinned inside the signed image; on Guest Shell, and on any platform where the package signature is not enforced, integrity is tamper-evidence rather than tamper-proofing. Role isolation, announce cadence, peer discovery and origin rates are enforced by the tracker and the origin and do not depend on any device honouring anything.
+
+An offline filesystem copy containing `iris-agent.conf`, its current/prior
+instruction keys or its `lkg_key` is not confidential from the holder of that
+copy. Mode-0600 permissions protect access on the running filesystem; they do
+not encrypt a copied filesystem. Diagnostic output such as `show tech` is
+within the envelope-only guarantee only when it excludes those private keys.
 
 A privilege-15 or IOS-XR root-lr administrator can alter the runtime or bypass
 the agent. A valid signature proves the signed instruction's origin, not that

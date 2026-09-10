@@ -23,8 +23,8 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | `tools/apply-assignments.sh fleet/assignments.csv` | Validate and apply assignment CSV. |
 | `tools/make-agent-bundle.sh` | Build the x86_64 Guest Shell bundle; `--arch arm64 --aria2 PATH` builds the ARM bundle from a verified aarch64 binary. |
 | `device/device-uninstall.sh` | Remove Guest Shell IRIS wiring from a device. |
-| `device/iox/install.sh` | Install the IOx app path. |
-| `device/iox/uninstall.sh` | Remove the IOx app path. |
+| `device/iox/install.sh` | Private controller recipe; use Console/API Onboard or the IOx control CLI's `submit-install`. Direct execution refuses without the inherited controller channel. |
+| `device/iox/uninstall.sh` | Private controller recipe; use Console/API Undeploy or the IOx control CLI's `submit-uninstall`. Direct execution refuses without the inherited controller channel. |
 | `docker compose -f server/docker-compose.yml exec -w /opt/iris/server iris python3 iox_verification.py <operation> ...` | Local IOx control client: submit, recover, reconcile, or read an IOx job from inside the server container. See [IOx control CLI](#iox-control-cli). |
 | `device/iox/build.sh --image-only` | Build or verify the one persisted OCI archive containing both linux/amd64 and linux/arm64 device images. |
 | `tools/provision-iox-packages.sh` | Build and stage both architecture-specific IOx packages. |
@@ -1153,8 +1153,12 @@ the same `event.id` after every process start, before the seeder's first
 re-announce has reached the fresh registry. Without the pin the replay
 classified the origin's rows `unknown` where the first export said `origin`,
 and a backend that deduplicates by `event.id` saw two different records with
-one id. The file is **derived state** and safe to delete: the next pass
-classifies live again and pins that. The tracker process is its only writer.
+one id. The file is **derived state**, not credential or assignment authority,
+but preserve it to keep replay attribution stable. If it is lost, pins are
+rebuilt when those reports are exported again; already delivered reports are
+not repinned on the next ordinary pass. A later process replay can therefore
+classify historical rows differently using the then-current identity view.
+The tracker process is its only writer.
 
 | Field | Meaning |
 | --- | --- |

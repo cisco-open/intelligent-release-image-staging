@@ -1000,8 +1000,9 @@ def _assert_phase1_rollup_relationship(text):
 def test_docs_phase1_honest_guarantee_and_admin_boundary():
     """The exact promise and its cross-page pointer keep the admin limit honest."""
     guarantee = """The encrypted instruction file is confidential against users
-    below privilege 15, against offline copies of flash and `show tech`, against
-    swarm peers and network observers, and against reuse on another device. It
+    below privilege 15, against swarm peers and network observers, against reuse
+    on another device, and against envelope-only copies that do not include
+    device private keys. It
     is not, and cannot be, confidential against the device's own administrator,
     who is root where the agent runs and holds every key the agent holds. Its
     integrity and authenticity hold against everyone including that
@@ -1013,6 +1014,11 @@ def test_docs_phase1_honest_guarantee_and_admin_boundary():
     anything."""
     security = _page("security.md")
     assert _compact(guarantee) in _compact(security)
+    _assert_unit(security, ("offline", "iris-agent.conf", "instruction keys",
+                           "lkg_key", "not confidential"),
+                 "filesystem copies containing device keys lose confidentiality")
+    _assert_unit(security, ("0600", "filesystem", "encrypt"),
+                 "file permissions must not be mistaken for offline encryption")
     _assert_unit(security, ("privilege-15", "root-lr", "administrator", "root"),
                  "the device-administrator capabilities must share one clause")
     _assert_unit(security, ("tracker", "origin", "enforcement", "authoritative"),
