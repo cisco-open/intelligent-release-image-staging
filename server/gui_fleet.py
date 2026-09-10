@@ -314,6 +314,12 @@ def install_options_for_record(record):
     """
     management_type = record.get("management_type") or ""
     model = gui_onboard.normalize_model(record.get("model") or "")
+    # An inventory-only row (no management type chosen yet) is what
+    # validate_record's allow_legacy path accepts, and that path applies none
+    # of the model or type coupling: the row may carry any platform as intent
+    # until a management type is chosen and the full rules run. Offer it all.
+    if management_type in ("", "legacy_routed"):
+        return list(_ALL_PLATFORMS)
     by_model = gui_onboard.install_options_for(model, record.get("os_family") or "")
     options = list(_ALL_PLATFORMS) if by_model is None else list(by_model)
     if management_type in _ROUTER_TYPES:

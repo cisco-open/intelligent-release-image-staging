@@ -1466,10 +1466,12 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
     ({"management_type": "inband", "model": "C9300-48UXM"}, ["guestshell", "iox"]),
     ({"management_type": "inband", "model": "IE-3400-8T2S"}, ["iox"]),
     ({"management_type": "routed", "model": ""}, ["guestshell", "iox"]),
-    # inventory-only rows are narrowed by the model alone
+    # inventory-only rows carry any platform as intent, exactly as the
+    # allow_legacy path accepts them; the coupling rules run once a type is set
     ({"management_type": "legacy_routed", "model": ""},
      ["guestshell", "iox", "router", "xr-appmgr"]),
-    ({"management_type": "legacy_routed", "model": "C8000V"}, ["router"]),
+    ({"management_type": "legacy_routed", "model": "C8000V"},
+     ["guestshell", "iox", "router", "xr-appmgr"]),
 ])
 def test_install_options_for_record_offers_only_what_validate_record_accepts(record, expected):
     assert gui_fleet.install_options_for_record(record) == expected
@@ -1488,3 +1490,8 @@ def test_install_options_for_record_agrees_with_validate_record(tmp_path):
             except ValueError:
                 accepted = False
             assert accepted == (platform in offered), (base["model"], platform)
+    # and the inventory-only row agrees with the allow_legacy path
+    legacy = {"device_id": "inv1", "device_ip": "192.0.2.9", "management_type": "legacy_routed",
+              "model": "C8000V"}
+    for platform in gui_fleet.install_options_for_record(legacy):
+        gui_fleet.validate_record(dict(legacy, platform=platform), allow_legacy=True)
