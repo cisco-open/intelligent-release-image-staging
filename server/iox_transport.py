@@ -337,7 +337,11 @@ def _secure_directory(path):
             os.chmod(path, 0o700)
         return
     parent = os.path.dirname(path) or "."
-    os.mkdir(path, 0o700)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        # A sibling attempt won the race; hold it to the same standard.
+        return _secure_directory(path)
     os.chmod(path, 0o700)
     _durable_directory(parent)
 
@@ -1280,6 +1284,15 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
     try:
         def checked_directory(opened, named, initial, label,
                               required_mode=0o700):
+            # Identity, type, owner and mode must hold on every look at the
+            # directory, by descriptor and by name: that is what stops the
+            # path being swapped underneath this read. Entry churn (size,
+            # timestamps, link count) is NOT evidence of tampering. Sibling
+            # attempts legitimately create transcripts, session fences and
+            # snapshots in these private same-uid directories while this one
+            # validates the store, and every other server component writes
+            # the state directory. Demanding identical timestamps refused
+            # every concurrent IOx onboard as "unsafe directory metadata".
             values = (opened, named, initial)
             if (any(not stat.S_ISDIR(item.st_mode) for item in values) or
                     any(item.st_uid != os.geteuid() for item in values) or
@@ -1288,10 +1301,7 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
                          for item in values)) or
                     any((item.st_dev, item.st_ino) !=
                         (initial.st_dev, initial.st_ino)
-                        for item in values) or
-                    any(item.st_nlink != initial.st_nlink for item in values) or
-                    _metadata_tuple(opened) != _metadata_tuple(initial) or
-                    _metadata_tuple(named) != _metadata_tuple(initial)):
+                        for item in values)):
                 raise IoxTransportError(
                     "journal_unreadable", "unsafe %s directory metadata" % label)
 
@@ -1355,8 +1365,12 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
                 (opened.st_dev, opened.st_ino) or
                 (after.st_dev, after.st_ino) !=
                 (opened.st_dev, opened.st_ino) or
-                _metadata_tuple(after) != _metadata_tuple(opened) or
-                _metadata_tuple(current) != _metadata_tuple(opened)):
+                # The journal references a durable prefix; the owning attempt
+                # keeps appending behind it while other attempts validate the
+                # store, so growth is legitimate and only a shrunk or swapped
+                # file is evidence against the bytes just read.
+                after.st_size < transcript_ref["stored_bytes"] or
+                current.st_size < transcript_ref["stored_bytes"]):
             raise IoxTransportError(
                 "journal_unreadable", "transcript pathname changed during read")
         after_state = os.fstat(state_descriptor)

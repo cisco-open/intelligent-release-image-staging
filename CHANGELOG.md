@@ -38,6 +38,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Onboard several IOx devices at once. Every IOx attempt validates the whole
+  deployment record store, and the transcript loader demanded that the
+  state, IOx and transcript directories keep byte-identical metadata while
+  it read, so a sibling attempt creating its own transcript or session fence
+  in the same second was refused as "unsafe transcript directory metadata"
+  or "IOx journal creation failed". The loader now holds directories to
+  identity, owner and mode, and a transcript to its inode and the durable
+  prefix the journal references, so concurrent attempts and the owning
+  attempt's own appends are no longer mistaken for tampering. Two
+  attempts creating the transcript directory in the same instant no longer
+  fail on the second mkdir.
 - Make IOx onboarding work against real IOS-XE. The IOx transport had been
   written against an idealised IOS that answers config commands silently,
   uses one spelling per error, and always asks for confirmation. An IE-3400

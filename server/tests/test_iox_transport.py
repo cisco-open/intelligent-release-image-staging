@@ -635,6 +635,114 @@ def _end(stdout=0, stderr=0, dropped=0, command_id=1):
     }
 
 
+def _churn_on_first_read(monkeypatch, actions):
+    """Run *actions* between the loader's first stat and its first read."""
+    real_read = os.read
+    fired = []
+
+    def churning_read(descriptor, size):
+        if not fired:
+            fired.append(True)
+            for action in actions:
+                action()
+        return real_read(descriptor, size)
+    monkeypatch.setattr(os, "read", churning_read)
+
+
+def _complete_transcript(tmp_path):
+    writer = _writer(tmp_path)
+    payload = b"App signature verification: enabled\n"
+    writer.append(_start())
+    writer.append(_stream(payload))
+    writer.append(_end(stdout=len(payload), command_id=1))
+    return writer
+
+
+def test_load_transcript_prefix_tolerates_sibling_attempts_writing_alongside(monkeypatch, tmp_path):
+    """Four routers onboarded together: while one attempt validates the
+    store, the others create transcripts, session fences and snapshots in
+    the same private directories, every other component writes the state
+    directory, and the transcript's own attempt appends behind the prefix
+    the journal references. None of that is tampering; the loader used to
+    refuse all of it as "unsafe ... directory metadata"."""
+    writer = _complete_transcript(tmp_path)
+    reference = writer.reference()
+    transcripts = tmp_path / "iox" / "transcripts"
+
+    def churn():
+        (transcripts / ("f" * 32 + ".transcript")).write_bytes(b"sibling")
+        sessions = tmp_path / "iox" / "sessions"
+        sessions.mkdir(mode=0o700, exist_ok=True)
+        (sessions / ("a" * 64 + ".lock.json")).write_text("{}")
+        (tmp_path / "fleet.json").write_text("{}")
+        with open(writer.path, "ab") as stream:
+            stream.write(b"\x00\x00\x00\x02{}")
+    _churn_on_first_read(monkeypatch, [churn])
+
+    loaded = _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    command = loaded["commands"][1]
+    assert command["start"]["purpose"] == "verification_read"
+    assert command["end"] is not None
+    assert command["end"]["stdout_observed_bytes"] == len(b"App signature verification: enabled\n")
+
+
+def test_load_transcript_prefix_still_refuses_a_transcript_swapped_during_read(monkeypatch, tmp_path):
+    writer = _complete_transcript(tmp_path)
+    reference = writer.reference()
+    transcripts = tmp_path / "iox" / "transcripts"
+
+    def swap():
+        replacement = transcripts / "replacement.tmp"
+        replacement.write_bytes(open(writer.path, "rb").read())
+        os.chmod(replacement, 0o600)
+        os.replace(replacement, writer.path)
+    _churn_on_first_read(monkeypatch, [swap])
+    with pytest.raises(_module().IoxTransportError) as raised:
+        _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    assert "pathname changed during read" in str(raised.value)
+
+
+def test_load_transcript_prefix_still_refuses_a_transcript_shrunk_during_read(monkeypatch, tmp_path):
+    writer = _complete_transcript(tmp_path)
+    reference = writer.reference()
+
+    def truncate():
+        with open(writer.path, "r+b") as stream:
+            stream.truncate(reference["stored_bytes"] - 1)
+    _churn_on_first_read(monkeypatch, [truncate])
+    with pytest.raises(_module().IoxTransportError) as raised:
+        _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    # Either guard is a correct refusal: the short read, or the size bound.
+    assert str(raised.value) in ("incomplete transcript prefix",
+                                 "transcript pathname changed during read")
+
+
+def test_load_transcript_prefix_still_refuses_a_directory_swapped_during_read(monkeypatch, tmp_path):
+    writer = _complete_transcript(tmp_path)
+    reference = writer.reference()
+    transcripts = tmp_path / "iox" / "transcripts"
+
+    def replace_directory():
+        os.rename(transcripts, tmp_path / "iox" / "old")
+        transcripts.mkdir(mode=0o700)
+    _churn_on_first_read(monkeypatch, [replace_directory])
+    with pytest.raises(_module().IoxTransportError) as raised:
+        _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    assert "unsafe transcript directory metadata" in str(raised.value)
+
+
+def test_secure_directory_accepts_a_sibling_creating_it_first(monkeypatch, tmp_path):
+    target = tmp_path / "transcripts"
+    real_mkdir = os.mkdir
+
+    def racing_mkdir(path, mode=0o777, **kwargs):
+        real_mkdir(path, mode, **kwargs)
+        raise FileExistsError(17, "File exists", str(path))
+    monkeypatch.setattr(os, "mkdir", racing_mkdir)
+    _module()._secure_directory(str(target))
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
+
+
 def test_load_transcript_prefix_trusts_stored_classification_across_a_classifier_change(tmp_path):
     """Issue #227: _load_transcript_prefix must NOT re-derive a command's
     classification with the current classifier and reject a stored value that
