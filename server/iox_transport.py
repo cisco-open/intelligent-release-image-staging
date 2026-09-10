@@ -1599,8 +1599,14 @@ def _only_ios_warnings(payload):
 # other context. Here it means the step's goal is ALREADY met.
 _APP_CLEARING_PURPOSES = frozenset((
     "app_stop", "app_deactivate", "app_uninstall"))
+# IOS spells the same condition two ways, and which one you get depends on
+# the verb: stop/deactivate answer "The application: <id>, does not exist"
+# while uninstall answers "No App found with name '<id>'". Both mean the app
+# is not there. Anchored and specific -- neither matches an app that exists
+# but refuses the operation.
 _APP_ABSENT_RE = re.compile(
-    br"(?im)^%\s*Error:\s*The application:\s*\S+,\s*does not exist\s*$")
+    br"(?im)^%\s*Error:\s*(?:The application:\s*\S+,\s*does not exist"
+    br"|No App found with name\s*'[^']*')\s*$")
 
 
 def _app_already_absent(purpose, payload):
