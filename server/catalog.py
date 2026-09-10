@@ -3286,6 +3286,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
 
         def _handle_instruction_get(self, parts, kind, token):
             if not token:
+                self._log_refusal("missing_bearer")
                 self._instruction_problem(
                     401, "catalog-authentication-required",
                     "Catalog authentication required", authenticate=True)
@@ -3303,11 +3304,14 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 return
             if ctx is None or ctx.principal.type != "device" \
                     or ctx.secret_name != "catalog_token":
+                self._log_refusal(_refusal_reason(
+                    strict, token, time.time(), grace, ctx, parts[2]), token)
                 self._instruction_problem(
                     401, "catalog-authentication-required",
                     "Catalog authentication required", authenticate=True)
                 return
             if ctx.principal.id != parts[2]:
+                self._log_refusal("wrong_principal", token)
                 self._instruction_problem(
                     403, "instruction-device-forbidden",
                     "Instruction access forbidden")

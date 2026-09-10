@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Instruction and keylist catalog endpoints emit the same bounded, redacted
+  bearer-refusal diagnostics as other device routes (#233).
 - Release archives include the IOx client checksum manifest and abort before
   publication if an allowlisted tracked input is missing (#260, #261).
 - VLAN cleanup accepts only the complete recorded absent-interface response;

@@ -1178,6 +1178,74 @@ def test_refused_bearer_logs_one_bounded_line_without_the_token(
         srv.shutdown()
 
 
+@pytest.mark.parametrize("endpoint", ["instructions", "instruction-keylist"])
+@pytest.mark.parametrize("case, expected_status, reason", [
+    ("missing", 401, "missing_bearer"),
+    ("unknown", 401, "unknown_token"),
+    ("expired", 401, "expired"),
+    ("revoked", 401, "revoked"),
+    ("previous", 401, "previous_token"),
+    ("wrong-device", 403, "wrong_principal"),
+    ("invalid-device-path", 403, "wrong_principal"),
+])
+def test_instruction_bearer_refusals_use_bounded_redacted_logger(
+        tmp_path, capsys, endpoint, case, expected_status, reason):
+    """The specialized instruction handler must retain the ordinary route's
+    diagnostics without changing its distinct 401/403 response contract."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    own = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    other = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    record = store["devices"]["dev-a"]["catalog_token"]
+    token, device = own, "dev-a"
+    if case == "missing":
+        token = None
+    elif case == "unknown":
+        token = "unknown-catalog-bearer-for-test"
+    elif case == "expired":
+        record["expires_at"] = now - 3600
+    elif case == "revoked":
+        record["revoked"] = True
+    elif case == "previous":
+        store["devices"]["dev-a"]["catalog_token_prev"] = dict(record)
+        record["value"] = "replacement-catalog-bearer-for-test"
+    elif case == "wrong-device":
+        token = other
+    elif case == "invalid-device-path":
+        device = "x" * 300
+    secrets_store.save(store, sp)
+    srv = catalog.make_server("127.0.0.1", 0, _store(tmp_path), sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    path = "/v1/devices/%s/%s" % (device, endpoint)
+    capsys.readouterr()
+    try:
+        status, _, _ = _req(srv.server_address[1], "GET", path, token=token)
+        assert status == expected_status
+        lines = _refusal_lines(capsys)
+        assert len(lines) == 1
+        line = lines[0]
+        assert "method=GET" in line
+        assert "route=/v1/devices/{device_id}/" + endpoint in line
+        assert "reason=" + reason in line
+        assert "device=" + ("invalid" if len(device) > 64 else device) in line
+        assert "src=127.0.0.1" in line
+        assert len(line) < 400 and "x" * 65 not in line
+        if token:
+            assert token not in line and token[:8] not in line
+            assert "token_id=" + catalog._audit_id(token) in line
+        else:
+            assert "token_id=" not in line
+        # Specialized endpoints share the logger's same repeat suppression.
+        status, _, _ = _req(srv.server_address[1], "GET", path, token=token)
+        assert status == expected_status
+        assert _refusal_lines(capsys) == []
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_rolled_old_token_on_a_device_route_logs_previous_token(
         tmp_path, capsys):
     """The lab symptom behind #233: a device still presenting its pre-rotation
