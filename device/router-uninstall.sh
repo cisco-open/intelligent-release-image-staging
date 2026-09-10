@@ -142,7 +142,13 @@ EOF
 # It is on-device proof of ownership that survives the loss of a record --
 # which is what makes the force path able to reclaim its own network config
 # without ever guessing about an operator's.
-IRIS_VPG_DESCRIPTION="description IRIS Guest Shell VPG"
+# Both recipes describe the VirtualPortGroup they create: the Guest Shell
+# router recipe writes the literal above, the IOx-on-router recipe writes
+# "description IRIS IOx VPG" (server/iox_verification.py / device/iox/install.sh).
+# The record-less reclaim must recognise EITHER, or an IOx app on a router
+# that lost its record leaves a VPG this force path cannot take back and
+# every re-onboard is refused for a collision (issues #209, #212).
+IRIS_VPG_DESCRIPTION_RE="description IRIS (?:Guest Shell|IOx) VPG"
 
 # Echo the VPG numbers whose interface block carries IRIS's description, and
 # the IRIS-named NAT objects present, from ONE running-config read. Anything
@@ -156,7 +162,7 @@ marker = sys.argv[1]
 text = sys.stdin.read()
 # An IOS interface block runs to the next line that starts in column 0.
 for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
-    if marker in m.group(2):
+    if re.search(marker, m.group(2)):
         print("vpg %s" % m.group(1))
 for acl in sorted(set(re.findall(r"(?m)^ip access-list standard (IRIS-NAT-\d+)\s*$", text))):
     print("acl %s" % acl)
@@ -169,7 +175,7 @@ for acl, iface in re.findall(
 import ipaddress
 nets = []
 for m in re.finditer(r"(?ms)^interface VirtualPortGroup(\d+)\s*$\n(.*?)(?=^\S|\Z)", text):
-    if marker not in m.group(2):
+    if not re.search(marker, m.group(2)):
         continue
     a = re.search(r"(?m)^\s*ip address\s+(\S+)\s+(\S+)\s*$", m.group(2))
     if a:
@@ -189,7 +195,7 @@ for line in re.findall(r"(?m)^ip nat inside source static tcp .*$", text):
         print("static %s" % line)
 for n in nets:
     print("net %s" % n.with_prefixlen)
-' "$IRIS_VPG_DESCRIPTION"
+' "$IRIS_VPG_DESCRIPTION_RE"
 }
 
 # Translations whose inside-local address sits in an IRIS VPG subnet, as

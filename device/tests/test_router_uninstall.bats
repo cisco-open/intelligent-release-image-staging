@@ -174,6 +174,16 @@ setup() {
   [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup7")" -ge 1 ]
 }
 
+@test "force teardown reclaims a VPG marked by the IOx-on-router recipe (#209/#212)" {
+  # An IOx app on a router marks its VPG "description IRIS IOx VPG", not the
+  # Guest Shell string. A record-less force reclaim must still recognise it,
+  # or the group and its NAT footprint are stranded and every re-onboard is
+  # refused for the collision.
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_IOX_VPG=yes _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup9")" -ge 1 ]
+}
+
 @test "force teardown never removes a VPG that lacks IRIS's description" {
   # THE safety property: an operator's own VirtualPortGroup carries no IRIS
   # marker and must survive a force teardown untouched.
@@ -327,6 +337,9 @@ case "$cmds" in
   *"no interface VirtualPortGroup7"*) touch "$FAKE_STATE_DIR/vpg7_removed" ;;
 esac
 case "$cmds" in
+  *"no interface VirtualPortGroup9"*) touch "$FAKE_STATE_DIR/vpg9_removed" ;;
+esac
+case "$cmds" in
   *"clear ip nat translation inside"*)
     printf '%s\n' "$cmds" | grep 'clear ip nat translation' >> "$FAKE_STATE_DIR/cleared" ;;
 esac
@@ -352,6 +365,12 @@ case "$cmds" in
           echo "interface VirtualPortGroup7"
           echo " description IRIS Guest Shell VPG"
           echo " ip address 192.168.254.9 255.255.255.252"
+          echo "!"
+        fi
+        if [ "${FAKE_RUNNING_IOX_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg9_removed" ]; then
+          echo "interface VirtualPortGroup9"
+          echo " description IRIS IOx VPG"
+          echo " ip address 192.168.254.13 255.255.255.252"
           echo "!"
         fi
         # What router-install.sh leaves on EVERY router it onboards and only
@@ -408,6 +427,12 @@ case "$cmds" in
       echo "interface VirtualPortGroup7"
       echo " description IRIS Guest Shell VPG"
       echo " ip address 192.168.254.9 255.255.255.252"
+      echo "!"
+    fi
+    if [ "${FAKE_RUNNING_IOX_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg9_removed" ]; then
+      echo "interface VirtualPortGroup9"
+      echo " description IRIS IOx VPG"
+      echo " ip address 192.168.254.13 255.255.255.252"
       echo "!"
     fi
     if [ "${FAKE_RUNNING_NAT:-no}" = "yes" ]; then
