@@ -2691,8 +2691,13 @@ class IoxController(object):
             raise _ControllerFailure(
                 "identity_mismatch", "target is not IOS XE", 2)
         package = _get(attempt.target, "pkg")
+        # C8000 and C9000 are x86 (amd64); IE-3x00 and IR are arm64. The
+        # match had only C9, so a Catalyst 8000V's correct amd64 package was
+        # rejected as an architecture mismatch -- the last discovery-time gate
+        # a C8000V IOx onboard hit. Kept in step with _validate_target and
+        # _record_target, which already use ^C[89].
         expected_package = ("iris-amd64.tar" if re.match(
-            r"^C9", identity["model"], re.I) else "iris-arm64.tar")
+            r"^C[89]", identity["model"], re.I) else "iris-arm64.tar")
         if package and package != expected_package:
             raise _ControllerFailure(
                 "identity_mismatch", "IOx package architecture mismatch", 2)
