@@ -792,6 +792,18 @@ def test_secure_directory_accepts_a_sibling_creating_it_first(monkeypatch, tmp_p
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o700
 
 
+def test_cleanup_absent_accepts_the_ie3400_discriminator_notice():
+    """A forced teardown removes the IRISQ logging discriminator; an IE-3400
+    without one answers 'Specified MD by the name IRISQ does not exist.'
+    with no % prefix, which the config-mode classifier read as unexpected
+    payload and failed the whole teardown (2026-09-10)."""
+    absent = _module()._cleanup_absent
+    assert absent("cleanup_config", b"Specified MD by the name IRISQ does not exist.\n")
+    assert absent("cleanup_config", b"%EEM: No such applet IRIS-AGENT\n")
+    assert not absent("cleanup_config", b"Specified MD by the name IRISQ is in use.\n")
+    assert not absent("configure_app", b"Specified MD by the name IRISQ does not exist.\n")
+
+
 def test_load_transcript_prefix_trusts_stored_classification_across_a_classifier_change(tmp_path):
     """Issue #227: _load_transcript_prefix must NOT re-derive a command's
     classification with the current classifier and reject a stored value that

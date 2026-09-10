@@ -1719,12 +1719,14 @@ def _save_confirmed(payload):
 # config half not reconciled.
 _CONFIG_CLEANUP_PURPOSES = frozenset(("cleanup_config", "remove_app_config"))
 _CLEANUP_ABSENT_RE = re.compile(
-    br"(?im)^%\s*(?:"
+    br"(?im)^(?:%\s*(?:"
     br"EEM:\s*No such applet\b"          # no event manager applet <name>
     br"|There is no\b.*\bto delete\b"    # no crypto/http trustpoint <name>
     br"|Can't find\b"                     # no ... policy <name>
     br"|.*\bnot (?:found|present|configured|exist(?:s)?)\b"
-    br")")
+    # `no logging discriminator <name>` for an absent discriminator: the
+    # IE-3400 answers without the % prefix (forced teardown, 2026-09-10).
+    br")|Specified MD by the name \S+ does not exist\.?\s*$)")
 
 
 def _cleanup_absent(purpose, payload):
