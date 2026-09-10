@@ -3585,6 +3585,15 @@ class IoxController(object):
                 normalized.setdefault("app_mask", normalized["svi_mask"])
             if "guest_ip" in normalized:
                 normalized.setdefault("app_ip", normalized["guest_ip"])
+            # ...and the reverse, which was missing. For routed the two name
+            # the same address (_build_env resolves GUEST_IP from app_ip or
+            # guest_ip interchangeably), but a deployment record's resolved
+            # plan stores only app_ip. _record_target projects record keys
+            # verbatim, so a RECORDED undeploy arrived without guest_ip and
+            # was refused as an incomplete target plan -- every routed IOx
+            # teardown, permanently, with no operator action able to fix it.
+            if "app_ip" in normalized:
+                normalized.setdefault("guest_ip", normalized["app_ip"])
             if "svi_ip" in normalized:
                 normalized.setdefault("app_gateway", normalized["svi_ip"])
                 normalized.setdefault("ios_ssh_host", normalized["svi_ip"])
