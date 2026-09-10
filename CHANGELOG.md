@@ -60,6 +60,18 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- XR command batches wait for each router prompt, preventing queued log
+  reads or logout from being lost after a `run` command (#253).
+- Schedule quarantine diagnostics retain a wave gate that already opened,
+  including recovery before the first execution receipt (#266).
+- Deployment-record reads preserve their strict refusal and read-only
+  fallback contracts after a concurrent replacement or read failure (#267).
+- Role CSV import rejects duplicate headers and extra cells before changing
+  policy (#270).
+- Changing inventory management type clears the prior routed-only SVI IGP
+  setting while preserving the device registration (#271).
+- IOx admission rejects dot path segments in native shared-storage paths
+  before contacting a device, including recorded and forced teardown (#272).
 - Router force cleanup requires an exact IRIS ownership description,
   preserving operator interfaces and NAT entries that merely mention it (#265).
 - Malformed telemetry report rings preserve delivered-event IDs and pinned
