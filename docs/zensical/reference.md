@@ -177,7 +177,10 @@ see [Kubernetes](kubernetes.md).
 Onboarding reads the public device certificate from `$IRIS_CONFIG/tls/crt.pem`,
 unless `IRIS_CRT_PUBLIC` selects another public certificate file. The server's
 `IRIS_LOG` names its log directory. It is kept out of device installer options;
-the device-side `IRIS_LOG` switch controls aria2 logging separately.
+the device-side `IRIS_LOG` switch controls aria2 logging separately, and for an
+IOx job it also decides whether the raw device session is streamed into the
+Console job log (off: step-level lines only; the session stays in the persisted
+transcript).
 
 ### TLS trust and console certificate
 
@@ -1332,7 +1335,7 @@ and overload backoff](device-agents.md#cadence-jitter-and-overload-backoff).
 | `IRIS_DEVICE_SSH_PORT` | `22` | IOx only | SSH-to-self port; integer 1–65535. |
 | `IRIS_DEVICE_SSH_KNOWN_HOSTS` | unset | IOx only | Optional absolute `known_hosts` path; enables strict host-key verification. |
 | `IRIS_MODEL` / `IRIS_VERSION` | unset | XR only | Optional observed device metadata persisted as `device_model` / `device_version`. XR has no SSH discovery path. |
-| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Enables `aria2c.log` with `on`, `1`, `true`, or `yes` (case-insensitive). IOx/XR installers pass the value to the container; on Guest Shell set `iris_log` in `iris-agent.conf`. IOx/XR cap the file at 50 MiB; Guest Shell trims it through `rotate-logs.sh` and EEM. Keep it off for normal operation to reduce flash writes. It does not control `%IRIS-6-<MNEMONIC>` status messages or heartbeat errors. See [Device-side logging](device-agents.md#device-side-logging-flash-write-endurance). |
+| `IRIS_LOG` | `off` | IOx, XR, Guest Shell | Enables `aria2c.log` with `on`, `1`, `true`, or `yes` (case-insensitive). IOx/XR installers pass the value to the container; on Guest Shell set `iris_log` in `iris-agent.conf`. IOx/XR cap the file at 50 MiB; Guest Shell trims it through `rotate-logs.sh` and EEM. Keep it off for normal operation to reduce flash writes. It does not control `%IRIS-6-<MNEMONIC>` status messages or heartbeat errors. On an IOx onboard or undeploy job the same value also makes the Console job log carry the raw IOS session the controller drove; off keeps that log at step level (headers, poll outcomes, one line per controller operation, and a failed step's `% ...` verdict). See [Device-side logging](device-agents.md#device-side-logging-flash-write-endurance). |
 | XR container logs | 3 × 1 MiB | XR | The installer configures Docker `json-file` logging with `max-size=1m` and `max-file=3`. This captures startup and `%IRIS` diagnostics even with `IRIS_LOG=off`. Read it with `show appmgr application name iris logs`. |
 
 There is no production `IRIS_CATALOG_CA` override: IOx trust must come from CAF

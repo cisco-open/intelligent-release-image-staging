@@ -636,6 +636,20 @@ Successful jobs end with `onboard complete: <IP>` or `undeploy complete: <IP>`.
 Errors name the failed check and any recovery steps. Onboarding completion
 means the agent is set up; check Devices for image staging progress.
 
+The log is step-level on every platform. Guest Shell, router and XR jobs
+stream their installer's `[n/N]` banners and notices. An IOx job streams the
+recipe's `[n/8]` (install) or `[n/4]` (undeploy) headers, its prerequisite
+notices and poll outcomes (`app is DEPLOYED (poll 2/24)`), and one indented
+line per controller operation with its duration -- `  configure_app ok (2.1s)`
+-- as each step completes. A failed step is named the same way
+(`  configure_app failed (2.1s)`), followed by the device's own `% ...`
+verdict and the controller's `IOx command failed: ...` detail. The raw IOS
+session the controller drove is not in the job log; it is kept as the job's
+persisted transcript under the state directory's `iox/transcripts`. To stream
+it into the job log for a debugging run, submit the job with the device
+logging opt-in `IRIS_LOG=on` (see the [reference](reference.md#device-container-environment-variables)) --
+the same switch that turns on the agent's `aria2c.log`.
+
 ### Deployment logs
 
 Job windows are live views; the durable record is Monitoring →

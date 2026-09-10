@@ -73,6 +73,21 @@ if [ "$DRY" -eq 0 ]; then
   else
     IRIS_IOX_RECIPE_ACTION=install
   fi
+  # What the job log shows. By default a request prints nothing of the device
+  # session it drove: the recipe's "[n/N]" headers, its PREREQ notices and
+  # poll outcomes, the controller's per-step lines and, on a failed step, the
+  # device's own '% ...' verdicts are the log. The session itself is in the
+  # controller's persisted transcript. The job's IRIS_LOG opt-in (the same
+  # device-logging switch the app receives, exported here by the controller
+  # as on/off) turns the raw echo on for a debugging run.
+  case "${IRIS_LOG:-off}" in
+    [Oo][Nn]|1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) RAW_ECHO=1 ;;
+    *) RAW_ECHO=0 ;;
+  esac
+  raw_echo() {
+    [ "$RAW_ECHO" -eq 1 ] && [ -n "$1" ] && printf '%s\n' "$1"
+    return 0
+  }
 
   iox_request() {
     python3 - "$IRIS_IOX_CONTROL_FD" "$IRIS_IOX_RECIPE_ACTION" "$@" --bind \
@@ -330,7 +345,16 @@ try:
               response["phase"] or "-"]
     os.write(1, ("IRIS-READY\t" + "\t".join(fields) + "\n").encode("ascii"))
     os.write(1, bytes(streams["stdout"]))
-    os.write(2, bytes(streams["stderr"]))
+    if os.environ.get("IRIS_LOG", "").strip().lower() in ("on", "1", "true", "yes"):
+        os.write(2, bytes(streams["stderr"]))
+    elif response["operation_code"] != 0:
+        # A failed step: quote the device's own verdicts, the '% ...' lines,
+        # from both streams; the rest of the session is in the transcript.
+        refusals = [line.strip() for line in
+                    (bytes(streams["stdout"]) + b"\n" + bytes(streams["stderr"])).splitlines()
+                    if line.lstrip().startswith(b"%")]
+        if refusals:
+            os.write(2, b"\n".join(refusals[:16]) + b"\n")
     if response["detail"]:
         os.write(2, (response["detail"] + "\n").encode("utf-8"))
     raise SystemExit(response["operation_code"])
@@ -377,7 +401,7 @@ PY
   request_plain() {
     local __rc __output
     if request_capture __output "$@"; then __rc=0; else __rc=$?; fi
-    [ -n "$__output" ] && printf '%s\n' "$__output"
+    raw_echo "$__output"
     return "$__rc"
   }
 
@@ -457,19 +481,22 @@ PY
 
   install_recipe() {
     local out year state rc i
+    echo "[1/8] upload package and certificate"
     request_plain upload_wrapper || return $?
     request_plain upload_certificate || return $?
 
-    if request_capture out command routing_prereq; then :; else rc=$?; return "$rc"; fi
+    echo "[2/8] check prerequisites: routing, storage, clock, IOx services"
+    if request_capture out command routing_prereq; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
     if printf '%s\n' "$out" | grep -qE '^no ip routing[[:space:]]*$|^Default gateway'; then
       echo "PREREQ: ip routing is disabled; the IOx application cannot reach the staging service" >&2
       return 4
     fi
-    if request_capture out command storage_prereq; then :; else rc=$?; return "$rc"; fi
+    if request_capture out command storage_prereq; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
     case "$out" in *"IOx Partition Exists"*) ;; *)
       echo "PREREQ: no IOx partition on the SD card" >&2; return 4 ;;
     esac
     if request_capture out command clock; then
+      raw_echo "$out"
       year="$(printf '%s' "$out" | grep -oE '[0-9]{4}' | tail -1 || true)"
       if [ -n "$year" ] && [ "$year" -lt 2024 ]; then
         echo "PREREQ WARNING: device clock is $year — TLS certificate validation may fail"
@@ -478,49 +505,58 @@ PY
     request_plain command prepare_iox_scp || return $?
 
     for i in $(seq 1 24); do
-      if request_capture out command iox_status; then :; else rc=$?; return "$rc"; fi
+      if request_capture out command iox_status; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
       # The app runtime is Dockerd on IE-3x00/C9300 and Libvirtd on a
       # Catalyst 8000V (KVM-based IOx); either being Running, with CAF, means
       # the app-hosting infrastructure is ready. Requiring Dockerd alone hung
       # every C8000V install here until the lifecycle deadline elapsed.
       if printf '%s' "$out" | grep -q 'IOx service (CAF).*Running' &&
-         printf '%s' "$out" | grep -qE 'Dockerd.*Running|Libvirtd.*Running'; then break; fi
+         printf '%s' "$out" | grep -qE 'Dockerd.*Running|Libvirtd.*Running'; then
+        echo "IOx services ready (poll $i/24)"
+        break
+      fi
       [ "$i" -lt 24 ] || { echo "ERROR: IOx services are not ready" >&2; return 4; }
     done
 
+    echo "[3/8] remove any existing app"
     request_plain begin_install || return $?
     request_plain command app_stop || return $?
     request_plain command app_deactivate || return $?
     request_plain command app_uninstall || return $?
     request_plain command remove_app_config || return $?
+    echo "[4/8] configure networking and app"
     request_plain command configure_network || return $?
     request_plain command mkdir_share || return $?
     request_plain command configure_app || return $?
-    if request_capture out command app_install; then printf '%s\n' "$out"; else rc=$?; printf '%s\n' "$out"; return "$rc"; fi
+    echo "[5/8] install app (waiting for DEPLOYED)"
+    if request_capture out command app_install; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
 
     state=""
     for i in $(seq 1 24); do
-      if request_capture out command app_list; then :; else
+      if request_capture out command app_list; then raw_echo "$out"; else
         rc=$?
+        raw_echo "$out"
         echo "ERROR: Application deployment did not complete; onboarding aborted." >&2
         return "$rc"
       fi
       state="$(printf '%s\n' "$out" | awk '$1=="iris"{print $2; exit}')"
-      [ "$state" = DEPLOYED ] && break
+      [ "$state" = DEPLOYED ] && { echo "app is DEPLOYED (poll $i/24)"; break; }
       [ "$i" -lt 24 ] || {
         echo "ERROR: Application deployment did not complete; onboarding aborted." >&2
         return 4
       }
     done
     request_plain deployed || return $?
-    if request_capture out command app_activate; then printf '%s\n' "$out"; else rc=$?; printf '%s\n' "$out"; return "$rc"; fi
+    echo "[6/8] activate app (waiting for ACTIVATED)"
+    if request_capture out command app_activate; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
     state=""
     for i in $(seq 1 24); do
-      if request_capture out command app_list; then :; else rc=$?; return "$rc"; fi
+      if request_capture out command app_list; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
       state="$(printf '%s\n' "$out" | awk '$1=="iris"{print $2; exit}')"
-      [ "$state" = ACTIVATED ] && break
+      [ "$state" = ACTIVATED ] && { echo "app is ACTIVATED (poll $i/24)"; break; }
       [ "$i" -lt 24 ] || return 4
     done
+    echo "[7/8] stage instructions, copy certificate, remove uploads, start app (waiting for RUNNING)"
     request_plain stage_instructions || return $?
     request_plain command copy_certificate || return $?
     request_plain command remove_certificate || return $?
@@ -528,11 +564,12 @@ PY
     request_plain command app_start || return $?
     state=""
     for i in $(seq 1 24); do
-      if request_capture out command app_list; then :; else rc=$?; return "$rc"; fi
+      if request_capture out command app_list; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
       state="$(printf '%s\n' "$out" | awk '$1=="iris"{print $2; exit}')"
-      [ "$state" = RUNNING ] && break
+      [ "$state" = RUNNING ] && { echo "app is RUNNING (poll $i/24)"; break; }
       [ "$i" -lt 24 ] || { echo "ERROR: IRIS application did not reach RUNNING" >&2; return 4; }
     done
+    echo "[8/8] save configuration"
     request_plain command save || return $?
     return 0
   }

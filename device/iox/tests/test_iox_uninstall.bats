@@ -716,6 +716,8 @@ ASSERTIONS
   _iox_fixture_setup
   run _iox_controller_run uninstall success recorded
   [ "$status" -eq 0 ]
+  [[ "$output" == *'[1/4] remove app: iris'*'app removed (poll 1/24)'*'[2/4] remove IRIS configuration'*'[3/4] remove IRIS files'*'[4/4] verify cleanup and save'*'undeploy complete:'* ]]
+  [[ "$output" != *'startup-config not saved'* ]]
   _iox_assert_trace mode recorded
   _iox_assert_trace ordered app_stop app_deactivate app_uninstall cleanup_config cleanup_files save finish
   _iox_assert_trace finish ''
@@ -726,6 +728,7 @@ ASSERTIONS
   run _iox_controller_run uninstall success force_agent_only
   [ "$status" -eq 0 ]
   [[ "$output" != *'VLAN not set'* ]]
+  [[ "$output" == *'[4/4] verify cleanup and save'*'startup-config not saved: force agent-only teardown'*'undeploy complete:'* ]]
   _iox_assert_trace mode force_agent_only
   _iox_assert_trace ordered app_stop app_deactivate app_uninstall cleanup_config cleanup_files finish
   _iox_assert_trace absent upload_wrapper upload_certificate begin_install deployed app_install app_activate
@@ -948,7 +951,8 @@ _assert_signal_finalization() {
 
 @test "uninstall completion follows acknowledged cleanup and finish" {
   _iox_fixture_setup
-  run _iox_controller_run uninstall completion_order
+  # See the install twin: the acknowledgements are session output.
+  IRIS_LOG=on run _iox_controller_run uninstall completion_order
   [ "$status" -eq 0 ]
   [[ "$output" == *'fixture cleanup acknowledged'*'fixture finish acknowledged'*'undeploy complete:'* ]]
   _iox_assert_trace count cleanup 1

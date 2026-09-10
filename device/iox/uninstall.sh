@@ -307,7 +307,8 @@ trap 'on_signal hup 129' HUP
 
 uninstall_recipe() {
   local out state rc i mode
-  if request_capture out command app_stop; then :; else rc=$?; return "$rc"; fi
+  echo "[1/4] remove app: $APPID"
+  if request_capture out command app_stop; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
   mode="$IPC_MODE"
   case "$mode" in recorded|force_agent_only) ;; *)
     echo "ERROR: invalid private IOx controller protocol" >&2; PROTOCOL_BROKEN=1; return 4 ;;
@@ -316,15 +317,18 @@ uninstall_recipe() {
   request_plain command app_uninstall || return $?
 
   for i in $(seq 1 24); do
-    if request_capture out command app_list; then :; else rc=$?; return "$rc"; fi
+    if request_capture out command app_list; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
     state="$(printf '%s\n' "$out" | awk '$1=="iris"{print $2; exit}')"
-    [ -z "$state" ] && break
+    [ -z "$state" ] && { echo "app removed (poll $i/24)"; break; }
     [ "$i" -lt 24 ] || { echo "ERROR: IRIS application remains after uninstall" >&2; return 4; }
   done
 
+  echo "[2/4] remove IRIS configuration"
   request_plain command cleanup_config || return $?
+  echo "[3/4] remove IRIS files"
   request_plain command cleanup_files || return $?
-  if request_capture out command cleanup_config_probe; then :; else rc=$?; return "$rc"; fi
+  echo "[4/4] verify cleanup and save"
+  if request_capture out command cleanup_config_probe; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
   # The closed controller probe includes a VLAN line only when that session is
   # authorized to remove its bound routed VLAN. The real recipe deliberately
   # receives no target values in its environment, so treat any VLAN returned
@@ -333,7 +337,7 @@ uninstall_recipe() {
     echo "ERROR: IRIS configuration remains after cleanup" >&2
     return 4
   fi
-  if request_capture out command cleanup_stage_probe; then :; else rc=$?; return "$rc"; fi
+  if request_capture out command cleanup_stage_probe; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi
   # The controller filters package rows to its bound PKG and certificate
   # names. Match every validated 1..128-character basename in those IOS rows,
   # including custom names; never infer the real package from this environment.
@@ -351,6 +355,8 @@ uninstall_recipe() {
   # The controller-side closed operation policy makes a forged choice fail.
   if [ "$mode" = recorded ]; then
     request_plain command save || return $?
+  else
+    echo "startup-config not saved: force agent-only teardown"
   fi
   return 0
 }

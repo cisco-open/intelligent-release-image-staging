@@ -154,6 +154,10 @@ _NETMASKS = frozenset(str(ipaddress.IPv4Network(
 
 _INSTALL_ONLY = frozenset(("upload_wrapper", "upload_certificate",
                            "begin_install", "deployed"))
+# Recipe operations that get no job-log line when they succeed: the two
+# lifecycle polls (the recipe prints the state it was waiting for once it is
+# reached) and the closing protocol handshake.
+_SILENT_RECIPE_STEPS = frozenset(("app_list", "iox_status", "cleanup", "finish"))
 _UNINSTALL_COMMANDS = frozenset((
     "iox_status", "app_list", "app_stop", "app_deactivate",
     "app_uninstall", "remove_app_config", "remove_wrapper",
@@ -1020,11 +1024,19 @@ class _SupervisedProcess(object):
 
 
 class _RecipeCapture(object):
-    """Continuously drain recipe pipes with bounded streaming redaction."""
+    """Continuously drain recipe pipes with bounded streaming redaction.
+
+    The reader threads accumulate each stream; ``drain`` hands the caller
+    what has arrived so far, so the controller can forward the recipe's own
+    progress lines at every request boundary instead of only after the
+    recipe exits. The 32 KiB bound counts everything ever captured on a
+    stream, drained or not, so draining does not widen it."""
     def __init__(self, process, secret_values):
         import iox_transport
         self._stop = threading.Event()
+        self._lock = threading.Lock()
         self._values = {"stdout": bytearray(), "stderr": bytearray()}
+        self._captured = {"stdout": 0, "stderr": 0}
         self._threads = []
         for name in ("stdout", "stderr"):
             stream = getattr(process, name)
@@ -1065,9 +1077,21 @@ class _RecipeCapture(object):
             wake.close()
 
     def _append(self, name, body):
-        remaining = 32768 - len(self._values[name])
-        if remaining > 0:
-            self._values[name].extend(body[:remaining])
+        with self._lock:
+            remaining = 32768 - self._captured[name]
+            if remaining > 0:
+                self._values[name].extend(body[:remaining])
+                self._captured[name] += min(len(body), remaining)
+
+    def drain(self):
+        """Take what each stream has accumulated since the last drain, in
+        (stream, bytes) pairs; streams with nothing new are omitted."""
+        with self._lock:
+            drained = [(name, bytes(body))
+                       for name, body in self._values.items() if body]
+            for name in self._values:
+                self._values[name] = bytearray()
+        return drained
 
     def finish(self, writers_reaped, deadline, monotonic_fn):
         if not writers_reaped:
@@ -1095,8 +1119,9 @@ class _RecipeCapture(object):
                 wake.close()
             except OSError:
                 pass
-        return complete, dict((name, bytes(body))
-                              for name, body in self._values.items())
+        with self._lock:
+            return complete, dict((name, bytes(body))
+                                  for name, body in self._values.items())
 
 
 def _wait_local_process(process, timeout):
@@ -5110,6 +5135,35 @@ class IoxController(object):
         if cleanup_failure is not None:
             raise cleanup_failure
 
+    def _report_step(self, on_output, capture, operation, arguments,
+                     started, failure):
+        """Put one step-level line in the job log for a recipe operation.
+
+        The recipe's own output captured so far (its "[n/8] ..." headers,
+        PREREQ notices, poll outcomes) is forwarded first, so it precedes
+        the line for the operation it introduced. Successful polls and the
+        cleanup/finish protocol steps stay silent -- the recipe reports the
+        polled state itself and a clean finish is not news -- while every
+        failure is named, including a refusal of the step's admission. The
+        failure detail is not repeated here: the recipe writes it to its
+        stderr when it receives the response, and the controller result
+        carries the primary failure's detail for the job's final line.
+        """
+        for stream, body in capture.drain():
+            on_output(stream, body)
+        name = (arguments.get("name") if operation == "command" and
+                isinstance(arguments, dict) else operation)
+        name = "".join(character for character in str(name)
+                       if 32 < ord(character) < 127)[:64] or "?"
+        elapsed = max(0.0, self._monotonic() - started)
+        if failure is None:
+            if name in _SILENT_RECIPE_STEPS:
+                return
+            line = "  %s ok (%.1fs)" % (name, elapsed)
+        else:
+            line = "  %s failed (%.1fs)" % (name, elapsed)
+        on_output("stdout", (line + "\n").encode("utf-8"))
+
     def _run_recipe(self, attempt, action, on_output):
         # Cancellation observed after board-scoped revalidation wins over any
         # later local recipe admission failure.  This also lets a waiter leave
@@ -5131,7 +5185,15 @@ class IoxController(object):
         env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
                        ":/sbin:/bin",
                "LANG": "C.UTF-8",
-               "LC_ALL": "C.UTF-8", "IRIS_IOX_CONTROL_FD": str(child.fileno())}
+               "LC_ALL": "C.UTF-8", "IRIS_IOX_CONTROL_FD": str(child.fileno()),
+               # The job's device-logging opt-in (the same normalized value
+               # the app receives as run-opts IRIS_LOG). The recipe echoes
+               # the raw device session into the job log only when it is
+               # on; by default the log carries the recipe's step headers
+               # and this controller's per-step lines, and the session stays
+               # in the persisted transcript.
+               "IRIS_LOG": ("on" if _get(attempt.target, "log") == "on"
+                            else "off")}
         if attempt.supervisor is None:
             raise _ControllerFailure(
                 "descendant_unreaped", "missing IOx supervisor custody", 5)
@@ -5183,8 +5245,14 @@ class IoxController(object):
                 arguments = request["arguments"]
                 if not isinstance(operation, str) or type(arguments) is not dict:
                     raise _ControllerFailure("rejected", "invalid recipe operation")
-                self._admit_recipe_step(
-                    attempt, action, operation, arguments, protocol)
+                step_started = self._monotonic()
+                try:
+                    self._admit_recipe_step(
+                        attempt, action, operation, arguments, protocol)
+                except _ControllerFailure as exc:
+                    self._report_step(on_output, recipe_capture, operation,
+                                      arguments, step_started, exc)
+                    raise
                 outputs = {"stdout": b"", "stderr": b""}
                 transport_result = None
                 operation_result_start = len(attempt.operation_results)
@@ -5370,6 +5438,8 @@ class IoxController(object):
                             detail=(finish_failure.detail if
                                     finish_failure else ""))
                         self._send_response(parent, sequence, attempt, response, outputs)
+                        self._report_step(on_output, recipe_capture, operation,
+                                          arguments, step_started, finish_failure)
                         expected_exit = intent if intent else code
                         attempt.finished_protocol = True
                         break
@@ -5392,6 +5462,8 @@ class IoxController(object):
                         outputs["stderr"] += _get(transport_result, "stderr", b"")
                     response = self._ipc_result(sequence, 0, attempt,
                                                 result=transport_result)
+                    self._report_step(on_output, recipe_capture, operation,
+                                      arguments, step_started, None)
                 except _ControllerFailure as exc:
                     if attempt.primary is None:
                         attempt.primary = exc
@@ -5399,6 +5471,8 @@ class IoxController(object):
                                                 result=transport_result,
                                                 category=exc.category,
                                                 detail=exc.detail)
+                    self._report_step(on_output, recipe_capture, operation,
+                                      arguments, step_started, exc)
                 self._send_response(parent, sequence, attempt, response, outputs)
                 sequence += 1
         except _ControllerFailure as exc:

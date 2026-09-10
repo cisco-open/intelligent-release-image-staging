@@ -727,9 +727,24 @@ ASSERTIONS
   run _iox_controller_run install success
   [ "$status" -eq 0 ]
   [[ "$output" == *'onboard complete: 192.0.2.10'* ]]
-  [[ "$output" == *'Installing package'* ]]
-  [[ "$output" == *'%IOX: application installation accepted'* ]]
+  # The job log is the recipe's step headers and poll outcomes, in order;
+  # the device session the controller drove stays in its transcript.
+  [[ "$output" == *'[1/8] upload package and certificate'*'[2/8] check prerequisites'*'IOx services ready (poll 1/24)'*'[3/8] remove any existing app'*'[4/8] configure networking and app'*'[5/8] install app'*'app is DEPLOYED (poll 1/24)'*'[6/8] activate app'*'app is ACTIVATED (poll 1/24)'*'[7/8] stage instructions'*'app is RUNNING (poll 1/24)'*'[8/8] save configuration'*'onboard complete:'* ]]
+  [[ "$output" != *'Installing package'* ]]
+  [[ "$output" != *'%IOX: application installation accepted'* ]]
+  [[ "$output" != *'Application activated'* ]]
+  [[ "$output" != *'[OK]'* ]]
   _iox_assert_trace ordered upload_wrapper begin_install app_install deployed app_activate stage_instructions copy_certificate app_start save finish
+  _iox_assert_trace finish RUNNING
+}
+
+@test "the job's IRIS_LOG opt-in echoes the device session into the recipe output" {
+  _iox_fixture_setup
+  IRIS_LOG=on run _iox_controller_run install success
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'[5/8] install app'*'Installing package'*'%IOX: application installation accepted'*'app is DEPLOYED (poll 1/24)'* ]]
+  [[ "$output" == *'Application activated'* ]]
+  [[ "$output" == *'[OK]'*'onboard complete: 192.0.2.10'* ]]
   _iox_assert_trace finish RUNNING
 }
 
@@ -753,6 +768,11 @@ ASSERTIONS
   _iox_fixture_setup
   run _iox_controller_run install certificate_copy_failure
   [ "$status" -ne 0 ]
+  # A failed step quotes the device's own '%' verdict and the controller's
+  # detail, without the rest of the session.
+  [[ "$output" == *'% Error: application data unavailable'* ]]
+  [[ "$output" == *'application data copy failed'* ]]
+  [[ "$output" != *'Application activated'* ]]
   _iox_assert_trace ordered app_activate copy_certificate finish
   _iox_assert_trace absent app_start
   _iox_assert_trace finish ACTIVATED
@@ -1062,7 +1082,9 @@ _assert_signal_finalization() {
 
 @test "install completion follows acknowledged cleanup and finish" {
   _iox_fixture_setup
-  run _iox_controller_run install completion_order
+  # The fixture's acknowledgements are device-session output, which only
+  # the IRIS_LOG opt-in echoes; the ordering proof needs them visible.
+  IRIS_LOG=on run _iox_controller_run install completion_order
   [ "$status" -eq 0 ]
   [[ "$output" == *'fixture cleanup acknowledged'*'fixture finish acknowledged'*'onboard complete:'* ]]
   _iox_assert_trace count cleanup 1

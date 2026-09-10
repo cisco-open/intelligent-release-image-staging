@@ -1036,7 +1036,7 @@ def _install_operations():
 def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
                           cleanup_on_error=True, authority=None,
                           prepare_hook=None, prefix_chunks=(), cancel=None,
-                          recipe_argv=None):
+                          recipe_argv=None, request_overrides=None):
     timeline = factory.calls
     store = _StatefulStore(tmp_path, calls=timeline)
     wrapper_path = _write_wrapper(tmp_path, markers)
@@ -1067,7 +1067,8 @@ def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
         tmp_path, store, factory, clock=clock, **config)
     try:
         result = controller.run_install(
-            _request(wrapper_path=wrapper_path), prepare, preflight,
+            _request(wrapper_path=wrapper_path, **(request_overrides or {})),
+            prepare, preflight,
             lambda stream, data: timeline.append(("output", stream, data)),
             cancel or _Cancel())
     finally:
@@ -4346,3 +4347,165 @@ def test_cli_rejects_force_on_other_operations_and_unbounded_waits(argv):
         module.main(argv=argv, client_factory=lambda: client, stdout=io.StringIO())
     assert exc.value.code == 2
     assert client.calls == []
+
+
+def _rendered_output(timeline):
+    return b"".join(call[2] for call in timeline
+                    if call[0] == "output").decode("utf-8", "replace")
+
+
+def test_recipe_steps_reach_the_job_log_in_order_without_the_session(tmp_path):
+    """The job log is the recipe's own lines plus one controller line per
+    operation, streamed at each request boundary. The device session the
+    controller drove is not in it; that lives in the persisted transcript."""
+    factory = _TransportFactory(verification="enabled")
+    header = b"[1/8] upload package and certificate\n"
+    result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, markers=("package.sign",), prefix_chunks=(header,))
+    assert result["result_code"] == 0
+    lines = _rendered_output(timeline).splitlines()
+    assert lines[0] == "[1/8] upload package and certificate"
+    step_lines = [line for line in lines if line.startswith("  ")]
+    expected = [arguments.get("name") if operation == "command" else operation
+                for operation, arguments in _install_operations()]
+    expected.remove("finish")
+    assert [line.split()[0] for line in step_lines] == expected
+    assert all(re.fullmatch(r"  [a-z_]+ ok \(\d+\.\ds\)", line)
+               for line in step_lines)
+    # Nothing else: no handshake lines, no device output, no controller prose.
+    assert lines == [lines[0]] + step_lines
+    # Streamed, not delivered after the recipe exits: the line for one step
+    # is out before the transport drives the next one.
+    outputs = [(index, call[2]) for index, call in enumerate(timeline)
+               if call[0] == "output"]
+    app_stop_reported = next(index for index, data in outputs
+                             if data.startswith(b"  app_stop ok"))
+    app_deactivate_driven = next(
+        index for index, call in enumerate(timeline)
+        if call[0] == "command" and call[4] == "app_deactivate")
+    assert app_stop_reported < app_deactivate_driven
+
+
+def test_a_failed_recipe_step_is_named_in_the_job_log(tmp_path):
+    factory = _TransportFactory(
+        verification="enabled",
+        command_outcomes={"configure_app": ["transport"]})
+    result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+        tmp_path, factory, markers=("package.sign",))
+    assert result["result_code"] == 4
+    lines = _rendered_output(timeline).splitlines()
+    assert any(re.fullmatch(r"  configure_app failed \(\d+\.\ds\)", line)
+               for line in lines)
+    assert not any(line.startswith("  configure_app ok") for line in lines)
+    # The failed step is the last controller line: nothing after it ran, and
+    # the recipe's cleanup handshake is not news.
+    assert lines[-1].startswith("  configure_app failed")
+    assert not any(line.startswith(("  cleanup", "  finish"))
+                   for line in lines)
+    # The detail belongs to the controller result, not to this line.
+    assert "injected transport" not in "\n".join(lines)
+    assert result["error_category"] == "transport"
+
+
+def test_recipe_environment_carries_the_job_log_opt_in(tmp_path):
+    """IRIS_LOG reaches the recipe as the target's normalized on/off, so the
+    recipe can echo the raw session only for a job that opted in."""
+    peer = _write_recipe_peer(tmp_path, operations=_install_operations())
+    probe = tmp_path / "probe-recipe.sh"
+    probe.write_text(
+        '#!/bin/bash\nprintf "IRIS_LOG=%%s\\n" "${IRIS_LOG-unset}"\n'
+        'exec /bin/bash "%s"\n' % peer)
+    for name, log, expected in (("default", None, "IRIS_LOG=off"),
+                                ("on", "on", "IRIS_LOG=on"),
+                                ("off", "off", "IRIS_LOG=off")):
+        root = tmp_path / name
+        root.mkdir()
+        overrides = {}
+        if log is not None:
+            overrides["target"] = _Bag(_request()["target"], log=log)
+        result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+            root, _TransportFactory(verification="enabled"),
+            markers=("package.sign",),
+            recipe_argv=["/bin/bash", str(probe)],
+            request_overrides=overrides)
+        assert result["result_code"] == 0, name
+        assert _rendered_output(timeline).splitlines()[0] == expected, name
+
+
+_INSTALL_HEADERS = [
+    "[1/8] upload package and certificate",
+    "[2/8] check prerequisites: routing, storage, clock, IOx services",
+    "[3/8] remove any existing app",
+    "[4/8] configure networking and app",
+    "[5/8] install app (waiting for DEPLOYED)",
+    "[6/8] activate app (waiting for ACTIVATED)",
+    "[7/8] stage instructions, copy certificate, remove uploads, start app "
+    "(waiting for RUNNING)",
+    "[8/8] save configuration",
+]
+
+
+def test_production_bash_recipe_job_log_is_step_level(tmp_path):
+    """device/iox/install.sh through the real controller: the job log is the
+    recipe's numbered headers, its poll outcomes and the controller's line
+    per operation, each header ahead of the operations it introduces, and
+    none of the device session -- unless the job's IRIS_LOG opt-in is on."""
+    recipe = (Path(__file__).resolve().parents[2] /
+              "device" / "iox" / "install.sh")
+    root = tmp_path / "default"
+    root.mkdir()
+    result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+        root, _TransportFactory(recipe_compatible=True),
+        recipe_argv=["/bin/bash", str(recipe)])
+    assert result["result_code"] == 0
+    rendered = _rendered_output(timeline)
+    lines = rendered.splitlines()
+    assert [line for line in lines if line.startswith("[")] == _INSTALL_HEADERS
+
+    def at(prefix):
+        return next(index for index, line in enumerate(lines)
+                    if line.startswith(prefix))
+
+    order = [
+        "[1/8]", "  upload_wrapper ok (", "  upload_certificate ok (",
+        "[2/8]", "  routing_prereq ok (", "  storage_prereq ok (",
+        "  clock ok (", "  prepare_iox_scp ok (",
+        "IOx services ready (poll 1/24)",
+        "[3/8]", "  begin_install ok (", "  app_stop ok (",
+        "  remove_app_config ok (",
+        "[4/8]", "  configure_network ok (", "  mkdir_share ok (",
+        "  configure_app ok (",
+        "[5/8]", "  app_install ok (", "app is DEPLOYED (poll 1/24)",
+        "  deployed ok (",
+        "[6/8]", "  app_activate ok (", "app is ACTIVATED (poll 1/24)",
+        "[7/8]", "  stage_instructions ok (", "  copy_certificate ok (",
+        "  remove_certificate ok (", "  remove_wrapper ok (",
+        "  app_start ok (", "app is RUNNING (poll 1/24)",
+        "[8/8]", "  save ok (", "onboard complete: device",
+    ]
+    positions = [at(prefix) for prefix in order]
+    assert positions == sorted(positions), list(zip(order, positions))
+    assert lines[-1] == "onboard complete: device"
+    # The polls and the closing handshake are silent on success.
+    assert not any(line.startswith(("  app_list", "  iox_status",
+                                    "  cleanup", "  finish"))
+                   for line in lines)
+    # The session the controller drove stays in its transcript.
+    for session_text in ("Gateway of last resort", "IOx Partition Exists",
+                         "IOx service (CAF)", "iris DEPLOYED",
+                         "iris RUNNING", "14:23:07"):
+        assert session_text not in rendered, session_text
+
+    root = tmp_path / "opt-in"
+    root.mkdir()
+    result, unused_store, timeline, unused_wrapper = _run_scripted_install(
+        root, _TransportFactory(recipe_compatible=True),
+        recipe_argv=["/bin/bash", str(recipe)],
+        request_overrides={"target": _Bag(_request()["target"], log="on")})
+    assert result["result_code"] == 0
+    rendered = _rendered_output(timeline)
+    assert [line for line in rendered.splitlines()
+            if line.startswith("[")] == _INSTALL_HEADERS
+    for session_text in ("Gateway of last resort", "IOx Partition Exists",
+                         "IOx service (CAF)", "iris DEPLOYED", "iris RUNNING"):
+        assert session_text in rendered, session_text

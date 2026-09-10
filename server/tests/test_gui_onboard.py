@@ -3986,6 +3986,16 @@ def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
     assert job["recovery_code"] is None
     assert job["record_id"] == "record-1"
     assert recipe_event.read_bytes() == b"finish_ack\n"
+    # The job log is step-level: the controller's line per recipe operation,
+    # in order, and none for the closing protocol handshake.
+    step_lines = [line for line in job["lines"] if line.startswith("  ")]
+    assert step_lines[0].startswith("  upload_wrapper ok (")
+    assert step_lines[-1].startswith("  save ok (")
+    assert [line.split()[0] for line in step_lines] == [
+        arguments.get("name") if operation == "command" else operation
+        for operation, arguments in iox_spec._install_operations()
+        if operation != "finish"]
+    assert not any(line.startswith("  finish") for line in job["lines"])
 
     # Reload through a separate store instance: this must be the durable
     # deployment record and terminal authority journal, not test-fake state.
@@ -4102,6 +4112,8 @@ def test_real_iox_teardown_accepts_restored_predecessor_transition(tmp_path):
     assert job["result_code"] == 0
     assert job["record_id"] == "old"
     assert recipe_event.read_bytes() == b"finish_ack\n"
+    assert any(line.startswith("  app_stop ok (") for line in job["lines"])
+    assert not any(line.startswith("  finish") for line in job["lines"])
     removed = store.get("old", strict=True)
     assert removed["state"] == "removed"
     assert removed["iox_verification"] == terminal_journal
