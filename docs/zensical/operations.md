@@ -1193,9 +1193,11 @@ wrapper build that uses it as an input, or pass the verified binary directly
 with `ARIA2C_BIN_ARM64`.
 
 The pinned amd64 and arm64 aria2 binaries are now built from the documented
-source pin plus all six patches in `tools/aria2c-patches/`. Patches 0005 and
+source pin plus all seven patches in `tools/aria2c-patches/`. Patches 0005 and
 0006 make the configured peer admission cap cover stalled/pending connections
-and preserve protocol messages coalesced with the BitTorrent handshake. These
+and preserve protocol messages coalesced with the BitTorrent handshake; patch
+0007 keeps a seeder↔seeder connection for 5 s after completion so the device's
+completion hook can still read per-peer transfer bytes over RPC. These
 binaries are the source inputs for the **next** signed IOx wrappers and XR RPM,
 and for refreshed Guest Shell bundles. Their presence in the source tree does
 not mean a release was cut, a package was signed, or any deployed device was

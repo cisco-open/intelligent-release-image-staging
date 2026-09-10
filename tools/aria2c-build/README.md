@@ -19,7 +19,7 @@ source:
 | Item | Where |
 | --- | --- |
 | Upstream fork and exact commit | named in `../aria2c-patches/README.md` |
-| The six patches | `../aria2c-patches/*.patch` |
+| The seven patches | `../aria2c-patches/*.patch` |
 | The build container definition | `Dockerfile` here |
 | The build driver | `build.sh` here |
 
@@ -147,3 +147,33 @@ four-patch binary is suitable for the peer-cap baseline, not this baseline.
 Results, console output and protocol traces are retained in the log directory.
 Use the aarch64 binary for ARM64 tests; a registered QEMU binfmt handler or
 `--runner qemu-aarch64-static` also works for emulated validation.
+
+## Seeder good-bye grace
+
+Patch `0007-seeder-goodbye-grace.patch` keeps a seeder↔seeder connection for
+5 s after both sides are complete before the `Good Bye Seeder` drop, instead
+of dropping it in the same event-loop iteration. The device's
+`--on-bt-download-complete` hook (`device/agent/peer-transfer-hook.sh`) reads
+per-peer session counters over RPC after the last piece lands, and upstream
+had erased every seeder that fed the download before that RPC could be
+served, so a device fed only by the origin reported zero attributed bytes
+(issue #68). The grace is enforced in
+`DefaultBtInteractive::checkActiveInteraction`, and the HAVE, HAVE_ALL and
+BITFIELD handlers defer to it instead of throwing on the message that
+completes the peer's copy: the finishing side advertises its last piece to
+every peer at once, and without that deferral the far end closed the
+connection under the grace. The 30 s mutual-disinterest and 60 s inactivity
+drops are unchanged; the peer-cap and handshake checks above are unaffected
+because their fixtures never announce a complete copy.
+
+There is no dedicated script for this patch. It was validated on loopback
+with two RPC-enabled instances of the exact deliverable (one seeding a
+generated 3 MiB payload, the other downloading it rate-limited with the real
+`peer-transfer-hook.sh` as its completion hook) while polling `getPeers` on
+both every 5 ms. Adoption criteria, all checked against the shipped
+checksum: the seeder stays listed on the downloader for about 5 s after
+completion with its `downloaded` counter at the payload size, the downloader
+stays listed on the seeder for the same window, the hook's `.peers.json`
+sidecar carries that peer rather than `[]`, and the six-patch binary fails
+the same check (peer list already empty at the first sample after
+completion, sidecar `[]`).
