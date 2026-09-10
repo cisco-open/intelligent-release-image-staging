@@ -672,15 +672,21 @@ _IOX_VPG_DESCRIPTION = "description IRIS IOx VPG"
 def _iox_own_router_footprint(resolved, sections):
     """True when the VirtualPortGroup the plan wants already exists AND is
     provably IRIS's own from a half-finished IOx onboard of this same plan:
-    the app is installed but was never started (_IOX_RESUMABLE_APP_STATES)
-    and the group carries the IOx recipe's description with exactly the
-    planned address. That retry is the documented idempotent re-install, so
-    the VPG/subnet/NAT collision checks must not refuse it the way they
-    refuse an operator's group -- the router spelling of scrubber #78."""
+    the group carries the IOx recipe's description with exactly the planned
+    address, and the app is either installed but never started
+    (_IOX_RESUMABLE_APP_STATES) or absent altogether -- an attempt that
+    configured the network and then failed before or at the app block leaves
+    exactly that footprint (a Catalyst 8000V refusing `app-hosting appid`
+    did, 2026-09-10). Both retries are the documented idempotent re-install,
+    so the VPG/subnet/NAT collision checks must not refuse them the way they
+    refuse an operator's group -- the router spelling of scrubber #78. A
+    RUNNING app, or a marked group at a different address, is still a
+    collision: that is not this plan's own half-finished work."""
     if resolved.get("platform") != "iox":
         return False
     appid = str(resolved.get("iox_appid") or "iris")
-    if _iox_app_state(sections["apps"], appid) not in _IOX_RESUMABLE_APP_STATES:
+    if _iox_app_state(sections["apps"], appid) not in (
+            "", *_IOX_RESUMABLE_APP_STATES):
         return False
     vpg = str(resolved.get("vpg_number", ""))
     block = re.search(

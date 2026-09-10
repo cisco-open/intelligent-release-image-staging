@@ -1084,6 +1084,30 @@ _APPLICATION_MUTATIONS = (
     "configure_app", "app_install", "app_activate", "app_start", "save")
 
 
+def test_command_failure_detail_names_the_step_and_quotes_the_device_verdict():
+    """A refused recipe command used to end the job with only 'IOx command
+    failed'; the router's own first '%' line is the verdict the operator
+    needs (e.g. IOxMan refusing the app block on a Catalyst 8000V)."""
+    detail = _module()._command_failure_detail("configure_app", {
+        "stdout": (b"iris-c8kv-101#configure terminal\r\n"
+                   b"iris-c8kv-101(config)#app-hosting appid iris\r\n"
+                   b"% node--1:dbm:IOxMan:Resource Profile-names is not specified\r\n"
+                   b"iris-c8kv-101(config)# app-vnic gateway0 virtualportgroup 1 guest-interface 0\r\n"
+                   b"% Invalid input detected at '^' marker.\r\n"),
+        "returncode": 0, "error_category": "unsupported_response"})
+    assert detail == ("IOx command failed: configure_app: device said "
+                      "% node--1:dbm:IOxMan:Resource Profile-names is not specified")
+    # No verdict line: the step name alone. Control characters never reach
+    # the log, and a long line is bounded.
+    assert _module()._command_failure_detail(
+        "app_install", {"stdout": b"Installing package\n"}) == "IOx command failed: app_install"
+    noisy = _module()._command_failure_detail(
+        "save", {"stdout": b"%\x1b[31m" + b"x" * 400 + b"\n"})
+    assert noisy.startswith("IOx command failed: save: device said %[31mx")
+    assert "\x1b" not in noisy and len(noisy) < 220
+    assert _module()._command_failure_detail("save", {}) == "IOx command failed: save"
+
+
 def test_controller_exposes_only_the_frozen_execution_surface(tmp_path):
     store = _StatefulStore(tmp_path)
     controller = _controller(tmp_path, store, _TransportFactory())

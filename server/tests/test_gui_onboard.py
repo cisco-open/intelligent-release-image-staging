@@ -1757,6 +1757,51 @@ def test_default_router_preflight_rejects_named_global_collisions(monkeypatch, c
             _router_resolved("router-routed"), "/repo")
 
 
+def _iox_router_resolved():
+    resolved = _router_resolved("router-routed")
+    resolved["platform"] = "iox"
+    return resolved
+
+
+_IOX_ROUTER_OWN_VPG = ("interface VirtualPortGroup10\n"
+                       " description IRIS IOx VPG\n"
+                       " ip address 10.8.0.1 255.255.255.252\n!\n")
+
+
+def test_default_router_preflight_resumes_over_its_own_vpg_when_no_app_exists(monkeypatch):
+    """An IOx-on-router attempt that configured the group and then failed
+    before the app existed (a Catalyst 8000V refusing the app block on
+    2026-09-10) leaves the IRIS-marked group at exactly the planned address
+    and no app. The retry must not be refused as an operator collision."""
+    _router_preflight_stub(monkeypatch, running=_IOX_ROUTER_OWN_VPG,
+                           apps="No App found\n")
+    gui_onboard._default_router_preflight(
+        {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+
+
+def test_default_router_preflight_still_refuses_a_foreign_or_live_vpg(monkeypatch):
+    # No marker: an operator's group at our address.
+    _router_preflight_stub(monkeypatch, running=(
+        "interface VirtualPortGroup10\n ip address 10.8.0.1 255.255.255.252\n!\n"),
+        apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+    # Marker but a different address: not this plan's footprint.
+    _router_preflight_stub(monkeypatch, running=(
+        "interface VirtualPortGroup10\n description IRIS IOx VPG\n"
+        " ip address 10.9.0.1 255.255.255.252\n!\n"), apps="No App found\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+    # Our marker and address, but the app is RUNNING: a live deployment.
+    _router_preflight_stub(monkeypatch, running=_IOX_ROUTER_OWN_VPG,
+                           apps="App id   State\niris     RUNNING\n")
+    with pytest.raises(ValueError, match="already exists"):
+        gui_onboard._default_router_preflight(
+            {}, {"DEVICE_IP": "192.0.2.10"}, _iox_router_resolved(), "/repo")
+
+
 def test_default_router_preflight_allows_empty_guest_share(monkeypatch):
     _router_preflight_stub(
         monkeypatch, guest_share=("Directory of bootflash:/guest-share/\n\n"

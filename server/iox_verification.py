@@ -350,6 +350,31 @@ def _unexpected_detail(label, exc):
                          ": " + text if text else "")
 
 
+_IOS_REFUSAL_RE = re.compile(rb"^%[^\r\n]+", re.M)
+
+
+def _command_failure_detail(purpose, result):
+    """Name the failed step and quote the device's own refusal line.
+
+    A job used to end with only "IOx command failed", and the operator had to
+    decode the transcript to learn that the router had answered
+    '% node--1:dbm:IOxMan:Resource Profile-names is not specified' to the
+    first line of the app block. The first '%' line the device printed is
+    the verdict IOS itself chose to show; quote it bounded and printable.
+    The transport already redacts credentials from captured output.
+    """
+    detail = "IOx command failed: %s" % purpose
+    stdout = _get(result, "stdout", b"")
+    if isinstance(stdout, (bytes, bytearray)):
+        match = _IOS_REFUSAL_RE.search(bytes(stdout))
+        if match is not None:
+            line = "".join(ch for ch in match.group(0).decode("ascii", "replace")
+                           if 32 <= ord(ch) < 127).strip()
+            if line:
+                detail += ": device said %s" % line[:160]
+    return detail
+
+
 def _command_bytes(lines):
     if isinstance(lines, bytes):
         body = lines
@@ -5122,7 +5147,7 @@ class IoxController(object):
                                 protocol["scp_prepared"] = True
                         if not self._transport_ok(transport_result) or _get(transport_result, "error_category"):
                             raise _ControllerFailure(_get(transport_result, "error_category") or "rejected",
-                                                     "IOx command failed")
+                                                     _command_failure_detail(name, transport_result))
                         if action == "uninstall" and name == "app_stop":
                             outputs["stdout"] += (
                                 "IRIS-READY-MODE:%s\n" %
