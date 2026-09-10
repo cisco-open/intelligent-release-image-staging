@@ -3494,3 +3494,12 @@ def test_successful_cleanup_does_not_offer_an_accepted_advisory_as_failure(
     assert result["error_category"] is None
     assert _verification_module()._command_failure_detail(
         "cleanup_config", result) == "IOx command failed: cleanup_config"
+
+
+@pytest.mark.parametrize("command", [b"no interface Vlan666", b"no vlan 666"])
+@pytest.mark.parametrize("extra", [b"% Authorization failed\n", b"Unexpected residual configuration\n"])
+def test_vlan_cleanup_does_not_accept_extra_refusal(tmp_path, peer_factory, command, extra):
+    steps=((b"configure terminal",hw.CONFIG_BANNER),(command,hw.IE3400_VLAN_ABSENT_INVALID_INPUT+extra),(b"end",b""))
+    result,unused=_replay(tmp_path,peer_factory,"cleanup_config",steps,hw.IE3400_HOST)
+    assert result["framing_complete"] is False
+    assert result["error_category"] is not None

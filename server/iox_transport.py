@@ -1773,7 +1773,8 @@ def _vlan_already_absent(purpose, line, payload):
         return False
     if _VLAN_REMOVAL_RE.match(line.strip()) is None:
         return False
-    return b"% Invalid input" in payload
+    lines = [entry.strip() for entry in payload.split(b"\n") if entry.strip()]
+    return lines == [b"^", b"% Invalid input detected at '^' marker."]
 
 
 def _cleanup_removal_advisory(purpose, line, payload):

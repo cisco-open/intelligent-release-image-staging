@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- VLAN cleanup accepts only the complete recorded absent-interface response;
+  an additional refusal or unexpected output now fails the step (#259).
 - IOx failure details quote the rejected command response instead of an
   earlier accepted cleanup advisory; instruction payloads stay private (#252).
 - Kubernetes preserves private authority-file permissions on PVC remounts;
