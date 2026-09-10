@@ -36,6 +36,38 @@ EOF
   exit 1
 fi
 
+# The server and Console run as the fixed uid 10001 with all capabilities
+# dropped, and the image cannot chown host paths. artifacts/ crosses that
+# boundary, and unlike the age identity -- whose absence fails the entrypoint
+# closed and loudly -- an unwritable artifacts/ lets the server start and then
+# SILENTLY skip self-provisioning: no Guest Shell bundle, no staged
+# iris-catalog.pem, and a Console package-readiness screen reporting everything
+# absent with no way to fix it from a container that has no Docker socket.
+# Grant it here instead of leaving that to be discovered after an onboarding
+# fails (issue #204).
+IRIS_RUNTIME_UID=10001
+mkdir -p "$REPO/artifacts"
+artifacts_uid="$(stat -c %u "$REPO/artifacts" 2>/dev/null || echo -1)"
+if [ "$artifacts_uid" != "$IRIS_RUNTIME_UID" ]; then
+  if sudo -n chown -R "$IRIS_RUNTIME_UID:$IRIS_RUNTIME_UID" "$REPO/artifacts" 2>/dev/null; then
+    echo ">> granted uid $IRIS_RUNTIME_UID ownership of $REPO/artifacts"
+  else
+    cat >&2 <<EOF
+!! $REPO/artifacts is owned by uid $artifacts_uid, but the server runs as uid
+   $IRIS_RUNTIME_UID and cannot chown a host path from inside the image.
+
+Left as it is, the server starts and then cannot write its own artifacts: the
+Guest Shell bundle is never provisioned, iris-catalog.pem is never staged, and
+device onboarding has nothing to hand a device.
+
+Grant it, then start me again:
+
+  sudo chown -R $IRIS_RUNTIME_UID:$IRIS_RUNTIME_UID "$REPO/artifacts"
+EOF
+    exit 1
+  fi
+fi
+
 # --pull: server/Dockerfile's base is a floating tag; without it a rebuild
 # silently reuses the host's cached python:3.12-slim-trixie and misses
 # Debian security updates already on the tag (issue #13; measured 2026-09-02).

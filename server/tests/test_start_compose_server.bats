@@ -23,6 +23,14 @@ setup() {
   # the handed-in seeder client server/Dockerfile COPYs; present by default so
   # the bring-up gets past its preflight (issue #203)
   : > "$REPO/bin/aria2c"
+  # artifacts/ must be owned by the runtime uid. A test fixture cannot chown to
+  # another uid unprivileged, and the preflight must never reach the real sudo
+  # from a test run, so ownership is simulated: stat reports the runtime uid by
+  # default, and the refusal test below overrides it (issue #204).
+  : > "$REPO/artifacts/.gitkeep"
+  printf '#!/usr/bin/env bash\necho 10001\n' > "$STUB/stat"
+  printf '#!/usr/bin/env bash\necho "sudo must not be reached from a test" >&2\nexit 1\n' > "$STUB/sudo"
+  chmod +x "$STUB/stat" "$STUB/sudo"
   # present so the script reaches the XR freshness block below it
   printf '#!/usr/bin/env bash\nexit 0\n' > "$REPO/tools/provision-iox-packages.sh"
   chmod +x "$REPO/tools/provision-iox-packages.sh"
@@ -93,5 +101,21 @@ run_bringup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"bin/aria2c"* ]]
   [[ "$output" == *"tools/get-aria2c.sh"* ]]
+  [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
+}
+
+@test "an artifacts dir the runtime uid cannot write is refused before the build" {
+  # The silent-failure case: the server would start, skip self-provisioning,
+  # and leave the Console reporting every device package absent with no way to
+  # fix it from a container that has no Docker socket (issue #204). Stub stat
+  # to report a foreign owner, and sudo to refuse, so the preflight has to
+  # report rather than repair.
+  printf '#!/usr/bin/env bash\necho 1000\n' > "$STUB/stat"
+  chmod +x "$STUB/stat"
+  run_bringup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"artifacts"* ]]
+  [[ "$output" == *"10001"* ]]
+  [[ "$output" == *"chown"* ]]
   [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
 }

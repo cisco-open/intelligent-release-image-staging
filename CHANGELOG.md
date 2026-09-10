@@ -12,6 +12,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Fixed
+- Grant the runtime uid the `artifacts/` directory during the Compose bring-up,
+  or refuse with the exact `chown`. An artifacts directory the server cannot
+  write let it start, report healthy, and then silently never stage
+  `iris-catalog.pem` or provision the Guest Shell bundle — leaving the Console
+  reporting every device package absent and unable to fix any of it
+  (issue #204).
 - Refuse the Compose bring-up with a named remedy when the handed-in `aria2c`
   is missing, instead of letting the image build fail with a BuildKit cache-key
   error. `tools/get-aria2c.sh` now also tells a wrong-architecture deliverable
