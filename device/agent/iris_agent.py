@@ -5365,12 +5365,17 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             return _gsf_cache[0]
         found = None
         for f in fss:
-            if f["type"] == "disk" and "rw" in f["flags"] \
-                    and "crashinfo:" not in f["prefixes"]:
-                prefix = f["prefixes"][0]
+            if f["type"] != "disk" or "rw" not in f["flags"]:
+                continue
+            # Probe every prefix IRIS may actually name, not just the first:
+            # crashinfo: is never selectable, and a disk that exposes it
+            # alongside real prefixes (Catalyst 8000V) is still a candidate.
+            for prefix in flash_target.selectable_prefixes(f):
                 if "Directory of" in _show("dir %sguest-share" % prefix):
                     found = prefix
                     break
+            if found:
+                break
         _gsf_cache.append(found)
         return found
 

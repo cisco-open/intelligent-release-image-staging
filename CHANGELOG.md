@@ -38,6 +38,15 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Stage images on a Catalyst 8000V. That platform publishes its only writable
+  disk under three names at once (`bootflash: flash: crashinfo:`), and the
+  agent's filesystem chooser discarded any disk whose alias list contained
+  `crashinfo:`. The router was left with no writable disk, so every agent tick
+  raised "no proved writable IOS staging filesystem" and died before its
+  heartbeat, which is a tick's last step: the device staged nothing and also
+  never reported, showing "awaiting heartbeat" forever. `crashinfo:` is now a
+  prefix that is never *selected*, rather than one that disqualifies the disk
+  offering it; a disk that offers nothing else is still refused (issue #236).
 - Re-onboard a Catalyst 8000V after an undeploy. IOS-XE 17.15.5 on the
   C8000V keeps the app's resource-profile association after
   `app-hosting uninstall`, and removing the `app-hosting appid iris` block

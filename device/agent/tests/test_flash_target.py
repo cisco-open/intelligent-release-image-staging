@@ -119,6 +119,68 @@ def test_choose_target_fs_never_crashinfo_or_ro():
     assert ft.choose_target_fs(fss, None) is None
 
 
+# A Catalyst 8000V publishes ONE writable disk under three names, crashinfo:
+# among them. Filtering the whole row out left the box with no writable disk,
+# so every agent tick died before its heartbeat (issue #236).
+_C8000V_FS = """File Systems:
+
+       Size(b)       Free(b)      Type  Flags  Prefixes
+             -             -    opaque     rw   system:
+             -             -    opaque     rw   tmpsys:
+*   5173313536     473923584      disk     rw   bootflash: flash: crashinfo:
+    4110950400    3975962624      disk     ro   webui:
+             -             -   network     rw   tftp:
+             -             -    opaque     rw   null:
+      33554432      33534101     nvram     rw   nvram:
+"""
+
+
+def test_c8000v_aliases_crashinfo_onto_its_only_writable_disk():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    disk = [f for f in fss if f["type"] == "disk" and "rw" in f["flags"]]
+    assert len(disk) == 1
+    assert disk[0]["prefixes"] == ["bootflash:", "flash:", "crashinfo:"]
+    assert ft.selectable_prefixes(disk[0]) == ["bootflash:", "flash:"]
+
+
+def test_choose_target_fs_uses_a_disk_that_merely_aliases_crashinfo():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_target_fs(fss, None) == "bootflash:"
+    assert ft.choose_target_fs(
+        fss, "bootflash:packages.conf") == "bootflash:"
+    # The boot path may name any selectable alias of that same disk.
+    assert ft.choose_target_fs(fss, "flash:packages.conf") == "flash:"
+
+
+def test_choose_stage_fs_honours_preferred_bootflash_on_c8000v():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs=None,
+        preferred_fs="bootflash:") == "bootflash:"
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs="bootflash:",
+        preferred_fs="") == "bootflash:"
+
+
+def test_crashinfo_is_never_selected_even_when_asked_for():
+    fss = ft.parse_file_systems(_C8000V_FS)
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs=None,
+        preferred_fs="crashinfo:") is None
+    assert ft.choose_stage_fs(
+        fss, model="C8000V", guest_share_fs="crashinfo:",
+        preferred_fs="") is None
+    assert ft.choose_target_fs(fss, "crashinfo:x.bin") == "bootflash:"
+
+
+def test_a_disk_offering_only_crashinfo_is_still_refused():
+    only_crash = [{"prefixes": ["crashinfo:"], "size": 1, "free": 1,
+                   "type": "disk", "flags": "rw", "is_default": True}]
+    assert ft.choose_target_fs(only_crash, None) is None
+    assert ft.choose_stage_fs(only_crash, model="C9300",
+                              preferred_fs="crashinfo:") is None
+
+
 def test_choose_target_fs_empty():
     assert ft.choose_target_fs([], "flash:x.bin") is None
 
