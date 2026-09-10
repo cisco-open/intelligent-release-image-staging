@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # IOx App
 
 The IOx path runs the agent as a Docker-based IOx application. It supports
-ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 app hosting. IOx and
-IOS-XR package the same canonical device image and run the same entrypoint;
+ARM64 IE-3400 style platforms and x86_64 Catalyst 9300 and Catalyst 8000V app
+hosting. IOx and IOS-XR package the same canonical device image and run the same entrypoint;
 `IRIS_DEVICE_PLATFORM=iox` selects this profile.
 
 ## When to use it
@@ -32,15 +32,14 @@ controller configures as `ip http client username` / `ip http client
 password` for the span of that copy and removes right after it. The token
 never enters a URL or a job log (it is redacted from every capture and
 transcript), and the envelope is published under `staging/<device-id>/` for
-that one fetch. Nothing is pushed to the device and no service is enabled on
-it for onboarding's sake; a device whose running-config already carries an
-operator's `ip http client username` or `password` is refused at preflight
+that one fetch. Package delivery uses HTTPS; a device whose running-config
+already carries an operator's `ip http client username` or `password` is refused at preflight
 rather than having them overwritten. `ip scp server enable` is configured for
 the agent, not the installer, and only on a platform with no bind-mounted
-share (IE-3400): the runtime image hand-off described below pushes the
-downloaded image to `guest-share` through the device's SCP server there. A
-Catalyst 9300 or Catalyst 8000 job hands the image over through its share
-instead, and onboarding leaves that device's SCP server untouched.
+share (IE-3400 or Catalyst 8000V): the runtime image hand-off described below
+pushes the downloaded image to `guest-share` through the device's SCP server.
+A Catalyst 9300 job uses its configured SSD share, and onboarding leaves that
+device's SCP server untouched.
 
 IOx preflight requests the app list, narrowly filtered IRIS collision lines,
 and counts of HTTP client credential settings. It does not request the full
@@ -115,8 +114,11 @@ envelope through the controller's application-data channel; see
 | `device/iox/package.yaml` | ARM64 IOx package metadata. |
 | `device/iox/package-amd64.yaml` | x86_64 IOx package metadata. |
 | `device/iox/build.sh` | Packages the canonical image in the IOx envelope. |
-| `device/iox/install.sh` | Installs the IOx app on a target device. |
-| `device/iox/uninstall.sh` | Removes the IOx app. |
+| `device/iox/install.sh` | Private controller recipe for IOx onboarding. |
+| `device/iox/uninstall.sh` | Private controller recipe for IOx removal. |
+
+Submit jobs through the Console, API, or [IOx control CLI](reference.md#iox-control-cli).
+The recipes require the controller's private channel and cannot be run standalone.
 
 ## Runtime behavior
 
@@ -125,9 +127,9 @@ agent. It downloads resumable swarm data under the CAF persistent directory
 (`/iox_data/iris` on the validated Catalyst 9300 runtime).
 
 The IOx package contains no deployment certificate. On every onboarding,
-`device/iox/install.sh` validates the current public certificate from the
-served artifacts directory, pushes it with the package, and uses IOS-XE's
-`app-hosting data` channel to place it in the app's application-data directory
+the controller validates the current public certificate from the served
+artifacts directory, has the device fetch it over HTTPS, and uses IOS-XE's
+`app-hosting data` channel to copy it into the app's application-data directory
 after activation and before app start. Activation mounts application storage;
 the `DEPLOYED` state cannot accept the copy. The entrypoint requires and validates
 that runtime-delivered certificate before it starts either the catalog client
@@ -140,13 +142,11 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   into the container (`run-opts "-v …:/mnt/share"`). The agent copies the
   scratch to the share ROOT under its fixed `iris-staged.bin` name at disk
   speed, then drives an IOS-internal
-  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>`
-  over its SSH-to-self CLI. That is the same bootflash-root placement as Guest
-  Shell, with no image bytes crossing the device CPU; the copy is a plain
-  copy that restores the real image name, and the agent attests the
-  placement by polling for the file and confirming it matches the catalog's
-  declared byte size exactly. The image was already verified by sha256
-  against the catalog before the placement copy; the catalog can separately
+  `copy usbflash1:iox_host_data_share/iris-staged.bin flash:<img>.iris-tmp`
+  over its SSH-to-self CLI. After confirming the temporary file matches the
+  catalog's exact byte size, the agent renames it to the final image name and
+  confirms the final size and the temporary file's absence. The image was
+  already verified by SHA-256 against the catalog before the placement copy; the catalog can separately
   verify authenticity against Cisco's signed Bulk Hash feed, and a mismatch
   quarantines the image. IRIS never creates a subdirectory in the
   share (a container-created subdir becomes inaccessible to the container
@@ -164,23 +164,23 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   973 MB image in 153 s against about 124 s over scp.
 - **IE-3400 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
-  SCP server and then runs a plain `copy` for the final placement, attested
-  afterward by the agent polling for an exact byte-size match at the
-  destination. This scp traffic is addressed to the device itself, so default
-  CoPP caps it at roughly 1.4 MB/s; IRIS never modifies CoPP.
+  SCP server. As on the other IOx paths, IOS copies it to `<img>.iris-tmp`,
+  the agent verifies the exact byte size, then renames it and confirms the
+  final size and temporary file's absence. This scp traffic is addressed to
+  the device itself, so default CoPP caps it at roughly 1.4 MB/s; IRIS never modifies CoPP.
 
 There is no fallback between the two. Onboarding enables the device's SCP
-server (`ip scp server enable`) **only on a platform with no share** — that is
-the one platform whose agent needs it. Where a share is configured, an
-unusable share (not mounted, unreadable from IOS, or a failed local copy into
+server (`ip scp server enable`) **only on platforms with no share**, whose
+agents need it. Where a share is configured, an unusable share (not mounted,
+unreadable from IOS, or a failed local copy into
 it) fails the placement with a `ROOTCOPY-FAIL` naming what the share probe
 found, rather than pushing the same bytes over a control plane the device is
 not even listening on. Nothing is deleted and no placement command runs in
 that case; the agent retries on later ticks.
 
-Both platforms drive IOS over the app's SSH-to-self CLI, for the placement copy and
-for the one-shot EEM applets that place and reclaim files at the target-FS root. That
-connection can optionally be pinned: set `device_ssh_known_hosts` in the agent config
+Both hand-off paths drive IOS over the app's SSH-to-self CLI for placement and
+reclaim commands at the target-FS root. That connection can optionally be
+pinned: set `device_ssh_known_hosts` in the agent config
 and, when that file exists, the app's `ssh` and `scp` calls verify the IOS host key
 against it instead of running unverified. See
 [Device Agents](device-agents.md).
@@ -201,20 +201,20 @@ certificate validation.
 The first time a device sees a given package, the IOx runtime has to load its
 docker layers into the image cache before the app can activate; a
 byte-identical package the box has run before activates in seconds because
-those layers are already cached. The installer's lifecycle waits are sized for
-that cold case: `INSTALL_TIMEOUT`, `ACTIVATE_TIMEOUT` and `START_TIMEOUT`
-default to 300 seconds each (`STATE_POLL`, the poll interval, to 5), the same
-budget `device/xr-install.sh` uses. They are flat rather than scaled by package
-size — each wait returns as soon as the state is reached, so a generous ceiling
-costs a healthy install nothing — and every one of them is an environment
-override for a device that needs longer. A wait that does run out prints the
-device's full, unfiltered reply to the `app-hosting` command and the last state
-it observed.
+those layers are already cached. The controller allows 300 seconds by default
+for each install, activation, and start phase, within the remaining overall
+session deadline (7,200 seconds by default). Each onboarding lifecycle wait
+makes at most 24 state polls, spaced adaptively across the remaining phase
+budget with a default five-second minimum, and returns as soon as the state is reached. These are
+controller-owned limits, not shell environment overrides. A failed wait names
+the failed step in the job log; enable **Detailed logs** when submitting the
+job to include its command output.
 
 An onboard that fails at activation leaves the app-hosting configuration in
 place, because the activation may still be in flight. That is deliberate and
-does **not** need an undeploy or a forced teardown: re-run the installer, or
-press Onboard again in the console. Console preflight treats an IRIS app that
+does **not** need an undeploy or a forced teardown: press **Onboard** again in
+the Console, submit the onboard API request, or use the IOx control CLI's
+`submit-install` command. Preflight treats an IRIS app that
 is `DEPLOYED` or `ACTIVATED` but never started as a resumable retry. The
 installer removes that incomplete app before retrying. An app that is
 `RUNNING` is a live deployment and requires undeploy first.

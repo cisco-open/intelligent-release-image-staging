@@ -1327,10 +1327,9 @@ _assert_signal_finalization() {
   [[ "$output" == *"file prompt quiet"* ]]
 }
 
-@test "dry-run stages a Catalyst 8000 through the bootflash share, never over scp" {
-  # The share pair is gui_onboard._C8K_IOX_ENV's; the installer only renders
-  # what it is given. With it the router bind-mounts the share, creates it,
-  # and leaves the device's SCP server alone (issue #228).
+@test "dry-run renders an explicitly supplied router share without enabling scp" {
+  # This checks rendering for an explicit share pair, not hardware support.
+  # Current C8000V jobs have no IOS-visible share and use the SCP path.
   for mode in router-routed router-nat; do
     MANAGEMENT_TYPE=$mode VPG_NUMBER=0 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
       APP_GATEWAY=192.0.2.1 NAT_INTERFACE=GigabitEthernet1 \

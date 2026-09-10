@@ -104,9 +104,9 @@ previous install — see
 
 ### IOx: what the installer delivers
 
-`device/iox/install.sh` never touches Guest Shell. Over its authenticated,
-host-key-checked SSH session it installs the catalog trustpoint, then has the
-device itself `copy https:` the built package (`iris-arm64.tar` or
+The controller's private `device/iox/install.sh` recipe never touches Guest
+Shell. Over its authenticated, host-key-checked SSH session it installs the
+catalog trustpoint, then has the device itself `copy https:` the built package (`iris-arm64.tar` or
 `iris-amd64.tar`) and the current public catalog certificate from the artifact
 server to the target IOS filesystem, authenticating with its own enrollment
 credential (`ip http client username` / `password`, configured for each copy
@@ -127,16 +127,13 @@ supervisor loop, running the agent once every `IRIS_TICK_SECONDS` (default 60s).
 
 Re-provision a device when replacing its bootstrap configuration or enrollment material: the cutover replaces only the staging agent's credentials and never touches the device's software.
 
-**Upgrade on IOx is uninstall, then reinstall** — there is no in-place package
-update. `device/iox/install.sh` is idempotent by design: its first step always
-stops, deactivates, and uninstalls any existing `iris` app before copying the
-new package and reinstalling, so re-running `device/iox/install.sh` directly
-with a freshly built package is the supported upgrade path. The same upgrade
-from the Console needs an undeploy first when the app is running. An incomplete
-IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried directly; see
+**Upgrade on IOx is undeploy, then onboard** with the rebuilt package. Use the
+Console, API, or the [IOx control CLI](reference.md#iox-control-cli)'s
+`submit-uninstall` and `submit-install` commands. The install and uninstall
+shell recipes require the controller's private channel; neither is a
+standalone operator command. A running app requires undeploy first. An incomplete
+IOx onboard left in `DEPLOYED` or `ACTIVATED` can be retried with Onboard; see
 [First install of a new package version](iox.md#first-install-of-a-new-package-version).
-`device/iox/uninstall.sh`
-performs the same teardown standalone, for a clean removal with no reinstall.
 
 ### IOS-XR: what the installer pushes
 
@@ -237,8 +234,9 @@ and puts the device back in the swarm without re-downloading, re-hashing or
 re-placing the image, and an adopted in-place file stays adopted. With either
 fact missing — a short file, or no recorded verification — nothing is
 announced, because a re-add with no checkpoint seeds without hashing and IRIS
-never offers peers bytes it cannot vouch for. If the re-add itself fails
-(aria2c not serving yet, torrent metainfo gone) the agent emits
+never offers peers bytes it cannot vouch for. Missing or stale torrent metainfo
+is fetched automatically before the re-add. If that fetch or the re-add fails
+(for example, aria2c is not serving yet), the agent emits
 `RESEED-DEFERRED`, still reports the image as staged, and retries next tick.
 
 ### Failure mode: a busy aria2c read as a dead one
@@ -367,23 +365,26 @@ candidate failure as proof that the older policy was erased.
 
 Placing an image under a name IRIS finds already on the storage root — the
 operator's ordinary republish flow, or a name the `BOOT` variable currently
-points at — never deletes the old file first. On Guest Shell, the agent first
-reads the root file's size through IOS and compares its native SHA-512 with
-the catalog. Guest Shell mounts only `guest-share`, so its local `/flash`
-directory cannot attest the IOS root. A one-shot `IRIS-ROOT-HASH` EEM policy
-runs the read-only hash with a 600-second limit and returns the result through
-a unique completion record under the IRIS share. The filename and digest must match,
-and IOS must report the expected size both before and after hashing.
-An exact match is adopted in
-place, including on IOS releases where `rename` will not overwrite an existing
+points at — never deletes the old file first. Guest Shell and IOx can adopt
+an existing root file after reading its size through IOS and comparing its
+native SHA-512 with the catalog. The filename and digest must match, and IOS
+must report the expected size both before and after hashing. An exact match
+is adopted in place, including on IOS releases where `rename` will not overwrite an existing
 destination. An unreadable or mismatched root file is left untouched and
 reported as `copy_failed`; replacing it is an explicit operator decision, not
 a destructive guess by IRIS.
 
-Native hash jobs are serialized. A failed hash waits five minutes after
-completion before another attempt; adoption does not rehash an already placed
-image. An interrupted launch whose completion cannot be determined remains
-blocked for operator inspection. See [root-hash recovery](reference.md#guestshell-root-hash-recovery).
+Guest Shell mounts only `guest-share`, so its local `/flash` directory cannot
+attest the IOS root. Its one-shot `IRIS-ROOT-HASH` EEM policy runs the read-only
+hash with a 600-second limit and returns a unique completion record under the
+IRIS share. These Guest Shell hash jobs are serialized; a failed hash waits
+five minutes after completion before another attempt. An interrupted launch
+whose completion cannot be determined remains blocked for operator inspection.
+See [root-hash recovery](reference.md#guestshell-root-hash-recovery).
+IOx runs the native hash directly through SSH-to-self, with a 900-second
+command limit. IOx checks for adoption after downloading and verifying the
+scratch file; its earlier root-presence check only protects the existing file
+from reclaim. Adoption does not rehash an already placed image.
 Ordinary placement continues to verify the downloaded SHA-256 and the copied
 file's exact IOS byte size; it does not run native `verify`.
 
@@ -392,8 +393,8 @@ name (`<image>.iris-tmp`), verifies presence and exact byte size there, and
 then renames the proven copy to the real name. A failure or power loss before
 that rename leaves any previous file exactly as it was; a failure at the
 rename step is not assumed to mean it failed — the agent re-checks the real
-name afterwards and reports whichever state it actually finds. IOS-XR is
-unaffected: `attest_in_place` never writes a second copy at all.
+name and the temporary file's absence afterwards and reports the observed
+result. IOS-XR is unaffected: `attest_in_place` never writes a second copy at all.
 
 A leftover temp-name file — from an attempt that crashed before its own
 retry could clean up after it — is covered by the same low-space
@@ -408,7 +409,7 @@ does not consume the once-per-cycle reclaim attempt. On an
 runs `install remove inactive`, which manages installed packages and does
 not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name
 leftover on an install-mode device is not automatically reclaimed by
-either path. The narrow exception is Guest Shell adoption of an already
+either path. The narrow exception is Guest Shell or IOx adoption of an already
 size-and-SHA-verified root file: if the failed attempt's reserved
 `<image>.iris-tmp` also exists, IRIS reclaims exactly that temp name after
 checking the running image and `BOOT` targets, then confirms its absence
@@ -421,7 +422,7 @@ attempt.
 
 An existing file already consumes space and is excluded from the device's
 reported free bytes. The placement check budgets for the new copy. Guest
-Shell's same-name adoption path does not overwrite a conflicting root file;
+Shell and IOx same-name adoption do not overwrite a conflicting root file;
 an operator must resolve that conflict. See
 [Sizing the storage root](management-type.md#sizing-the-storage-root).
 
@@ -519,8 +520,11 @@ that container log with `--log-driver json-file --log-opt max-size=1m
 unbounded log on the app-hosting partition. XR agent messages do not appear
 in the router's `show logging` output.
 
-For an IOx or XR deployment, set `IRIS_LOG=on` when running its installer.
-The installer passes the setting to the common container. Use the normal
+For an IOx or XR deployment, select **Detailed logs** in the Console's Onboard
+dialog, or send `"log": true` in the onboard API request. This passes
+`IRIS_LOG=on` to the common container and, for IOx, includes command output in
+the onboarding job log. The Undeploy dialog has its own **Detailed logs**
+switch for that job's output. Both switches default to off. Use the normal
 undeploy/onboard sequence when changing a deployed app's run options.
 
 For Guest Shell, add `iris_log = on` to the persisted `iris-agent.conf`.
@@ -552,7 +556,7 @@ catalog values:
 | Torrent pieces | aria2 on every device | Checks pieces during transfer and validates saved pieces when resuming an incomplete download. |
 | SHA-256 | Shared agent, on the completed staging file | Confirms the file matches the value recorded at publication. |
 | Exact byte size | IOS-XE `dir`, or XR `stat` on the bind mount | Confirms final placement. IOS-XE copies the already-verified file; XR has downloaded directly to its final location. |
-| SHA-512 and size for an existing Guest Shell root file | Bounded IOS-XE native verification | Allows adoption when Guest Shell cannot read the IOS root itself. This is an existing-file check, not an extra native hash after every placement. |
+| SHA-512 and size for an existing Guest Shell or IOx root file | Bounded IOS-XE native verification | Allows adoption when the agent cannot read the IOS root itself. IOx checks after the scratch download. This is an existing-file check, not an extra native hash after every placement. |
 
 Cisco Bulk Hash verification on the server separately compares the catalog's
 SHA-512 with Cisco's signed feed; see [Image verification](operations.md#image-verification).

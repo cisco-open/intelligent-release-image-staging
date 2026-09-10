@@ -51,7 +51,7 @@ pull from. `tools/get-aria2c.sh` installs the handed-in seeder client from
 change to that pin (a new aria2c build) means: refresh both `deliverables/`
 binaries, rebuild BOTH images, rebuild every device package with the same
 binaries, and copy the packages to the pod again (see
-[Provide the device packages](#provide-the-device-packages)) before rolling the
+[Operator-supplied device artifacts](#operator-supplied-device-artifacts)) before rolling the
 Deployments — the device agents must be file-identical across packages.
 
 ```bash
@@ -385,6 +385,12 @@ kubectl -n iris exec deployment/iris-seed-server -- \
 The server regenerates derivable Guest Shell assets at startup. The two IOx
 packages and XR appmgr RPM are built out of tree and must be copied with their
 adjacent provenance manifests to the server PVC after each package rebuild.
+Bundle publication requires exactly two distinct approved public instruction
+roots under `/data/config/instr/roots.d`, readable by UID 10001. Provision the
+same `.pub` pair used by the package builders; never generate replacement roots
+in the pod or copy offline private keys there. See the
+[instruction-root ceremony](../docs/zensical/operations.md#instruction-root-ceremony-and-recovery).
+Check Console Setup package readiness after rollout as well as pod readiness.
 Use temporary filenames and publish each manifest last:
 
 ```bash

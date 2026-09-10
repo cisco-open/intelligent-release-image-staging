@@ -71,6 +71,14 @@ IOS-XR harddisk bind mount receives the new runtime trust anchor. Package
 readiness checks bytes against manifests, not whether the source has changed;
 use the [rebuild procedure](development.md#embedded-agent-packages).
 
+Before publishing fresh bundles, provision exactly two distinct approved public
+instruction roots as `.pub` files under `/data/config/instr/roots.d`, readable
+by the server's UID 10001. Use the same approved pair when building every
+device package; never generate replacement roots in the pod or copy offline
+private keys there. Follow the [instruction-root ceremony](operations.md#instruction-root-ceremony-and-recovery).
+Missing or invalid roots leave bundle publication unavailable even when the
+pod's listeners are ready. Check package readiness in Console Setup after rollout.
+
 ## Phase 1 storage and network impact
 
 The existing `iris-data` PVC stays mounted at `/data`, with `IRIS_STATE` at
