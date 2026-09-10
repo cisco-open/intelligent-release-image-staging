@@ -701,7 +701,7 @@ class OccurrenceStore:
             if existing == count:
                 return old
             row = copy.deepcopy(old)
-            row["annotations"] = {"all_targets_quarantined": count}
+            row.setdefault("annotations", {})["all_targets_quarantined"] = count
             row["updated_at"] = max(now, row["updated_at"])
             _validate_occurrence(identifier, row)
             return row

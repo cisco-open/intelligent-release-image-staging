@@ -940,3 +940,38 @@ def test_wave_gate_that_opened_stays_open_across_an_interrupted_pass(
     runner.run_once()
     assert len(executor.dispatched) == 2
     assert occurrence(store)["state"] == "completed"
+
+
+@pytest.mark.parametrize("restart_before_admission", [False, True])
+def test_quarantine_annotation_preserves_an_open_wave_gate(
+        wave_setup, restart_before_admission):
+    store, clock, executor, reads, runner = wave_setup
+    create(store, after=gate(), window=300)
+    executor.counted = counts(staged=10)
+
+    def validate(schedule, snapshot, phase):
+        # Production window-start validation records this diagnostic after
+        # the preceding wave's staging gate has opened durably.
+        assert phase == "window_start"
+        runner.occurrences.annotate_all_targets_quarantined(
+            snapshot["occurrence_id"], len(snapshot["device_ids"]), now=clock.now)
+        if restart_before_admission:
+            runner.stop()
+
+    executor.validate = validate
+    runner.run_once()
+    recorded = occurrence(store)
+    assert recorded["annotations"]["all_targets_quarantined"] == 2
+    assert recorded["annotations"]["wave"]["gate"] == "open"
+    if restart_before_admission:
+        assert not receipts(store, recorded)
+        executor.validate = lambda *_: None
+        executor.wave_counts = lambda *_: pytest.fail("durable open gate was lost")
+        clock.now += 1
+        recovered = schedule_runner.ScheduleRunner(
+            store, runner.resolve_target, executor=executor,
+            role_guard=runner.role_guard, now_fn=clock)
+        recovered.run_once()
+    assert len(executor.dispatched) == 2
+    assert occurrence(store)["state"] == "completed"
+    assert all(row["status"] == "ok" for row in receipts(store, occurrence(store)))
