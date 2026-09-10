@@ -8,6 +8,7 @@ import sys
 import pytest
 
 import iris_agent
+from device.agent.tests import test_flash_target as flash_fixtures
 from device.agent.tests import test_instr_apply as task16
 
 # telemetry (#13): completion-jitter sleep is a module seam; never sleep in
@@ -4507,6 +4508,119 @@ def test_bundle_reclaim_protects_the_boot_target():
     assert "next.bin" in seen["protect"]          # the BOOT target
     assert "running.bin" in seen["protect"]       # still the running image
     assert bundle_reclaimed == [("flash:", ["stale.bin"])]
+
+
+_BOOT_CONF_LISTINGS = [
+    pytest.param("flash:", flash_fixtures._C9300_DIR,
+                 "cat9k_iosxe.26.01.01.SPA.bin", id="c9300"),
+    pytest.param("bootflash:", flash_fixtures._C8000V_DIR,
+                 "c8000v-universalk9.26.01.01.SPA.bin", id="c8000v"),
+]
+
+
+def _boot_conf_reclaim_deps(prefix, listing, running, staged=False):
+    image = {"id": "img1", "filename": "img1.bin", "size": 500_000_000,
+             "sha256": "abc"}
+    cat = FakeCatalog({"approved_image_id": "img1"}, image)
+    sizes = {"/stage/img1.bin": image["size"]} if staged else {}
+    deps, emitted, boot, _, copied, _, reclaimed, deleted = make_deps(
+        cat, sizes, free=300_000_000, mode="bundle")
+    boot["image"] = prefix + "packages.conf"
+    directory = [listing]
+    deps = deps._replace(
+        running_image=lambda: running,
+        target_fs=lambda: (prefix, 300_000_000),
+        reclaimable=lambda target, protect:
+            iris_agent.flash_target.reclaimable_artifacts(directory[0], protect))
+    return deps, emitted, boot, copied, reclaimed, deleted, directory, image
+
+
+@pytest.mark.parametrize("prefix,listing,running", _BOOT_CONF_LISTINGS)
+@pytest.mark.parametrize("boot_name", [
+    "packages.conf", "PACKAGES.CONF", "next/packages.CoNf",
+    "cat9k_iosxe.17.18.03.SPA.conf",
+])
+def test_bundle_reclaim_boot_conf_keeps_the_install_set(
+        prefix, listing, running, boot_name):
+    # Real root listings: two C9300 packages plus its versioned manifest,
+    # or all nine C8000V packages. BOOT may point at a future install-mode
+    # manifest while show version still identifies the running bundle.
+    deps, emitted, boot, _, reclaimed, deleted, _, image = \
+        _boot_conf_reclaim_deps(prefix, listing, running)
+    boot["image"] = prefix + "/" + boot_name
+
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", prefix, image, {}) is False
+    assert reclaimed == [] and deleted == []
+    assert any(name == "RECLAIM-KEPT" and "BOOT" in message
+               for name, message in emitted)
+
+
+def _stale_bundle_rows(running):
+    # Synthetic stale-file rows added to, not substituted for, the hardware
+    # listing. Both names remain safe candidates beside the protected set.
+    stale = running.replace("26.01.01", "17.10.01")
+    names = [stale, stale + ".iris-tmp"]
+    rows = "".join("999 -rw- 123 Sep 10 2026 12:00:00 +00:00 %s\n" % name
+                   for name in names)
+    return rows, names
+
+
+@pytest.mark.parametrize("prefix,listing,running", _BOOT_CONF_LISTINGS)
+def test_bundle_reclaim_boot_conf_still_deletes_stale_bundle_and_temp(
+        prefix, listing, running):
+    deps, emitted, _, _, reclaimed, deleted, directory, image = \
+        _boot_conf_reclaim_deps(prefix, listing, running)
+    rows, names = _stale_bundle_rows(running)
+    directory[0] += rows
+
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", prefix, image, {}) is True
+    assert reclaimed == []
+    assert deleted == [(prefix, names)]
+    assert any(name == "RECLAIM-KEPT" for name, _ in emitted)
+
+
+@pytest.mark.parametrize("prefix,listing,running", _BOOT_CONF_LISTINGS)
+@pytest.mark.parametrize("staged,guard,outcome", [
+    (False, "reclaim_tried", "no-space"),
+    (True, "copy_reclaim_tried", "seeding-only"),
+])
+def test_bundle_reclaim_boot_conf_only_burns_guard_after_a_delete(
+        prefix, listing, running, staged, guard, outcome):
+    deps, _, _, copied, reclaimed, deleted, directory, _ = \
+        _boot_conf_reclaim_deps(prefix, listing, running, staged=staged)
+    state = {}
+
+    assert iris_agent.run_once(CFG, deps, state) == outcome
+    assert state["img1"].get(guard) is not True
+    assert deleted == []
+
+    # A later tick discovers reclaimable IRIS scratch/an unused bundle.
+    # The first no-op must not suppress that useful reclaim attempt.
+    rows, names = _stale_bundle_rows(running)
+    directory[0] += rows
+    assert iris_agent.run_once(CFG, deps, state) == outcome
+    assert state["img1"][guard] is True
+    assert deleted == [(prefix, names)]
+
+    # Space is still tight, but a real delete already consumed this guard.
+    assert iris_agent.run_once(CFG, deps, state) == outcome
+    assert deleted == [(prefix, names)]
+    assert copied == [] and reclaimed == []
+
+
+@pytest.mark.parametrize("names", [[], ["cat9k-old.bin", "cat9k-old.bin.iris-tmp"]])
+def test_bundle_reclaim_boot_conf_notice_requires_filtered_candidates(names):
+    cat = FakeCatalog({"approved_image_id": "img1"}, _IMG)
+    deps, emitted, boot, _, _, _, _, deleted = make_deps(
+        cat, {}, reclaimables=names)
+    boot["image"] = "flash:packages.conf"
+
+    assert iris_agent._reclaim_for_mode(
+        deps, "bundle", "flash:", _IMG, {}) is bool(names)
+    assert deleted == ([("flash:", names)] if names else [])
+    assert not any(name == "RECLAIM-KEPT" for name, _ in emitted)
 
 
 def test_bundle_reclaim_skips_when_the_boot_variable_is_unreadable():

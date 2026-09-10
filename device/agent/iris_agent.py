@@ -1364,6 +1364,18 @@ def _reclaim_for_mode(deps, mode, target_prefix, image, state):
         if boot:
             protect.add(boot)
         names = deps.reclaimable(target_prefix, protect)
+        if boot.casefold().endswith(".conf"):
+            # The next boot may use an install manifest while the running
+            # image is still a bundle. Its basename alone cannot protect the
+            # packages it references, so keep the whole install set. Unused
+            # bundles and reserved .iris-tmp leftovers remain reclaimable.
+            unused = [name for name in names
+                      if not name.casefold().endswith((".pkg", ".conf"))]
+            if len(unused) != len(names):
+                deps.emit("RECLAIM-KEPT",
+                          "kept .pkg and .conf files because BOOT targets "
+                          "an install manifest")
+            names = unused
         if names:
             deps.reclaim_bundle(target_prefix, names)
             return True

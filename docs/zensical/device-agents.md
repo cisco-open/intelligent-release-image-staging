@@ -398,7 +398,12 @@ unaffected: `attest_in_place` never writes a second copy at all.
 A leftover temp-name file — from an attempt that crashed before its own
 retry could clean up after it — is covered by the same low-space
 bundle-reclaim sweep as any other unused image artifact on a **bundle-mode**
-device, so it does not sit invisible on an otherwise-full box there. On an
+device, so it does not sit invisible on an otherwise-full box there. When
+`BOOT` names a `.conf` provisioning file, the sweep keeps every `.pkg` and
+`.conf` file, including packages that provisioning file may reference. Only
+otherwise-reclaimable bundle images and IRIS temp files remain candidates.
+An unreadable `BOOT` setting defers the sweep, and keeping every candidate
+does not consume the once-per-cycle reclaim attempt. On an
 **install-mode** device this sweep does not apply: low-space reclaim there
 runs `install remove inactive`, which manages installed packages and does
 not touch a stray `.bin.iris-tmp` at the storage root, so a temp-name

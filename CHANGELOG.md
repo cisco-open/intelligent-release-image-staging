@@ -51,6 +51,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Bundle-mode reclaim preserves all `.pkg` and `.conf` files when `BOOT`
+  points to a provisioning file, protecting the packages needed for the
+  operator's next boot. A sweep with nothing safe to delete leaves its
+  reclaim attempt available for a later tick (#239).
 - IOx containers use SCP when onboarding configures no shared filesystem.
   Earlier packages invented a C9300 share on C8000V and IE-3400 devices,
   preventing placement despite a complete download. Redeployment clears
