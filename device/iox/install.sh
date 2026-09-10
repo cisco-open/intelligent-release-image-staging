@@ -486,7 +486,7 @@ PY
 
   install_recipe() {
     local out year state rc i
-    echo "[1/8] upload package and certificate"
+    echo "[1/8] fetch package and certificate"
     request_plain upload_wrapper || return $?
     request_plain upload_certificate || return $?
 

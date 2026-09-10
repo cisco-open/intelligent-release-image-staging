@@ -397,6 +397,11 @@ def _command_failure_detail(purpose, result):
     The transport already redacts credentials from captured output.
     """
     detail = "IOx command failed: %s" % purpose
+    # A timeout is the transport giving up on a prompt, not a verdict: an
+    # earlier '%' line in the same step (the tolerated "% Can't find policy
+    # IRIS" answer to a trustpoint removal, say) would misname the cause.
+    if _get(result, "timed_out", False):
+        return detail + ": timed out waiting for the device's prompt"
     stdout = _get(result, "stdout", b"")
     if isinstance(stdout, (bytes, bytearray)):
         match = _IOS_REFUSAL_RE.search(bytes(stdout))

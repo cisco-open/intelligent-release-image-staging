@@ -4403,12 +4403,12 @@ def test_recipe_steps_reach_the_job_log_in_order_without_the_session(tmp_path):
     operation, streamed at each request boundary. The device session the
     controller drove is not in it; that lives in the persisted transcript."""
     factory = _TransportFactory(verification="enabled")
-    header = b"[1/8] upload package and certificate\n"
+    header = b"[1/8] fetch package and certificate\n"
     result, unused_store, timeline, unused_wrapper = _run_scripted_install(
         tmp_path, factory, markers=("package.sign",), prefix_chunks=(header,))
     assert result["result_code"] == 0
     lines = _rendered_output(timeline).splitlines()
-    assert lines[0] == "[1/8] upload package and certificate"
+    assert lines[0] == "[1/8] fetch package and certificate"
     step_lines = [line for line in lines if line.startswith("  ")]
     expected = [arguments.get("name") if operation == "command" else operation
                 for operation, arguments in _install_operations()]
@@ -4477,7 +4477,7 @@ def test_recipe_environment_carries_the_job_log_opt_in(tmp_path):
 
 
 _INSTALL_HEADERS = [
-    "[1/8] upload package and certificate",
+    "[1/8] fetch package and certificate",
     "[2/8] check prerequisites: routing, storage, clock, IOx services",
     "[3/8] remove any existing app",
     "[4/8] configure networking and app",
@@ -4690,3 +4690,14 @@ def test_strict_controller_requires_the_artifact_url_and_directory(tmp_path):
             store, _Bag(**dict(base, artifact_url="http://192.0.2.2:8000",
                                artifacts_dir=str(tmp_path / "artifacts"))),
             iox_transport.IoxTransport, lambda: 100, lambda: 100.0)
+
+
+def test_command_failure_detail_names_a_timeout_instead_of_an_earlier_verdict():
+    module = _module()
+    result = {"timed_out": True, "returncode": -15,
+              "stdout": b"no crypto pki trustpoint IRIS\r\n% Can't find policy IRIS\r\n"}
+    assert module._command_failure_detail("configure_trustpoint", result) == (
+        "IOx command failed: configure_trustpoint: timed out waiting for the device's prompt")
+    plain = {"timed_out": False, "returncode": 4,
+             "stdout": b"app-hosting appid iris\r\n% node--1:dbm:IOxMan:Resource Profile-names is not specified\r\n"}
+    assert "Resource Profile-names" in module._command_failure_detail("configure_app", plain)

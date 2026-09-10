@@ -85,7 +85,11 @@ _HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 _RECORD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _BOARD_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _PROMPT_RE = re.compile(br"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})(?P<level>[>#]) ?$")
-_CONFIG_PROMPT_RE = re.compile(br"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})\((?P<body>config(?:-[A-Za-z0-9]+)*)\)#$")
+# `crypto pki trustpoint IRIS` drops IOS into its PKI sub-mode, whose prompt
+# is `host(ca-trustpoint)#` -- the one configuration prompt that does not
+# start with "config". Recorded on a Catalyst 8000V and an IE-3400 on
+# 2026-09-10; without it the trustpoint step waited out its timeout there.
+_CONFIG_PROMPT_RE = re.compile(br"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})\((?P<body>config(?:-[A-Za-z0-9]+)*|ca-trustpoint)\)#$")
 _REMOTE_PATH_RE = re.compile(
     r"^(?:flash|bootflash|sdflash|harddisk):/?[A-Za-z0-9._/-]{1,240}$")
 

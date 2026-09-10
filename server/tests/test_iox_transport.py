@@ -3266,3 +3266,28 @@ def test_http_client_credentials_are_redacted_from_every_capture_and_transcript(
     assert b"unit-token-SECRET" not in persisted + decoded
     assert b"ip http client password 0 <redacted>" in _value(result, "stdout")
     peer.assert_reaped()
+
+
+def test_pki_sub_mode_prompt_counts_as_a_configuration_prompt():
+    """`crypto pki trustpoint IRIS` answers with `host(ca-trustpoint)#`, the
+    one configuration prompt without a "config" body. Recorded on
+    iris-c8kv-104 and 3400-1 on 2026-09-10; before this the trustpoint step
+    waited out its timeout on both."""
+    module = importlib.import_module("iox_transport")
+    dialogue = module._Dialogue if hasattr(module, "_Dialogue") else None
+    suffix = None
+    for name in dir(module):
+        obj = getattr(module, name)
+        if isinstance(obj, type) and hasattr(obj, "_suffix_prompt"):
+            suffix = getattr(obj, "_suffix_prompt")
+            break
+    assert suffix is not None
+    data = b"iris-c8kv-104(config)#crypto pki trustpoint IRIS\r\niris-c8kv-104(ca-trustpoint)#"
+    found = suffix(data, 0)
+    assert found is not None
+    position, match, kind = found
+    assert kind == "config"
+    assert match.group("body") == b"ca-trustpoint"
+    assert suffix(b"3400-1(ca-trustpoint)#", 0)[2] == "config"
+    # Only that sub-mode: an arbitrary parenthesised word is still no prompt.
+    assert suffix(b"3400-1(ca-profile)#", 0) is None

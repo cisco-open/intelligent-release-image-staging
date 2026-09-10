@@ -729,7 +729,7 @@ ASSERTIONS
   [[ "$output" == *'onboard complete: 192.0.2.10'* ]]
   # The job log is the recipe's step headers and poll outcomes, in order;
   # the device session the controller drove stays in its transcript.
-  [[ "$output" == *'[1/8] upload package and certificate'*'[2/8] check prerequisites'*'IOx services ready (poll 1/24)'*'[3/8] remove any existing app'*'[4/8] configure networking and app'*'[5/8] install app'*'app is DEPLOYED (poll 1/24)'*'[6/8] activate app'*'app is ACTIVATED (poll 1/24)'*'[7/8] stage instructions'*'app is RUNNING (poll 1/24)'*'[8/8] save configuration'*'onboard complete:'* ]]
+  [[ "$output" == *'[1/8] fetch package and certificate'*'[2/8] check prerequisites'*'IOx services ready (poll 1/24)'*'[3/8] remove any existing app'*'[4/8] configure networking and app'*'[5/8] install app'*'app is DEPLOYED (poll 1/24)'*'[6/8] activate app'*'app is ACTIVATED (poll 1/24)'*'[7/8] stage instructions'*'app is RUNNING (poll 1/24)'*'[8/8] save configuration'*'onboard complete:'* ]]
   [[ "$output" != *'Installing package'* ]]
   [[ "$output" != *'%IOX: application installation accepted'* ]]
   [[ "$output" != *'Application activated'* ]]
