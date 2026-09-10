@@ -11,6 +11,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.10.1]
+
 ### Added
 - Console and API onboard/undeploy jobs offer a **Detailed logs** option
   (`log: true`, default off) for IOx command output. Onboarding also enables
