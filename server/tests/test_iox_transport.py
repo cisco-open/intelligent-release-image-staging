@@ -2802,7 +2802,10 @@ def _preflight(stdout):
         _command=lambda *args, **kwargs: (result, None),
         _transport_ok=module.IoxController._transport_ok,
         config={"application_id": "iris"})
-    attempt = types.SimpleNamespace(target={}, identity={})
+    # The HTTPS-fetch preflight also reads the request's device id to tell
+    # IRIS's own `ip http client username` pair from an operator's.
+    attempt = types.SimpleNamespace(target={}, identity={},
+                                    request={"device_id": "iris-c8kv-101"})
     return module, fake, attempt
 
 
