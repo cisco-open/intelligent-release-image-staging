@@ -460,9 +460,13 @@ per-device state](reference.md#keyed-per-device-state)):
   `$STAGE/.iris-tick-backoff`. A success immediately clears the streak and
   resumes ordinary cadence. The cap is comfortably inside the catalog
   token's multi-day refresh slack, so a run of backed-off ticks never
-  strands a device. Handled Phase 1 policy/instruction fetch or apply failures
-  return a contained tick result and do not trigger this process-exit backoff;
-  their retry is on a later ordinary tick, with no in-tick sleep/retry loop.
+  strands a device. A tick whose catalog policy fetch fails outright
+  (unreachable, timed out, or a non-2xx answer) is reported as the contained
+  result `catalog-unavailable` and the agent exits non-zero for it, so a
+  catalog outage or a saturated server engages this backoff. Other handled
+  Phase 1 instruction fetch or apply failures, and a per-image staging error,
+  return a contained tick result with exit 0 and do not trigger it; their
+  retry is on a later ordinary tick, with no in-tick sleep/retry loop.
 
 These launcher controls set mechanical timing, not signed policy authority — see [Reference →
 Device container environment variables](reference.md#device-container-environment-variables)

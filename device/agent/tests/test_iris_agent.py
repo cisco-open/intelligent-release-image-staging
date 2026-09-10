@@ -5172,3 +5172,123 @@ def test_phase_two_rename_poll_budget_is_sixty_seconds_not_the_copy_budget():
                  iris_agent._copy_to_root_direct_impl):
         d = inspect.signature(impl).parameters["rename_reverify_fn"].default
         assert d is iris_agent._agent_reverify_rename
+
+
+# --- #235: a staging exception is contained and the device still registers
+
+
+def _raising_target_fs(message="no proved writable IOS staging filesystem"):
+    def target_fs():
+        raise RuntimeError(message)
+    return target_fs
+
+
+def test_stage_exception_is_contained_and_set_heartbeat_still_sent():
+    # #235: deps.target_fs() raising (the C8000V's "no proved writable IOS
+    # staging filesystem") used to unwind past the set heartbeat POST, so the
+    # server never heard from the device at all (last_seen=never). The tick
+    # must still POST its heartbeat, carrying the failure as stage_state
+    # "error" with the exception text as stage_error, and return
+    # "stage-error" for the image.
+    cat = FakeCatalog({"approved_image_id": "img1"},
+                      {"id": "img1", "filename": "img1.bin",
+                       "size": 5_000_000_000, "sha256": "abc"})
+    sent = []
+    deps, emitted, _, _, _, _, _, _ = make_deps(cat, {})
+    deps = deps._replace(catalog=_HeartbeatSpy(cat, sent),
+                         target_fs=_raising_target_fs())
+    state = {}
+    assert iris_agent.run_once(CFG, deps, state) == "stage-error"
+    assert len(sent) == 1
+    hb = sent[0]
+    assert hb["current_image_id"] == "img1"
+    assert hb["stage_state"] == "error"
+    assert hb["stage_error"] == (
+        "RuntimeError: no proved writable IOS staging filesystem")
+    assert "telemetry_observation" in hb
+    fails = [msg for m, msg in emitted if m == "STAGE-FAIL"]
+    assert len(fails) == 1
+    assert "img1" in fails[0] and "no proved writable" in fails[0]
+    # Nothing persisted for the image: a bare stage_error entry would read
+    # as an image record to the park pass, and the next tick re-reports.
+    assert "stage_error" not in state.get("img1", {})
+
+
+def test_stage_exception_in_one_image_leaves_siblings_and_set_heartbeat_intact():
+    # #235 for a real set: img1's failure is img1's verdict only. img2 still
+    # stages, the ONE set heartbeat still goes out, and it names img1 in
+    # errored_image_ids with the set's stage_state collapsed to "error".
+    images = {
+        "img1": {"id": "img1", "filename": "img1.bin",
+                 "size": 1_000_000, "sha256": "a" * 64},
+        "img2": {"id": "img2", "filename": "img2.bin",
+                 "size": 1_000_000, "sha256": "b" * 64},
+    }
+
+    class _Catalog(FakeCatalog):
+        def get_image(self, image_id):
+            return images[image_id]
+
+    cat = _Catalog({"approved_image_ids": ["img1", "img2"]}, None)
+    sent = []
+    calls = []
+
+    def flaky_target_fs():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("no proved writable IOS staging filesystem")
+        return ("flash:", 9_000_000_000)
+
+    deps, emitted, _, aria_calls, _, _, _, _ = make_deps(cat, {})
+    deps = deps._replace(catalog=_HeartbeatSpy(cat, sent),
+                         target_fs=flaky_target_fs)
+    assert iris_agent.run_once(CFG, deps, {}) == (
+        "multi:stage-error,downloading")
+    assert len(sent) == 1
+    hb = sent[0]
+    assert hb["stage_state"] == "error"
+    assert hb["errored_image_ids"] == ["img1"]
+    assert hb["stage_error"] == (
+        "RuntimeError: no proved writable IOS staging filesystem")
+    assert [i for i, _ in cat.downloaded] == ["img2"]
+    assert len(aria_calls) == 1
+    assert [msg for m, msg in emitted if m == "STAGE-FAIL"][0].startswith(
+        "img1 ")
+
+
+def test_public_stage_error_is_bounded_and_redacted():
+    # The text rides the heartbeat, so URLs (which may be authenticated) and
+    # credential-looking key/value pairs are scrubbed and the result is
+    # bounded; the exception type always leads.
+    exc = RuntimeError(
+        "POST https://198.51.100.1:8443/api/v1/x?announce=1 failed;\n"
+        "token:s3cr3t Bearer=abc123 password = hunter2 "
+        "device_ssh_pass=p4ss api_key: k3y " + "z" * 600)
+    text = iris_agent._public_stage_error(exc)
+    assert text.startswith(
+        "RuntimeError: POST <url> failed; token=<redacted> "
+        "Bearer=<redacted> password=<redacted> device_ssh_pass=<redacted> "
+        "api_key=<redacted> zzz")
+    for leak in ("198.51.100.1", "s3cr3t", "abc123", "hunter2", "p4ss",
+                 "k3y"):
+        assert leak not in text
+    assert len(text) <= iris_agent._STAGE_ERROR_MAX
+    assert text.endswith("...")
+    assert iris_agent._public_stage_error(KeyError()) == "KeyError"
+    assert iris_agent._public_stage_error(ValueError("plain")) == (
+        "ValueError: plain")
+
+
+# --- #232: a catalog-plane failure reaches the launcher's failure backoff
+
+
+def test_tick_exit_code_signals_only_catalog_plane_failure_to_the_launcher():
+    # Both launchers (entrypoint.sh next_tick_sleep, bootstrap.sh
+    # BACKOFF_FILE) key their failure backoff on the agent's exit status, so
+    # a tick whose catalog work failed entirely must exit non-zero; the other
+    # contained results are not catalog outages and keep the ordinary cadence.
+    assert iris_agent._tick_exit_code("catalog-unavailable") == 1
+    for result in ("no-assignment", "catalog-not-due", "downloading",
+                   "complete", "stage-error", "multi:stage-error,complete",
+                   "instruction-apply-unavailable", None):
+        assert iris_agent._tick_exit_code(result) == 0, result

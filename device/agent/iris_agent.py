@@ -3323,6 +3323,75 @@ def _contained_cadence_heartbeat(cfg, deps, state, ids, tele_on, stream_on,
         return None
 
 
+# Longest stage_error a contained staging failure reports (#235). Well
+# inside the server's 1024-byte heartbeat cap (catalog.py _HEARTBEAT_STR_CAPS)
+# and short enough for the Console's device row.
+_STAGE_ERROR_MAX = 240
+_STAGE_ERROR_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+# Credential-looking keys: the agent's own config names (catalog_token,
+# announce_token, device_ssh_pass, announce_key), HTTP auth words, and any
+# *key / *pass* spelling. Only a key=value / key:value pair is redacted, so an
+# exception TYPE such as KeyError (added after redaction anyway) is untouched.
+_STAGE_ERROR_SECRET_RE = re.compile(
+    r"(\w*token|\w*secret|\w*pass(?:w(?:or)?d)?|bearer|authorization|\w*key)"
+    r"\s*[=:]\s*\S+", re.IGNORECASE)
+
+
+def _public_stage_error(exc, limit=_STAGE_ERROR_MAX):
+    """The exception text a contained staging failure may put on the wire.
+
+    Exception messages are not written with the heartbeat in mind: a catalog
+    or tracker error can quote an authenticated URL, an aria2 RPC fault can
+    echo the `token:<secret>` parameter it rejected. Any URL and any
+    key=value/key:value pair whose key names a credential is redacted before
+    the text leaves the device, whitespace is collapsed, and the result is
+    bounded to `limit` characters. The exception type always leads so an
+    empty message (KeyError()) still says something."""
+    text = " ".join(str(exc).split())
+    text = _STAGE_ERROR_URL_RE.sub("<url>", text)
+    text = _STAGE_ERROR_SECRET_RE.sub(r"\1=<redacted>", text)
+    name = type(exc).__name__
+    text = "%s: %s" % (name, text) if text else name
+    if len(text) > limit:
+        text = text[:max(limit - 3, 0)] + "..."
+    return text
+
+
+def _contained_stage_failure(cfg, deps, state, img_id, tick, tele_on,
+                             stream_on, exc):
+    """Record ONE image's uncontained staging exception as that image's
+    verdict instead of letting it escape run_once (#235).
+
+    Before this, any exception inside _stage_image -- deps.target_fs()
+    refusing to name a writable IOS filesystem ("no proved writable IOS
+    staging filesystem"), an SSH transport error, a state-shape surprise --
+    unwound past the set heartbeat POST below, so the server never heard
+    from the device at all: last_seen stayed "never" and the only trace was a
+    syslog line on the device. A device that cannot stage must still
+    register, exactly like the unassigned path does; the failure rides the
+    heartbeat as stage_state "error" with the bounded, redacted exception
+    text as stage_error, and the tick returns "stage-error" for it. Nothing
+    is written to state: the next tick re-runs the image and re-reports or
+    clears the error on its own, and a bare stage_error entry would read as
+    an image record to the park pass.
+
+    The tick's earlier records are replaced: whatever heartbeat or telemetry
+    the image staged before raising described a tick that did not finish."""
+    text = _public_stage_error(exc)
+    try:
+        deps.emit("STAGE-FAIL", "%s staging failed: %s" % (img_id, text))
+    except Exception:
+        pass
+    tick.tele = None
+    tick.heartbeat({"id": img_id}, deps, "error",
+                   target_fs=state.get("stage_fs") or cfg.get("target_fs"),
+                   tele_on=tele_on, stream_on=stream_on,
+                   stage_error=text,
+                   observation=_not_active_observation(
+                       tele_on, time.time()))
+    return "stage-error"
+
+
 def run_once(cfg, deps, state, tick_seconds=60):
     tick_seconds = _normalize_tick_seconds(tick_seconds)
     # Self-refresh the catalog token BEFORE any catalog work, once it's past
@@ -3636,12 +3705,21 @@ def run_once(cfg, deps, state, tick_seconds=60):
         # The FIRST image of the set carries the legacy top-level "image_id"
         # pointer; _stage_image writes it where the single-image agent did,
         # after that image's own catalog and filename checks pass.
-        statuses.append(_stage_image(cfg, deps, state, img_id, tele_on,
-                                     stream_on, tick,
-                                     legacy_pointer=(idx == 0),
-                                     plan_row=plan_rows.get(img_id),
-                                     instruction_attestation=
-                                     instruction_attestation))
+        #
+        # One image's failure is that image's verdict, never the tick's: the
+        # set heartbeat below must still go out so the device registers and
+        # the Console shows the error (#235, _contained_stage_failure).
+        try:
+            status = _stage_image(cfg, deps, state, img_id, tele_on,
+                                  stream_on, tick,
+                                  legacy_pointer=(idx == 0),
+                                  plan_row=plan_rows.get(img_id),
+                                  instruction_attestation=
+                                  instruction_attestation)
+        except Exception as exc:
+            status = _contained_stage_failure(
+                cfg, deps, state, img_id, tick, tele_on, stream_on, exc)
+        statuses.append(status)
 
     # ONE heartbeat for the whole set (the device is one row on the server),
     # then each image's telemetry replayed against the answer it carried.
@@ -5485,6 +5563,24 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
     return _with_instruction_step(deps, cfg, conf_path, platform)
 
 
+# Tick results for which main() exits NON-ZERO (#232). Both launchers key
+# their failure backoff on the agent's exit status (entrypoint.sh
+# next_tick_sleep, bootstrap.sh BACKOFF_FILE -- issue #59), and both document
+# that backoff as covering "catalog unreachable, timed out, or answering a
+# non-2xx status". run_once contains exactly that case into the string
+# "catalog-unavailable" and returned it with exit 0, so the backoff only ever
+# engaged for an uncontained crash and a catalog outage kept every device
+# re-polling on the ordinary cadence. The state file is still written and the
+# result still printed before the exit code is raised; the other contained
+# results (no assignment, a local instruction apply failure, a per-image
+# staging error) are not catalog-plane failures and keep exit 0.
+_BACKOFF_RESULTS = frozenset(("catalog-unavailable",))
+
+
+def _tick_exit_code(result):
+    return 1 if result in _BACKOFF_RESULTS else 0
+
+
 def main():  # pragma: no cover
     conf_path = os.environ.get(
         "IRIS_AGENT_CONF", "/flash/guest-share/iris/iris-agent.conf")
@@ -5532,8 +5628,10 @@ def main():  # pragma: no cover
         deps.emit("STATE-WRITE-FAIL", "%s persistence failed: %s"
                   % (state_path, e))
     print(result)
+    return _tick_exit_code(result)
 
 
 if __name__ == "__main__":
     if "--once" in sys.argv or len(sys.argv) == 1:
-        main()
+        # None (the "busy" early return) exits 0 like the ordinary tick.
+        sys.exit(main())

@@ -258,10 +258,13 @@ TICK="${IRIS_TICK_SECONDS:-60}"
 #     firing together.
 #   * BACKOFF_MAX bounds the OTHER case -- the agent process itself failing
 #     outright (catalog unreachable, timed out, or answering a non-2xx
-#     status, the same shape a saturated server produces). See
-#     next_tick_sleep below. Comfortably inside the token's multi-day
-#     refresh slack (iris_agent.py's needs_refresh docstring), so a run of
-#     backed-off ticks never strands the device.
+#     status, the same shape a saturated server produces). The loop keys on
+#     the agent's exit status alone: iris_agent.py exits non-zero for a tick
+#     whose catalog policy fetch failed (_tick_exit_code, #232) as well as
+#     for an uncontained crash, so a catalog outage actually reaches this
+#     backoff. See next_tick_sleep below. Comfortably inside the token's
+#     multi-day refresh slack (iris_agent.py's needs_refresh docstring), so
+#     a run of backed-off ticks never strands the device.
 JITTER_PCT="${IRIS_TICK_JITTER_PCT:-10}"
 BACKOFF_MAX="${IRIS_TICK_BACKOFF_MAX:-600}"
 MAX_PEERS="${IRIS_MAX_PEERS:-10}"
