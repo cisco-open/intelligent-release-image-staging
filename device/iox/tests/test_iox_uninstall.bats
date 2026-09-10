@@ -355,7 +355,7 @@ def request(value):
     operation=value['operation']
     arguments=value['arguments']
     assert type(arguments) is dict
-    assert operation in ('command','upload_wrapper','upload_certificate','begin_install','deployed','cleanup','finish')
+    assert operation in ('command','fetch_wrapper','fetch_certificate','begin_install','deployed','cleanup','finish')
     name=operation
     if operation=='command':
         assert set(arguments)=={'name'} and arguments['name'] in command_names()
@@ -369,7 +369,7 @@ def request(value):
     else:
         assert arguments=={}
     if action=='uninstall':
-        assert operation not in ('upload_wrapper','upload_certificate','begin_install','deployed')
+        assert operation not in ('fetch_wrapper','fetch_certificate','begin_install','deployed')
         assert name not in ('app_install','app_activate','configure_app','configure_network','copy_certificate','app_start')
     trace.write(json.dumps(dict(event='request',request=value),sort_keys=True)+'\n')
     trace.flush()
@@ -398,7 +398,7 @@ def request(value):
     detail=''
     stdout=''
     stderr=''
-    returncode=0 if operation in ('command','upload_wrapper','upload_certificate') else None
+    returncode=0 if operation in ('command','fetch_wrapper','fetch_certificate') else None
     framing=True
     timed_out=False
     if scenario=='certificate_invalid' and sum(counts.values())==1:
@@ -439,13 +439,13 @@ def request(value):
             timed_out=True
             framing=False
             returncode=None
-    elif name=='upload_wrapper':
+    elif name=='fetch_wrapper':
         uploaded=True
         remote_wrapper=True
-        if scenario=='upload_wrapper_failure':
+        if scenario=='fetch_wrapper_failure':
             code,category,detail=4,'transport','fixture upload failed after creating remote file'
             returncode=1
-    elif name=='upload_certificate': remote_certificate=True
+    elif name=='fetch_certificate': remote_certificate=True
     elif name=='begin_install':
         assert uploaded,'begin_install preceded bound upload'
         admitted=True
@@ -735,7 +735,7 @@ ASSERTIONS
   [[ "$output" == *'[4/4] verify cleanup and save'*'startup-config not saved: force agent-only teardown'*'undeploy complete:'* ]]
   _iox_assert_trace mode force_agent_only
   _iox_assert_trace ordered app_stop app_deactivate app_uninstall cleanup_config cleanup_files finish
-  _iox_assert_trace absent upload_wrapper upload_certificate begin_install deployed app_install app_activate
+  _iox_assert_trace absent fetch_wrapper fetch_certificate begin_install deployed app_install app_activate
 }
 
 @test "controller recorded teardown remains board-bound without EXPECTED_DEVICE_IDENTITY" {

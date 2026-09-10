@@ -994,8 +994,8 @@ def test_identity_from_result_reads_both_ie3400_and_c8000v(tmp_path):
 
 def _install_operations():
     return [
-        ("upload_wrapper", {}),
-        ("upload_certificate", {}),
+        ("fetch_wrapper", {}),
+        ("fetch_certificate", {}),
         ("begin_install", {}),
         ("command", {"name": "app_stop"}),
         ("command", {"name": "app_deactivate"}),
@@ -1013,6 +1013,18 @@ def _install_operations():
         ("command", {"name": "save"}),
         ("finish", {"exit_intent": 0}),
     ]
+
+
+@pytest.mark.parametrize("name", ["fetch_wrapper", "fetch_certificate"])
+def test_recipe_cannot_invoke_fetch_as_a_generic_command(name):
+    module = _module()
+    protocol = {"finished": False, "cleanup": False, "begun": False,
+                "completed": set(), "seen": set()}
+    with pytest.raises(module._ControllerFailure) as failure:
+        module.IoxController._admit_recipe_step(
+            _Bag(), _Bag(primary=None), "install", "command", {"name": name}, protocol)
+    assert failure.value.category == "rejected"
+    assert protocol["seen"] == set()
 
 
 def _run_scripted_install(tmp_path, factory, markers=(), clock=None,
@@ -4568,7 +4580,7 @@ def test_production_bash_recipe_job_log_is_step_level(tmp_path):
                     if line.startswith(prefix))
 
     order = [
-        "[1/8]", "  upload_wrapper ok (", "  upload_certificate ok (",
+        "[1/8]", "  fetch_wrapper ok (", "  fetch_certificate ok (",
         "[2/8]", "  routing_prereq ok (", "  storage_prereq ok (",
         "  clock ok (", "  prepare_iox_scp ok (",
         "IOx services ready (poll 1/24)",

@@ -1849,7 +1849,7 @@ def receive():
     size=struct.unpack("!I",exact(4))[0]
     assert 1<=size<=65536
     return json.loads(exact(size).decode("utf-8"))
-for operation,arguments in [("upload_wrapper",{}),("upload_certificate",{}),
+for operation,arguments in [("fetch_wrapper",{}),("fetch_certificate",{}),
     ("begin_install",{}),
     ("command",{"name":"app_stop"}),("command",{"name":"app_install"}),
     ("deployed",{}),("command",{"name":"app_activate"}),

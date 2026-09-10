@@ -3989,7 +3989,7 @@ def test_iox_console_job_reaches_a_real_controller_and_recipe_peer(tmp_path):
     # The job log is step-level: the controller's line per recipe operation,
     # in order, and none for the closing protocol handshake.
     step_lines = [line for line in job["lines"] if line.startswith("  ")]
-    assert step_lines[0].startswith("  upload_wrapper ok (")
+    assert step_lines[0].startswith("  fetch_wrapper ok (")
     assert step_lines[-1].startswith("  save ok (")
     assert [line.split()[0] for line in step_lines] == [
         arguments.get("name") if operation == "command" else operation

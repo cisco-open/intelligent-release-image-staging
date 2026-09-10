@@ -222,7 +222,7 @@ def valid_result(value, sequence, attempt, operation, ready, previous_phase):
             return False
         prior = previous_phase or "observed"
         if value["ok"]:
-            if operation in ("command", "upload_wrapper", "upload_certificate"):
+            if operation in ("command", "fetch_wrapper", "fetch_certificate"):
                 if value["revision"] != expected_revision or value["phase"] != prior:
                     return False
             elif operation == "stage_instructions":
@@ -260,7 +260,7 @@ try:
     if len(binding) != 11 or not call:
         raise ValueError("binding")
     operation = call[0]
-    if action not in ("install", "uninstall") or operation not in ("command", "upload_wrapper", "upload_certificate", "begin_install", "deployed", "stage_instructions", "cleanup", "finish"):
+    if action not in ("install", "uninstall") or operation not in ("command", "fetch_wrapper", "fetch_certificate", "begin_install", "deployed", "stage_instructions", "cleanup", "finish"):
         raise ValueError("operation")
     peer = socket.socket(fileno=os.dup(fd))
     if peer.family != socket.AF_UNIX or peer.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
@@ -487,8 +487,8 @@ PY
   install_recipe() {
     local out year state rc i
     echo "[1/8] fetch package and certificate"
-    request_plain upload_wrapper || return $?
-    request_plain upload_certificate || return $?
+    request_plain fetch_wrapper || return $?
+    request_plain fetch_certificate || return $?
 
     echo "[2/8] check prerequisites: routing, storage, clock, IOx services"
     if request_capture out command routing_prereq; then raw_echo "$out"; else rc=$?; raw_echo "$out"; return "$rc"; fi

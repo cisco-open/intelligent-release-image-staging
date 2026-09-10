@@ -105,9 +105,9 @@ _COMMANDS = frozenset((
     "copy_certificate", "app_start", "save", "remove_wrapper",
     "remove_certificate", "cleanup_config", "cleanup_files",
     "cleanup_config_probe", "cleanup_stage_probe",
-    # Controller-internal steps of the device-side artifact fetch: the recipe
-    # never names them, the controller runs them under upload_wrapper,
-    # upload_certificate and stage_instructions.
+    # Controller-internal commands of the device-side artifact fetch. The
+    # recipe invokes the fetch_wrapper, fetch_certificate and
+    # stage_instructions operations instead of submitting these as commands.
     "configure_trustpoint", "http_client_credentials", "clear_http_client",
     "fetch_wrapper", "fetch_certificate", "fetch_instructions"))
 
@@ -163,7 +163,7 @@ _SAFE_IOS_PATH = re.compile(
 _NETMASKS = frozenset(str(ipaddress.IPv4Network(
     "0.0.0.0/%d" % prefix).netmask) for prefix in range(33))
 
-_INSTALL_ONLY = frozenset(("upload_wrapper", "upload_certificate",
+_INSTALL_ONLY = frozenset(("fetch_wrapper", "fetch_certificate",
                            "begin_install", "deployed"))
 # Recipe operations that get no job-log line when they succeed: the two
 # lifecycle polls (the recipe prints the state it was waiting for once it is
@@ -5299,16 +5299,19 @@ class IoxController(object):
         name = arguments.get("name") if operation == "command" else operation
         if not isinstance(name, str):
             raise _ControllerFailure("rejected", "invalid recipe operation", 4)
+        if operation == "command" and name in ("fetch_wrapper", "fetch_certificate"):
+            raise _ControllerFailure(
+                "rejected", "artifact fetch requires its controller operation", 4)
         seen = protocol["seen"]
         if action == "install":
             if not protocol["begun"]:
-                allowed = {"upload_wrapper", "upload_certificate",
+                allowed = {"fetch_wrapper", "fetch_certificate",
                            "routing_prereq", "storage_prereq", "clock",
                            "prepare_iox_scp", "iox_status"}
                 if name == "begin_install":
-                    if "upload_wrapper" not in protocol["completed"]:
+                    if "fetch_wrapper" not in protocol["completed"]:
                         raise _ControllerFailure(
-                            "rejected", "begin before wrapper upload", 4)
+                            "rejected", "begin before wrapper fetch", 4)
                     protocol["begun"] = True
                     seen.add(name)
                     return
@@ -5380,8 +5383,8 @@ class IoxController(object):
                 raise _ControllerFailure(
                     "rejected", "invalid instruction staging request", 4)
             if (rank in (12, 13, 14, 15) and
-                    "upload_certificate" not in protocol["completed"]):
-                raise _ControllerFailure("rejected", "certificate was not uploaded", 4)
+                    "fetch_certificate" not in protocol["completed"]):
+                raise _ControllerFailure("rejected", "certificate was not fetched", 4)
             if rank == 15 and current != 14:
                 raise _ControllerFailure(
                     "rejected", "incomplete certificate cleanup", 4)
@@ -5461,16 +5464,16 @@ class IoxController(object):
                 "timeout", "lifecycle polling deadline elapsed", 4)
 
     def _cleanup_remote_artifacts(self, attempt, protocol):
-        """Remove and verify this attempt's admitted transient uploads."""
+        """Remove and verify this attempt's admitted transient downloads."""
         previous = attempt.safety_recovery
         attempt.safety_recovery = True
         try:
             completed = protocol["completed"]
             admitted = protocol["seen"]
-            for upload, removal in (
-                    ("upload_certificate", "remove_certificate"),
-                    ("upload_wrapper", "remove_wrapper")):
-                if upload not in admitted or removal in completed:
+            for fetch, removal in (
+                    ("fetch_certificate", "remove_certificate"),
+                    ("fetch_wrapper", "remove_wrapper")):
+                if fetch not in admitted or removal in completed:
                     continue
                 result, unused = self._command(
                     attempt, removal, self._render_command(attempt, removal), 45)
@@ -5668,7 +5671,7 @@ class IoxController(object):
                 transport_result = None
                 operation_result_start = len(attempt.operation_results)
                 try:
-                    if operation == "upload_wrapper" and arguments == {} and action == "install":
+                    if operation == "fetch_wrapper" and arguments == {} and action == "install":
                         import iox_transport
                         if (not protocol["scp_prepared"] and
                                 isinstance(attempt.transport,
@@ -5689,7 +5692,7 @@ class IoxController(object):
                         transport_result = self._fetch(
                             attempt, "fetch_wrapper",
                             os.fstat(attempt.snapshot.fd).st_size)
-                    elif operation == "upload_certificate" and arguments == {} and action == "install":
+                    elif operation == "fetch_certificate" and arguments == {} and action == "install":
                         certificate = self.config.get("catalog_certificate_path")
                         fd = _open_public_certificate(
                             certificate, self._strict_target)

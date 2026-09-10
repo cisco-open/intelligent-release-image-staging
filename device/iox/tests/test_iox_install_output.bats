@@ -367,7 +367,7 @@ def request(value):
     operation=value['operation']
     arguments=value['arguments']
     assert type(arguments) is dict
-    assert operation in ('command','upload_wrapper','upload_certificate','begin_install','deployed','stage_instructions','cleanup','finish')
+    assert operation in ('command','fetch_wrapper','fetch_certificate','begin_install','deployed','stage_instructions','cleanup','finish')
     name=operation
     if operation=='command':
         assert set(arguments)=={'name'} and arguments['name'] in command_names()
@@ -381,7 +381,7 @@ def request(value):
     else:
         assert arguments=={}
     if action=='uninstall':
-        assert operation not in ('upload_wrapper','upload_certificate','begin_install','deployed','stage_instructions')
+        assert operation not in ('fetch_wrapper','fetch_certificate','begin_install','deployed','stage_instructions')
         assert name not in ('app_install','app_activate','configure_app','configure_network','copy_certificate','app_start')
     trace.write(json.dumps(dict(event='request',request=value),sort_keys=True)+'\n')
     trace.flush()
@@ -410,7 +410,7 @@ def request(value):
     detail=''
     stdout=''
     stderr=''
-    returncode=0 if operation in ('command','upload_wrapper','upload_certificate') else None
+    returncode=0 if operation in ('command','fetch_wrapper','fetch_certificate') else None
     framing=True
     timed_out=False
     if scenario=='certificate_invalid' and sum(counts.values())==1:
@@ -454,13 +454,13 @@ def request(value):
             timed_out=True
             framing=False
             returncode=None
-    elif name=='upload_wrapper':
+    elif name=='fetch_wrapper':
         uploaded=True
         remote_wrapper=True
-        if scenario=='upload_wrapper_failure':
+        if scenario=='fetch_wrapper_failure':
             code,category,detail=4,'transport','fixture upload failed after creating remote file'
             returncode=1
-    elif name=='upload_certificate': remote_certificate=True
+    elif name=='fetch_certificate': remote_certificate=True
     elif name=='begin_install':
         assert uploaded,'begin_install preceded bound upload'
         admitted=True
@@ -734,7 +734,7 @@ ASSERTIONS
   [[ "$output" != *'%IOX: application installation accepted'* ]]
   [[ "$output" != *'Application activated'* ]]
   [[ "$output" != *'[OK]'* ]]
-  _iox_assert_trace ordered upload_wrapper begin_install app_install deployed app_activate stage_instructions copy_certificate app_start save finish
+  _iox_assert_trace ordered fetch_wrapper begin_install app_install deployed app_activate stage_instructions copy_certificate app_start save finish
   _iox_assert_trace finish RUNNING
 }
 
@@ -752,7 +752,7 @@ ASSERTIONS
   _iox_fixture_setup
   run _iox_controller_run install marker_present
   [ "$status" -eq 0 ]
-  _iox_assert_trace ordered upload_wrapper begin_install app_stop app_install deployed app_activate stage_instructions
+  _iox_assert_trace ordered fetch_wrapper begin_install app_stop app_install deployed app_activate stage_instructions
   _iox_assert_trace absent verification_enable verification_disable
 }
 
@@ -937,7 +937,7 @@ PY
 }
 
 @test "controller cleanup removes admitted uploads after upload prerequisite and lifecycle failure" {
-  for scenario in upload_wrapper_failure routing_missing certificate_copy_failure; do
+  for scenario in fetch_wrapper_failure routing_missing certificate_copy_failure; do
     _iox_fixture_setup
     run _iox_controller_run install "$scenario"
     [ "$status" -ne 0 ]
@@ -951,7 +951,7 @@ PY
   _iox_fixture_setup
   run _iox_controller_run install signal_during_ipc
   [ "$status" -eq 143 ]
-  _iox_assert_trace ordered upload_wrapper cleanup finish
+  _iox_assert_trace ordered fetch_wrapper cleanup finish
   _iox_assert_trace artifact_clean
 }
 
@@ -959,7 +959,7 @@ PY
   _iox_fixture_setup
   run _iox_controller_run install second_signal_during_cleanup
   [ "$status" -eq 143 ]
-  _iox_assert_trace ordered upload_wrapper cleanup finish
+  _iox_assert_trace ordered fetch_wrapper cleanup finish
   _iox_assert_trace artifact_clean
 }
 
