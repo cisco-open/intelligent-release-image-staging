@@ -192,6 +192,26 @@ setup() {
   [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ]
 }
 
+@test "force teardown preserves an operator description that mentions the IRIS marker" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes FAKE_RUNNING_OPERATOR_STATIC=yes \
+    FAKE_OPERATOR_DESCRIPTION="Customer backup; description IRIS IOx VPG" \
+    run _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.2")" -eq 0 ] || return 1
+  [ "$status" -eq 0 ]
+}
+
+@test "force teardown preserves an operator description that extends the IRIS marker" {
+  _router_uninstall_stub_setup
+  FAKE_RUNNING_OPERATOR_VPG=yes FAKE_RUNNING_OPERATOR_STATIC=yes \
+    FAKE_OPERATOR_DESCRIPTION="IRIS Guest Shell VPG - reassigned to operator" \
+    run _router_uninstall_run_live_forced
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no interface VirtualPortGroup3")" -eq 0 ] || return 1
+  [ "$(_calls_containing "$FAKE_COMMAND_LOG" "no ip nat inside source static tcp 192.168.254.2")" -eq 0 ] || return 1
+  [ "$status" -eq 0 ]
+}
+
 @test "force teardown reclaims the IRIS VPG while leaving the operator's alone" {
   _router_uninstall_stub_setup
   FAKE_RUNNING_IRIS_VPG=yes FAKE_RUNNING_OPERATOR_VPG=yes \
@@ -356,8 +376,12 @@ case "$cmds" in
         echo "hostname iris8kv-1"
         if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
           echo "interface VirtualPortGroup3"
+          [ -z "${FAKE_OPERATOR_DESCRIPTION:-}" ] || echo " description $FAKE_OPERATOR_DESCRIPTION"
           echo " ip address 192.168.254.1 255.255.255.252"
           echo "!"
+        fi
+        if [ "${FAKE_RUNNING_OPERATOR_STATIC:-no}" = "yes" ]; then
+          echo "ip nat inside source static tcp 192.168.254.2 6881 interface GigabitEthernet1 6881"
         fi
         # A VPG carrying the description router-install.sh writes into every
         # VPG IRIS creates -- on-device proof of IRIS ownership.
@@ -420,8 +444,12 @@ case "$cmds" in
     echo "hostname iris8kv-1"
     if [ "${FAKE_RUNNING_OPERATOR_VPG:-no}" = "yes" ]; then
       echo "interface VirtualPortGroup3"
+      [ -z "${FAKE_OPERATOR_DESCRIPTION:-}" ] || echo " description $FAKE_OPERATOR_DESCRIPTION"
       echo " ip address 192.168.254.1 255.255.255.252"
       echo "!"
+    fi
+    if [ "${FAKE_RUNNING_OPERATOR_STATIC:-no}" = "yes" ]; then
+      echo "ip nat inside source static tcp 192.168.254.2 6881 interface GigabitEthernet1 6881"
     fi
     if [ "${FAKE_RUNNING_IRIS_VPG:-no}" = "yes" ] && [ ! -e "$FAKE_STATE_DIR/vpg7_removed" ]; then
       echo "interface VirtualPortGroup7"

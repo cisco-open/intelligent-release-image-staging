@@ -147,7 +147,10 @@ EOF
 # The record-less reclaim must recognise EITHER, or an IOx app on a router
 # that lost its record leaves a VPG this force path cannot take back and
 # every re-onboard is refused for a collision (issues #209, #212).
-IRIS_VPG_DESCRIPTION_RE="description IRIS (?:Guest Shell|IOx) VPG"
+# Ownership requires the whole description line. A note that merely mentions
+# an old IRIS description does not authorize deleting an operator's interface
+# or any NAT mappings within its subnet.
+IRIS_VPG_DESCRIPTION_RE="(?m)^[ \t]*description IRIS (?:Guest Shell|IOx) VPG[ \t]*\r?$"
 
 # Echo the VPG numbers whose interface block carries IRIS's description, and
 # the IRIS-named NAT objects present, from ONE running-config read. Anything
