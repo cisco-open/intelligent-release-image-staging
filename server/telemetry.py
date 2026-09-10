@@ -34,9 +34,11 @@ import live_samples
 import instruction_keys
 import metrics
 import otlp
+import peer_endpoints as _peer_endpoints
 import peer_enforcement as _peer_enforcement
 import peer_ledger as _peer_ledger
 import peer_policy as _peer_policy
+import report_attribution as _report_attribution
 import telemetry_destination
 import transfer_lifecycle as _transfer_lifecycle
 from peer_registry import PeerRegistry
@@ -642,9 +644,18 @@ class Telemetry:
                  env_endpoint="", env_enabled=False, headers=None,
                  policy_info=None, enforcement_info=None, peer_ledger=None,
                  assignments_info=None, transfer_lifecycle=None,
-                 attestations_info=None, instruction_status_info=None):
+                 attestations_info=None, instruction_status_info=None,
+                 report_attribution=None, origin_endpoints_info=None):
         self.exporter = exporter
         self._seen_report_event_ids = set()
+        # Pinned per-report sender classification (report_attribution), so a
+        # ring replay after a restart exports the SAME record it exported the
+        # first time. None -> classify live on every pass, as before.
+        self._report_attribution = report_attribution
+        # The tracker's durable principal -> announce-endpoint map, read as
+        # ``peer_endpoints.fresh_endpoints``; the origin identity that survives
+        # a process start (see _origin_swarm_ips). None -> registry only.
+        self._origin_endpoints_info = origin_endpoints_info
         # event.id -> (plan_id, event, transfer_id) for every lifecycle record
         # this process has put on the queue and not yet seen acknowledged. The
         # queue's delivered-callback hands back event.ids and nothing else, so
@@ -1408,10 +1419,22 @@ class Telemetry:
         the same IDs for backend deduplication.
         Each record is enriched from the device's last heartbeat (model,
         flash, stage state — capped/coerced inside build_report_record) plus
-        the swarm IP->device_id join for peer-row resolution (spec 7.6)."""
+        the swarm IP->device_id join for peer-row resolution (spec 7.6).
+
+        The transfer-record rows of a report are classified ONCE. A replay
+        carries the same ``event.id`` as the first export, so it must carry
+        the same content; but the two inputs the classification reads -- the
+        origin's announce addresses and the address->device join -- are live
+        state that a fresh process does not have yet and that drifts over the
+        weeks a report can sit in the ring. The identity view a report was
+        first classified against is therefore pinned (report_attribution) and
+        read back on every later pass, and only a classification that the
+        startup gap could not have degraded is pinned (is_provisional)."""
         devices = self._read_device_info()
         device_by_ip = self._device_by_ip(devices)
         origin_ips = self._origin_swarm_ips()
+        image_names = self._image_names()
+        pinned_views = self._pinned_attributions()
         reports = self._reports_info() or {}
         candidates = []
         ring_event_ids = set()
@@ -1422,50 +1445,116 @@ class Telemetry:
             rec = rec if isinstance(rec, dict) else {}
             enrich = {"model": rec.get("model"),
                       "free_flash_bytes": rec.get("free_flash_bytes"),
-                      "stage_state": rec.get("stage_state"),
-                      "peer_devices": device_by_ip}
+                      "stage_state": rec.get("stage_state")}
             for rep in ring:
                 if not isinstance(rep, dict):
                     continue
+                event_id, record = _report_event_id(rep, str(device_id))
+                ring_event_ids.add(event_id)
+                block = rep.get("peer_transfer_records")
+                pinned = pinned_views.get(event_id) \
+                    if isinstance(block, dict) else None
+                if pinned is not None:
+                    rep_origin, rep_devices = pinned
+                else:
+                    rep_origin, rep_devices = origin_ips, device_by_ip
                 # peer_transfer_records is per REPORT, not per device, so its
                 # origin/device/unknown split rides with the report it
                 # describes. Absent block -> absent key: not measured is not
                 # zero, and an all-zero split would read as "no peer bytes".
                 split = classify_peer_transfer_records(
-                    rep.get("peer_transfer_records"), origin_ips, device_by_ip)
-                rep_enrich = enrich if split is None else dict(
-                    enrich, peer_transfer_record_attribution=split)
-                event_id, record = _report_event_id(rep, str(device_id))
-                ring_event_ids.add(event_id)
+                    block, rep_origin, rep_devices)
+                rep_enrich = dict(
+                    enrich, peer_devices=rep_devices,
+                    image_name=image_names.get(str(rep.get("image_id"))))
+                if split is not None:
+                    rep_enrich["peer_transfer_record_attribution"] = split
+                pin = (pinned is None and split is not None and
+                       not _report_attribution.is_provisional(
+                           split, origin_ips))
                 try:
                     received_at = float(rep.get("received_at", 0) or 0)
                 except (TypeError, ValueError):
                     received_at = 0.0
-                candidates.append((received_at, event_id, str(device_id),
-                                   record, rep_enrich))
+                candidates.append(
+                    (received_at, event_id, str(device_id),
+                     {"report": record, "enrich": rep_enrich,
+                      "origin": rep_origin, "devices": rep_devices,
+                      "block": block if pin else None}))
         # Delivered report IDs need only cover the current durable ring. Queued
         # records are independently deduped by LogQueue, so forgetting an ID
-        # that has left the ring cannot cause a scan-time re-enqueue.
+        # that has left the ring cannot cause a scan-time re-enqueue. The
+        # pinned classifications are bounded the same way.
         self._seen_report_event_ids.intersection_update(ring_event_ids)
-        for _, event_id, device_id, report, enrich in sorted(
+        new_pins = {}
+        for _, event_id, device_id, ctx in sorted(
                 candidates, key=lambda row: row[:3]):
-            if (event_id not in self._seen_report_event_ids
-                    and not self.log_queue.contains(event_id)):
-                self.log_queue.emit(otlp.build_report_record(
-                    report, device_id, enrich=enrich))
-                # Fan the transfer-record block out into one record per peer. Without
-                # this the exact device-side measurement stops in the catalog
-                # and only the per-transfer rollups leave the server -- the
-                # lossy sampled estimate (iris.swarm.peer_bytes) would be the
-                # only per-edge data a backend ever saw, which is the wrong way
-                # round. classify is bound here, not inside otlp: a second copy
-                # of the origin/device identity rule would drift, and the copy
-                # that drifts is the one an operator reads a peer share off.
-                for peer_record in otlp.build_peer_transfer_records(
-                        report, device_id, enrich=enrich,
-                        classify=lambda ip: transfer_record_source_class(
-                            ip, origin_ips, device_by_ip)):
-                    self.log_queue.emit(peer_record)
+            if (event_id in self._seen_report_event_ids
+                    or self.log_queue.contains(event_id)):
+                continue
+            report, enrich = ctx["report"], ctx["enrich"]
+            rep_origin, rep_devices = ctx["origin"], ctx["devices"]
+            self.log_queue.emit(otlp.build_report_record(
+                report, device_id, enrich=enrich))
+            # Fan the transfer-record block out into one record per peer. Without
+            # this the exact device-side measurement stops in the catalog
+            # and only the per-transfer rollups leave the server -- the
+            # lossy sampled estimate (iris.swarm.peer_bytes) would be the
+            # only per-edge data a backend ever saw, which is the wrong way
+            # round. classify is bound here, not inside otlp: a second copy
+            # of the origin/device identity rule would drift, and the copy
+            # that drifts is the one an operator reads a peer share off.
+            for peer_record in otlp.build_peer_transfer_records(
+                    report, device_id, enrich=enrich,
+                    classify=lambda ip, o=rep_origin, d=rep_devices:
+                    transfer_record_source_class(ip, o, d)):
+                self.log_queue.emit(peer_record)
+            if ctx["block"] is not None:
+                # Pin the view these rows were just classified against, cut
+                # down to the block's own addresses.
+                new_pins[event_id] = _report_attribution.identity_view(
+                    ctx["block"], rep_origin, rep_devices)
+        self._sync_pinned_attribution(ring_event_ids, new_pins)
+
+    def _pinned_attributions(self):
+        """``{event_id: (origin_ips, device_by_ip)}`` -- the identity view
+        each report was first exported against; {} when nothing is pinned
+        (no store, or nothing exported yet). One read per pass. A store that
+        cannot be read pins nothing: the pass classifies live, exactly as it
+        did before the store existed."""
+        if self._report_attribution is None:
+            return {}
+        try:
+            return self._report_attribution.snapshot() or {}
+        except Exception:
+            return {}
+
+    def _sync_pinned_attribution(self, ring_event_ids, new_pins):
+        """One read-modify-write per pass: forget the reports that left the
+        ring (the same bound as the delivered-id set) and pin the ones this
+        pass classified for the first time. A failed write costs the pins,
+        never the export: the next pass classifies live again."""
+        if self._report_attribution is None:
+            return
+        try:
+            self._report_attribution.sync(ring_event_ids, new_pins)
+        except Exception:
+            pass                            # telemetry never breaks on bad input
+
+    def _image_names(self):
+        """``{image_id: catalog filename}`` for ``iris.image.name`` on the
+        per-peer rows. Presentation only: an image that has left the catalog
+        has no name and keeps its id."""
+        try:
+            images = self._images_info() if self._images_info else {}
+        except Exception:
+            return {}
+        out = {}
+        if isinstance(images, dict):
+            for image_id, entry in images.items():
+                if isinstance(entry, dict) and entry.get("filename"):
+                    out[str(image_id)] = str(entry["filename"])
+        return out
 
     def _read_device_info(self):
         """The catalog's {device_id: heartbeat record}, or {} when unwired or
@@ -1479,19 +1568,21 @@ class Telemetry:
         return devices if isinstance(devices, dict) else {}
 
     def _origin_swarm_ips(self):
-        """The addresses the origin is currently announcing from -- the typed
-        ``service:seeder`` principal's registry rows, the same identity source
-        _seeder_torrent_metrics uses.
+        """The addresses the origin announces from -- the typed
+        ``service:seeder`` principal's registry rows (the same identity source
+        _seeder_torrent_metrics uses) plus its endpoints in the tracker's
+        durable map, when the hub was given one.
 
         Identity comes from the authenticated principal, never from an address
         list or a peer's own seeder flag. Never breaks: an unreadable registry
-        yields an empty set, which sends every transfer-record row to ``unknown``
-        rather than quietly promoting the origin's bytes to peer-delivered."""
+        and map yield an empty set, which sends every transfer-record row to
+        ``unknown`` rather than quietly promoting the origin's bytes to
+        peer-delivered."""
         ips = set()
         try:
             snapshot = self._registry.snapshot()
         except Exception:
-            return ips
+            snapshot = {}
         for peers in snapshot.values():
             if not isinstance(peers, list):
                 continue
@@ -1502,6 +1593,31 @@ class Telemetry:
                         and peer.get("principal_id") == "seeder" \
                         and peer.get("ip"):
                     ips.add(str(peer["ip"]))
+        # The same identity, durably: the tracker writes every authenticated
+        # principal's announce endpoint to peer_endpoints, which outlives the
+        # process and ages out on IRIS_ENDPOINT_TTL (15 min by default). The
+        # in-memory registry is EMPTY for the first minutes after a start --
+        # the seeder's aria2 announces before the tracker listens and only
+        # retries later -- and the report-ring replay runs inside that gap,
+        # which is how every replayed row went out ``unknown`` while the
+        # first export of the same record said ``origin``. Still the
+        # service:seeder principal, never an address list or a peer's own
+        # seeder flag; an unreadable map contributes nothing.
+        if self._origin_endpoints_info is not None:
+            try:
+                durable = self._origin_endpoints_info() or {}
+            except Exception:
+                durable = {}
+            for entry in (durable.values() if isinstance(durable, dict)
+                          else ()):
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("principal_type") != "service" \
+                        or entry.get("principal_id") != "seeder":
+                    continue
+                for endpoint in entry.get("endpoints") or ():
+                    if isinstance(endpoint, dict) and endpoint.get("ipv4"):
+                        ips.add(str(endpoint["ipv4"]))
         return ips
 
     @staticmethod
@@ -1945,6 +2061,19 @@ def from_env(env=None):
         lifecycle = _transfer_lifecycle.TransferLifecycle(state_dir)
     except OSError:
         lifecycle = None
+    # Pinned per-report sender classification. Same rule again: without it
+    # every pass classifies live, and a ring replay after a restart may
+    # re-export a report with a different attribution than its first export.
+    try:
+        attribution = _report_attribution.ReportAttributionStore(state_dir)
+    except OSError:
+        attribution = None
+    # The tracker's durable principal -> endpoint map (same process, same
+    # IRIS_STATE), read as a fresh snapshot per pass; the origin identity
+    # that is already there when the in-memory registry is still empty.
+    endpoints_path = os.path.join(state_dir, "peer-endpoints.json")
+    origin_endpoints_info = lambda: _peer_endpoints.fresh_endpoints(
+        endpoints_path, time.time())
     hub = Telemetry(rpc=rpc, interval=interval,
                     device_info=device_info, reports_info=reports_info,
                     live_info=live_info, images_info=images_info,
@@ -1960,7 +2089,9 @@ def from_env(env=None):
                     assignments_info=assignments_info,
                     transfer_lifecycle=lifecycle,
                     attestations_info=attestations_info,
-                    instruction_status_info=instruction_status_info)
+                    instruction_status_info=instruction_status_info,
+                    report_attribution=attribution,
+                    origin_endpoints_info=origin_endpoints_info)
     # Build the initial exporters NOW (not on the first pass) so swarm events
     # from the announce path are captured from process start, exactly as the
     # construction-time exporters were before the destination became editable.

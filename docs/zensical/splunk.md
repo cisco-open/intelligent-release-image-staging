@@ -356,18 +356,29 @@ index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
   "otel.log.name"="iris.device.peer_transfer_record"
 | dedup "event.id"
 | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| eval image=coalesce('iris.image.name', 'iris.image.id')
+| eval source=coalesce('iris.peer.device_id', "unknown")
 | stats max(received_bytes) AS received_bytes
     values("iris.transfer_record.capture_complete") AS capture_complete
-    BY "device.id", "iris.image.id", "iris.transfer.id",
-       "network.peer.address", "iris.peer.attribution"
+    values("network.peer.address") AS peer_address
+    BY "device.id", image, "iris.transfer.id", source, "iris.peer.attribution"
 ```
 
-The query keeps the largest cumulative capture per transfer and peer.
-Attribution is `origin`, `device`, or `unknown`. Each row is measured by the
-receiving device, but a peer that disconnected before capture can be absent;
-`capture_complete=false` marks that incomplete capture. Missing rows do not
-mean zero bytes. `iris.swarm.peer_bytes` is the origin-side sampled view of
-traffic; summing it with device peer records would count the same traffic twice.
+The query keeps the largest cumulative capture per transfer and sender.
+`source` is the sender: `origin` for the seeder, the sending device's id for
+a `device` row (`iris.peer.device_id` carries both), and `unknown` for a row
+the server could not name. That attribute is absent on unknown rows, and a
+`BY` on an absent field silently drops the event, so the `eval` fills it in.
+`image` is the catalog filename (`iris.image.name`, looked up when the report
+is exported); it falls back to `iris.image.id` for an image that has since
+left the catalog. Each row is measured by the receiving device, but a peer
+that disconnected before capture can be absent; `capture_complete=false`
+marks that incomplete capture. Missing rows do not mean zero bytes. A report
+is re-exported under the same `event.id` after a server restart; its sender
+classification is pinned on first export, so the copies are identical and
+`dedup` collapses them. `iris.swarm.peer_bytes` is the origin-side sampled
+view of traffic; summing it with device peer records would count the same
+traffic twice.
 
 ### Assignment to confirmed seeding
 

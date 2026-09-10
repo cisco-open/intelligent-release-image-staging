@@ -770,20 +770,24 @@ from different observation points; do not sum the two record families.
 device transfer. An `--on-bt-download-complete` hook on the device reads the
 counters at the instant the last piece lands, before aria2 flips the download to
 seed-only and the connections drain. Attributes: `device.id` (the *receiving*
-device), `iris.image.id`, `iris.transfer.id`, `network.peer.address`,
-`network.peer.port`, `iris.transfer.session_bytes_from_peer` /
+device), `iris.image.id`, `iris.image.name` (the catalog filename),
+`iris.transfer.id`, `network.peer.address`, `network.peer.port`,
+`iris.transfer.session_bytes_from_peer` /
 `iris.transfer.session_bytes_to_peer`, `iris.peer.attribution`,
-`iris.peer.device.id`, `iris.peer.has_complete_file` and
-`iris.transfer_record.capture_complete`.
+`iris.peer.device.id`, `iris.peer.device_id` (the sender in one column: the
+device's id, `origin`, or absent for an unknown), `iris.peer.has_complete_file`
+and `iris.transfer_record.capture_complete`.
 
 `iris.peer.attribution` is the attribute that makes the number mean anything.
 The origin seeder is an ordinary BitTorrent peer of every device, so it appears
 in the device's own peer list like any other sender; the device cannot tell it
-apart and does not try. The server classifies each row at ingest against the
-tracker's `service:seeder` principal and its own device-address map, into
-`origin`, `device`, or `unknown` — an address that resolves to neither is
-reported as unknown, never folded into the device figure. The per-transfer
-rollups on `iris.device.transfer.report` follow the same split:
+apart and does not try. The server classifies each row when the report is
+first exported, against the tracker's `service:seeder` principal and its own
+device-address map, into `origin`, `device`, or `unknown` — an address that
+resolves to neither is reported as unknown, never folded into the device
+figure — and pins that answer (`report-attribution.json`), so the copy
+re-exported under the same `event.id` after a restart is identical. The
+per-transfer rollups on `iris.device.transfer.report` follow the same split:
 `iris.transfer.bytes_from_all_senders_total` is the device's own honest total
 **including the origin**, and `iris.transfer.bytes_from_origin_total`,
 `iris.transfer.bytes_from_devices_total` and

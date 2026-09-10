@@ -3029,6 +3029,15 @@ def test_peer_transfer_records_reach_the_log_queue_not_just_the_catalog():
         ip = attrs["network.peer.address"]["stringValue"]
         classes[ip] = attrs["iris.peer.attribution"]["stringValue"]
     assert classes == {"10.9.9.9": "origin", "10.0.0.7": "device"}, classes
+    # and the sender column an operator groups by: origin / the device's id
+    sources = {}
+    for record in hub.log_queue.snapshot():
+        if log_name(record) != "iris.device.peer_transfer_record":
+            continue
+        attrs = {a["key"]: a["value"] for a in record["attributes"]}
+        sources[attrs["network.peer.address"]["stringValue"]] = \
+            attrs["iris.peer.device_id"]["stringValue"]
+    assert sources == {"10.9.9.9": "origin", "10.0.0.7": "d7"}, sources
 
 
 def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
@@ -3070,6 +3079,8 @@ def test_image_size_family_reaches_the_metrics_endpoint(tmp_path):
 # pure APPEND: nothing above it is touched, and in particular the existing
 # exact-shape assertions stay the regression guard they were written to be.
 import auth
+import peer_endpoints
+import report_attribution
 import transfer_lifecycle
 
 _LIFECYCLE_NAME = "iris.transfer.lifecycle"
@@ -4212,3 +4223,293 @@ def test_fail_closed_canonical_quarantine_preserves_known_intent(monkeypatch):
     assert fact["matched_seq"] is None
     assert fact["role"] == "boat"
     assert fact["role_shadowed_by"] == "boat"
+
+
+# ---------------------------------------------------------------------------
+# Pinned sender classification (report_attribution)
+# ---------------------------------------------------------------------------
+#
+# Observed in Splunk on 2026-09-10: iris.device.peer_transfer_record with ONE
+# event.id (<report_id>:100.90.168.20) indexed once as attribution=origin,
+# then 42 more times as attribution=unknown, same 213309440 bytes. Every
+# extra copy was a ring replay by a freshly started process, run before the
+# seeder's first re-announce had reached the empty in-memory registry.
+
+
+def _seeded_registry():
+    reg = PeerRegistry()
+    reg.announce("abc", "seeder", _ORIGIN_IP, 6881, left=0,
+                 principal=auth.Principal("service", "seeder"))
+    return reg
+
+
+def _transfer_record_report(report_id="r1", received_at=1, rows=None):
+    if rows is None:
+        rows = [_transfer_record_row(_ORIGIN_IP, 700),
+                _transfer_record_row("10.0.0.7", 300)]
+    return {"schema": "v2", "report_id": report_id,
+            "received_at": received_at, "image_id": "img-1",
+            "transfer_id": "t1",
+            "peer_transfer_records": _transfer_record_block(rows)}
+
+
+def _flat(record):
+    return {a["key"]: list(a["value"].values())[0]
+            for a in record["attributes"]}
+
+
+def _peer_rows(hub):
+    """{peer address: flat attributes} of the queued per-peer records."""
+    out = {}
+    for record in hub.log_queue.snapshot():
+        attrs = _flat(record)
+        if attrs.get("otel.log.name") == "iris.device.peer_transfer_record":
+            out[attrs["network.peer.address"]] = attrs
+    return out
+
+
+def _report_rows(hub):
+    return [_flat(r) for r in hub.log_queue.snapshot()
+            if _flat(r).get("otel.log.name") == "iris.device.transfer.report"]
+
+
+def test_a_replay_after_a_restart_exports_the_attribution_it_first_exported(
+        tmp_path):
+    """One event.id, one content. The first export ran with the seeder in the
+    registry and a device map that named 10.0.0.7; the replay runs in a fresh
+    process with an EMPTY registry and an empty device map. Pinned, the replay
+    is byte-identical to the first export -- report record and per-peer rows
+    alike -- instead of a second row saying unknown."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [_transfer_record_report()]}
+    first = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: reports,
+        device_info=lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}},
+        report_attribution=store)
+    first._export_new_reports()
+    before = _peer_rows(first)
+    assert before[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+    assert before[_ORIGIN_IP]["iris.peer.device_id"] == "origin"
+    assert before["10.0.0.7"]["iris.peer.attribution"] == "device"
+    assert before["10.0.0.7"]["iris.peer.device_id"] == "rtr-07"
+    assert _report_rows(first)[0]["iris.transfer.bytes_from_origin_total"] \
+        == "700"
+
+    replay = telemetry.Telemetry(
+        PeerRegistry(), reports_info=lambda: reports,
+        device_info=lambda: {}, report_attribution=store)
+    replay._export_new_reports()
+    assert _peer_rows(replay) == before
+    assert [r["attributes"] for r in replay.log_queue.snapshot()] == \
+        [r["attributes"] for r in first.log_queue.snapshot()]
+
+    # without the store this is exactly the Splunk symptom
+    bare = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports,
+                               device_info=lambda: {})
+    bare._export_new_reports()
+    assert _peer_rows(bare)[_ORIGIN_IP]["iris.peer.attribution"] == "unknown"
+    assert _peer_rows(bare)[_ORIGIN_IP]["event.id"] == \
+        before[_ORIGIN_IP]["event.id"]
+
+
+def test_a_classification_made_without_any_origin_identity_is_not_pinned(
+        tmp_path):
+    """The startup gap must not become permanent: a pass that knew no origin
+    address and left a row unknown exports what it has but pins nothing, so
+    the next export (with the seeder back) classifies live and pins THAT. A
+    device-only block classified in the same gap is exact and is pinned."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [
+        _transfer_record_report("r1", 1),
+        _transfer_record_report("r2", 2, rows=[
+            _transfer_record_row("10.0.0.7", 300)])]}
+    devices = lambda: {"rtr-07": {"swarm_ip": "10.0.0.7"}}
+    gap = telemetry.Telemetry(PeerRegistry(), reports_info=lambda: reports,
+                              device_info=devices, report_attribution=store)
+    gap._export_new_reports()
+    assert _peer_rows(gap)[_ORIGIN_IP]["iris.peer.attribution"] == "unknown"
+    assert store.get("r1") is None
+    assert store.get("r2") == (set(), {"10.0.0.7": "rtr-07"})
+
+    later = telemetry.Telemetry(_seeded_registry(),
+                                reports_info=lambda: reports,
+                                device_info=devices, report_attribution=store)
+    later._export_new_reports()
+    assert _peer_rows(later)[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+    assert store.get("r1") == ({_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+
+    # a genuine unknown classified while the origin WAS known is pinned as
+    # such: it is an answer, not a gap
+    reports["rtr-04"].append(_transfer_record_report("r3", 3, rows=[
+        _transfer_record_row("203.0.113.9", 5)]))
+    later._export_new_reports()
+    assert store.get("r3") == (set(), {})
+
+
+def test_pinned_attribution_is_bounded_to_the_report_ring(tmp_path):
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    reports = {"rtr-04": [_transfer_record_report("r1", 1),
+                          _transfer_record_report("r2", 2)]}
+    hub = telemetry.Telemetry(_seeded_registry(),
+                              reports_info=lambda: reports,
+                              report_attribution=store)
+    hub._export_new_reports()
+    assert store.get("r1") is not None and store.get("r2") is not None
+    reports["rtr-04"] = [_transfer_record_report("r2", 2)]
+    hub._export_new_reports()
+    assert store.get("r1") is None
+    assert store.get("r2") is not None
+    # a report without a transfer-record block has nothing to pin
+    reports["rtr-04"].append({"schema": "v2", "report_id": "r9",
+                              "received_at": 9})
+    hub._export_new_reports()
+    assert store.get("r9") is None
+
+
+def test_report_attribution_store_pins_once_and_reads_bad_state_as_empty(
+        tmp_path):
+    store = report_attribution.ReportAttributionStore(str(tmp_path),
+                                                      now_fn=lambda: 42.0)
+    assert store.get("r1") is None
+    assert store.pin("r1", {_ORIGIN_IP}, {"10.0.0.7": "rtr-07"}) is True
+    # first pin wins: the classification never changes once exported
+    assert store.pin("r1", set(), {}) is False
+    assert store.get("r1") == ({_ORIGIN_IP}, {"10.0.0.7": "rtr-07"})
+    doc = json.load(open(store.path))
+    assert doc["reports"]["r1"]["pinned_at"] == 42.0
+    store.prune({"r1"})
+    assert store.get("r1") is not None
+    store.prune(set())
+    assert store.get("r1") is None
+    # corrupt file: nothing pinned, nothing raised, and the next pin heals it
+    open(store.path, "w").write("{not json")
+    assert store.get("r1") is None
+    assert store.pin("r1", set(), {}) is True
+    assert store.get("r1") == (set(), {})
+    # an unwritable store costs the pin, never the export
+    reports = {"rtr-04": [_transfer_record_report()]}
+    class Boom:
+        def snapshot(self):
+            raise OSError("disk gone")
+
+        def sync(self, keep, pins):
+            raise OSError("disk gone")
+    hub = telemetry.Telemetry(_seeded_registry(),
+                              reports_info=lambda: reports,
+                              report_attribution=Boom())
+    hub._export_new_reports()
+    assert _peer_rows(hub)[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
+
+
+def test_report_attribution_sync_is_one_read_modify_write_per_pass(tmp_path):
+    """The export pass reads the store once (snapshot) and writes it at most
+    once (sync), whatever the fleet size; sync prunes and pins together and
+    leaves the file alone when nothing changed."""
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    assert store.snapshot() == {}
+    assert store.sync({"r1", "r2"}, {"r1": ({_ORIGIN_IP}, {}),
+                                     "r2": (set(), {"10.0.0.7": "rtr-07"})})
+    assert store.snapshot() == {"r1": ({_ORIGIN_IP}, {}),
+                                "r2": (set(), {"10.0.0.7": "rtr-07"})}
+    stamp = os.stat(store.path).st_mtime_ns
+    # nothing to drop, nothing new (r1 is already pinned: first pin wins)
+    assert store.sync({"r1", "r2"}, {"r1": (set(), {})}) is False
+    assert os.stat(store.path).st_mtime_ns == stamp
+    assert store.snapshot()["r1"] == ({_ORIGIN_IP}, {})
+    # r2 left the ring, r3 arrives: one write
+    assert store.sync({"r1", "r3"}, {"r3": (set(), {})}) is True
+    assert set(store.snapshot()) == {"r1", "r3"}
+    # a corrupt entry is not pinned, and does not spoil its neighbours
+    doc = json.load(open(store.path))
+    doc["reports"]["r3"] = {"origin": "not-a-list"}
+    json.dump(doc, open(store.path, "w"))
+    assert set(store.snapshot()) == {"r1"}
+
+
+def test_identity_view_is_cut_down_to_the_block_rows():
+    block = _transfer_record_block([_transfer_record_row(_ORIGIN_IP, 1),
+                                    _transfer_record_row("10.0.0.7", 2),
+                                    _transfer_record_row("10.0.0.8", 3)])
+    origin, devices = report_attribution.identity_view(
+        block, {_ORIGIN_IP, "192.0.2.99"},
+        {"10.0.0.7": "rtr-07", "10.0.0.50": "rtr-50"})
+    assert origin == {_ORIGIN_IP}
+    assert devices == {"10.0.0.7": "rtr-07"}
+    assert report_attribution.identity_view(None, {_ORIGIN_IP}, {}) == \
+        (set(), {})
+    # provisional: no origin known AND a row went unknown
+    assert report_attribution.is_provisional({"unknown_rows": 1}, set())
+    assert not report_attribution.is_provisional({"unknown_rows": 0}, set())
+    assert not report_attribution.is_provisional({"unknown_rows": 1},
+                                                 {_ORIGIN_IP})
+    assert not report_attribution.is_provisional(None, set())
+
+
+def test_origin_addresses_survive_a_restart_through_the_durable_endpoint_map(
+        tmp_path):
+    """The registry is in-memory and empty until the seeder re-announces
+    (minutes, in the lab: aria2 announces before the tracker listens and
+    retries later). The tracker's durable endpoint map already holds the
+    service:seeder principal's addresses, so a fresh hub knows the origin
+    from its first pass. Same principal rule: a DEVICE named seeder is not
+    the origin, and an aged-out endpoint is not the origin's address."""
+    path = str(tmp_path / "peer-endpoints.json")
+    peer_endpoints.record_endpoint(path, auth.Principal("service", "seeder"),
+                                   _ORIGIN_IP, 6881, 1000.0)
+    peer_endpoints.record_endpoint(path, auth.Principal("device", "seeder"),
+                                   "10.0.0.9", 6881, 1000.0)
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        origin_endpoints_info=lambda: peer_endpoints.fresh_endpoints(
+            path, 1010.0))
+    assert hub._origin_swarm_ips() == {_ORIGIN_IP}
+    # union with the live registry, not a replacement
+    hub = telemetry.Telemetry(
+        _seeded_registry(),
+        origin_endpoints_info=lambda: {
+            "service:seeder": {"principal_type": "service",
+                               "principal_id": "seeder",
+                               "endpoints": [{"ipv4": "192.0.2.11"}]}})
+    assert hub._origin_swarm_ips() == {_ORIGIN_IP, "192.0.2.11"}
+    expired = 1000.0 + peer_endpoints.endpoint_ttl() + 1
+    hub = telemetry.Telemetry(
+        PeerRegistry(),
+        origin_endpoints_info=lambda: peer_endpoints.fresh_endpoints(
+            path, expired))
+    assert hub._origin_swarm_ips() == set()
+
+    def boom():
+        raise RuntimeError("map down")
+    hub = telemetry.Telemetry(PeerRegistry(), origin_endpoints_info=boom)
+    assert hub._origin_swarm_ips() == set()
+    hub = telemetry.Telemetry(PeerRegistry(),
+                              origin_endpoints_info=lambda: "garbage")
+    assert hub._origin_swarm_ips() == set()
+
+
+def test_peer_transfer_records_carry_the_catalog_filename():
+    """iris.image.name is the catalog's filename for iris.image.id, looked up
+    at export; an image gone from the catalog keeps its id and has no name,
+    and an unreadable catalog costs the name, never the export."""
+    reports = {"rtr-04": [_transfer_record_report()]}
+    hub = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: reports,
+        images_info=lambda: {"img-1": {"filename": "cat9k.bin", "size": 1},
+                             "img-2": {"filename": "other.bin"}})
+    hub._export_new_reports()
+    rows = _peer_rows(hub)
+    assert {r["iris.image.id"] for r in rows.values()} == {"img-1"}
+    assert {r["iris.image.name"] for r in rows.values()} == {"cat9k.bin"}
+    hub = telemetry.Telemetry(_seeded_registry(), reports_info=lambda: reports,
+                              images_info=lambda: {"img-2": {"filename": "x"}})
+    hub._export_new_reports()
+    assert all("iris.image.name" not in r for r in _peer_rows(hub).values())
+    assert {r["iris.image.id"] for r in _peer_rows(hub).values()} == {"img-1"}
+
+    def boom():
+        raise RuntimeError("catalog unreadable")
+    hub = telemetry.Telemetry(_seeded_registry(), reports_info=lambda: reports,
+                              images_info=boom)
+    hub._export_new_reports()
+    assert len(_peer_rows(hub)) == 2
+    assert all("iris.image.name" not in r for r in _peer_rows(hub).values())

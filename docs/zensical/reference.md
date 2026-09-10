@@ -1124,6 +1124,30 @@ Prometheus family (see
 [Observability](observability.md#metrics-names-operator-contract)): a bound
 nothing reports is a bound an operator cannot check.
 
+### `report-attribution.json`
+
+`<state>/report-attribution.json` pins, per exported device report, the sender
+classification of its `peer_transfer_records` rows. The classification reads
+two volatile inputs — the addresses the `service:seeder` principal announces
+from and the swarm-address → device join — and a report is re-exported under
+the same `event.id` after every process start, before the seeder's first
+re-announce has reached the fresh registry. Without the pin the replay
+classified the origin's rows `unknown` where the first export said `origin`,
+and a backend that deduplicates by `event.id` saw two different records with
+one id. The file is **derived state** and safe to delete: the next pass
+classifies live again and pins that. The tracker process is its only writer.
+
+| Field | Meaning |
+| --- | --- |
+| `reports.<event_id>.origin` | The origin addresses among the report's rows when it was first exported. |
+| `reports.<event_id>.devices` | The `address → device_id` join among the report's rows at that time. |
+| `reports.<event_id>.pinned_at` | When the entry was written. |
+
+A classification made while the server knew **no** origin address at all and
+left a row `unknown` is not pinned, so the startup gap never becomes the
+permanent answer; the next export classifies it again. Entries are dropped
+when their report leaves the report ring, so the file is bounded by the ring.
+
 ### Lifecycle events
 
 Two events per plan, in this order and no other: `planned` when the assignment

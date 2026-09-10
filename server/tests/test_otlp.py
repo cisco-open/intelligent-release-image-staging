@@ -620,6 +620,7 @@ def test_peer_transfer_record_carries_the_measured_edge():
         "device_id": "rtr-04", "image_id": "cat9k.26.01.01",
         "transfer_id": "t1", "ip": "198.51.100.7", "port": 6881,
         "peer_device_id": "rtr-07", "peer_attribution": "device",
+        "image_name": "cat9k_iosxe.26.01.01.SPA.bin",
         "has_complete_file": True, "session_bytes_from_peer": 281_474_976,
         "session_bytes_to_peer": 1_048_576, "captured_at": 1787000000.0,
         "source": "aria2_session_counters", "capture_complete": True,
@@ -629,6 +630,10 @@ def test_peer_transfer_record_carries_the_measured_edge():
     assert flat["device.id"] == "rtr-04"          # the RECEIVING device
     assert flat["iris.peer.device.id"] == "rtr-07"
     assert flat["iris.peer.attribution"] == "device"
+    # the SENDER in one column, and the image by its catalog filename
+    assert flat["iris.peer.device_id"] == "rtr-07"
+    assert flat["iris.image.id"] == "cat9k.26.01.01"
+    assert flat["iris.image.name"] == "cat9k_iosxe.26.01.01.SPA.bin"
     assert flat["network.peer.address"] == "198.51.100.7"
     assert flat["iris.transfer_record.source"] == "aria2_session_counters"
     assert flat["event.id"] == "r1:198.51.100.7"
@@ -652,6 +657,10 @@ def test_peer_transfer_record_never_calls_an_unclassified_peer_a_device():
     assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "unknown"}
     # no resolution, no name -- but the bytes are still exported.
     assert "iris.peer.device.id" not in _attrs(rec)
+    # and no sender id either: an unknown sender has no identity to group
+    # by, and a placeholder in an id column would be one.
+    assert "iris.peer.device_id" not in _attrs(rec)
+    assert "iris.image.name" not in _attrs(rec)
     assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
         {"intValue": "9"}
     for bogus in ("peer", "", None, "DEVICE", "origin_maybe", 1):
@@ -671,6 +680,10 @@ def test_peer_transfer_record_marks_the_origin_as_origin():
     assert _attrs(rec)["iris.peer.attribution"] == {"stringValue": "origin"}
     assert _attrs(rec)["iris.transfer.session_bytes_from_peer"] == \
         {"intValue": "691167232"}
+    # the origin's row names its sender as the origin, in the same column a
+    # device row carries its device id -- one BY field for a per-source table.
+    assert _attrs(rec)["iris.peer.device_id"] == {"stringValue": "origin"}
+    assert "iris.peer.device.id" not in _attrs(rec)
 
 
 def test_peer_transfer_record_seeder_flag_is_not_an_origin_flag():
@@ -767,7 +780,8 @@ def test_peer_transfer_records_take_the_sender_class_from_the_server():
     ])
     classes = {"192.0.2.10": "origin", "198.51.100.7": "device"}
     enrich = {"peer_devices": {"198.51.100.7": "rtr-07",
-                               "192.0.2.10": "rtr-20"}}
+                               "192.0.2.10": "rtr-20"},
+              "image_name": "cat9k_iosxe.26.01.01.SPA.bin"}
     recs = otlp.build_peer_transfer_records(
         report, "rtr-04", enrich=enrich,
         classify=lambda ip: classes.get(ip, "unknown"))
@@ -781,6 +795,18 @@ def test_peer_transfer_records_take_the_sender_class_from_the_server():
     # heartbeat map must not name the origin, and an unknown stays unnamed.
     assert [g.get("iris.peer.device.id") for g in got] == \
         [None, "rtr-07", None]
+    # the one-column sender: origin / device id / nothing. The stale map's
+    # name for the origin's address must not leak in here either.
+    assert [g.get("iris.peer.device_id") for g in got] == \
+        ["origin", "rtr-07", None]
+    # the catalog filename rides on every row of the report
+    assert {g["iris.image.name"] for g in got} == \
+        {"cat9k_iosxe.26.01.01.SPA.bin"}
+    # and is simply absent when the caller could not resolve one
+    recs = otlp.build_peer_transfer_records(
+        report, "rtr-04", enrich={"peer_devices": {}},
+        classify=lambda ip: classes.get(ip, "unknown"))
+    assert all("iris.image.name" not in _attrs(r) for r in recs)
 
 
 def test_peer_transfer_records_treat_a_failed_classification_as_unknown():

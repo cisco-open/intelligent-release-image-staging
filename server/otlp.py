@@ -124,6 +124,24 @@ def _peer_attribution(value):
     return value if value in _PEER_ATTRIBUTIONS else "unknown"
 
 
+# The value ``iris.peer.device_id`` carries for a row the origin sent. Not the
+# seeder principal's id ("seeder"): a device may legitimately be NAMED seeder
+# (``device:seeder`` is a different principal from ``service:seeder``), and a
+# column an operator groups senders by must not let the two collide.
+ORIGIN_SOURCE_ID = "origin"
+
+
+def _peer_source_id(attribution, peer_device_id):
+    """One groupable sender column: the attributed device's id, ``origin`` for
+    the seeder, and NOTHING for an unknown row -- an unknown sender has no id,
+    and inventing a placeholder would put a non-identity in an id column."""
+    if attribution == "device":
+        return peer_device_id
+    if attribution == "origin":
+        return ORIGIN_SOURCE_ID
+    return None
+
+
 def _transfer_record_split_pairs(enrich):
     """Attribute pairs for ``telemetry.classify_peer_transfer_records``'s four figures,
     or [] when the block was never classified.
@@ -672,19 +690,29 @@ def build_peer_transfer_record(row):
     """
     if not isinstance(row, dict):
         row = {}
+    attribution = _peer_attribution(row.get("peer_attribution"))
+    peer_device_id = _enrich_str(row.get("peer_device_id"))
     pairs = [
         ("otel.log.name", "iris.device.peer_transfer_record"),
         (_SCHEMA_ATTR, 2),
         # The RECEIVING device -- the one that measured these bytes.
         ("device.id", _enrich_str(row.get("device_id"))),
         ("iris.image.id", _enrich_str(row.get("image_id"))),
+        # The catalog filename behind the id, looked up at export time.
+        # Presentation, not identity: an image that has left the catalog by
+        # then has an id and no name, and the id is still the join key.
+        ("iris.image.name", _enrich_str(row.get("image_name"))),
         ("iris.transfer.id", _enrich_str(row.get("transfer_id"))),
         ("network.peer.address", _enrich_str(row.get("ip"))),
         ("network.peer.port", _enrich_int(row.get("port"))),
         # Omitted when the join did not resolve; the attribution still says so.
-        ("iris.peer.device.id", _enrich_str(row.get("peer_device_id"))),
-        ("iris.peer.attribution",
-         _peer_attribution(row.get("peer_attribution"))),
+        ("iris.peer.device.id", peer_device_id),
+        ("iris.peer.attribution", attribution),
+        # The SENDER in one column: the device id for a device row, ``origin``
+        # for the seeder's row, absent for an unknown. ``iris.peer.device.id``
+        # stays as it was (device rows only); this is the column a per-source
+        # table groups by without a coalesce over attribution.
+        ("iris.peer.device_id", _peer_source_id(attribution, peer_device_id)),
         ("iris.peer.has_complete_file", row.get("has_complete_file")),
         ("iris.transfer.session_bytes_from_peer",
          _enrich_int(row.get("session_bytes_from_peer"))),
@@ -720,6 +748,8 @@ def build_peer_transfer_records(report, device_id=None, enrich=None,
     share off. ``enrich["peer_devices"]`` names the device behind an address,
     and the name is attached only where the class already says ``device`` --
     naming a peer we did not classify would assert the join twice over.
+    ``enrich["image_name"]`` is the catalog filename for the report's image
+    (``iris.image.name``), presentation only.
 
     Event time is the hook's own ``captured_at`` (the instant the counters were
     read), not the server's ingest time minutes later on the next EEM tick.
@@ -752,6 +782,10 @@ def build_peer_transfer_records(report, device_id=None, enrich=None,
         ctx["source"] = block.get("source")
         ctx["captured_at"] = block.get("captured_at")
         ctx["capture_complete"] = block.get("complete")
+        # The catalog filename for the report's image, resolved by the caller
+        # (telemetry._image_names); None when the image is not in the catalog.
+        ctx["image_name"] = enrich.get("image_name") \
+            if isinstance(enrich, dict) else None
         if classify is not None:
             try:
                 ctx["peer_attribution"] = classify(ip)
