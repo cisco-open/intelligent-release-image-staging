@@ -1566,6 +1566,30 @@ def _lines(payload):
     return payload.split(b"\n") if payload else []
 
 
+def _only_ios_warnings(payload):
+    """True when a config-mode payload is nothing but IOS advisory banners.
+
+    A configuration command is normally silent, and output from one is a
+    strong signal that something is wrong -- which is why the caller treats
+    it as a protocol violation. IOS breaks that rule for advisories: an
+    IE-3400 answers `iox` with
+
+        Warning: Do not remove SD flash card when IOx is enabled or errors
+        on SD device could occur.
+
+    which is purely informational and made every IOx install on that
+    platform fail at prepare_iox_scp with "configuration command returned
+    payload". IOS's own convention separates the two cases -- errors are
+    prefixed '%' and are already caught by _classify_ios_error, advisories
+    are prefixed 'Warning:' -- so accept a payload whose every non-empty
+    line is an advisory, and nothing else. The banner is still recorded in
+    the transcript either way; this only stops it being read as a failure.
+    """
+    lines = [line for line in payload.split(b"\n") if line.strip()]
+    return bool(lines) and all(
+        line.lstrip().startswith(b"Warning:") for line in lines)
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2251,7 +2275,8 @@ class IoxTransport(object):
                             raise IoxTransportError("unsupported_response", "end returned payload")
                         in_config = False
                     elif (in_config and question is None and payload and
-                          payload_error is None):
+                          payload_error is None and
+                          not _only_ios_warnings(payload)):
                         raise IoxTransportError("unsupported_response", "configuration command returned payload")
                     if (purpose == "save" and line == b"write memory" and
                             payload != b"[OK]\n" and payload_error is None):
