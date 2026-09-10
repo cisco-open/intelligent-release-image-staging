@@ -4925,7 +4925,7 @@ def test_cancelled_authority_waiter_preserves_physical_manual_worker_slot(monkey
 
 def test_catalyst_8000_offers_router_and_iox_and_resolves_the_iox_arch():
     """IOx on a Catalyst 8000: amd64 package, bootflash staging, no SSD share
-    -- the installer derives the VirtualPortGroup attachment from the router
+    -- the installer derives the VirtualPortGroup vnic from the router
     management type, so the arch env carries no AppGig interface."""
     assert gui_onboard.install_options_for("C8000V") == ["router", "iox"]
     env = gui_onboard._iox_arch_env("r1", "C8000V")
