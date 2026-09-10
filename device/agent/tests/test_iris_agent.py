@@ -5292,3 +5292,252 @@ def test_tick_exit_code_signals_only_catalog_plane_failure_to_the_launcher():
                    "complete", "stage-error", "multi:stage-error,complete",
                    "instruction-apply-unavailable", None):
         assert iris_agent._tick_exit_code(result) == 0, result
+
+
+# ---- IE-3400 (IOx app, staging to sdflash:) placement against a pre-existing
+# same-name root file. Every IOS line below is verbatim from an IE-3400-8T2S
+# on IOS-XE 17.15.4 with `file prompt quiet` (lab device 3400-1, 2026-09-10),
+# captured through the agent's own cli_ssh.SSHCli transport. The device had
+# reached copy_failed after four attempts: each one scp-pushed and copied the
+# 459 MB image to the temp name successfully, then Phase 2's rename was
+# refused because a byte-identical file already sat at the sdflash: root. ----
+
+_IE3400_FNAME = "ie3x00-universalk9.26.01.01.SPA.bin"
+_IE3400_TMP = _IE3400_FNAME + ".iris-tmp"
+_IE3400_SIZE = 459210572
+_IE3400_SHA512 = ("8d1bfcaeac3b03a6907f14869cb1f76c1db37b2f366237e277b9d1c1908f27dc"
+                  "8d8cebd4978fd0bffe9201389ee88aa7ac4e061e6fedb4ba68b1613aa8250b13")
+_IE3400_RUNNING = "flash:ie3x00-universalk9.17.15.04.SPA.bin"
+_IE3400_DIR_ROOT = (
+    "Directory of sdflash:/ie3x00-universalk9.26.01.01.SPA.bin\n"
+    "\n"
+    "52      -rwx        459210572   Sep 2 2026 16:26:10 +00:00  "
+    "ie3x00-universalk9.26.01.01.SPA.bin\n"
+    "\n"
+    "9675177984 bytes total (8297504768 bytes free)")
+_IE3400_DIR_TMP_ABSENT = (
+    "%Error opening sdflash:/ie3x00-universalk9.26.01.01.SPA.bin.iris-tmp "
+    "(No such file or directory)")
+_IE3400_VERIFY = (
+    "....Done!\n"
+    "verify /sha512 (sdflash:ie3x00-universalk9.26.01.01.SPA.bin) = "
+    + _IE3400_SHA512 + "\n\n")
+# `copy` and `rename` outputs as observed on the probe files used to
+# reproduce the refusal without touching the image at the root; the rename
+# refusal is then spelled for the root names the agent actually issues.
+_IE3400_COPY_OK = ("Copy in progress...C\n"
+                   "229 bytes copied in 0.140 secs (1636 bytes/sec)")
+_IE3400_RENAME_REFUSED_PROBE = (
+    "%Error renaming sdflash:guest-share/iris/iris-probe-a.txt to "
+    "sdflash:guest-share/iris/iris-probe-b.txt (File exists)")
+_IE3400_RENAME_REFUSED = (
+    "%Error renaming sdflash:ie3x00-universalk9.26.01.01.SPA.bin.iris-tmp to "
+    "sdflash:ie3x00-universalk9.26.01.01.SPA.bin (File exists)")
+
+
+def _ie3400_dir_tmp_present():
+    # The temp copy's own row, in the same `dir` shape as the root file.
+    return _IE3400_DIR_ROOT.replace(
+        "sdflash:/" + _IE3400_FNAME, "sdflash:/" + _IE3400_TMP).replace(
+        "+00:00  " + _IE3400_FNAME, "+00:00  " + _IE3400_TMP)
+
+
+def test_ie3400_sdflash_native_root_size_reads_present_and_absent_rows():
+    cmds = []
+    assert iris_agent._ios_root_file_size(
+        _IE3400_FNAME, "sdflash:",
+        lambda c: cmds.append(c) or _IE3400_DIR_ROOT) == _IE3400_SIZE
+    assert iris_agent._ios_root_file_size(
+        _IE3400_TMP, "sdflash:",
+        lambda c: cmds.append(c) or _IE3400_DIR_TMP_ABSENT) is None
+    assert cmds == ["dir sdflash:" + _IE3400_FNAME, "dir sdflash:" + _IE3400_TMP]
+    # Only the proved IOS staging disks; anything else is still refused.
+    with pytest.raises(ValueError):
+        iris_agent._ios_root_file_size(_IE3400_FNAME, "usbflash1:",
+                                       lambda c: _IE3400_DIR_ROOT)
+
+
+def test_ie3400_sdflash_native_sha512_runs_read_only_on_the_vty():
+    cmds = []
+    assert iris_agent._verify_iox_root(
+        _IE3400_FNAME, "sdflash:", _IE3400_SHA512,
+        lambda c: cmds.append(c) or _IE3400_VERIFY) is True
+    assert cmds == ["verify /sha512 sdflash:" + _IE3400_FNAME]
+    assert iris_agent._verify_iox_root(
+        _IE3400_FNAME, "sdflash:", "0" * 128, lambda c: _IE3400_VERIFY) is False
+    # A wrong-file, error, or non-text answer is never a match — it raises, and
+    # the adoption caller turns that into "blocked" rather than guessing.
+    for bad in (_IE3400_DIR_TMP_ABSENT,
+                _IE3400_VERIFY.replace(_IE3400_FNAME, "other.bin"), None):
+        with pytest.raises(ValueError):
+            iris_agent._verify_iox_root(_IE3400_FNAME, "sdflash:",
+                                        _IE3400_SHA512, lambda c: bad)
+    for fname, prefix, digest in (("../x.bin", "sdflash:", _IE3400_SHA512),
+                                  (_IE3400_FNAME, "usbflash1:", _IE3400_SHA512),
+                                  (_IE3400_FNAME, "sdflash:", "not-a-digest")):
+        with pytest.raises(ValueError):
+            iris_agent._verify_iox_root(fname, prefix, digest,
+                                        lambda c: _IE3400_VERIFY)
+
+
+def _ie3400_adoption_deps(cli, reclaimed, emitted):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        root_file_size=lambda name, prefix: iris_agent._ios_root_file_size(
+            name, prefix, cli),
+        verify_root=lambda name, prefix, digest: iris_agent._verify_iox_root(
+            name, prefix, digest, cli),
+        running_image=lambda: "ie3x00-universalk9.17.15.04.SPA.bin",
+        boot_image=lambda: "ie3x00-universalk9.17.15.04.SPA.bin",
+        reclaim_bundle=lambda prefix, names: reclaimed.append(
+            (prefix, list(names))),
+        emit=lambda m, msg: emitted.append((m, msg)))
+
+
+def test_ie3400_sdflash_adopts_identical_root_file_and_reclaims_pushed_scratch():
+    image = {"filename": _IE3400_FNAME, "size": _IE3400_SIZE,
+             "sha256": "f" * 64, "sha512": _IE3400_SHA512}
+    cmds, reclaimed, emitted = [], [], []
+
+    def cli(c):
+        cmds.append(c)
+        if c == "dir sdflash:" + _IE3400_FNAME:
+            return _IE3400_DIR_ROOT
+        if c == "dir sdflash:" + _IE3400_TMP:
+            return _IE3400_DIR_TMP_ABSENT
+        if c.startswith("verify /sha512 "):
+            return _IE3400_VERIFY
+        raise AssertionError("unexpected IOS command %r" % c)
+
+    cfg = dict(CFG, device_platform="iox", stage_dir="/iox_data/iris",
+               target_fs="sdflash:")
+    deps = _ie3400_adoption_deps(cli, reclaimed, emitted)
+    assert iris_agent._try_adopt_guestshell_root(
+        cfg, deps, image, "sdflash:") == ("adopted", None)
+    assert cmds == ["dir sdflash:" + _IE3400_FNAME,
+                    "verify /sha512 sdflash:" + _IE3400_FNAME,
+                    "dir sdflash:" + _IE3400_FNAME,
+                    "dir sdflash:" + _IE3400_TMP]
+    # Only IRIS's own scp-pushed scratch is reclaimed — never the root file.
+    assert reclaimed == [("sdflash:", ["guest-share/iris/" + _IE3400_FNAME])]
+    assert emitted[-1][0] == "ROOTCOPY-ADOPTED"
+
+
+def test_ie3400_sdflash_different_root_file_is_left_in_place_with_a_precise_error():
+    image = {"filename": _IE3400_FNAME, "size": _IE3400_SIZE,
+             "sha256": "f" * 64, "sha512": "0" * 128}
+    cmds, reclaimed, emitted = [], [], []
+
+    def cli(c):
+        cmds.append(c)
+        if c == "dir sdflash:" + _IE3400_FNAME:
+            return _IE3400_DIR_ROOT
+        if c.startswith("verify /sha512 "):
+            return _IE3400_VERIFY          # a real file, different content
+        raise AssertionError("unexpected IOS command %r" % c)
+
+    cfg = dict(CFG, device_platform="iox", stage_dir="/iox_data/iris")
+    deps = _ie3400_adoption_deps(cli, reclaimed, emitted)
+    verdict, error = iris_agent._try_adopt_guestshell_root(
+        cfg, deps, image, "sdflash:")
+    assert verdict == "blocked"
+    assert error == ("existing IOS root file SHA-512 does not match the "
+                     "catalog; left in place")
+    assert reclaimed == []
+    assert not any(c.split()[0] in ("delete", "copy", "rename") for c in cmds)
+    # No IOS CLI on XR: adoption stays out of that platform's way entirely.
+    cmds.clear()
+    assert iris_agent._try_adopt_guestshell_root(
+        dict(cfg, device_platform="xr-appmgr"), deps, image, "sdflash:"
+    ) == ("not-applicable", None)
+    assert cmds == []
+
+
+def test_ie3400_sdflash_rename_refusal_is_reported_and_never_deletes_the_root_file():
+    # The direct (SSH-to-self) placement path, fed the device's own answers:
+    # Phase 1 lands and proves the temp copy, then IOS refuses the rename
+    # because the real name already exists.
+    cmds, emitted = [], []
+
+    def cli(c):
+        cmds.append(c)
+        if c == "dir sdflash:" + _IE3400_TMP:
+            return _ie3400_dir_tmp_present()
+        if c.startswith("copy "):
+            return _IE3400_COPY_OK
+        if c.startswith("rename "):
+            return _IE3400_RENAME_REFUSED
+        return ""
+
+    ok = iris_agent._copy_to_root_direct_impl(
+        _IE3400_FNAME, "sdflash:", cli, lambda m, msg: emitted.append((m, msg)),
+        reverify_fn=lambda *a, **k: iris_agent._agent_reverify_root(
+            *a, poll_attempts=1, sleep_fn=lambda s: None, **k),
+        delete_source_on_success=True,
+        running_image_fn=lambda: _IE3400_RUNNING, expected_size=_IE3400_SIZE)
+    assert ok is False
+    assert cmds == [
+        "delete /force sdflash:" + _IE3400_TMP,
+        "copy sdflash:/guest-share/iris/%s sdflash:%s" % (_IE3400_FNAME, _IE3400_TMP),
+        "dir sdflash:" + _IE3400_TMP,
+        "rename sdflash:%s sdflash:%s" % (_IE3400_TMP, _IE3400_FNAME),
+    ]
+    # No 60 s dir poll re-deriving the same answer, no delete of the real
+    # name, and the scratch is kept for the next attempt.
+    assert "delete /force sdflash:" + _IE3400_FNAME not in cmds
+    assert not any("guest-share" in c and c.startswith("delete") for c in cmds)
+    fails = [msg for m, msg in emitted if m == "ROOTCOPY-FAIL"]
+    assert len(fails) == 1
+    assert "refused by IOS" in fails[0]
+    assert "sdflash:%s was left exactly as it was" % _IE3400_FNAME in fails[0]
+    assert fails[0].endswith(_IE3400_RENAME_REFUSED)
+    # The refusal line is recognised as IOS printed it; silence and a raise
+    # (None) are not refusals.
+    assert (iris_agent._ios_rename_refusal(_IE3400_RENAME_REFUSED_PROBE)
+            == _IE3400_RENAME_REFUSED_PROBE)
+    assert iris_agent._ios_rename_refusal("") is None
+    assert iris_agent._ios_rename_refusal(None) is None
+    assert iris_agent._ios_rename_refusal(_IE3400_COPY_OK) is None
+
+
+def test_ie3400_sdflash_tick_adopts_after_copy_failed_without_pushing_or_copying():
+    # The device's actual state after four refused placements, run through
+    # run_once with an IOx profile whose sdflash: root already holds the
+    # catalog bytes: one tick adopts the file, clears the terminal state and
+    # reports ready — no scp push, no copy, no rename.
+    img = "ie3x00-universalk9.26.01.01"
+    cat = FakeCatalog({"approved_image_id": img},
+                      {"id": img, "filename": _IE3400_FNAME, "size": _IE3400_SIZE,
+                       "sha256": "f" * 64, "sha512": _IE3400_SHA512})
+    sizes = {"/iox_data/iris/" + _IE3400_FNAME: _IE3400_SIZE,
+             "sdflash:" + _IE3400_FNAME: _IE3400_SIZE}
+    deps, emitted, _, _, copied, _, _, bundle_reclaimed = make_deps(
+        cat, sizes, verify_ok=True, free=8297504768)
+    hashed = []
+    deps = deps._replace(
+        io_transfer=True,
+        target_fs=lambda: ("sdflash:", 8297504768),
+        running_image=lambda: "ie3x00-universalk9.17.15.04.SPA.bin",
+        verify_root=lambda name, prefix, digest: hashed.append(
+            (name, prefix, digest)) or True)
+    cfg = dict(CFG, device_platform="iox", stage_dir="/iox_data/iris",
+               target_fs="sdflash:")
+    state = {"schema_version": iris_agent._STATE_SCHEMA, "image_id": img,
+             "stage_fs": "sdflash:",
+             img: {"copy_attempts": 4, "copy_terminal": True, "done": True,
+                   "download_started": True, "ios_copy_started": True,
+                   "sha": "f" * 64,
+                   "stage_error": "final IOS placement failed; inspect IRIS ROOTCOPY-FAIL",
+                   "torrent_auth_format": "bearer-https-v2",
+                   "torrent_id": "ih:4981a26178b886e78d11cef6227c062ffff3966d"}}
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert copied == []                                   # nothing was copied
+    assert hashed == [(_IE3400_FNAME, "sdflash:", _IE3400_SHA512)]
+    assert bundle_reclaimed == [("sdflash:", ["guest-share/iris/" + _IE3400_FNAME])]
+    st = state[img]
+    assert st["copied"] is True and st["origin"] == "adopted"
+    assert st["root_file"] == _IE3400_FNAME and state["root_file"] == _IE3400_FNAME
+    for key in ("copy_attempts", "copy_terminal", "stage_error", "ios_copy_started"):
+        assert key not in st
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    assert any(m == "ROOTCOPY-ADOPTED" for m, _ in emitted)

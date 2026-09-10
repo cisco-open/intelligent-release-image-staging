@@ -42,6 +42,13 @@ _STATE_SCHEMA = 2
 # catalog value can't inject extra IOS config.
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# The IOS filesystems a pre-existing root image may be attested on (native
+# `dir` size + `verify /sha512`) before IRIS decides whether to place a copy at
+# all: the C9300 Guest Shell / C9k IOx boot disks, and sdflash: — the IE-3x00
+# family's IOx staging disk, where the agent's SSH-to-self vty reads it the
+# same way. Anything else is refused as an invalid root path.
+_IOS_ROOT_PREFIXES = ("flash:", "bootflash:", "sdflash:")
+
 # A failed IOS copy can occupy its full 900-second applet budget. Four attempts
 # bound that disruption while still tolerating several transient failures. The
 # first retry runs on the next tick; subsequent retries use a five-minute
@@ -186,6 +193,20 @@ def _guestshell_root_ios_path(stage_dir, target_prefix, fname):
     root = roots.get(target_prefix)
     if (root is None or stage_dir != root + "/guest-share/iris"
             or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
+        return None
+    return target_prefix + fname
+
+
+def _iox_root_ios_path(target_prefix, fname):
+    """The IOS root path an IOx-app agent attests before placing `fname`.
+
+    The IOx container has no mount of the IOS disk at all (IE-3x00 sdflash:,
+    C9k flash:/bootflash:), so unlike the Guest Shell there is no local
+    mount shape to cross-check — the proved staging prefix (target_fs) and a
+    catalog filename that passes the IOS-command allowlist are the whole
+    contract. None for any other prefix or a non-canonical name."""
+    if (target_prefix not in _IOS_ROOT_PREFIXES or not isinstance(fname, str)
+            or not _FILENAME_RE.fullmatch(fname)):
         return None
     return target_prefix + fname
 
@@ -1136,20 +1157,39 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
     Returns ``("adopted", None)`` only after the root bytes have the catalog
     size and SHA-512 and any IRIS-reserved ``.iris-tmp`` leftover is confirmed
     gone. ``("absent", None)`` means ordinary copy placement may proceed.
-    ``("not-applicable", None)`` keeps non-Guest-Shell/noncanonical platforms
-    on their existing placement path. Every ambiguous read or content mismatch
-    returns ``("blocked", <operator-facing error>)`` without touching the real
-    destination.
+    ``("not-applicable", None)`` keeps noncanonical Guest Shell mounts and
+    platforms without an IOS CLI (xr-appmgr) on their existing placement
+    path. Every ambiguous read or content mismatch returns ``("blocked",
+    <operator-facing error>)`` without touching the real destination.
+
+    Applies to the Guest Shell AND the IOx app (`device_platform = iox`):
+    both place by copying to a reserved temp name and renaming it over the
+    real name, and IOS-XE `rename` refuses an existing destination outright
+    — observed verbatim on an IE-3400-8T2S running 17.15.4 with `file prompt
+    quiet`, staging to sdflash: (`%Error renaming ... (File exists)`), where
+    every placement attempt re-pushed and re-copied the image only to have
+    Phase 2 refused, until the retry budget ran out. Attesting the existing
+    root file first (native size + SHA-512) adopts a byte-identical one and
+    leaves a different one alone with a precise error, instead of burning
+    four full copies on a rename IOS will never perform.
 
     The only cleanup this path can request is the established guarded reclaim
-    of ``<filename>.iris-tmp``.  It never submits the real filename to an IOS
-    delete or rename command.
+    of ``<filename>.iris-tmp`` — plus, on IOx only, IRIS's own scp-pushed
+    scratch under ``<FS>guest-share/iris/`` once adoption has succeeded (the
+    same source the direct copy path deletes after a verified placement; the
+    swarm seeds from the CAF-persistent stage_dir, so it is a transfer
+    intermediary, not the seeding file). It never submits the real filename
+    to an IOS delete or rename command.
     """
-    if cfg.get("device_platform"):
-        return "not-applicable", None
+    platform = cfg.get("device_platform")
     fname = image["filename"]
-    root_path = _guestshell_root_ios_path(
-        cfg.get("stage_dir"), target_prefix, fname)
+    if platform == "iox":
+        root_path = _iox_root_ios_path(target_prefix, fname)
+    elif platform:
+        return "not-applicable", None
+    else:
+        root_path = _guestshell_root_ios_path(
+            cfg.get("stage_dir"), target_prefix, fname)
     if root_path is None:
         return "not-applicable", None
 
@@ -1208,6 +1248,20 @@ def _try_adopt_guestshell_root(cfg, deps, image, target_prefix):
             deps.emit("ROOTCOPY-ADOPT-REFUSED", "%s: %s" % (fname, error))
             return "blocked", error
 
+    if platform == "iox":
+        # The IOx placement path scp-pushes the staged file to
+        # <FS>guest-share/iris/<fname> ahead of every copy attempt and deletes
+        # it only after a verified placement (_copy_to_root_direct_impl's
+        # delete_source_on_success). Adoption IS that verified placement,
+        # minus the copy, so reclaim the push the same way — otherwise the
+        # failed attempts that led here leave a full duplicate image on the
+        # target FS for good. IRIS's own scratch name, never the real file.
+        # reclaim_bundle on this platform is a plain `delete /force` per
+        # name on the vty; harmless when nothing was pushed.
+        try:
+            deps.reclaim_bundle(target_prefix, ["guest-share/iris/" + fname])
+        except Exception:
+            pass
     deps.emit("ROOTCOPY-ADOPTED",
               "%s already exists at %s with catalog size and SHA-512; "
               "adopted without replacement" % (fname, target_prefix))
@@ -4212,7 +4266,7 @@ def _dir_size_of(dir_out, fname):
 
 def _ios_root_file_size(fname, prefix, cli_execute_fn):
     """Strict native size: only explicit IOS ENOENT proves absence."""
-    if (prefix not in ("flash:", "bootflash:")
+    if (prefix not in _IOS_ROOT_PREFIXES
             or not isinstance(fname, str) or not _FILENAME_RE.fullmatch(fname)):
         raise ValueError("invalid IOS root path")
     path = prefix + fname
@@ -4240,6 +4294,30 @@ def _parse_ios_sha512(output, root_path):
             or "%Error" in output or "% Invalid" in output):
         raise ValueError("IOS SHA-512 response is missing or ambiguous")
     return hashes[0].lower()
+
+
+def _verify_iox_root(fname, prefix, digest, cli_execute_fn):
+    """Read-only native IOS SHA-512 of `<prefix><fname>`, run DIRECTLY on the
+    IOx agent's SSH-to-self vty.
+
+    The Guest Shell needs the asynchronous IRIS-ROOT-HASH EEM policy
+    (_verify_guestshell_root) only because its synchronous `cli` module hangs
+    on long-running commands. The IOx transport is a real vty session with a
+    900 s execution budget (cli_ssh.SSHCli), which runs `verify /sha512` to
+    completion like any other command — measured at 26 s for a 459 MB image
+    on an IE-3400-8T2S. `verify` reads the file and prints one digest line;
+    no image is copied, deleted or modified. Returns True only when the ONE
+    digest IOS bound to exactly this path equals the catalog's; raises on
+    any other response (_parse_ios_sha512), which the adoption caller turns
+    into a "blocked" verdict rather than a guess."""
+    root_path = _iox_root_ios_path(prefix, fname)
+    if root_path is None or not isinstance(digest, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{128}", digest):
+        raise ValueError("invalid native root hash request")
+    output = cli_execute_fn("verify /sha512 %s" % root_path)
+    if not isinstance(output, str):
+        raise ValueError("IOS SHA-512 response unavailable")
+    return _parse_ios_sha512(output, root_path) == digest.lower()
 
 
 def _verify_guestshell_root(fname, prefix, digest, stage_dir,
@@ -4722,6 +4800,19 @@ def _copy_to_root_impl(fname, target_prefix, cli_configure_fn, cli_execute_fn,
                               expected_size=expected_size)
 
 
+def _ios_rename_refusal(rename_out):
+    """The `%Error renaming ...` line IOS printed for a `rename` it refused, or
+    None. Only an explicit refusal in the command's own output counts — an
+    empty output is the ordinary silent success, and a raise (None here) is
+    ambiguous and stays with the dir-based verdict."""
+    if not isinstance(rename_out, str):
+        return None
+    for line in rename_out.splitlines():
+        if line.lstrip().startswith("%Error renaming"):
+            return line.strip()
+    return None
+
+
 def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
                               reverify_fn=_agent_reverify_root, copy_source=None,
                               delete_source_on_success=False,
@@ -4837,16 +4928,37 @@ def _copy_to_root_direct_impl(fname, target_prefix, cli_execute_fn, emit_fn,
     # docstring above for why this is the smallest window this driver can
     # make the replacement's exposure.
     try:
-        cli_execute_fn("rename %s %s" % (tmp_dst, dst))
+        rename_out = cli_execute_fn("rename %s %s" % (tmp_dst, dst))
     except Exception as e:
         # Unlike the copy above, a raise here is NOT treated as "nothing
         # happened": Phase 1 already proved good bytes exist at the temp
         # name, so the only open question is whether the rename itself
         # landed. rename_reverify_fn below is the actual verdict either way.
+        rename_out = None
         emit_fn("ROOTCOPY-FAIL",
                 "%s rename into place raised; the verified bytes at %s are "
                 "unharmed either way, and the dir check below is the real "
                 "verdict on whether the rename landed: %s" % (fname, tmp, e))
+    refused = _ios_rename_refusal(rename_out)
+    if refused:
+        # IOS answered the rename with an explicit refusal, so nothing moved:
+        # `<fname>` still holds whatever it held, and the proven bytes are
+        # still at the temp name. Observed verbatim on an IE-3400-8T2S
+        # (IOS-XE 17.15.4, `file prompt quiet`) when the real name already
+        # existed at the sdflash: root — this release's `rename` does not
+        # overwrite an existing destination, quiet prompts or not:
+        #   %Error renaming sdflash:<f>.iris-tmp to sdflash:<f> (File exists)
+        # Polling the pair for 60 s would only re-derive the same verdict,
+        # and its generic "cannot be confirmed" wording would send an operator
+        # looking for a lost rename rather than at the file in the way. The
+        # pre-copy adoption probe (_try_adopt_guestshell_root) is what keeps
+        # a byte-identical existing file from reaching this point at all.
+        emit_fn("ROOTCOPY-FAIL",
+                "%s rename into place refused by IOS, so %s was left exactly "
+                "as it was and the verified bytes remain at %s (this IOS "
+                "release does not rename over an existing file): %s"
+                % (fname, dst, tmp_dst, refused))
+        return False
     ok = rename_reverify_fn(fname, target_prefix, cli_execute_fn, emit_fn,
                             expected_size=expected_size)
     # In container mode the scp-pushed guest-share scratch is a transfer
@@ -5558,8 +5670,15 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
         copy_in_place=False,
         root_file_size=lambda name, prefix: _ios_root_file_size(
             name, prefix, cli_execute),
-        verify_root=lambda name, prefix, digest: _verify_guestshell_root(
-            name, prefix, digest, cfg["stage_dir"], cli_configure))
+        # IOx has a real vty: hash synchronously. The Guest Shell's
+        # `cli` module cannot sit through a long command, hence its
+        # asynchronous EEM policy and receipt files instead.
+        verify_root=(
+            (lambda name, prefix, digest: _verify_iox_root(
+                name, prefix, digest, cli_execute))
+            if _container_iox else
+            (lambda name, prefix, digest: _verify_guestshell_root(
+                name, prefix, digest, cfg["stage_dir"], cli_configure))))
     return _with_instruction_step(deps, cfg, conf_path, platform)
 
 
