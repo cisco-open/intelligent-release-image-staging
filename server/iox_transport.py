@@ -1874,14 +1874,16 @@ class _Dialogue(object):
         echo_end = self.wait_until(
             lambda data: self._echo_end(data, expected_echo))
         payload_start = echo_end
+        # Whether the device actually ASKED the confirmation. It is
+        # conditional: `file prompt quiet` suppresses it, and IRIS sets that
+        # itself during prepare_iox_scp, so a teardown's `no app-hosting
+        # appid` executes silently and returns straight to the config prompt.
+        # Waiting unconditionally hung the teardown until its deadline; then
+        # stripping an answer echo that was never sent turned the silent
+        # success into "interactive answer echo mismatch". Both are gated on
+        # this flag now.
+        question_asked = False
         if question is not None:
-            # The confirmation is CONDITIONAL. `file prompt quiet` suppresses
-            # it -- and IRIS sets that itself during prepare_iox_scp -- so the
-            # device may answer with its prompt and never ask. Waiting
-            # unconditionally hung the teardown until the deadline: the
-            # question is shorter than nothing that ever arrived, so the
-            # mismatch branch could not fire either and cleanup_config died
-            # on a timeout with the app already removed.
             asked = []
             def question_seen(data):
                 tail = data[echo_end:]
@@ -1895,6 +1897,7 @@ class _Dialogue(object):
                 return None
             question_end = self.wait_until(question_seen)
             if asked:
+                question_asked = True
                 self.send(answer + b"\n")
                 payload_start = question_end
 
@@ -1921,7 +1924,7 @@ class _Dialogue(object):
             return position, len(data), prompt_kind
         prompt_start, prompt_end, prompt_kind = self.wait_until(final)
         payload = self._data()[payload_start:prompt_start]
-        if question is not None:
+        if question_asked:
             if answer:
                 if not payload.startswith(answer + b"\n"):
                     raise IoxTransportError("unsupported_response", "interactive answer echo mismatch")
