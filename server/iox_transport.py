@@ -1590,6 +1590,35 @@ def _only_ios_warnings(payload):
         line.lstrip().startswith(b"Warning:") for line in lines)
 
 
+# The lifecycle steps that CLEAR prior application state. Both recipes run
+# them before doing anything else -- the installer to make a re-install
+# idempotent, the teardown to remove what is there -- so for all three the
+# desired end state is "this app is not running". IOS answers a request to
+# stop/deactivate/uninstall an app it does not have with an explicit
+# %Error, which _classify_ios_error rightly reads as a rejection in every
+# other context. Here it means the step's goal is ALREADY met.
+_APP_CLEARING_PURPOSES = frozenset((
+    "app_stop", "app_deactivate", "app_uninstall"))
+_APP_ABSENT_RE = re.compile(
+    br"(?im)^%\s*Error:\s*The application:\s*\S+,\s*does not exist\s*$")
+
+
+def _app_already_absent(purpose, payload):
+    """True when a state-clearing step failed only because there was nothing
+    to clear.
+
+    Without this a first install on a CLEAN device died at step one: the
+    installer stops any previous app, IOS said the application does not
+    exist, and the whole install was rejected -- so onboarding only ever
+    worked on a device that already had the app. The teardown had the mirror
+    problem: a device already in the desired state could not be reconciled
+    (issue #225). Matched narrowly, on these three purposes only: an app that
+    EXISTS but refuses to stop still reports its own error and still fails.
+    """
+    return (purpose in _APP_CLEARING_PURPOSES and
+            _APP_ABSENT_RE.search(payload) is not None)
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2266,6 +2295,8 @@ class IoxTransport(object):
                     framed_payloads.append(payload)
                     payload_spans.append({"offset": span[0], "length": span[1]})
                     payload_error = _classify_ios_error(payload)
+                    if _app_already_absent(purpose, payload):
+                        payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
                     if line == b"configure terminal":
