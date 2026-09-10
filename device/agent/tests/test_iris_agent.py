@@ -985,6 +985,28 @@ def test_finished_image_forgotten_by_aria2_is_re_added_to_seed_on_xr():
     assert cat.heartbeats[-1]["current_image_id"] == "img1"
 
 
+def test_re_seed_fetches_the_missing_torrent_of_an_adopted_image_first():
+    """Live XR failure 2026-09-10 (100.90.170.81): an image adopted in place
+    never fetched its torrent, so the re-seed's aria_add raised
+    FileNotFoundError every tick (RESEED-DEFERRED). The arm now fetches the
+    metainfo the way the download path does, records the identity it was
+    fetched for, and only then hands the file to aria2."""
+    cat = _reseed_catalog()
+    deps, emitted, _, aria, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True, aria_remove=lambda f: None)
+    state = _reseed_state()
+    assert "torrent_id" not in state["img1"]
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert cat.downloaded == [("img1", "/stage/img1.torrent")]
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert state["img1"]["torrent_id"] == iris_agent._torrent_identity(
+        cat.get_image("img1"))
+    assert any(m == "RESEED" for m, _ in emitted)
+    assert not any(m == "RESEED-DEFERRED" for m, _ in emitted)
+    assert copied == []
+
+
 def test_finished_image_forgotten_by_aria2_is_re_added_to_seed_on_iox():
     """Same recreation, IOx shape: copy_in_place=False (the root copy is a
     separate file on IOS-visible storage, placed through the io_transfer

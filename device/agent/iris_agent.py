@@ -2093,6 +2093,18 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         and (done_st.get("tele") or {}).get(
                             "content_sha256_state") == "verified"
                         and deps.aria_stats(stage) is None):
+                    # An image adopted in place (XR: the file was already on
+                    # harddisk:) never fetched its torrent -- the download
+                    # path that does so is exactly what adoption skipped --
+                    # so the metainfo aria2 needs may be absent or stale
+                    # (a same-id republish). Fetch it the way the download
+                    # path does before handing the file to aria2; a fetch
+                    # failure lands in the deferred arm below and retries.
+                    if (deps.file_size(torrent) is None
+                            or done_st.get("torrent_id") != torrent_id):
+                        deps.catalog.download_torrent(img_id, torrent)
+                        done_st["torrent_id"] = torrent_id
+                        done_st["torrent_auth_format"] = torrent_transport
                     deps.aria_remove(image["filename"])
                     deps.aria_add(torrent, stage_dir)
                     deps.emit("RESEED",
