@@ -2353,6 +2353,11 @@ class IoxTransport(object):
                     category = "unsupported_response"
                     framing = False
             ios_error = _classify_ios_error(response_payload)
+            # Same allowance as the per-line pass above: this second
+            # classification runs on the final payload and would otherwise
+            # re-impose the rejection the loop just forgave.
+            if _app_already_absent(purpose, response_payload):
+                ios_error = None
             if ios_error is not None:
                 category = ios_error
             if purpose == "verification_read":
