@@ -1688,6 +1688,25 @@ def _cleanup_absent(purpose, payload):
         _CLEANUP_ABSENT_RE.match(line.strip()) for line in lines)
 
 
+# Removing an SVI or L2 VLAN that is already gone is benign during teardown,
+# but IOS does not say so kindly: an IE-3400 answers `no interface Vlan666`
+# for an absent Vlan666 with "% Invalid input detected", the SAME signal a
+# real syntax error gives. It cannot be tolerated by message shape without
+# masking genuine errors -- but it CAN be tolerated by COMMAND: these removal
+# lines are IRIS-generated and fixed, never operator input, so an invalid-
+# input response to one means the target VLAN is already absent. Scoped to
+# the two cleanup removal forms and to config cleanup purposes.
+_VLAN_REMOVAL_RE = re.compile(br"^no (?:interface Vlan\d+|vlan \d+)\s*$")
+
+
+def _vlan_already_absent(purpose, line, payload):
+    if purpose not in _CONFIG_CLEANUP_PURPOSES:
+        return False
+    if _VLAN_REMOVAL_RE.match(line.strip()) is None:
+        return False
+    return b"% Invalid input" in payload
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2380,7 +2399,8 @@ class IoxTransport(object):
                     payload_spans.append({"offset": span[0], "length": span[1]})
                     payload_error = _classify_ios_error(payload)
                     if (_app_already_absent(purpose, payload) or
-                            _cleanup_absent(purpose, payload)):
+                            _cleanup_absent(purpose, payload) or
+                            _vlan_already_absent(purpose, line, payload)):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
@@ -2398,7 +2418,8 @@ class IoxTransport(object):
                     elif (in_config and question is None and payload and
                           payload_error is None and
                           not _only_ios_warnings(payload) and
-                          not _cleanup_absent(purpose, payload)):
+                          not _cleanup_absent(purpose, payload) and
+                          not _vlan_already_absent(purpose, line, payload)):
                         raise IoxTransportError("unsupported_response", "configuration command returned payload")
                     if (purpose == "save" and line == b"write memory" and
                             not _save_confirmed(payload) and
