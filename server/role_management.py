@@ -916,16 +916,19 @@ class RoleCoordinator:
             except Exception as exc:
                 self._translate_policy_error(exc)
 
-    def retire_device(self, device_id, actor, catalog=None):
+    def retire_device(self, device_id, actor, catalog=None, *, cleanup=None):
         """Clean policy, fleet, and optional catalog state for one device.
 
         The caller owns durable credential revocation and performs it before
         entering here.  Policy cleanup failure therefore degrades but does not
         block fleet retirement; a fleet failure after policy cleanup is a
         reported partial result and the first phase is never rolled back. The
-        membership guard spans fleet deletion and catalog purge, preventing a
-        waiting assignment from recreating policy for the deleted device.
+        membership guard spans fleet deletion, catalog purge, and optional
+        caller cleanup. Replacement registration cannot race record retirement
+        or job cancellation. The caller contains degraded cleanup failures.
         """
+        if cleanup is not None and not callable(cleanup):
+            raise ValueError("invalid retirement cleanup")
         with secrets_store.store_lock(self.lock_path):
             with assignment_service.membership_guard(self.fleet):
                 policy_error = None
@@ -958,6 +961,8 @@ class RoleCoordinator:
                         purged = catalog.purge_device(device_id)
                     except Exception:
                         catalog_degraded = True
+                if cleanup is not None:
+                    cleanup()
                 try:
                     drift = self.role_drift()
                 except Exception:

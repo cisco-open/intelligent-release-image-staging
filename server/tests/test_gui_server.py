@@ -9407,6 +9407,141 @@ def test_delete_abandons_records_so_a_readded_device_can_onboard(tmp_path, monke
         stop()
 
 
+@pytest.mark.parametrize("pause", ["before_records", "after_records"])
+def test_delete_finishes_old_cleanup_before_replacement_can_onboard(
+        tmp_path, monkeypatch, pause):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    paused, continue_delete = threading.Event(), threading.Event()
+    preflight_entered, continue_job = threading.Event(), threading.Event()
+    replacement_started, replacement_submitted = threading.Event(), threading.Event()
+    executed, outcomes = [], {}
+
+    def preflight(dev, env, resolved):
+        preflight_entered.set()
+        assert continue_job.wait(5)
+        return {"status": "passed", "device_identity": "NEWBOARDID",
+                "detected_model": "C8000V", "nat_interface": "GigabitEthernet1"}
+
+    def runner(path, env, output, on_proc):
+        executed.append(True)
+        return 0
+
+    host, port, fleet, records, stop = _serve_router(
+        tmp_path, runner, preflight_fn=preflight)
+    threads = []
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        old = _stranded_record(records)
+        if pause == "before_records":
+            # No old recoverable record masks the first gap. The other case
+            # pauses just after retiring a genuinely stranded predecessor.
+            records.transition(old, "abandoned")
+        real_retire = records.retire_device
+
+        def retire(device_id, reason, *args, **kwargs):
+            if pause == "after_records":
+                value = real_retire(device_id, reason, *args, **kwargs)
+            paused.set()
+            assert continue_delete.wait(5)
+            if pause == "before_records":
+                value = real_retire(device_id, reason, *args, **kwargs)
+            return value
+
+        monkeypatch.setattr(records, "retire_device", retire)
+
+        def delete():
+            outcomes["delete"] = _req(
+                host, port, "DELETE", "/api/devices/r1", headers=headers)[0]
+
+        def replace():
+            replacement_started.set()
+            outcomes["add"] = _req(
+                host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                headers=headers)[0]
+            status, _, body = _req(
+                host, port, "POST", "/api/devices/r1/onboard", {},
+                headers=headers)
+            outcomes["onboard"] = status
+            outcomes["job_id"] = json.loads(body).get("job_id")
+            replacement_submitted.set()
+
+        threads = [threading.Thread(target=delete), threading.Thread(target=replace)]
+        threads[0].start()
+        assert paused.wait(3)
+        assert fleet.get_device("r1") is None
+        threads[1].start()
+        assert replacement_started.wait(3)
+        blocked_during_cleanup = not replacement_submitted.wait(0.15)
+        continue_delete.set()
+        for thread in threads:
+            thread.join(3)
+            assert not thread.is_alive()
+        assert outcomes["delete"] == outcomes["add"] == outcomes["onboard"] == 200
+        assert preflight_entered.wait(3)
+        new = next(record["record_id"] for record in records.list(device_id="r1")
+                   if record["record_id"] != old)
+        state_after_delete = records.get(new)["state"]
+        continue_job.set()
+        job = _wait_onboard_job(host, port, cookie, outcomes["job_id"])
+        assert blocked_during_cleanup
+        assert records.get(old)["state"] == "abandoned"
+        assert state_after_delete != "abandoned"
+        assert job["state"] == "done"
+        assert records.get(new)["state"] == "active"
+        assert "[abort requested by operator]" not in job["lines"]
+        assert executed == [True]
+    finally:
+        continue_delete.set()
+        continue_job.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(3)
+        stop()
+
+
+@pytest.mark.parametrize("failure", ["records", "jobs"])
+def test_delete_cleanup_failure_retains_degraded_response_and_releases_guard(
+        tmp_path, monkeypatch, failure):
+    monkeypatch.setenv("IRIS_STATE", str(tmp_path / "state"))
+    audit_path = str(tmp_path / "audit.jsonl")
+    host, port, fleet, records, stop = _serve_router(
+        tmp_path, lambda path, env, output: 0, audit_path=audit_path)
+    called = []
+
+    def retire(device_id, reason):
+        called.append("records")
+        if failure == "records":
+            raise OSError("injected record failure")
+        return []
+
+    def cancel(service, device_id):
+        called.append("jobs")
+        if failure == "jobs":
+            raise OSError("injected job failure")
+        return {"cancelled": 0, "aborted": 0}
+
+    monkeypatch.setattr(records, "retire_device", retire)
+    monkeypatch.setattr(gui_onboard.OnboardService, "cancel_device", cancel)
+    try:
+        cookie, csrf = _auth(host, port)
+        headers = {"Cookie": cookie, "X-CSRF-Token": csrf}
+        status, _, body = _req(
+            host, port, "DELETE", "/api/devices/r1", headers=headers)
+        assert status == 207
+        assert json.loads(body) == {"deleted": True, "degraded": [failure]}
+        assert called == ["records", "jobs"]
+        assert fleet.get_device("r1") is None
+        assert _req(host, port, "POST", "/api/devices", dict(_ROUTER_ROW),
+                    headers=headers)[0] == 200
+        events = _read_audit_lines(audit_path)
+        deletion = next(event for event in events if event["event"] == "device_delete")
+        assert deletion["result"] == "degraded"
+        assert "partial cleanup: " + failure in deletion["detail"]
+    finally:
+        stop()
+
+
 def test_delete_audit_names_the_record_outcome(tmp_path, monkeypatch):
     """The delete audit line already names what it revoked and what it retained.
     Records were the one thing it changed silently."""

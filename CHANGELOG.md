@@ -60,6 +60,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Device deletion finishes record retirement and job cancellation before a
+  replacement can register under the same name, preserving its new deployment
+  and job (#279).
 - Role editing discards previews after form changes and retains the revision
   originally opened, preventing stale forms from overwriting newer policy
   (#268, #269).

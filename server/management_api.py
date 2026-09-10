@@ -7299,9 +7299,32 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # policy + fleet + catalog state. Any failure here is
                 # partial/degraded but CANNOT permit the device.
                 degraded = []
+                retired = []
+                stopped = 0
+                cleanup_degraded = []
+
+                def cleanup_retired_device():
+                    nonlocal retired, stopped
+                    # Keep name-based cleanup inside the coordinator's fleet
+                    # lifetime guard: a replacement may reuse this device id
+                    # only after the old records and jobs have been retired.
+                    try:
+                        if record_store is not None:
+                            retired = record_store.retire_device(
+                                did, "device deleted from the fleet")
+                    except Exception:
+                        cleanup_degraded.append("records")
+                    try:
+                        if onboard is not None:
+                            halted = onboard.cancel_device(did)
+                            stopped = halted["cancelled"] + halted["aborted"]
+                    except Exception:
+                        cleanup_degraded.append("jobs")
+
                 try:
                     role_cleanup = role_coordinator().retire_device(
-                        did, actor, catalog=catalog)
+                        did, actor, catalog=catalog,
+                        cleanup=cleanup_retired_device)
                 except role_management.RoleManagementError as exc:
                     self._audit(
                         "device_delete", "device", action="delete", target=did,
@@ -7320,34 +7343,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 purged = role_cleanup["catalog_purged"]
                 if role_cleanup["catalog_degraded"]:
                     degraded.append("catalog")
-                # Retire the deployment records for the same reason the catalog
-                # state goes: a record outlives the fleet row, and the NEXT
-                # device registered under this id inherits it. That strands the
-                # device rather than merely confusing it — onboard refuses while
-                # a recoverable record exists and names undeploy as the fix,
-                # while that teardown refuses the (replaced) box on an identity
-                # mismatch. Abandoned, not dropped: the record stays the account
-                # of what IRIS built there, which an operator who deleted a
-                # still-configured device is the one person who needs.
-                retired = []
-                try:
-                    if record_store is not None:
-                        retired = record_store.retire_device(
-                            did, "device deleted from the fleet")
-                except Exception:
-                    degraded.append("records")
-                # Work in flight outlives the device for the same reason: a job
-                # record is keyed on the device id alone, so one left behind
-                # keeps the busy guard armed against the NEXT device registered
-                # under this name -- refusing the opposite action outright and
-                # silently joining the dead job for the same one.
-                stopped = 0
-                try:
-                    if onboard is not None:
-                        halted = onboard.cancel_device(did)
-                        stopped = halted["cancelled"] + halted["aborted"]
-                except Exception:
-                    degraded.append("jobs")
+                degraded.extend(cleanup_degraded)
                 result = "ok" if deleted and not degraded else (
                     "fail" if not deleted else "degraded")
                 if deleted:
