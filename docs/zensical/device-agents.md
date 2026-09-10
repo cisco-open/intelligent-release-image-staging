@@ -425,6 +425,13 @@ Shell's same-name adoption path does not overwrite a conflicting root file;
 an operator must resolve that conflict. See
 [Sizing the storage root](management-type.md#sizing-the-storage-root).
 
+Before a low-space IOx download would trigger reclaim, the agent checks for
+the destination through IOS. If it exists, IRIS preserves it and reserves
+one image plus headroom for the download; an unreadable destination check
+defers staging. This presence check does not attest the file or mark it
+staged. After downloading, the normal native size and SHA-512 checks must
+still pass before adoption. A mismatch remains an operator decision.
+
 ## Verified policy and mechanical ticks
 
 Legacy `max_peers` remains parseable for upgrade compatibility but is ignored

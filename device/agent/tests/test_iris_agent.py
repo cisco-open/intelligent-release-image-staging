@@ -548,6 +548,171 @@ def test_download_gate_unknown_mode_skips_all_reclaim():
     assert reclaimed == [] and bundle_reclaimed == []
 
 
+def _iox_predownload_case(free=1_640_000_000, root_size=973_065_200):
+    # #254: the C8000V root survived undeploy but vanished during onboarding.
+    # The CAF seeding file is absent; native free fits one image, not two.
+    image = {"id": "c8000v-26-01-01",
+             "filename": "c8000v-universalk9.26.01.01.SPA.bin",
+             "size": 973_065_200, "sha256": "a" * 64, "sha512": "b" * 128}
+    cat = FakeCatalog({"approved_image_id": image["id"]}, image)
+    sizes = {"bootflash:" + image["filename"]: root_size}
+    calls = []
+    deps, _, _, _, _, _, _, _ = make_deps(
+        cat, sizes, free=free, mode="install")
+
+    def native_size(name, prefix):
+        calls.append(("size", name))
+        return sizes.get(prefix + name)
+
+    deps = deps._replace(
+        io_transfer=True, target_fs=lambda: ("bootflash:", free),
+        running_image=lambda: "packages.conf",
+        root_file_size=native_size,
+        verify_root=lambda name, prefix, digest:
+            calls.append(("sha512", name)) or True,
+        reclaim=lambda: calls.append(("reclaim",)),
+        reclaim_bundle=lambda prefix, names:
+            calls.append(("cleanup", list(names))),
+        copy_to_root=lambda name, prefix, expected_size:
+            calls.append(("copy", name)) or True,
+        aria_add=lambda torrent, stage_dir:
+            calls.append(("download",)))
+    cfg = dict(CFG, device_platform="iox", stage_dir="/data/iris",
+               target_fs="bootflash:")
+    return cfg, image, cat, deps, sizes, calls
+
+
+@pytest.mark.parametrize("configured_share", [False, True])
+def test_iox_predownload_keeps_native_root_then_attests_after_download(
+        configured_share):
+    cfg, image, cat, deps, sizes, calls = _iox_predownload_case()
+    if configured_share:
+        cfg.update(share_dir="/app-hosting/share",
+                   share_ios_path="bootflash:/virtual-instance/iris/")
+    state = {}
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    assert calls == [("size", image["filename"]), ("download",)]
+    assert len(cat.downloaded) == 1
+    st = state[image["id"]]
+    for key in ("done", "copied", "origin", "sha", "reclaim_tried"):
+        assert key not in st
+
+    # The initial existence read authorizes no adoption: only a later local
+    # SHA-256 and fresh native size/SHA-512/recheck may establish ready.
+    sizes[cfg["stage_dir"] + "/" + image["filename"]] = image["size"]
+    calls.clear()
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert calls == [
+        ("size", image["filename"]), ("sha512", image["filename"]),
+        ("size", image["filename"]),
+        ("size", image["filename"] + ".iris-tmp"),
+        ("cleanup", ["guest-share/iris/" + image["filename"]])]
+    assert st["copied"] is True and st["origin"] == "adopted"
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+
+
+@pytest.mark.parametrize("root_size", [973_065_200, 0])
+def test_iox_predownload_keeps_any_existing_root_when_one_image_will_not_fit(
+        root_size):
+    cfg, image, cat, deps, _, calls = _iox_predownload_case(
+        free=973_065_200 + iris_agent.flashcheck.HEADROOM - 1,
+        root_size=root_size)
+    state = {}
+    for _ in range(3):
+        assert iris_agent.run_once(cfg, deps, state) == "no-space"
+    assert calls == [("size", image["filename"])] * 3
+    assert "reclaim_tried" not in state[image["id"]]
+    assert cat.downloaded == []
+    assert cat.heartbeats[-1]["stage_state"] == "flash_full"
+
+
+@pytest.mark.parametrize("bad_size", [True, -1, "973065200", 973065200.0])
+def test_iox_predownload_malformed_native_size_defers_without_reclaim(bad_size):
+    cfg, image, cat, deps, sizes, calls = _iox_predownload_case(root_size=bad_size)
+    state = {}
+    assert iris_agent.run_once(cfg, deps, state) == "stage-error"
+    assert calls == [("size", image["filename"])]
+    assert "reclaim_tried" not in state[image["id"]]
+    assert cat.downloaded == []
+    assert cat.heartbeats[-1]["stage_state"] == "error"
+    # A later readable destination recovers without a sticky failure/guard.
+    sizes["bootflash:" + image["filename"]] = image["size"]
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+
+
+def test_iox_predownload_native_read_failure_defers_without_reclaim():
+    cfg, image, cat, deps, _, calls = _iox_predownload_case()
+
+    def unreadable(name, prefix):
+        raise OSError("native directory unavailable")
+
+    state = {}
+    assert iris_agent.run_once(
+        cfg, deps._replace(root_file_size=unreadable), state) == "stage-error"
+    assert calls == [] and cat.downloaded == []
+    assert "reclaim_tried" not in state[image["id"]]
+    assert cat.heartbeats[-1]["stage_state"] == "error"
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+
+
+def test_iox_predownload_absent_root_retains_two_image_budget_and_once_guard():
+    cfg, image, cat, deps, _, calls = _iox_predownload_case(root_size=None)
+    state = {}
+    for _ in range(3):
+        assert iris_agent.run_once(cfg, deps, state) == "no-space"
+    assert calls == [("size", image["filename"]), ("reclaim",),
+                     ("size", image["filename"]), ("size", image["filename"])]
+    assert state[image["id"]]["reclaim_tried"] is True
+    assert cat.downloaded == []
+
+
+@pytest.mark.parametrize("platform,io_transfer,prefix", [
+    ("", True, "bootflash:"), ("iox", False, "bootflash:"),
+    ("iox", True, "harddisk:")])
+def test_iox_predownload_probe_is_limited_to_native_iox_transfer_paths(
+        platform, io_transfer, prefix):
+    cfg, _, _, deps, _, calls = _iox_predownload_case(free=0)
+    cfg["device_platform"] = platform
+    deps = deps._replace(io_transfer=io_transfer,
+                         target_fs=lambda: (prefix, 0))
+    assert iris_agent.run_once(cfg, deps, {}) == "no-space"
+    assert calls == [("reclaim",)]
+
+
+@pytest.mark.parametrize("root_change", ["absent", "size", "sha512"])
+def test_iox_predownload_existence_does_not_survive_destination_change(root_change):
+    cfg, image, cat, deps, sizes, calls = _iox_predownload_case()
+    state = {}
+    assert iris_agent.run_once(cfg, deps, state) == "downloading"
+    calls.clear()
+    sizes[cfg["stage_dir"] + "/" + image["filename"]] = image["size"]
+    if root_change == "absent":
+        del sizes["bootflash:" + image["filename"]]
+    elif root_change == "size":
+        sizes["bootflash:" + image["filename"]] = image["size"] - 1
+    else:
+        deps = deps._replace(verify_root=lambda name, prefix, digest:
+                             calls.append(("sha512", name)) or False)
+    result = iris_agent.run_once(cfg, deps, state)
+    st = state[image["id"]]
+    assert not st.get("copied") and "origin" not in st
+    assert not any(call[0] in ("copy", "cleanup") for call in calls)
+    if root_change == "absent":
+        # No cached existence exemption at the copy gate: ordinary placement
+        # needs two native writes, so the unchanged tight budget blocks it.
+        assert result == "seeding-only"
+        assert calls == [("size", image["filename"]), ("reclaim",)]
+        assert st["copy_reclaim_tried"] is True
+        assert cat.heartbeats[-1]["stage_state"] == "flash_full_seeding_only"
+    else:
+        assert result == "complete"  # local download only; root is refused
+        assert not any(call[0] == "reclaim" for call in calls)
+        assert st["copy_terminal"] is True
+        assert cat.heartbeats[-1]["stage_state"] == "copy_failed"
+        assert ("has size" if root_change == "size" else "SHA-512 does not match"
+                ) in st["stage_error"]
+
+
 def test_copy_gate_room_for_one_copy_downloads_seeds_but_blocks_root_copy():
     # File already downloaded (staged) and sha-ok, but only ONE image fits:
     # free >= size (scratch present) yet not >= size again for the root copy.

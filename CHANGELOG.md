@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx download preflight preserves an existing IOS root image when space is
+  tight. It reserves one image for the download and still requires native
+  size and SHA-512 verification before adopting the destination (#254).
 - The origin seeder waits for the local tracker listener before starting,
   avoiding failed first announces and the resulting gap in swarm membership
   after a server restart (#244).

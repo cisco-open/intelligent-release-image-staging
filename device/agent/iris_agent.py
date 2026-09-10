@@ -2698,11 +2698,34 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     target_prefix, free = deps.target_fs()
     state["stage_fs"] = target_prefix
     stage_bytes = size * (2 if deps.io_transfer else 1)
+    keep_native_root = False
+    if (not flashcheck.has_room(free, stage_bytes)
+            and cfg.get("device_platform") == "iox" and deps.io_transfer
+            and _iox_root_ios_path(target_prefix, image["filename"]) is not None):
+        # A pre-existing destination must reach the post-download adoption
+        # check intact (#254). Native reclaim can remove it before that check,
+        # even though its bytes are already excluded from `free`. Existence
+        # alone forbids reclaim; it does NOT establish identity or readiness.
+        try:
+            observed = deps.root_file_size(image["filename"], target_prefix)
+        except Exception:
+            raise RuntimeError(
+                "existing IOS root file could not be inspected safely before download"
+            ) from None
+        if observed is not None:
+            if type(observed) is not int or observed < 0:
+                raise ValueError("invalid IOS root file size before download")
+            keep_native_root = True
+            # Keep one image's conservative allowance for the CAF seeding
+            # download: its storage may share the native backing filesystem.
+            # Later placement must freshly adopt or refuse the existing root,
+            # including with a configured share; no replacement is budgeted.
+            stage_bytes = size
     if not flashcheck.has_room(free, stage_bytes):
         st = state.setdefault(img_id, {})
         # Burn the once-guard only when reclaim actually ran (a no-op on a
         # transient mode=None must not permanently disable reclaim).
-        if not st.get("reclaim_tried"):
+        if not keep_native_root and not st.get("reclaim_tried"):
             if _reclaim_for_mode(deps, mode, target_prefix, image, state):
                 st["reclaim_tried"] = True
                 target_prefix, free = deps.target_fs()
