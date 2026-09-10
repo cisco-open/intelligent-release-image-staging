@@ -466,7 +466,11 @@ def test_park_then_unpark_reuses_the_surviving_root_copy():
     deps, rec = make_deps(cat, sizes)
     deps = deps._replace(
         root_present=lambda fname, prefix="flash:", expected_size=None:
-        root_ok.get(fname, True))
+        root_ok.get(fname, True),
+        # aria2 holds every completed download here, so the board #248 re-seed
+        # arm has nothing to repair: what this test counts is re-DOWNLOADS.
+        aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                              if sizes.get(p) else None))
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == "multi:complete,complete"
     assert rec["copied"] == ["img-a.bin", "img-b.bin"]
@@ -712,7 +716,13 @@ def test_missing_catalog_image_keeps_its_failure_identity():
 ])
 def test_rpc_rejection_reports_error_preserves_siblings_and_retries(image_ids, reply):
     cat = MultiCatalog([_img(iid) for iid in image_ids])
-    deps, rec = make_deps(cat, {"/stage/img-b.bin": 5})
+    sizes = {"/stage/img-b.bin": 5}
+    deps, rec = make_deps(cat, sizes)
+    # The staged sibling is seeding, as aria2 confirms: only the REJECTED add
+    # and its retry belong in rec["aria_added"] (board #248's re-seed arm asks
+    # aria2 first and stays out of the way when it answers).
+    deps = deps._replace(aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                               if sizes.get(p) else None))
     reject = True
 
     def add(torrent, directory):
@@ -844,7 +854,12 @@ def test_one_image_torrent_fetch_failure_does_not_abort_the_set_tick():
     re-copying ~1.2 GB every tick."""
     cat = MultiCatalog([_img("img-a"), _img("img-b")], ids=["img-a", "img-b"])
     cat.torrent_raises = {"img-b"}
-    deps, rec = make_deps(cat, {"/stage/img-a.bin": 5})
+    sizes = {"/stage/img-a.bin": 5}
+    deps, rec = make_deps(cat, sizes)
+    # The sibling that completed is seeding, as aria2 confirms, so the board
+    # #248 re-seed arm leaves it alone and this test still counts only img-b.
+    deps = deps._replace(aria_stats=lambda p: ({"gid": "g", "status": "active"}
+                                               if sizes.get(p) else None))
     state = {}
     assert iris_agent.run_once(CFG, deps, state) == \
         "multi:complete,torrent-unavailable"

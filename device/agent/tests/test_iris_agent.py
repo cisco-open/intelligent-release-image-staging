@@ -928,6 +928,160 @@ def test_untracked_partial_without_control_file_is_discarded_and_restarted():
     assert all("lost track" not in msg for m, msg in emitted if m == "STAGING")
 
 
+# ---- board #248: a finished image aria2 has forgotten must be re-seeded ----
+# The container platforms (XR appmgr, IOx CAF) can be recreated under a
+# finished, placed image: the mount and this state file survive, aria2c's
+# session does not. Board #70's re-add cannot reach that case -- the
+# steady-state short-circuit returns without consulting aria2 at all, and a
+# FINISHED download has no .aria2 control file, which is exactly what the
+# board #70 arm treats as an untrusted partial. Live proof: two XR routers
+# stopped announcing at their container recreation while both images sat whole
+# on disk with done/copied recorded.
+
+def _reseed_state(**overrides):
+    entry = {"done": True, "copied": True, "sha": "abc",
+             "root_file": "img1.bin", "origin": "adopted",
+             "tele": {"content_sha256_state": "verified"}}
+    entry.update(overrides)
+    return {"schema_version": iris_agent._STATE_SCHEMA,
+            "image_id": "img1", "img1": entry}
+
+
+def _reseed_catalog():
+    return FakeCatalog({"approved_image_id": "img1"},
+                       {"id": "img1", "filename": "img1.bin",
+                        "size": 1000, "sha256": "abc"})
+
+
+def test_finished_image_forgotten_by_aria2_is_re_added_to_seed_on_xr():
+    """XR shape (copy_in_place=True, stage dir IS the target-FS root). The
+    whole image is on the mount at the exact catalog size, this agent hashed
+    it ('verified'), and aria2 has no record of it (aria_stats -> None, the
+    fixture default) after an appmgr re-onboard/restart. It must be re-added
+    so the device announces again -- without re-downloading, re-hashing,
+    re-placing, or losing the operator-adopted provenance of the file."""
+    cat = _reseed_catalog()
+    removed_from_aria = []
+    deps, emitted, _, aria, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True,
+                         aria_remove=lambda f: removed_from_aria.append(f))
+    state = _reseed_state()
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert aria == [("/stage/img1.torrent", "/stage")]   # re-added once
+    assert removed_from_aria == ["img1.bin"]             # phantom entry cleared
+    assert copied == []                                  # placement NOT re-run
+    assert any(m == "RESEED" and "img1.bin" in msg for m, msg in emitted)
+    # Nothing about the record moves: no new transfer, no fresh download, and
+    # an operator-adopted in-place file stays adopted (download_started is the
+    # only thing that would flip it, and this path never sets it).
+    assert state["img1"]["done"] is True
+    assert state["img1"]["copied"] is True
+    assert state["img1"]["origin"] == "adopted"
+    assert "download_started" not in state["img1"]
+    assert state["img1"]["tele"]["content_sha256_state"] == "verified"
+    # ...and the tick still reports the steady, fully staged answer.
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    assert cat.heartbeats[-1]["current_image_id"] == "img1"
+
+
+def test_finished_image_forgotten_by_aria2_is_re_added_to_seed_on_iox():
+    """Same recreation, IOx shape: copy_in_place=False (the root copy is a
+    separate file on IOS-visible storage, placed through the io_transfer
+    path). The staged copy in the CAF-persistent stage dir is what feeds the
+    swarm, so it is the one that must go back into aria2."""
+    cat = _reseed_catalog()
+    deps, emitted, _, aria, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(io_transfer=True)
+    state = _reseed_state(origin="downloaded")
+    cfg = dict(CFG, device_platform="iox")
+    assert iris_agent.run_once(cfg, deps, state) == "complete"
+    assert aria == [("/stage/img1.torrent", "/stage")]
+    assert copied == []
+    assert any(m == "RESEED" and "img1.bin" in msg for m, msg in emitted)
+    assert state["img1"]["done"] is True and state["img1"]["copied"] is True
+    assert state["img1"]["origin"] == "downloaded"
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+
+
+def test_a_short_staged_file_is_still_discarded_and_restarted_not_re_seeded():
+    """The re-seed arm demands the WHOLE image. A short file (aria2's session
+    died mid-download, so the state file still reads done/copied from an
+    earlier cycle) must keep board #70's behaviour: XR's size-aware
+    root_present rejects it, the tick re-acquires, and the guarded start
+    discards a partial with no control file instead of announcing it."""
+    cat = _reseed_catalog()
+    removed = []
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 400}, free=9_000_000_000, removed=removed)
+    deps = deps._replace(
+        copy_in_place=True,
+        # xr_deps.root_present: present but the wrong size -> False.
+        root_present=lambda fname, prefix="flash:", expected_size=None:
+            expected_size is None or expected_size == 400)
+    state = _reseed_state()
+    assert iris_agent.run_once(CFG, deps, state) == "downloading"
+    assert "/stage/img1.bin" in removed                   # untrusted partial
+    assert aria == [("/stage/img1.torrent", "/stage")]    # fresh download
+    assert any(m == "RECHECK" and "no aria2 control file" in msg
+               for m, msg in emitted)
+    assert all(m != "RESEED" for m, _ in emitted)
+
+
+def test_a_whole_file_this_agent_never_hashed_is_not_re_seeded():
+    """No content_sha256_state='verified' in the record -- a state file from
+    before that fact was written, or one whose verdict was dropped with the
+    bytes it described. aria2 would announce it WITHOUT hashing it
+    (--bt-seed-unverified with no control file), so IRIS has nothing to vouch
+    with: leave it exactly as today, staged and quiet."""
+    cat = _reseed_catalog()
+    deps, emitted, _, aria, copied, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True)
+    state = _reseed_state(tele={"content_sha256_state": "not_checked"})
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert aria == [] and copied == []
+    assert all(m != "RESEED" for m, _ in emitted)
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+
+
+def test_an_image_aria2_still_holds_is_not_re_added():
+    """The ordinary steady tick: aria2 answers for the staged file, so it is
+    already seeding. Nothing to do -- re-adding on every 60 s tick would churn
+    the swarm entry for no reason."""
+    cat = _reseed_catalog()
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(
+        copy_in_place=True,
+        aria_stats=lambda p: {"gid": "g1", "status": "active"})
+    state = _reseed_state()
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert aria == []
+    assert all(m not in ("RESEED", "RESEED-DEFERRED") for m, _ in emitted)
+
+
+def test_a_failed_re_add_never_turns_a_staged_image_into_an_error():
+    """aria2c not serving yet (the container came back before its daemon did).
+    The device HAS the image; the tick must still report 'ready' and retry
+    next tick, not crash and not report a staging failure."""
+    cat = _reseed_catalog()
+
+    def _boom(_torrent, _dest):
+        raise OSError("connection refused")
+
+    deps, emitted, _, aria, _, _, _, _ = make_deps(
+        cat, {"/stage/img1.bin": 1000}, free=9_000_000_000)
+    deps = deps._replace(copy_in_place=True, aria_add=_boom)
+    state = _reseed_state()
+    assert iris_agent.run_once(CFG, deps, state) == "complete"
+    assert any(m == "RESEED-DEFERRED" and "img1.bin" in msg
+               for m, msg in emitted)
+    assert cat.heartbeats[-1]["stage_state"] == "ready"
+    assert cat.heartbeats[-1]["stage_error"] is None
+
+
 def test_aria_add_rpc_down_heartbeats_error_instead_of_crashing():
     # 2026-08-20 incident class: aria2c is not serving RPC (launch failed,
     # daemon died). The connection error out of addTorrent used to escape

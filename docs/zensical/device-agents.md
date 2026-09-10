@@ -224,6 +224,23 @@ healthy daemon trusting the previous certificate. A changed digest forces
 one restart; a malformed or
 unverifiable snapshot fails before launch.
 
+### Failure mode: a recreated container forgets what it is seeding
+
+Recreating a container — an IOS-XR appmgr re-onboard or restart, an IOx CAF
+restart — starts a new aria2c with an empty session while the persistent mount
+keeps the images and the agent keeps its state file. A transfer still in
+progress is re-added from its `.aria2` checkpoint. A *finished* image has no
+checkpoint, because aria2 deletes it at completion, so the agent re-adds that
+one from its own evidence instead: the staged file is exactly the catalog size
+and the content check recorded for it is `verified`. The re-add emits `RESEED`
+and puts the device back in the swarm without re-downloading, re-hashing or
+re-placing the image, and an adopted in-place file stays adopted. With either
+fact missing — a short file, or no recorded verification — nothing is
+announced, because a re-add with no checkpoint seeds without hashing and IRIS
+never offers peers bytes it cannot vouch for. If the re-add itself fails
+(aria2c not serving yet, torrent metainfo gone) the agent emits
+`RESEED-DEFERRED`, still reports the image as staged, and retries next tick.
+
 ### Failure mode: a busy aria2c read as a dead one
 
 A daemon built without asynchronous DNS can pause its event loop while

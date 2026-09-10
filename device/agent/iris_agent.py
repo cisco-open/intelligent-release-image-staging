@@ -1980,7 +1980,11 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     done_st = state.get(img_id, {})
     if done_st.get("done") and done_st.get("copied"):
         content_ok = done_st.get("sha", image["sha256"]) == image["sha256"]
-        staged_ok = deps.file_size(stage) is not None
+        # The exact staged size is kept, not just its presence: the re-seed
+        # arm below needs "this is the WHOLE image", which presence alone does
+        # not say. One stat, read twice.
+        steady_size = deps.file_size(stage)
+        staged_ok = steady_size is not None
         root_ok = deps.root_present(image["filename"], state.get("stage_fs", "flash:"),
                                     size)
         if content_ok and staged_ok and root_ok and not migrate_transport:
@@ -2054,6 +2058,58 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                         stage_error="image SHA-256 verification failed; retrying download",
                         observation=_not_active_observation(tele_on, time.time()))
                     return "bad-sha"
+            # RE-SEED AN IMAGE ARIA2 HAS FORGOTTEN (board #248). A recreated
+            # container (XR appmgr re-onboard/restart, IOx CAF restart) brings
+            # up a brand-new aria2c whose session knows nothing, while the
+            # mount keeps the finished image and this state file keeps
+            # done/copied. Board #70's re-add cannot help: it lives on the
+            # download path far below, which THIS short-circuit returns before
+            # ever reaching, and a FINISHED download has no `.aria2` control
+            # file (aria2 removes it at completion), so the one arm down there
+            # that could re-add it treats a control-file-less file as an
+            # untrusted partial and discards it. The device therefore kept
+            # heartbeating 'ready' while announcing to no tracker at all: the
+            # swarm silently lost a seed (100.90.170.81/.82 stopped announcing
+            # at their container recreation, both images whole on disk).
+            #
+            # Re-adding with no control file is safe HERE, and only here,
+            # because IRIS's own evidence stands in for the bitfield aria2 no
+            # longer has. aria2 will NOT hash the file (no control file +
+            # --bt-seed-unverified means markAllPiecesDone(); see the discard
+            # arm below), so this arm demands the two facts the completion
+            # path itself required before it called the image staged: the file
+            # is EXACTLY the catalog size, and THIS agent hashed those bytes
+            # and recorded content_sha256_state='verified'. Either one missing
+            # -> no re-add, and today's behaviour stands.
+            #
+            # Deliberately NOT done: download_started is left alone, so the
+            # copy-success site's origin rule keeps calling an operator's
+            # in-place file 'adopted'; no peer-transfer snapshot is discarded,
+            # because no new transfer starts; done/copied/sha/origin are
+            # untouched. This tells aria2 again about bytes IRIS already
+            # accepted — it does not re-acquire them.
+            try:
+                if (steady_size == size
+                        and (done_st.get("tele") or {}).get(
+                            "content_sha256_state") == "verified"
+                        and deps.aria_stats(stage) is None):
+                    deps.aria_remove(image["filename"])
+                    deps.aria_add(torrent, stage_dir)
+                    deps.emit("RESEED",
+                              "%s aria2 no longer holds this finished image "
+                              "(container/daemon restart); re-added to seed"
+                              % image["filename"])
+            except Exception as e:
+                # Best effort. The device HAS the image, and the heartbeat
+                # below is still an honest 'ready' — a torrent file that went
+                # missing, a daemon not serving yet, or an RPC secret aria2c
+                # has not adopted must not turn a fully staged image into an
+                # error; the next tick retries. RPC diagnostics can carry
+                # credentials, so only the exception type is logged.
+                deps.emit("RESEED-DEFERRED",
+                          "%s could not be re-added to aria2 for seeding "
+                          "(%s); will retry" % (image["filename"],
+                                                type(e).__name__))
             # The observation phase stays 'steady' whatever the report does:
             # aria2 is seeding here, not downloading, and _build_observation
             # takes an aria snapshot only for 'downloading'/'seeding-only'.
