@@ -947,10 +947,18 @@ def _iox_credential_projection(creds):
         record = creds.get_secrets(reference)
         if not isinstance(record, dict):
             return record
+        # Empty means absent, and must be dropped rather than forwarded.
+        # CredentialStore stores an unconfigured enable_secret as "", and the
+        # controller's syntax check refuses an empty string outright ("if
+        # value is not None and (not value or ...)") instead of reading it as
+        # unset -- so a profile with no enable secret, which is the normal
+        # case, failed every IOx operation with "invalid IOx credential
+        # syntax". A genuinely missing device_user/device_pass still fails,
+        # correctly, as incomplete credentials.
         return dict(
             (key, record[key]) for key in
             ("name", "device_user", "device_pass", "enable_secret")
-            if key in record)
+            if record.get(key) not in (None, ""))
     return resolve
 
 
