@@ -57,6 +57,17 @@ The device credential is not bound to the requested artifact resource.
 
 The catalog operation requires a valid device bearer credential.
 
+Every refusal also writes one line to the server log (`docker logs iris`):
+`iris-catalog: refused bearer method=… route=… device=… src=… reason=…`.
+`device` is the id from the request path when it is id-shaped (`-` on image
+and torrent routes), and `reason` is one of `missing_bearer`,
+`unknown_token`, `expired`, `revoked`, `wrong_principal` (another device's
+live token) or `previous_token` (the device still presents its pre-rotation
+token, so it missed a token-refresh delivery). `token_id` is the truncated
+hash the audit log uses for the same credential; the line never carries the
+token. Repeats of one refusal collapse to a line per minute (`repeats=N`),
+and at most 100 lines a minute are written in total (`dropped=N`).
+
 ## console-certificate-unavailable
 
 No usable browser-facing Console certificate is available.

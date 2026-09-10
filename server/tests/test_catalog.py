@@ -1067,6 +1067,176 @@ def test_auth_fail_writes_audit_line(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #233: every refused bearer leaves one bounded, token-free stderr line
+# ---------------------------------------------------------------------------
+
+def _refusal_lines(capsys):
+    return [line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("iris-catalog: refused bearer")]
+
+
+def test_refused_bearer_logs_one_bounded_line_without_the_token(
+        tmp_path, capsys):
+    """A 401 outside token-refresh used to be invisible: log_message is
+    suppressed and only token-refresh audits.  Each refusal now writes one
+    stderr line carrying method, route template, device id (from the path,
+    only when id-shaped), source IP and a reason code -- never the token or
+    any prefix of it, and never an attacker-shaped path segment (#233)."""
+    os.environ["IRIS_AGE_RECIPIENTS"] = ""
+    sp = _secrets_path(tmp_path)
+    now = time.time()
+    store = secrets_store.load(sp)
+    tok_a = secrets_store.mint(store, "dev-a", "catalog_token", now)
+    tok_b = secrets_store.mint(store, "dev-b", "catalog_token", now)
+    expired_tok = "expiredtokendeadbeef00000000dead"
+    revoked_tok = "revokedtokendeadbeef00000000dead"
+    store["devices"]["dev-x"] = {"catalog_token": {
+        "value": expired_tok, "created_at": now - 7200,
+        "expires_at": now - 3600, "revoked": False}}
+    store["devices"]["dev-r"] = {"catalog_token": {
+        "value": revoked_tok, "created_at": now,
+        "expires_at": now + 3600, "revoked": True}}
+    secrets_store.save(store, sp)
+    s = _store(tmp_path)
+    s.set_policy("dev-a", approved_image_id="img1")
+    srv = catalog.make_server("127.0.0.1", 0, s, sp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    capsys.readouterr()
+    try:
+        bogus = "bogus-" + "z" * 26
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=bogus)
+        assert status == 401
+        lines = _refusal_lines(capsys)
+        assert len(lines) == 1, lines
+        line = lines[0]
+        for field in ("method=GET", "route=/v1/devices/{device_id}/policy",
+                      "device=dev-a", "src=127.0.0.1",
+                      "reason=unknown_token"):
+            assert field in line, line
+        assert bogus not in line and bogus[:8] not in line
+        # The correlation id is the audit log's truncated sha256, not the
+        # token: an operator can match it against mint/refresh old_id/new_id.
+        assert "token_id=" + catalog._audit_id(bogus) in line
+
+        # The same refusal again inside the window is counted, not repeated.
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=bogus)
+        assert status == 401
+        assert _refusal_lines(capsys) == []
+
+        # Another device's live token on a device-bound route.
+        _req(port, "POST", "/v1/devices/dev-a/heartbeat", token=tok_b,
+             body=b"{}")
+        (line,) = _refusal_lines(capsys)
+        assert "reason=wrong_principal" in line, line
+        assert "route=/v1/devices/{device_id}/heartbeat" in line
+        assert "method=POST" in line
+        assert tok_b not in line and tok_b[:8] not in line
+
+        _req(port, "POST", "/v1/devices/dev-x/telemetry", token=expired_tok,
+             body=b"{}")
+        (line,) = _refusal_lines(capsys)
+        assert "reason=expired" in line and "device=dev-x" in line, line
+        assert "expiredtoken" not in line
+
+        # Image routes carry no device id in the path.
+        _req(port, "GET", "/v1/images", token=revoked_tok)
+        (line,) = _refusal_lines(capsys)
+        assert "reason=revoked" in line and "route=/v1/images" in line, line
+        assert "device=-" in line
+        assert "revokedtoken" not in line
+
+        status, _, _ = _req(port, "GET", "/v1/images")
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "reason=missing_bearer" in line, line
+        assert "token_id=" not in line
+
+        # Unregistered methods authenticate first and log the same way.
+        status, _, _ = _req(port, "PUT", "/v1/images/img1", token=bogus)
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "method=PUT" in line and "route=unmatched" in line, line
+
+        # The path segment is unauthenticated input: an id-shaped value is
+        # logged, anything else is a placeholder, never echoed.
+        attacker_id = "x" * 32000
+        _req(port, "GET", "/v1/devices/" + attacker_id + "/policy",
+             token=bogus)
+        (line,) = _refusal_lines(capsys)
+        assert "device=invalid" in line, line
+        assert "x" * 65 not in line and len(line) < 400
+
+        # An accepted request writes nothing.
+        status, _, _ = _req(port, "GET", "/v1/devices/dev-a/policy",
+                            token=tok_a)
+        assert status == 200
+        assert _refusal_lines(capsys) == []
+    finally:
+        srv.shutdown()
+
+
+def test_rolled_old_token_on_a_device_route_logs_previous_token(
+        tmp_path, capsys):
+    """The lab symptom behind #233: a device still presenting its pre-rotation
+    token on heartbeat.  The line says so, so an operator can tell a missed
+    refresh delivery from a device that never called home."""
+    srv, port, old_tok = _serve_with_device(tmp_path, "dev-pt")
+    capsys.readouterr()
+    try:
+        status, _, _ = _req(port, "POST", "/v1/devices/dev-pt/token-refresh",
+                            token=old_tok, body=b"{}")
+        assert status == 200
+        assert _refusal_lines(capsys) == []
+        status, _, _ = _req(port, "POST", "/v1/devices/dev-pt/heartbeat",
+                            token=old_tok, body=b"{}")
+        assert status == 401
+        (line,) = _refusal_lines(capsys)
+        assert "reason=previous_token" in line and "device=dev-pt" in line
+        assert old_tok not in line and old_tok[:8] not in line
+    finally:
+        srv.shutdown()
+
+
+def test_refusal_log_dedupes_and_caps_lines_per_window(capsys):
+    clock = [1000.0]
+    log = catalog._RefusalLog(window=60, max_keys=8, max_lines=3,
+                              now_fn=lambda: clock[0])
+    key = ("10.0.0.1", "dev-a", "/v1/images", "unknown_token")
+    assert log.refused(*key, method="GET", token_id="abcd1234")
+    assert not log.refused(*key)
+    assert not log.refused(*key)
+    clock[0] += 60
+    assert log.refused(*key)
+    err = capsys.readouterr().err
+    assert err.count("refused bearer") == 2
+    assert "token_id=abcd1234" in err.splitlines()[0]
+    assert "repeats=2" in err.splitlines()[-1]
+    # Three lines per window across all keys; the shortfall is reported on
+    # the next line that does get written.
+    assert log.refused("10.0.0.2", "dev-b", "/v1/images", "unknown_token")
+    assert log.refused("10.0.0.3", "dev-c", "/v1/images", "unknown_token")
+    assert not log.refused("10.0.0.4", "dev-d", "/v1/images", "unknown_token")
+    assert not log.refused("10.0.0.5", "dev-e", "/v1/images", "unknown_token")
+    assert capsys.readouterr().err.count("refused bearer") == 2
+    clock[0] += 60
+    assert log.refused("10.0.0.6", "dev-f", "/v1/images", "unknown_token")
+    err = capsys.readouterr().err
+    assert err.count("refused bearer") == 1 and "dropped=2" in err
+
+
+def test_refusal_log_key_table_stays_bounded(capsys):
+    log = catalog._RefusalLog(window=60, max_keys=2, max_lines=100,
+                              now_fn=lambda: 5.0)
+    for i in range(6):
+        assert log.refused("10.0.0.%d" % i, "dev", "/v1/images", "revoked")
+        assert len(log._seen) <= 2
+    assert capsys.readouterr().err.count("refused bearer") == 6
+
+
+# ---------------------------------------------------------------------------
 # Task 4: old token overlap grace after refresh
 # ---------------------------------------------------------------------------
 

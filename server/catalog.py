@@ -212,6 +212,128 @@ def _audit_id(value):
     return hashlib.sha256(value.encode()).hexdigest()[:8]
 
 
+# ---------------------------------------------------------------------------
+# Refused-bearer server log (#233)
+# ---------------------------------------------------------------------------
+
+# The handler suppresses per-request logging (Handler.log_message), so a 401
+# on a device-bound or image route used to leave no trace at all: an operator
+# could not tell a device that never called home from one calling home with a
+# stale token.  One bounded stderr line per distinct refusal per window fixes
+# that without letting a misbehaving or hostile client flood the log.
+_REFUSAL_LOG_WINDOW = 60        # s: one line per (src, device, route, reason)
+_REFUSAL_LOG_MAX_KEYS = 1024    # distinct keys remembered at once
+_REFUSAL_LOG_MAX_LINES = 100    # lines per window across all keys
+_REFUSAL_LOG_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD",
+                        "OPTIONS")
+# The shape gui_fleet accepts for a device id.  The path segment of a refused
+# request is unauthenticated attacker input: anything else is logged as a
+# placeholder, never echoed (mirrors the "unresolved" audit rule above).
+_REFUSAL_LOG_DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _refusal_reason(index, token, now, grace, ctx=None, device_id=None):
+    """Classify a refused catalog bearer for the server log.
+
+    Classification only, in the mould of auth._known_expired: it re-derives
+    the lookup the resolver already made and never influences the auth
+    decision.  *ctx* is the resolved context when the token WAS valid but not
+    for this route/device.  Returns a word from a fixed vocabulary -- never
+    the token, a prefix of it, or anything from the record.
+    """
+    try:
+        if ctx is not None:
+            if ctx.principal.type != "device" or (
+                    device_id is not None and ctx.principal.id != device_id):
+                return "wrong_principal"
+            # Valid, same device, but a rolled-old token on a route that
+            # only takes the current one: the device missed its refresh.
+            return "previous_token"
+        entry = secrets_store.credential_for(index, token)
+        if entry is None:
+            return "unknown_token"
+        _principal, secret_name, record = entry
+        if record.get("revoked"):
+            return "revoked"
+        expires_at = record.get("expires_at", 0)
+        if expires_at != 0 and now >= expires_at + grace:
+            return "expired"
+        if secret_name == "catalog_token_prev":
+            return "previous_token"
+        return "refused"
+    except Exception:
+        return "unclassified"
+
+
+class _RefusalLog:
+    """De-duplicated, capped stderr reporting for refused catalog bearers.
+
+    Each distinct (src_ip, device, route, reason) key gets one line per
+    window; repeats inside the window are counted and reported as
+    ``repeats=N`` on that key's next line.  A per-window line budget across
+    ALL keys bounds the total output under a scan that varies the key, with
+    the shortfall reported as ``dropped=N`` on the next line that does get
+    written.  The key table itself is capped (stale, then oldest, evicted).
+    ``token_id`` is the same truncated sha256 the audit log carries -- the
+    line never holds a token value or any prefix of one.
+    """
+
+    def __init__(self, window=_REFUSAL_LOG_WINDOW,
+                 max_keys=_REFUSAL_LOG_MAX_KEYS,
+                 max_lines=_REFUSAL_LOG_MAX_LINES, now_fn=time.monotonic):
+        self.window = window
+        self.max_keys = max_keys
+        self.max_lines = max_lines
+        self._now = now_fn
+        self._lock = threading.Lock()
+        self._seen = {}                 # key -> [last_line_at, repeats]
+        self._window_start = now_fn()
+        self._lines = 0                 # lines written this window
+        self._dropped = 0               # refusals unlogged since the last line
+
+    def refused(self, src_ip, device, route, reason, method="-",
+                token_id=""):
+        """Log (or count) one refusal; return True iff a line was written."""
+        key = (src_ip, device, route, reason)
+        now = self._now()
+        with self._lock:
+            if now - self._window_start >= self.window:
+                self._window_start = now
+                self._lines = 0
+            state = self._seen.get(key)
+            if state is not None and now - state[0] < self.window:
+                state[1] += 1
+                return False
+            if self._lines >= self.max_lines:
+                self._dropped += 1
+                return False
+            if state is None and len(self._seen) >= self.max_keys:
+                self._evict(now)
+            repeats = state[1] if state is not None else 0
+            dropped, self._dropped = self._dropped, 0
+            self._seen[key] = [now, 0]
+            self._lines += 1
+        line = ("iris-catalog: refused bearer method=%s route=%s device=%s "
+                "src=%s reason=%s" % (method, route, device, src_ip, reason))
+        if token_id:
+            line += " token_id=%s" % token_id
+        if repeats:
+            line += " repeats=%d" % repeats
+        if dropped:
+            line += " dropped=%d" % dropped
+        print(line, file=sys.stderr, flush=True)
+        return True
+
+    def _evict(self, now):
+        # Called under the lock, only when the table is full: drop every
+        # quiet key, then the single oldest if that was not enough.
+        for key in [k for k, s in self._seen.items()
+                    if now - s[0] >= self.window]:
+            del self._seen[key]
+        if len(self._seen) >= self.max_keys:
+            del self._seen[min(self._seen, key=lambda k: self._seen[k][0])]
+
+
 def _resolve_refresh_auth(store, index, token, now, grace):
     """Resolve a token for the same-device refresh route.
 
@@ -2931,6 +3053,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                    deployment_checkpoint=deployment_checkpoint)
 
     grace = int(os.environ.get("IRIS_TOKEN_SKEW_GRACE", "300"))
+    refusals = _RefusalLog()
 
     class Handler(BaseHTTPRequestHandler):
         # Socket inactivity timeout: StreamRequestHandler.setup applies it
@@ -2996,6 +3119,8 @@ def make_server(host, port, store, secrets_path, certfile=None,
                            or (is_refresh and ctx.secret_name
                                == "catalog_token_prev")))
                 if not ok:
+                    self._log_refusal(_refusal_reason(
+                        strict, token, now, grace, ctx, device_id), token)
                     # Audit auth failure for token-refresh routes
                     if parts[3] == "token-refresh":
                         try:
@@ -3020,8 +3145,34 @@ def make_server(host, port, store, secrets_path, certfile=None,
             ctx = auth.resolve_catalog_auth(
                 store_dict, strict, token, now, grace)
             if ctx is None:
+                self._log_refusal(
+                    _refusal_reason(strict, token, now, grace), token)
                 return None, None, None
             return store_dict, index, ctx
+
+        def _log_refusal(self, reason, token=None):
+            """One bounded stderr line per refused bearer (#233).
+
+            Best-effort like the audit emit: a logging failure never breaks
+            the refusal itself.  The device id comes from the path only when
+            it has the shape of a real id; the route is the registered
+            template, so neither field can carry attacker-shaped text.
+            """
+            try:
+                parts = urlsplit(self.path).path.strip("/").split("/")
+                device = "-"
+                if len(parts) >= 3 and parts[:2] == ["v1", "devices"]:
+                    device = parts[2] if _REFUSAL_LOG_DEVICE_RE.match(
+                        parts[2]) else "invalid"
+                method = self.command if self.command \
+                    in _REFUSAL_LOG_METHODS else "other"
+                route = api_routes.match("catalog", method, self.path)
+                refusals.refused(
+                    self.client_address[0], device,
+                    route.path if route is not None else "unmatched",
+                    reason, method=method, token_id=_audit_id(token))
+            except Exception:
+                pass
 
         def _extract_token(self):
             value = self.headers.get("Authorization", "")
@@ -3211,6 +3362,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
                 self._handle_instruction_get(parts, kind, token)
                 return
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))
@@ -3246,6 +3398,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
         def do_POST(self):
             token = self._extract_token()
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))
@@ -3314,6 +3467,7 @@ def make_server(host, port, store, secrets_path, certfile=None,
             """Authenticate before disclosing unsupported method handling."""
             token = self._extract_token()
             if not token:
+                self._log_refusal("missing_bearer")
                 self._problem(401, "catalog-authentication-required",
                               "Catalog authentication required",
                               (("WWW-Authenticate", "Bearer"),))
