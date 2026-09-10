@@ -163,7 +163,10 @@ function el(id) {
   });
   return elements.get(id);
 }
-var document = {getElementById: el};
+var document = {getElementById: el, querySelectorAll: () => [], querySelector: () => null};
+var confirmPrompts = [], confirmAnswers = [];
+function confirm(text) { confirmPrompts.push(text); return confirmAnswers.length ? confirmAnswers.shift() : true; }
+async function downloadCsv(url, name) { calls.push({url, download: name}); }
 var peerPolicy = {revision: 7, roles_supported: true, roles: {members: {boat: 2}}};
 var peerPolicyReadOk = true, bulkBusy = false, devStatus = el('dev-status');
 var selection = ['on-page', 'off-page'];
@@ -171,7 +174,7 @@ function selectedIds() { return selection.slice(); }
 function setBulkBusy(b) { bulkBusy = b; }
 function claimSelection() { if (bulkBusy) return null; setBulkBusy(true); return selectedIds(); }
 function openModal(id) { el(id).hidden = false; }
-function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); }
+function closeModal(id) { el(id).hidden = true; if (id === 'role-modal') cancelRoleDialog(); if (id === 'role-def-modal') cancelRoleDefinitionDialog(); }
 function csrfHdr(h) { return {...h, 'X-CSRF-Token': 'test-csrf'}; }
 function esc(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
 function fmtDate(v) { return 'time:' + v; }
@@ -179,11 +182,12 @@ var refreshes = 0;
 async function refreshDevices() { refreshes++; }
 var calls = [], replies = [];
 async function fetch(url, opts) {
-  calls.push({url, ...opts, body: opts && JSON.parse(opts.body)});
+  calls.push({url, ...opts, body: opts && opts.body !== undefined ? JSON.parse(opts.body) : undefined});
   const next = replies.shift();
   if (next instanceof Error) throw next;
   if (typeof next === 'function') return await next();
-  return {ok: next.status < 400, status: next.status, json: async () => next.body};
+  return {ok: next.status < 400, status: next.status, json: async () => next.body,
+          headers: {get: (k) => (next.headers || {})[k] || null}};
 }
 function reply(body, status = 200) { replies.push({status, body}); }
 function preview(extra = {}) {
@@ -195,6 +199,146 @@ function preview(extra = {}) {
 ''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
         text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_role_definition_editor_previews_then_commits_with_the_preview_token():
+    """#222: the editor follows the Set role contract exactly -- one dry run
+    on the pre-preview revision, then one commit carrying that preview's
+    token on the SAME revision even when polling has moved on."""
+    _run_role_console_js(r'''
+await el('role-def-new').listeners.click();
+assert.equal(el('role-def-modal').hidden, false);
+el('rd-name').value = 'Bad Name';
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 0, 'invalid input never reaches the server');
+assert.match(el('role-def-msg').textContent, /Role name must/);
+el('rd-name').value = 'boat';
+el('rd-peers').value = 'fiber, boat';
+el('rd-nets').value = '10.20.0.0/16';
+el('rd-restricted').checked = true;
+el('rd-origin').checked = false;
+el('rd-on-stale').value = 'keep';
+reply(preview({member_delta: 0, origin_access_lost: 0, role_pairs_stopped: 0}));
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 1);
+assert.equal(calls[0].method, 'PUT');
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.deepEqual(calls[0].body, {restricted: true, peers: ['boat', 'fiber'], origin: false,
+  nets: ['10.20.0.0/16'], on_stale: 'keep'});
+assert.equal(calls[0].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[0].headers['X-CSRF-Token'], 'test-csrf');
+assert.equal(el('role-def-preview').hidden, false);
+assert.match(el('role-def-preview').textContent, /Create role boat/);
+assert.match(el('role-def-preview').textContent, /QoS policy changed: yes/);
+assert.equal(el('role-def-save').textContent, 'Save role');
+peerPolicy.revision = 99; // polling must not replace the preview's base revision
+reply({ok: true, dry_run: false, revision: 8, candidate_revision: 8});
+reply({revision: 8, roles: {boat: {restricted: true, peers: ['boat', 'fiber'], origin: false}}});
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 3);
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(calls[2].url, '/api/v1/peer-policy/roles', 'definitions re-read after the write');
+assert.equal(el('role-def-modal').hidden, true);
+assert.match(el('role-def-status').textContent, /Role boat saved at policy revision 8/);
+assert.equal(peerPolicy.revision, 8);
+assert.equal(refreshes, 1, 'the Set role dropdown and Role filter follow the device refresh');
+await new Promise(r => setTimeout(r, 0)); // the definitions re-read renders after the dialog closed
+assert.match(el('role-def-rows').innerHTML, /data-role="boat"/);
+assert.match(el('role-def-rows').innerHTML, /fiber/);
+''')
+
+
+def test_role_definition_editor_edit_discards_a_stale_preview_and_carries_qos_state():
+    _run_role_console_js(r'''
+roleDefinitions = {boat: {restricted: true, peers: ['boat'], qos: {seed_up_bps: 12500000},
+  qos_state: {seeder: {numwant: 4}}}};
+roleDefinitionsOk = true;
+openRoleDefinitionEditor('boat');
+assert.equal(el('rd-name').disabled, true);
+assert.equal(el('role-def-modal-title').textContent, 'Edit role boat');
+reply(preview());
+await el('role-def-save').listeners.click();
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.deepEqual(calls[0].body.qos_state, {seeder: {numwant: 4}}, 'a full replacement keeps the tracker overlay');
+assert.match(el('role-def-preview').textContent, /Replace role boat/);
+el('role-def-modal').listeners.input({target: {}});
+assert.equal(el('role-def-preview').hidden, true, 'editing after a preview discards it');
+assert.equal(el('role-def-save').textContent, 'Preview change');
+assert.match(el('role-def-msg').textContent, /Preview again/);
+reply({code: 'revision_conflict', revision: 9}, 409);
+await el('role-def-save').listeners.click();
+assert.equal(calls.length, 2, 'a second click previews again rather than committing');
+assert.match(el('role-def-msg').textContent, /Peer policy changed/);
+reply({code: 'role_isolated', role: 'boat'}, 409);
+await el('role-def-save').listeners.click();
+assert.match(el('role-def-msg').textContent, /permit itself/);
+''')
+
+
+def test_role_definition_delete_and_import_preview_then_confirm():
+    _run_role_console_js(r'''
+reply(preview({role_pairs_stopped: 1}));
+replies.push({status: 204, body: null, headers: {ETag: '"iris-peer-policy-9"'}});
+reply({revision: 9, roles: {}});
+await deleteRoleDefinition('boat');
+assert.equal(calls[0].method, 'DELETE');
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/boat?dry_run=1');
+assert.match(confirmPrompts[0], /Delete role boat/);
+assert.match(confirmPrompts[0], /Role pairings stopped: 1/);
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/boat');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.equal(calls[1].headers['If-Match'], '"iris-peer-policy-7"');
+assert.equal(peerPolicy.revision, 9, 'a 204 carries the revision only in its ETag');
+assert.match(el('role-def-status').textContent, /Role boat deleted at policy revision 9/);
+calls.length = 0; confirmPrompts.length = 0;
+// A declined confirmation commits nothing.
+confirmAnswers.push(false);
+reply(preview({roles: 2}));
+await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, '/api/v1/peer-policy/roles/import-csv?dry_run=1');
+assert.deepEqual(calls[0].body, {csv: 'role\nboat\nfiber\n'});
+assert.match(confirmPrompts[0], /Replace every role definition with the 2 role\(s\) in roles\.csv/);
+assert.match(confirmPrompts[0], /Roles missing from the file are removed/);
+assert.match(el('role-def-status').textContent, /cancelled; nothing changed/);
+calls.length = 0;
+reply(preview({roles: 2}));
+reply({ok: true, dry_run: false, revision: 10, candidate_revision: 10, roles: 2});
+reply({revision: 10, roles: {boat: {peers: ['boat']}, fiber: {peers: ['fiber']}}});
+await importRoleDefinitions('role\nboat\nfiber\n', 'roles.csv');
+assert.equal(calls[1].url, '/api/v1/peer-policy/roles/import-csv');
+assert.equal(calls[1].body.confirm_token, 'preview-token');
+assert.match(el('role-def-status').textContent, /Imported 2 role definition\(s\) from roles\.csv at policy revision 10/);
+calls.length = 0;
+reply({code: 'invalid_roles_csv', detail: 'unknown roles CSV field: bogus'}, 422);
+await importRoleDefinitions('role,bogus\nx,1\n', 'bad.csv');
+assert.equal(calls.length, 1, 'a refused preview never commits');
+assert.match(el('role-def-status').textContent, /Import refused: unknown roles CSV field: bogus/);
+reply({code: 'role_in_use', roles: ['boat']}, 409);
+await importRoleDefinitions('role\nfiber\n', 'drop.csv');
+assert.match(el('role-def-status').textContent, /declared roles missing from the file: boat/);
+await el('role-def-export').listeners.click();
+assert.deepEqual(calls[calls.length - 1], {url: '/api/v1/peer-policy/roles/export-csv', download: 'roles.csv'});
+''')
+
+
+def test_role_definition_controls_follow_the_capability_banner():
+    _run_role_console_js(r'''
+peerPolicy.roles_supported = false;
+renderPeerPolicyPanel();
+for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, true, id);
+await el('role-def-new').listeners.click();
+assert.equal(calls.length, 0);
+assert.match(el('role-def-status').textContent, /cannot confirm.*role support/i);
+await importRoleDefinitions('role\nboat\n', 'roles.csv');
+await deleteRoleDefinition('boat');
+assert.equal(calls.length, 0, 'no preview while the banner shows');
+peerPolicy.roles_supported = true;
+renderPeerPolicyPanel();
+for (const id of ['role-def-new', 'role-def-import', 'role-def-export']) assert.equal(el(id).disabled, false, id);
+''')
 
 
 def test_role_bulk_action_uses_one_aggregate_preview_and_commit():

@@ -3275,8 +3275,6 @@
       if (committing || !keepLock) refreshDevices().catch(function () {});
     }
   });
-  // ---- End role workflow ----
-
   // ---- Role definitions: create, edit, delete, import, export ----
   // Definitions are the policy's own objects (GET /peer-policy/roles), read
   // when the Peer policy panel is open and again after every definition
@@ -3685,6 +3683,8 @@
   async function importRoleDefinitions(csv, filename) {
     if (roleDefBusy) return;
     var status = document.getElementById('role-def-status');
+    var warning = roleCapabilityMessage();
+    if (warning) { status.textContent = warning; return; }
     var revision = peerPolicy.revision;
     if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
     setRoleDefBusy(true);
@@ -3713,7 +3713,7 @@
     if (roleDefBusy) return;
     downloadCsv('/api/v1/peer-policy/roles/export-csv', 'roles.csv');
   });
-  // ---- End role definitions ----
+  // ---- End role workflow ----
 
   // Quarantine/release the whole selection. The peer-policy API is one device
   // per call and carries a revision, so these run in sequence and carry the
