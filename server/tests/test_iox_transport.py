@@ -3305,3 +3305,33 @@ def test_hardware_preflight_walks_over_the_recipes_own_trustpoint():
         b"ip http client secure-trustpoint IRIS\n"))
     module.IoxController._ordinary_install_preflight(fake, attempt)
     assert attempt.identity == {"status": "passed"}
+
+
+def test_cleanup_answers_the_enrolled_trustpoint_removal_question(tmp_path, peer_factory):
+    """`no crypto pki trustpoint IRIS` in cleanup_config asks
+    "Are you sure you want to do this? [yes/no]:" once the trustpoint is
+    enrolled (every HTTPS-fetch onboard leaves one); recorded on iris-c8kv-104
+    and 3400-1 on 2026-09-10, where the unanswered question timed the undeploy
+    out. Cleanup must answer yes, exactly as the install step does."""
+    question = (b"% Removing an enrolled trustpoint will destroy all certificates\r\n"
+                b" received from the related Certificate Authority.\r\n\r\n"
+                b"Are you sure you want to do this? [yes/no]:")
+    steps = ((b"configure terminal", b""),
+             (b"no crypto pki trustpoint IRIS", b""),
+             (b"end", b""))
+    scenario = {
+        "commands": [line.decode("ascii") for line, unused in steps],
+        "payload": [payload.decode("ascii") for unused, payload in steps],
+        "host": "iris-c8kv-104",
+        "question": question.decode("ascii"),
+        "question_index": 1,
+    }
+    peer = peer_factory(**scenario)
+    root = tmp_path / "cleanup-trustpoint"
+    root.mkdir(mode=448)
+    transport, unused = _transport(root, peer, purpose="cleanup_config")
+    result = _command(transport, b"\n".join(line for line, unused in steps), timeout=2.5)
+    peer.assert_reaped()
+    assert _value(result, "timed_out") is False
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None

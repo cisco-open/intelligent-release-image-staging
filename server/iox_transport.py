@@ -2566,6 +2566,19 @@ class IoxTransport(object):
                     elif purpose == "cleanup_config" and line.startswith(b"no app-hosting appid"):
                         question = b"Are you sure you want to do this? [yes/no]:"
                         answer = b"yes"
+                    elif (purpose in _CONFIG_CLEANUP_PURPOSES and in_config and
+                          line == _TRUSTPOINT_REMOVE):
+                        # An ENROLLED trustpoint (every device onboarded over
+                        # the HTTPS fetch) is removed only after IOS's
+                        # "Removing an enrolled trustpoint will destroy all
+                        # certificates ... Are you sure you want to do this?
+                        # [yes/no]:" -- recorded on a C8000V and an IE-3400 on
+                        # 2026-09-10, where the unanswered question timed the
+                        # whole undeploy out. An absent trustpoint answers
+                        # "% Can't find policy IRIS" instead, which
+                        # _cleanup_absent already tolerates.
+                        question = _YES_NO_QUESTION_RE
+                        answer = b"yes"
                     elif (purpose == _TRUSTPOINT_PURPOSE and in_config and
                           line == _TRUSTPOINT_REMOVE):
                         question = _YES_NO_QUESTION_RE
