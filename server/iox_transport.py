@@ -36,7 +36,6 @@ import time
 WRAPPER_MAX_BYTES = 256 * 1024 * 1024
 WRAPPER_COPY_CHUNK_BYTES = 1024 * 1024
 WRAPPER_COPY_MAX_SECONDS = 120
-INSTRUCTION_MAX_BYTES = 256 * 1024
 
 ARCHIVE_MAX_MEMBERS = 4096
 ARCHIVE_MAX_NAME_BYTES = 4096
@@ -90,8 +89,6 @@ _PROMPT_RE = re.compile(br"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})(?P<level>[
 # start with "config". Recorded on a Catalyst 8000V and an IE-3400 on
 # 2026-09-10; without it the trustpoint step waited out its timeout there.
 _CONFIG_PROMPT_RE = re.compile(br"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]{0,62})\((?P<body>config(?:-[A-Za-z0-9]+)*|ca-trustpoint)\)#$")
-_REMOTE_PATH_RE = re.compile(
-    r"^(?:flash|bootflash|sdflash|harddisk):/?[A-Za-z0-9._/-]{1,240}$")
 
 _PHASES = frozenset((
     "observed", "disable_intent", "disabled_confirmed", "installing",
@@ -331,24 +328,6 @@ def _valid_record_id(value, nullable=False):
 def _valid_board(value, nullable=False):
     return (nullable and value is None) or (
         isinstance(value, str) and _BOARD_RE.fullmatch(value) is not None)
-
-
-def _valid_remote_path(value, purpose):
-    if not isinstance(value, str) or _REMOTE_PATH_RE.fullmatch(value) is None:
-        return False
-    relative = value.split(":", 1)[1]
-    if relative.startswith("/"):
-        relative = relative[1:]
-    components = relative.split("/")
-    if any(component in ("", ".", "..") for component in components):
-        return False
-    basename = components[-1]
-    if purpose == "upload_wrapper":
-        return re.fullmatch(r"iris-[0-9a-f]{32}\.tar", basename) is not None
-    if purpose == "upload_instructions":
-        return re.fullmatch(
-            r"iris-instructions-[0-9a-f]{32}\.envelope", basename) is not None
-    return purpose == "upload_certificate" and basename == "iris-ca.pem"
 
 
 def _durable_directory(path):
@@ -1951,21 +1930,9 @@ user=$3
 port=$4
 binary=$5
 sshpass_binary=$6
-mode=$7
 source "$policy" || exit 125
 iris_ssh_policy "$peer" || { rc=$?; iris_ssh_cleanup; exit "$rc"; }
-if [ "$mode" = ssh ]; then
-  "$sshpass_binary" -e "$binary" -tt -p "$port" -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" "$user@$peer"
-else
-  source_fd=$8
-  destination=$9
-  # -O forces the legacy SCP protocol. OpenSSH 9 defaults to SFTP, which
-  # IOS-XE's scp server does not implement -- every wrapper upload failed
-  # with "scp: Connection closed" (rc 255) before the file left the server.
-  # Proven on an IE-3400: identical command, same credentials, fails without
-  # -O and succeeds with it.
-  "$sshpass_binary" -e "$binary" -O -P "$port" -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" "/proc/self/fd/$source_fd" "$user@$peer:$destination"
-fi
+"$sshpass_binary" -e "$binary" -tt -p "$port" -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" "$user@$peer"
 rc=$?
 iris_ssh_cleanup
 exit "$rc"
@@ -2428,19 +2395,18 @@ class IoxTransport(object):
             raise IoxTransportError("rejected", "missing controller command context")
         return copy.deepcopy(context)
 
-    def _spawn(self, mode, deadline, pass_fds=(), extra=()):
+    def _spawn(self, deadline):
         self._check_active(deadline)
         args = [
             "/bin/bash", "--noprofile", "--norc", "-c", _SSH_SHIM,
             "iris-iox-transport", self.config["ssh_policy_path"],
             self.config["host"], self.config["user"], str(self.port),
-            self.config["ssh_binary"] if mode == "ssh" else self.config["scp_binary"],
-            self.config["sshpass_binary"], mode,
-        ] + list(extra)
+            self.config["ssh_binary"], self.config["sshpass_binary"],
+        ]
         options = {
             "stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE, "env": self._environment(),
-            "pass_fds": tuple(pass_fds), "close_fds": True,
+            "pass_fds": (), "close_fds": True,
             "start_new_session": True,
         }
         if self.supervisor is None:
@@ -2583,7 +2549,7 @@ class IoxTransport(object):
                 raise IoxTransportError("unsupported_syntax", "rendered command is outside the closed grammar")
             self.transcript.append(context, restoration=restoration)
             self._check_active(deadline)
-            child = self._spawn("ssh", deadline)
+            child = self._spawn(deadline)
             self._check_active(deadline)
             dialogue = _Dialogue(
                 self, child, stdout, stderr, operation_deadline)
@@ -2870,113 +2836,6 @@ class IoxTransport(object):
                 b"no route to host" in lower or b"could not resolve hostname" in lower):
             return "connection"
         return None
-
-    def upload(self, snapshot_fd, remote_path, phase_deadline):
-        deadline = self._deadline(phase_deadline)
-        operation_deadline = self._operation_deadline(deadline)
-        candidates = [item for item in self.config.get("command_contexts", {}).values()
-                      if item.get("kind") == "scp" and item.get("command_id") not in
-                      getattr(self.transcript, "_closed", set())]
-        if len(candidates) != 1:
-            raise IoxTransportError("rejected", "upload requires one command context")
-        context = copy.deepcopy(candidates[0])
-        command_id = context["command_id"]
-        purpose = context["purpose"]
-        restoration = purpose == "upload_certificate" and context.get("phase") == "restore_intent"
-        stdout = _NormalizedCapture(self._secret_values, _CAPTURE_BYTES)
-        stderr = _NormalizedCapture(self._secret_values, _CAPTURE_BYTES)
-        child = None
-        category = None
-        framing = False
-        try:
-            self._check_active(deadline)
-            if (not _is_int(snapshot_fd, 3) or
-                    not _valid_remote_path(remote_path, purpose)):
-                raise IoxTransportError("unsupported_syntax", "invalid upload binding")
-            source = os.fstat(snapshot_fd)
-            source_limit = (INSTRUCTION_MAX_BYTES if
-                            purpose == "upload_instructions" else
-                            WRAPPER_MAX_BYTES)
-            if (not stat.S_ISREG(source.st_mode) or source.st_size < 1 or
-                    source.st_size > source_limit):
-                raise IoxTransportError(
-                    "unsupported_syntax", "upload source is not a bounded regular file")
-            self.transcript.append(context, restoration=restoration)
-            self._check_active(deadline)
-            child = self._spawn("scp", deadline, pass_fds=(snapshot_fd,),
-                                extra=(str(snapshot_fd), remote_path))
-            self._check_active(deadline)
-            unused_out, unused_err, unused_out_over, unused_err_over, failure = _drain_child(
-                child, operation_deadline, self.cancel, _CAPTURE_BYTES,
-                self.monotonic_fn,
-                captures={"stdout": stdout, "stderr": stderr},
-                supervised=self.supervisor is not None,
-                termination_deadline=deadline)
-            stdout.finish()
-            stderr.finish()
-            reaped = self._finish_child(child, deadline)
-            if not reaped:
-                category = "descendant_unreaped"
-            elif failure is not None:
-                category = failure.category
-            elif child.returncode not in (None, 0):
-                category = self._startup_category(bytes(stderr.data)) or "transport"
-            elif stdout.truncated or stderr.truncated:
-                category = "transport"
-            else:
-                framing = True
-        except IoxTransportError as exc:
-            category = exc.category
-            if child is not None:
-                if not self._stop_child(child, deadline):
-                    category = "descendant_unreaped"
-            stdout.finish()
-            stderr.finish()
-        except Exception:
-            category = "transport"
-            if child is not None:
-                if not self._stop_child(child, deadline):
-                    category = "descendant_unreaped"
-            stdout.finish()
-            stderr.finish()
-        if purpose == "upload_instructions":
-            # SCP diagnostics can repeat its argv or even source bytes.  The
-            # bounded status is sufficient for this private upload; raw streams
-            # must not enter durable or recipe-visible evidence.
-            stdout = _NormalizedCapture((), _CAPTURE_BYTES)
-            stderr = _NormalizedCapture((), _CAPTURE_BYTES)
-            stdout.finish()
-            stderr.finish()
-        if command_id in getattr(self.transcript, "_commands", {}):
-            try:
-                self._record_streams(
-                    command_id, stdout, stderr, restoration, deadline)
-                self._check_active(deadline)
-                end = {
-                    "schema_version": 1, "type": "command_end", "command_id": command_id,
-                    "finished_at": int(time.time()),
-                    "returncode": child.returncode if child is not None else None,
-                    "timed_out": category == "timeout",
-                    "stdout_truncated": stdout.truncated, "stderr_truncated": stderr.truncated,
-                    "framing_complete": framing, "error_category": category,
-                    "stdout_observed_bytes": stdout.observed, "stderr_observed_bytes": stderr.observed,
-                    "stdout_dropped_bytes": stdout.dropped, "stderr_dropped_bytes": stderr.dropped,
-                    "payload_spans": [], "observed_state": None, "transition_response": None,
-                }
-                self.transcript.append(end, restoration=restoration)
-                self._check_active(deadline)
-            except IoxTransportError as exc:
-                if category != "descendant_unreaped":
-                    category = exc.category
-                framing = False
-        try:
-            self._check_active(deadline)
-        except IoxTransportError as exc:
-            if category != "descendant_unreaped":
-                category = exc.category
-            framing = False
-        return self._result(
-            child, stdout, stderr, framing, category, deadline)
 
     def cancel_and_reap(self, deadline):
         deadline = self._clock() if deadline is None else deadline

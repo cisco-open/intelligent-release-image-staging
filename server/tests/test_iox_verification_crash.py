@@ -616,33 +616,6 @@ class _FakeTransport(object):
             "transcript_ref": copy.deepcopy(self.transcript_ref),
         })
 
-    def upload(self, snapshot_fd, remote_path, phase_deadline):
-        assert isinstance(snapshot_fd, int) and remote_path and phase_deadline is not None
-        # The controller supplies one unstarted SCP command context per upload.
-        contexts = [value for value in self.config["command_contexts"].values()
-                    if value["kind"] == "scp"]
-        context = max(contexts, key=lambda value: value["command_id"])
-        command_id = context["command_id"]
-        self.transcript.append(dict(context))
-        if (context["purpose"] == "upload_instructions" and
-                hasattr(self.device, "instruction_source")):
-            self.device.instruction_source = True
-        self.trace.append(("upload", remote_path))
-        self.transcript.append({
-            "schema_version": 1, "type": "command_end", "command_id": command_id,
-            "finished_at": 100, "returncode": 0, "timed_out": False,
-            "stdout_truncated": False, "stderr_truncated": False,
-            "framing_complete": True, "error_category": None,
-            "stdout_observed_bytes": 0, "stderr_observed_bytes": 0,
-            "stdout_dropped_bytes": 0, "stderr_dropped_bytes": 0,
-            "payload_spans": [], "observed_state": None, "transition_response": None})
-        self.transcript_ref = self.transcript.reference()
-        return _AttrDict({
-            "returncode": 0, "timed_out": False, "stdout": b"", "stderr": b"",
-            "stdout_truncated": False, "stderr_truncated": False,
-            "framing_complete": True, "error_category": None,
-            "transcript_ref": copy.deepcopy(self.transcript_ref)})
-
     def cancel_and_reap(self, deadline):
         assert deadline is not None
         self.trace.append(("signal", "TERM"))

@@ -2711,7 +2711,6 @@ class IoxController(object):
             "home": self.state_dir, "attempt_id": attempt.attempt_id,
             "controller_id": self.controller_id,
             "ssh_binary": self.config.get("ssh_binary", "/usr/bin/ssh"),
-            "scp_binary": self.config.get("scp_binary", "/usr/bin/scp"),
             "sshpass_binary": self.config.get("sshpass_binary", "/usr/bin/sshpass"),
             "ssh_policy_path": self.config.get("ssh_policy_path",
                 os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "lab", "iris-ssh-policy.sh"))),

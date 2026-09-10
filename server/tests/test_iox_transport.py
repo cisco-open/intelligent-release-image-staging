@@ -836,6 +836,22 @@ def test_load_transcript_prefix_trusts_stored_classification_across_a_classifier
     assert command["end"]["transition_response"] == "other"
 
 
+@pytest.mark.parametrize("purpose", [
+    "upload_wrapper", "upload_certificate", "upload_instructions",
+])
+def test_historical_scp_transcripts_remain_readable_after_upload_removal(tmp_path, purpose):
+    """Recovery can read persisted evidence from pre-HTTPS controllers."""
+    writer = _writer(tmp_path)
+    start = dict(_start(purpose=purpose), kind="scp")
+    writer.append(start)
+    end = dict(_end(), observed_state=None, payload_spans=[])
+    writer.append(end)
+    loaded = _module()._load_transcript_prefix(
+        str(tmp_path), writer.reference(), CONTROLLER)
+    assert loaded["commands"][1]["start"] == start
+    assert loaded["commands"][1]["end"] == end
+
+
 def test_transcript_is_canonical_private_and_reference_counts_physical_prefix(tmp_path):
     writer = _writer(tmp_path)
     path = _transcript_path(tmp_path)
@@ -1016,23 +1032,6 @@ if scenario.get("ignore_term"):
 if scenario.get("startup_error"):
     write(scenario["startup_error"], 2)
     sys.exit(scenario.get("exit_code", 255))
-if os.path.basename(sys.argv[0]) == "scp":
-    candidates = [arg for arg in sys.argv[1:] if arg.startswith("/proc/self/fd/")]
-    if len(candidates) == 1:
-        with open(candidates[0], "rb") as handle:
-            content = handle.read(65537)
-    elif "-" in sys.argv[1:]:
-        content = sys.stdin.buffer.read(65537)
-    else:
-        trace("unstable_upload_source")
-        sys.exit(95)
-    if scenario.get("scp_echo_content"):
-        write(content)
-    if scenario.get("scp_stderr"):
-        write(scenario["scp_stderr"], 2)
-    trace("uploaded", sha256=hashlib.sha256(content).hexdigest(), size=len(content))
-    sys.exit(0)
-
 if scenario.get("child"):
     if scenario.get("ignore_term"):
         child = subprocess.Popen([sys.executable, "-c",
@@ -1183,10 +1182,9 @@ class _Peer:
         self.bin_dir.mkdir(mode=448)
         script = ("#!" + sys.executable + "\nSCENARIO = " + repr(str(self.scenario))
                   + "\nTRACE = " + repr(str(self.trace)) + "\n" + _PEER_SCRIPT)
-        for binary in ("ssh", "scp"):
-            path = self.bin_dir / binary
-            path.write_text(script)
-            path.chmod(448)
+        path = self.bin_dir / "ssh"
+        path.write_text(script)
+        path.chmod(448)
         sshpass = self.bin_dir / "sshpass"
         sshpass.write_text(
             "#!" + sys.executable + "\nimport os,sys\n"
@@ -1288,15 +1286,11 @@ def _transport(tmp_path, peer, purpose="verification_read", cancel=None,
     known_hosts.write_text("test fixture only\n")
     known_hosts.chmod(384)
     command_context = _start(purpose=purpose) if context is None else context
-    if purpose in ("upload_wrapper", "upload_certificate",
-                   "upload_instructions"):
-        command_context["kind"] = "scp"
     config = {
         "host": "192.0.2.10", "user": "fixture-user", "state_dir": str(state),
         "tmp_dir": str(temporary), "home": str(home),
         "attempt_id": ATTEMPT, "controller_id": CONTROLLER,
         "ssh_binary": str(peer.bin_dir / "ssh"),
-        "scp_binary": str(peer.bin_dir / "scp"),
         "sshpass_binary": str(peer.bin_dir / "sshpass"),
         "ssh_policy_path": str(Path(__file__).resolve().parents[2] / "lab" / "iris-ssh-policy.sh"),
         "ssh_policy_env": {"IRIS_SSH_KNOWN_HOSTS": str(known_hosts)},
@@ -1495,93 +1489,6 @@ def test_each_stream_capture_is_capped_drained_counted_and_never_authoritative_w
     peer.assert_reaped()
 
 
-def test_upload_uses_original_snapshot_fd_after_path_replacement(tmp_path, peer_factory):
-    data = _archive(_member(payload=b"snapshot upload fixture"))
-    path, snapshots = _wrapper(tmp_path, data)
-    peer = peer_factory()
-    transport, unused = _transport(tmp_path, peer, purpose="upload_wrapper")
-    with _admit(path, snapshots) as snapshot:
-        replacement = tmp_path / "replacement"
-        replacement.write_bytes(b"wrong source bytes")
-        os.replace(str(replacement), str(path))
-        result = transport.upload(snapshot.fd, "sdflash:iris-" + TRANSACTION + ".tar",
-                                  time.monotonic() + 1.5)
-        assert _value(result, "returncode") == 0
-        uploaded = [event for event in peer.events() if event["event"] == "uploaded"]
-        assert uploaded == [{"event": "uploaded", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}]
-        assert not any(event["event"] == "unstable_upload_source" for event in peer.events())
-    peer.assert_reaped()
-
-
-def test_instruction_upload_accepts_only_the_transaction_bound_envelope_path(
-        tmp_path, peer_factory):
-    peer = peer_factory()
-    transport, unused = _transport(
-        tmp_path, peer, purpose="upload_instructions")
-    source = tmp_path / "instruction.envelope"
-    source.write_bytes(b"private bootstrap ciphertext")
-    source.chmod(0o600)
-    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        exact = "flash:iris-instructions-%s.envelope" % TRANSACTION
-        result = transport.upload(descriptor, exact, time.monotonic() + 1.5)
-        assert _value(result, "returncode") == 0
-        uploaded = [event for event in peer.events()
-                    if event["event"] == "uploaded"]
-        assert uploaded == [{
-            "event": "uploaded",
-            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-            "size": source.stat().st_size,
-        }]
-    finally:
-        os.close(descriptor)
-    peer.assert_reaped()
-
-
-@pytest.mark.parametrize("remote", [
-    "flash:iris-instructions.envelope",
-    "flash:iris-instructions-%s.envelope.bak" % TRANSACTION,
-    "flash:iris-instructions-%s/escape.envelope" % TRANSACTION,
-    "flash:iris-instructions-%s.envelope" % ("A" * 32),
-    "bootflash:other-%s.envelope" % TRANSACTION,
-])
-def test_instruction_upload_rejects_every_near_match_before_scp(
-        tmp_path, peer_factory, remote):
-    peer = peer_factory()
-    transport, unused = _transport(
-        tmp_path, peer, purpose="upload_instructions")
-    source = tmp_path / "instruction.envelope"
-    source.write_bytes(b"private bootstrap ciphertext")
-    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        result = transport.upload(descriptor, remote, time.monotonic() + 1.5)
-    finally:
-        os.close(descriptor)
-    assert _value(result, "error_category") == "unsupported_syntax"
-    assert not [event for event in peer.events()
-                if event["event"] == "uploaded"]
-
-
-def test_instruction_upload_has_its_own_256_kib_source_bound(
-        tmp_path, peer_factory):
-    peer = peer_factory()
-    transport, unused = _transport(
-        tmp_path, peer, purpose="upload_instructions")
-    source = tmp_path / "instruction.envelope"
-    source.write_bytes(b"x" * (256 * 1024 + 1))
-    descriptor = os.open(str(source), os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        result = transport.upload(
-            descriptor,
-            "flash:iris-instructions-%s.envelope" % TRANSACTION,
-            time.monotonic() + 1.5)
-    finally:
-        os.close(descriptor)
-    assert _value(result, "error_category") == "unsupported_syntax"
-    assert not [event for event in peer.events()
-                if event["event"] == "uploaded"]
-
-
 @pytest.mark.parametrize("command", [b"x" * 321, b"show\x00infra", b"show\rinfra", b"show\x7finfra", b"show\tinfra"])
 def test_rendered_command_bounds_refuse_before_starting_transport(tmp_path, peer_factory, command):
     peer = peer_factory()
@@ -1702,37 +1609,6 @@ def test_instruction_command_parses_private_payload_then_exposes_no_path_or_stre
     assert remote.encode("ascii") not in decoded
     assert ("iris-instructions-%s.envelope" % ("d" * 32)).encode(
         "ascii") not in decoded
-    peer.assert_reaped()
-
-
-def test_instruction_upload_discards_ciphertext_and_remote_diagnostics(
-        tmp_path, peer_factory):
-    body = b"private-instruction-ciphertext"
-    remote = "flash:iris-instructions-%s.envelope" % ("d" * 32)
-    peer = peer_factory(
-        commands=[], scp_echo_content=True,
-        scp_stderr="diagnostic for %s\n" % remote)
-    transport, unused = _transport(
-        tmp_path, peer, purpose="upload_instructions")
-    source = tmp_path / "instruction.envelope"
-    source.write_bytes(body)
-    descriptor = os.open(str(source), os.O_RDONLY)
-    try:
-        result = transport.upload(
-            descriptor, remote, time.monotonic() + 1.5)
-    finally:
-        os.close(descriptor)
-
-    assert _value(result, "error_category") is None
-    assert _value(result, "stdout") == b""
-    assert _value(result, "stderr") == b""
-    records = _records(
-        _transcript_path(tmp_path / "state").read_bytes())
-    decoded = b"".join(
-        base64.b64decode(record["data_b64"])
-        for record in records if record["type"] == "stream")
-    assert body not in decoded
-    assert remote.encode("ascii") not in decoded
     peer.assert_reaped()
 
 
@@ -3126,24 +3002,6 @@ def test_hardware_ssh_close_diagnostics_are_not_transport_failures(tmp_path, pee
     peer.assert_reaped()
 
 
-def test_hardware_scp_upload_forces_the_legacy_protocol_and_tolerates_the_close_notice(
-        tmp_path, peer_factory):
-    """a1d92bb: IOS-XE's scp server has no SFTP, so the wrapper upload must
-    run scp with -O; the recorded successful upload's stderr is only ssh's
-    close notice."""
-    data = _archive(_member(payload=b"hardware upload fixture"))
-    path, snapshots = _wrapper(tmp_path, data)
-    peer = peer_factory(scp_stderr=hw.C8000V_SCP_STDERR.decode("ascii"))
-    transport, unused = _transport(tmp_path, peer, purpose="upload_wrapper")
-    with _admit(path, snapshots) as snapshot:
-        result = transport.upload(snapshot.fd, "bootflash:iris-" + TRANSACTION + ".tar",
-                                  time.monotonic() + 1.5)
-    assert _value(result, "returncode") == 0
-    assert _value(result, "framing_complete") is True
-    assert _value(result, "error_category") is None
-    spawns = [event for event in peer.events()
-              if event["event"] == "spawn" and event["binary"] == "scp"]
-    assert spawns and all("-O" in event["argv"] for event in spawns)
 
 
 # --- device-side artifact fetch (the transfer that replaced the SCP push) ---

@@ -37,6 +37,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   transport and controller classifiers (#226).
 
 ### Changed
+- Removed the unused IOx SCP upload transport. Current onboarding continues
+  to fetch over HTTPS; older SCP transcripts remain readable (#247).
 - IOx onboarding no longer pushes the package over SCP. The device fetches
   its package, catalog certificate and instruction envelope from the artifact
   server with `copy https:` over the catalog trustpoint, authenticating with

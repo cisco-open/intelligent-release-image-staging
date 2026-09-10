@@ -283,35 +283,6 @@ class _StatefulTransport(object):
                 b"iris DEPLOYED\n" if self.app_present else b"")
         return _transport_result()
 
-    def upload(self, snapshot_fd, remote_path, phase_deadline):
-        assert phase_deadline is not None
-        position = os.lseek(snapshot_fd, 0, os.SEEK_CUR)
-        os.lseek(snapshot_fd, 0, os.SEEK_SET)
-        body = os.read(snapshot_fd, 1024 * 1024)
-        os.lseek(snapshot_fd, position, os.SEEK_SET)
-        purpose = "upload_wrapper"
-        if self.config.get("command_contexts"):
-            scp = [value for value in self.config["command_contexts"].values()
-                   if value.get("kind") == "scp"]
-            if scp:
-                purpose = max(scp, key=lambda value: value["command_id"])[
-                    "purpose"]
-        started_at = (self.scenario.clock.peek()
-                      if self.scenario is not None and
-                      self.scenario.clock is not None else None)
-        self.calls.append(("upload", remote_path, body, phase_deadline,
-                           purpose, started_at))
-        if (self.scenario is not None and self.scenario.clock is not None and
-                purpose in self.scenario.advances):
-            self.scenario.clock.advance(self.scenario.advances[purpose])
-        outcome = self._scripted_outcome(purpose)
-        if outcome is not None:
-            return _transport_result(
-                stderr=("injected %s\n" % outcome).encode("ascii"),
-                returncode=1, error_category=outcome,
-                framing_complete=False)
-        return _transport_result()
-
     def cancel_and_reap(self, deadline):
         self.calls.append(("cancel_and_reap", deadline))
         self.closed = True
@@ -424,9 +395,6 @@ class _AliasLockTransport(object):
             stdout_truncated=False, stderr_truncated=False,
             framing_complete=True, error_category=None,
             transcript_ref=self.transcript.reference())
-
-    def upload(self, snapshot_fd, remote_path, phase_deadline):
-        raise AssertionError("cancelled alias fixture reached upload")
 
     def cancel_and_reap(self, deadline):
         return True
