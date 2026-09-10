@@ -841,12 +841,17 @@ class DeploymentRecordStore:
                         raise ValueError("deployment record store exceeds size limit")
                     raw = stream.read(_STORE_MAX_BYTES + 1)
                     _validate_authority_file(stream.fileno(), self.path)
-            except ValueError as exc:
+            except (OSError, ValueError) as exc:
                 if (_transient_authority_read(exc) and
                         attempt + 1 < _STORE_READ_ATTEMPTS):
                     time.sleep(0.02)
                     continue
-                raise
+                if strict:
+                    raise RecordStoreUnreadable(
+                        "deployment record store %s is unreadable (%s); refusing "
+                        "to overwrite it -- repair or remove the file"
+                        % (self.path, exc))
+                return {"records": {}}
             break
         try:
             if len(raw) > _STORE_MAX_BYTES:

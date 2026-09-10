@@ -1982,3 +1982,54 @@ def test_read_retries_a_store_replaced_by_a_sibling_writer(tmp_path, monkeypatch
                             ValueError("unsafe deployment authority file mode: %s" % path)))
     with pytest.raises(deployment_records.RecordStoreUnreadable):
         store._read(strict=True)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("failure", ["oversize", "replaced_after_open", "read_error"])
+def test_read_failures_after_open_preserve_unreadable_contract(
+        tmp_path, monkeypatch, strict, failure):
+    import contextlib
+    import errno
+    import os
+    from pathlib import Path
+
+    store = deployment_records.DeploymentRecordStore(str(tmp_path))
+    store.create(_record(record_id="d1"))
+    original = Path(store.path).read_bytes()
+    if failure == "oversize":
+        monkeypatch.setattr(deployment_records, "_STORE_MAX_BYTES", len(original) - 1)
+    elif failure == "replaced_after_open":
+        real_open = deployment_records._open_existing_authority_file
+
+        def replace_after_open(path, flags, required_mode=None):
+            descriptor, metadata = real_open(path, flags, required_mode)
+            replacement = str(path) + ".replacement"
+            with open(replacement, "wb") as stream:
+                stream.write(original)
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, path)
+            return descriptor, metadata
+
+        monkeypatch.setattr(deployment_records, "_open_existing_authority_file",
+                            replace_after_open)
+        monkeypatch.setattr(deployment_records.time, "sleep", lambda delay: None)
+    else:
+        real_fdopen = os.fdopen
+
+        class ReadFailure:
+            def read(self, limit):
+                raise OSError(errno.EIO, "injected read failure")
+
+        @contextlib.contextmanager
+        def failed_read(descriptor, mode):
+            with real_fdopen(descriptor, mode):
+                yield ReadFailure()
+
+        monkeypatch.setattr(deployment_records.os, "fdopen", failed_read)
+
+    if strict:
+        with pytest.raises(deployment_records.RecordStoreUnreadable):
+            store._read(strict=True)
+    else:
+        assert store._read(strict=False) == {"records": {}}
+    assert Path(store.path).read_bytes() == original
