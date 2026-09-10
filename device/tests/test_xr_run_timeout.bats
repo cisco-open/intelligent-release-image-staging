@@ -26,28 +26,86 @@ setup() {
   export IRIS_STATE="$BATS_TEST_TMPDIR/state"   # persistent known_hosts stays local
   export DEVICE_USER=admin DEVICE_PASS=zzsecretzz
 
-  # Fake sshpass: logs the argv it was invoked with, captures whatever
-  # bytes actually reach its stdin (this is the load-bearing assertion for
-  # the whole task -- a stub that only drained stdin into /dev/null could
-  # not distinguish "the real request arrived" from "ssh was launched with
-  # stdin already redirected from /dev/null before a single byte got
-  # there"), emits FAKE_OUTPUT (matching a real device, which prints its
-  # login banner before it ever wedges), THEN optionally sleeps to simulate
-  # a wedged router (FAKE_SLEEP) -- banner-then-sleep, not sleep-then-banner,
-  # is load-bearing for the redaction test below: a session killed mid-sleep
-  # must already have flushed its output, or that test would be asserting
-  # redaction against zero bytes -- then exits FAKE_SSHPASS_STATUS.
+  # The peer emits prompts without newlines and reads one command at a time.
+  # Its run child can consume queued stdin, reproducing why pipelined exit
+  # disappears on hardware even after complete command output was returned.
   cat > "$STUB/sshpass" <<'STUBEOF'
-#!/usr/bin/env bash
-if [ -n "${ARGV_LOG:-}" ]; then
-  printf '%s\n' "$*" >> "$ARGV_LOG"
-fi
-cat > "${STDIN_LOG:-/dev/null}"
-printf '%s\n' "${FAKE_OUTPUT:-sw1#ok}"
-if [ -n "${FAKE_SLEEP:-}" ]; then
-  /bin/sleep "$FAKE_SLEEP"
-fi
-exit "${FAKE_SSHPASS_STATUS:-0}"
+#!/usr/bin/env python3
+import os
+import select
+import signal
+import sys
+import time
+
+with open(os.environ['ARGV_LOG'], 'a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\n')
+
+def emit(text):
+    os.write(1, text.encode())
+
+def line():
+    data = b''
+    while not data.endswith(b'\n'):
+        part = os.read(0, 1)
+        if not part:
+            return None
+        data += part
+    text = data.decode().rstrip('\r\n')
+    with open(os.environ['STDIN_LOG'], 'a') as log:
+        log.write(text + '\n')
+    return text
+
+emit(os.environ.get('FAKE_OUTPUT', 'sw1#ok') + '\n')
+if os.environ.get('FAKE_SLEEP'):
+    time.sleep(float(os.environ['FAKE_SLEEP']))
+if os.environ.get('FAKE_EOF') == 'login':
+    sys.exit(int(os.environ.get('FAKE_SSHPASS_STATUS', '0')))
+prefix = 'RP/0/RP0/CPU0:router'
+prompt = prefix + '#'
+emit(prompt)
+while True:
+    command = line()
+    if command is None:
+        # A real SSH PTY stays open if exit was swallowed by the run child.
+        if os.environ.get('FAKE_CONSUME_RUN_INPUT'):
+            time.sleep(30)
+        break
+    emit(command + '\r\n')
+    if command == 'exit':
+        if os.environ.get('FAKE_EXIT_SLEEP'):
+            time.sleep(30)
+        break
+    if os.environ.get('FAKE_EOF') == 'command':
+        break
+    if command.startswith('run '):
+        emit('SAFE_RUN_OUTPUT\n')
+        if os.environ.get('FAKE_CONSUME_RUN_INPUT'):
+            while select.select([0], [], [], 0.1)[0]:
+                pending = os.read(0, 4096)
+                if not pending:
+                    break
+                emit('RUN_CHILD_CONSUMED_INPUT\n')
+        if os.environ.get('FAKE_MISLEADING_PROMPT'):
+            emit('RP/0/RP0/CPU0:other-router#')
+            if select.select([0], [], [], 0.1)[0]:
+                emit('WRONG_PROMPT_RELEASED_INPUT\n')
+                sys.exit(9)
+            emit('\n')
+        if os.environ.get('FAKE_SPLIT_PROMPT'):
+            emit(prefix + '(config')
+            if select.select([0], [], [], 0.1)[0]:
+                emit('PARTIAL_PROMPT_RELEASED_INPUT\n')
+                sys.exit(9)
+            emit(')#')
+            continue
+    if command == 'configure':
+        prompt = prefix + '(config)#'
+    elif command == 'abort':
+        prompt = prefix + '#'
+    emit(prompt)
+if os.environ.get('FAKE_SIGNAL'):
+    os.kill(os.getpid(), signal.SIGTERM)
+sys.exit(int(os.environ.get('FAKE_SSHPASS_STATUS', '0')))
 STUBEOF
   chmod +x "$STUB/sshpass"
 
@@ -253,4 +311,86 @@ STUBEOF
   run env bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
   [ "$status" -ne 0 ] || return 1
   [[ "$output" == *"mktemp"* ]]
+}
+
+@test "run child cannot consume the next command or final exit before returning its prompt" {
+  run env FAKE_CONSUME_RUN_INPUT=1 IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'run harmless-read\nshow version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *"SAFE_RUN_OUTPUT"* ]] || return 1
+  [[ "$output" != *"RUN_CHILD_CONSUMED_INPUT"* ]] || return 1
+  grep -q '^show version$' "$STDIN_LOG" || return 1
+  grep -q '^exit$' "$STDIN_LOG"
+}
+
+@test "only the authenticated XR prompt releases the next command" {
+  run env FAKE_MISLEADING_PROMPT=1 IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'run harmless-read\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"WRONG_PROMPT_RELEASED_INPUT"* ]] || return 1
+  grep -q '^exit$' "$STDIN_LOG"
+}
+
+@test "a split configuration prompt waits for its closing delimiter" {
+  run env FAKE_SPLIT_PROMPT=1 IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'run harmless-read\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *"PARTIAL_PROMPT_RELEASED_INPUT"* ]] || return 1
+  grep -q '^exit$' "$STDIN_LOG"
+}
+
+@test "clean SSH EOF before login or before all commands is a transport failure" {
+  for phase in login command; do
+    run env FAKE_EOF="$phase" IRIS_XR_SESSION_TIMEOUT=2 \
+      bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+    [ "$status" -ne 0 ] || return 1
+    [[ "$output" == *"before all commands"* ]] || return 1
+  done
+}
+
+@test "SSH failure status survives prompt framing" {
+  run env FAKE_EOF=login FAKE_SSHPASS_STATUS=23 IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 23 ]
+}
+
+@test "the hard deadline still bounds EOF after the final exit" {
+  run env FAKE_EXIT_SLEEP=1 IRIS_XR_SESSION_TIMEOUT=1 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 124 ] || return 1
+  grep -q '^exit$' "$STDIN_LOG"
+}
+
+@test "SSH termination by signal is preserved instead of reported as a timeout" {
+  run env FAKE_SIGNAL=1 IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 143 ]
+}
+
+@test "a failed read after exit was delivered cannot report success" {
+  # Inject EIO at the syscall boundary after the healthy fake peer echoes
+  # exit. SSH itself still exits zero, so only a transport read failure can
+  # account for the nonzero result.
+  cat > "$STUB/IrisReadFailure.pm" <<'PERLEOF'
+package IrisReadFailure;
+use Errno qw(EIO);
+BEGIN {
+    my $after_exit = 0;
+    *CORE::GLOBAL::sysread = sub (*\$$;$) {
+        if ($after_exit) { $! = EIO; return undef }
+        my ($handle, $buffer, $length, $offset) = @_;
+        my $count = @_ == 4
+            ? CORE::sysread($handle, $$buffer, $length, $offset)
+            : CORE::sysread($handle, $$buffer, $length);
+        $after_exit = 1 if defined($count) && $$buffer =~ /(?:^|\n)exit\r?\n/;
+        return $count;
+    };
+}
+1;
+PERLEOF
+  run env PERL5LIB="$STUB" PERL5OPT=-MIrisReadFailure IRIS_XR_SESSION_TIMEOUT=2 \
+    bash -c "printf 'show version\n' | bash '$RUN' 192.0.2.10"
+  [ "$status" -eq 1 ] || return 1
+  [[ "$output" == *"cannot read SSH dialogue"* ]] || return 1
+  grep -q '^exit$' "$STDIN_LOG"
 }

@@ -51,6 +51,7 @@
     iris/TESTING.md \
     iris/lab/device-run.sh \
     iris/lab/xr-run.sh \
+    iris/lab/xr-dialogue.pl \
     iris/lab/iris-ssh-policy.sh \
     iris/device/container/Dockerfile \
     iris/device/container/entrypoint.sh \
@@ -110,6 +111,7 @@ _make_release_fixture() {
   echo "FROM scratch" > "$FIX/tools/aria2c-build/Dockerfile"
   echo "# build" > "$FIX/tools/aria2c-build/build.sh"
   echo "# run" > "$FIX/lab/device-run.sh"; echo "# run" > "$FIX/lab/xr-run.sh"
+  cp "$repo/lab/xr-dialogue.pl" "$FIX/lab/xr-dialogue.pl"
   echo "# policy" > "$FIX/lab/iris-ssh-policy.sh"
   echo "kind: Namespace" > "$FIX/kubernetes/namespace.yaml"
   echo "# fleet" > "$FIX/fleet/README.md"

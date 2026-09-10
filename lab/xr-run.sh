@@ -104,7 +104,9 @@ GUARDED_CMDS="$(printf '%s\n' "$CMDS" | awk '
 ')"
 
 xr_run_ssh() {
-  sshpass -e ssh -tt -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
+  # XR's `run` child can consume already-buffered CLI commands, including
+  # exit. Send each line only after the previous command returns its prompt.
+  perl "$LAB_DIR/xr-dialogue.pl" sshpass -e ssh -tt -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
     "${DEVICE_USER}@${HOST}" 2>>"$ERR_COPY"
 }

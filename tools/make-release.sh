@@ -74,7 +74,7 @@ SHIP=(
   tools/aria2c-patches tools/aria2c-build
   # The IOS-XE and IOS-XR transports the install/undeploy recipes call, and
   # the SSH host-key policy they (and the installers) source.
-  lab/device-run.sh lab/xr-run.sh lab/iris-ssh-policy.sh
+  lab/device-run.sh lab/xr-run.sh lab/xr-dialogue.pl lab/iris-ssh-policy.sh
   # optional Kubernetes seed-server deployment
   kubernetes
   # fleet: EXAMPLES ONLY (the real csv/conf carry tokens + passwords)

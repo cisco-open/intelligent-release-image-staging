@@ -95,11 +95,10 @@
 # rewrite below replaced the listing+targeted-delete design with three
 # unconditional harddisk: root globs, hardware-proven safe -- see
 # sweep_verify_request()'s comment.) The safety reason stands on its own:
-# there is no interactive transport here to react to a login's output before
-# it ends (lab/xr-run.sh pipes the whole request in and reads the whole
-# transcript back only once the session is over; making it react mid-stream
-# is out of this script's own scope), so "adjudicate deactivate, THEN decide
-# whether to compose and send anything destructive" can only happen BETWEEN
+# this script adjudicates the captured output only after a login ends.
+# lab/xr-run.sh waits for prompts between commands but does not interpret
+# their results or change the prepared request, so "adjudicate deactivate,
+# THEN decide whether to compose and send anything destructive" can only happen BETWEEN
 # two separate logins -- never within a single one, no matter what CLI
 # syntax the destructive step itself uses. At most two logins is still a
 # large win over the old per-step design's 6-11: worst case, a wedged router

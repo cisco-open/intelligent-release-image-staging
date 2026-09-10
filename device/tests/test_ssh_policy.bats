@@ -31,8 +31,20 @@ setup() {
   cat > "$STUB/sshpass" <<'STUBEOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$ARGV_LOG"
-cat > /dev/null
-echo "sw1#terminal length 0"
+case " $* " in
+  *' ServerAliveInterval=15 '*)
+    printf 'RP/0/RP0/CPU0:router#'
+    while IFS= read -r command; do
+      printf '%s\n' "$command"
+      [ "$command" = exit ] && break
+      printf 'RP/0/RP0/CPU0:router#'
+    done
+    ;;
+  *)
+    cat > /dev/null
+    echo "sw1#terminal length 0"
+    ;;
+esac
 if [ -n "${FAKE_STDERR:-}" ]; then printf '%s\n' "$FAKE_STDERR" >&2; fi
 exit "${FAKE_SSH_STATUS:-0}"
 STUBEOF
