@@ -7624,12 +7624,12 @@ def _serve_with_shutdown(server, cleanup, latch=None, start_admission=None):
     try:
         if latch.pending:
             raise _TerminationRequested()
-        if start_admission is not None:
-            start_admission()
         latch.armed = True
         if latch.pending:
             latch.armed = False
             raise _TerminationRequested()
+        if start_admission is not None:
+            start_admission()
         server.serve_forever()
     except _TerminationRequested:
         pass
@@ -7848,41 +7848,39 @@ def main():
     schedule_stop = threading.Event()
     schedule_thread = threading.Thread(
         target=schedule_service.run, args=(schedule_stop,), daemon=True)
-    schedule_thread.start()
-    # Hourly instruction-key custody refresh. This is an in-process daemon
-    # thread like the maintenance loops below, never another entrypoint process.
-    custody_stop = threading.Event()  # never set; loop dies with this process
-    threading.Thread(
-        target=instruction_keys.status_loop,
-        args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
-        daemon=True).start()
-    # Instruction production shares the management process's trusted fleet
-    # and catalog stores; importing this module never starts background work.
+    custody_stop = threading.Event()
     instruction_stop = threading.Event()
-    threading.Thread(
-        target=instruction_stamper.status_loop,
-        args=(instruction_stop, instruction_stamper.InstructionStamper(
-            fleet=fleet, catalog_store=catalog)),
-        daemon=True).start()
-    # Daily public-CA bundle auto-refresh (spec A3): in-process daemon
-    # thread, the repo's periodic-work idiom -- no cron/timer/extra process.
-    ca_stop = threading.Event()     # never set in production; loop dies with us
-    threading.Thread(target=ca_trust_refresh_loop,
-                     args=(ca_stop, state_dir, _bg_audit),
-                     daemon=True).start()
-    # Cisco Bulk Hash reconciliation schedule (KGV reconciler Task 3): same
-    # daemon-thread idiom as ca_trust_refresh_loop, immediately above.
-    bulkhash_stop = threading.Event()  # never set in production either
-    threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
-                     args=(bulkhash_stop, state_dir, catalog, _bg_audit),
-                     daemon=True).start()
-    # Daily audit-trail export (F5): same daemon-thread idiom. The password
-    # accessor is passed as a callable so each run reads the current secret.
-    export_stop = threading.Event()  # never set in production either
-    threading.Thread(target=audit_export.export_loop,
-                     args=(export_stop, audit_path, state_dir,
-                           creds.audit_export_secrets, _bg_audit),
-                     daemon=True).start()
+    ca_stop = threading.Event()
+    bulkhash_stop = threading.Event()
+    export_stop = threading.Event()
+
+    def start_management():
+        # All admission starts under the termination latch. A signal during
+        # construction skips this callback; a signal or failure within it
+        # still enters the same cleanup path with any started work owned.
+        schedule_thread.start()
+        # Maintenance stays in this process, sharing its trusted stores.
+        threading.Thread(
+            target=instruction_keys.status_loop,
+            args=(custody_stop, instruction_keys.InstructionPaths.from_env()),
+            daemon=True).start()
+        threading.Thread(
+            target=instruction_stamper.status_loop,
+            args=(instruction_stop, instruction_stamper.InstructionStamper(
+                fleet=fleet, catalog_store=catalog)),
+            daemon=True).start()
+        threading.Thread(target=ca_trust_refresh_loop,
+                         args=(ca_stop, state_dir, _bg_audit),
+                         daemon=True).start()
+        threading.Thread(target=bulkhash_refresh.bulkhash_refresh_loop,
+                         args=(bulkhash_stop, state_dir, catalog, _bg_audit),
+                         daemon=True).start()
+        # Read export credentials through the accessor at each run.
+        threading.Thread(target=audit_export.export_loop,
+                         args=(export_stop, audit_path, state_dir,
+                               creds.audit_export_secrets, _bg_audit),
+                         daemon=True).start()
+        control_server.start()
     scheme = "https" if srv.tls_active else "http"
     if not srv.tls_active:
         print("iris-gui: WARNING: serving the console over PLAIN HTTP (%s=1): "
@@ -7896,7 +7894,8 @@ def main():
                      bulkhash_stop, export_stop):
             stop.set()
         schedule_service.stop()
-        schedule_thread.join(timeout=10)
+        if schedule_thread.ident is not None:
+            schedule_thread.join(timeout=10)
         if schedule_thread.is_alive():
             print("iris-management: schedule runner did not stop within 10s",
                   file=sys.stderr, flush=True)
@@ -7913,7 +7912,7 @@ def main():
 
     _serve_with_shutdown(
         srv, shutdown_management, latch=term_latch,
-        start_admission=control_server.start)
+        start_admission=start_management)
 
 
 if __name__ == "__main__":
