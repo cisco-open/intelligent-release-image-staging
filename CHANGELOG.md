@@ -12,6 +12,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Console and API onboard/undeploy jobs offer a **Detailed logs** option
+  (`log: true`, default off) for IOx command output. Onboarding also enables
+  download logs on IOx and IOS-XR; credential redaction remains active.
 - Splunk view: a *Peer-to-peer evidence* row shows bytes received stacked by
   source (origin, peer device, unknown), the share of bytes served by peer
   devices, and the individual device-to-device transfers, read from the

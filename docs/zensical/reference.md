@@ -177,10 +177,12 @@ see [Kubernetes](kubernetes.md).
 Onboarding reads the public device certificate from `$IRIS_CONFIG/tls/crt.pem`,
 unless `IRIS_CRT_PUBLIC` selects another public certificate file. The server's
 `IRIS_LOG` names its log directory. It is kept out of device installer options;
-the device-side `IRIS_LOG` switch controls aria2 logging separately, and for an
-IOx job it also decides whether the raw device session is streamed into the
-Console job log (off: step-level lines only; the session stays in the persisted
-transcript).
+the device-side `IRIS_LOG` switch controls aria2 logging separately. The Console's
+**Detailed logs** checkbox, or the onboard/undeploy API's optional boolean `log`,
+sets this switch explicitly (`false` or omitted means off). For an IOx job it
+also controls detailed device-session output in the Console job log, with
+credential redaction retained. Onboarding enables download logs on IOx and
+IOS-XR; Guest Shell uses its separate persistent `iris_log` config key.
 
 ### TLS trust and console certificate
 
@@ -426,7 +428,7 @@ verification](operations.md#image-verification).
 | `POST /api/v1/devices/<id>/forget-host-key` | Removes the device's entry from the persistent SSH known_hosts accept-new mode records into (`lab/iris-ssh-policy.sh`) — for a device that was re-imaged or replaced and now fails every session with a changed-key error. `{ok: true, peer: <device_ip>}` on success, including when nothing was recorded (already effectively forgotten). 400 `{error: ...}` when the device has no `device_ip` on record or the removal itself fails. Audited as `device_forget_host_key` (device id, actor, and the peer address). Only the persistent accept-new file is touched — an `IRIS_SSH_HOST_KEY` pin or an operator-supplied `IRIS_SSH_KNOWN_HOSTS` file is untouched. The next session re-verifies and pins the device's new key; this never disables verification. See [Operations → Forgetting a device's SSH host key](operations.md#forgetting-a-devices-ssh-host-key). |
 | `POST /api/v1/devices/<id>/request-report` | Requests a fresh telemetry report; `{ok: true, expires_at}`, or 429 while one is already pending. |
 | `POST /api/v1/devices/<id>/adopt` | Requires `{"acknowledge_adopt": true}`; returns `{record_id}`. 409 when the device already has an active deployment record; routers cannot be adopted. |
-| `POST /api/v1/devices/<id>/onboard`, `POST /api/v1/devices/<id>/undeploy` | Starts the job; `{job_id}`. 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
+| `POST /api/v1/devices/<id>/onboard`, `POST /api/v1/devices/<id>/undeploy` | Starts the job; `{job_id}`. Both routes accept optional `log: true` for detailed IOx command output (default `false`; see [Onboarding jobs](#onboarding-jobs)). 409 when the device is busy with the opposite action. Undeploy also answers 409 when the device has no deployment record — send `{"force": true}` to run it anyway, which removes only the IRIS-named agent footprint and leaves operator-owned network state (VLAN/SVI, VirtualPortGroup, NAT) untouched, audited as `undeploy_forced`. A `503` naming an unreadable `deployment_records.json` is a different answer: the records cannot be read at all, so whether this device has a deployment is unknown — repair the file rather than adopting the device. |
 
 Router deployments carry extra preflight and ownership rules — see
 [Management Type and VLAN Ownership](management-type.md#router-preflight-and-ownership).
@@ -683,6 +685,13 @@ Jobs cover onboarding and undeploy. Their states are `queued`, `running`,
 `done`, `error`, or `cancelled`. `done` means the installer or undeployer
 finished; it does not mean an assigned image has staged. Use the device's
 heartbeat status for that.
+
+Both device job submission routes accept an optional boolean `log`, default
+`false`. Send `{"log": true}` for detailed IOx command output; onboarding also
+enables download logs on IOx and IOS-XR. It can be combined with onboarding's
+`telemetry` / `telemetry_stream` flags or undeploy's `force` flag. Strings,
+numbers and `null` are rejected for `log` before a job is prepared or queued.
+Guest Shell logging remains controlled by the device's `iris_log` config key.
 
 The stream sends each log line as an unnamed text `data:` event, with
 `: keepalive` comments during quiet periods. The named `end` event carries

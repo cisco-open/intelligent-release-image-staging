@@ -3710,13 +3710,15 @@ def test_authority_scan_still_refuses_an_entry_that_never_settles(tmp_path, monk
         controller.close()
 
 
+@pytest.mark.parametrize("log", ["off", "on"])
 def test_minted_catalog_token_is_stream_redacted_before_recipe_output(
-        tmp_path):
+        tmp_path, log):
     token = b"fixture-catalog-token-SECRET"
     factory = _TransportFactory(verification="enabled")
     result, unused_store, timeline, unused_wrapper = _run_scripted_install(
         tmp_path, factory, markers=("package.sign",),
-        prefix_chunks=(token[:11], token[11:]))
+        prefix_chunks=(token[:11], token[11:]),
+        request_overrides={"target": _Bag(_request()["target"], log=log)})
     rendered = b"".join(
         call[2].encode("utf-8") if isinstance(call[2], str) else call[2]
         for call in timeline if call[0] == "output")

@@ -2070,6 +2070,13 @@
     return { telemetry: !t || t.checked,
              telemetry_stream: !!(s && s.checked) };
   }
+  function jobFlags(action, forced) {
+    var flags = action === 'onboard' ? telemetryFlags()
+      : (forced ? { force: true } : {});
+    var log = document.getElementById(action + '-log');
+    flags.log = !!(log && log.checked);
+    return flags;
+  }
   // The header checkbox can only ever mean "every row on THIS page" -- once
   // the table pages (issue #112 step 3), a page is a fraction of what the
   // filter matches, and silently treating "select all" as "select the
@@ -2443,6 +2450,7 @@
     if (!ids) return;
     var forceEl = document.getElementById('undeploy-force');
     var forced = action === 'undeploy' && forceEl && forceEl.checked;
+    var options = jobFlags(action, forced);
     if (action === 'undeploy' &&
         !confirm('Undeploy ' + ids.length + ' device(s)?' + (forced
           ? '\n\nFORCE is on. For any device with no deployment record this removes the IRIS agent footprint only — EEM applets, Guest Shell and the IRIS guest-share files. The VirtualPortGroup and NAT are NOT removed, because without a record there is no proof IRIS created them; clean those up yourself if IRIS did. On an IOS-XR device, force removes the same IRIS-named footprint a normal undeploy would — the appmgr application iris, its iris-xr package source, the RPM, iris-work/, and the IRIS sidecar files at harddisk: root — but a staged image file there is never removed by IRIS teardown, and the agent deletes an adopted file only when the catalog republishes new content under that same image id — never otherwise.'
@@ -2461,8 +2469,7 @@
       await Promise.all(ids.map(async function (id) {
         try {
           var r = await jpost('/api/v1/devices/' + encodeURIComponent(id) + '/' + action,
-                              action === 'onboard' ? telemetryFlags()
-                                : (forced ? { force: true } : {}));
+                              options);
           if (r.ok) { batchJobs[(await r.json()).job_id] = id; } else {
             // surface WHY it was refused — a bare id reads as a mystery
             var reason = '';

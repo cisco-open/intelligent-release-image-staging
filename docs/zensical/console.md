@@ -644,11 +644,14 @@ line per controller operation with its duration -- `  configure_app ok (2.1s)`
 -- as each step completes. A failed step is named the same way
 (`  configure_app failed (2.1s)`), followed by the device's own `% ...`
 verdict and the controller's `IOx command failed: ...` detail. The raw IOS
-session the controller drove is not in the job log; it is kept as the job's
+session the controller drove is not in the default job log; it is kept as the job's
 persisted transcript under the state directory's `iox/transcripts`. To stream
-it into the job log for a debugging run, submit the job with the device
-logging opt-in `IRIS_LOG=on` (see the [reference](reference.md#device-container-environment-variables)) --
-the same switch that turns on the agent's `aria2c.log`.
+it into the job log for a debugging run, select **Detailed logs** in the
+Onboard or Undeploy dialog, or submit `{"log": true}` through the API.
+It defaults to off; credential redaction remains active. Onboarding with this
+option also enables `aria2c.log` on IOx and IOS-XR. Guest Shell logging is
+configured separately through `iris_log` in its agent configuration (see the
+[reference](reference.md#device-container-environment-variables)).
 
 ### Deployment logs
 

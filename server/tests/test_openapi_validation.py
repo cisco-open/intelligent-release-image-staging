@@ -517,6 +517,22 @@ def test_tracker_state_schemas_validate_mutations_presence_pairs_and_published_e
             assert set(interval) == {"value", "source"}
 
 
+def test_onboard_and_undeploy_log_opt_in_is_an_optional_boolean():
+    document = _load()
+    for prefix in ("/api/v1", "/internal/v1"):
+        for action in ("onboard", "undeploy"):
+            media = document["paths"][prefix + "/devices/{device_id}/" + action][
+                "post"]["requestBody"]["content"]["application/json"]
+            schema = _local_schema(media["schema"], document)
+            assert schema["properties"]["log"]["default"] is False
+            validator = OAS32Validator(schema)
+            for body in ({}, {"log": False}, {"log": True}):
+                validator.validate(body)
+            for invalid in (None, 0, 1, "on", "false", [], {}):
+                with pytest.raises(ValidationError):
+                    validator.validate({"log": invalid})
+
+
 def test_schedule_closed_schemas_cover_stage_only_defaults_and_patch_replacement():
     document = _load()
     for prefix in ("/api/v1", "/internal/v1"):

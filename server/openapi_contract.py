@@ -1715,8 +1715,8 @@ _JSON_REQUESTS = {
     "/devices/{device_id}/adopt": ({"acknowledge_adopt": True},
                                    ("acknowledge_adopt",), True),
     "/devices/{device_id}/onboard": (
-        {"telemetry": True, "telemetry_stream": False}, (), False),
-    "/devices/{device_id}/undeploy": ({"force": False}, (), False),
+        {"telemetry": True, "telemetry_stream": False, "log": False}, (), False),
+    "/devices/{device_id}/undeploy": ({"force": False, "log": False}, (), False),
     "/credentials": (
         {"id": "default", "name": "Default devices",
          "device_user": "operator", "device_pass": "device-password",
@@ -1791,6 +1791,14 @@ def _request_body(route):
     title = _operation_name(route, suffix) + "Request"
     schema = _schema_for_example(
         example, title, required=required, credential_input=True)
+    if suffix in ("/devices/{device_id}/onboard", "/devices/{device_id}/undeploy"):
+        schema["properties"]["log"].update({
+            "default": False,
+            "description": (
+                "Enable detailed IOx command output in the job log. "
+                "Onboarding also enables download logs on IOx and IOS-XR. "
+                "Guest Shell logging is configured separately."),
+        })
     if suffix == "/devices":
         # Fleet JSON input is a closed operator-owned schema. Historical
         # vlan/guest_ip aliases remain CSV compatibility fields only, while

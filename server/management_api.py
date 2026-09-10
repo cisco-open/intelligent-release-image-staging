@@ -1824,6 +1824,9 @@ class _OnboardSubmissionAdapter(object):
         if not isinstance(body, dict):
             return reject(400, "request body must be an object")
 
+        if "log" in body and type(body["log"]) is not bool:
+            return reject(400, "log must be a bool")
+        log = "on" if body.get("log", False) else "off"
         if "force" in body and type(body["force"]) is not bool:
             return reject(400, "force must be a bool")
         force = body.get("force", False) is True
@@ -1834,10 +1837,11 @@ class _OnboardSubmissionAdapter(object):
         env_extra = {
             "TELEMETRY": "on" if telemetry else "off",
             "TELEMETRY_STREAM": "on" if stream else "off",
+            "IRIS_LOG": log,
         }
         env_extra["IRIS_TELEMETRY"] = env_extra["TELEMETRY"]
         env_extra["IRIS_TELEMETRY_STREAM"] = env_extra["TELEMETRY_STREAM"]
-        undeploy_env = None
+        undeploy_env = {"IRIS_LOG": log}
         resolved = None
         record_ref = {}
         selected_record_id = None
@@ -1924,7 +1928,7 @@ class _OnboardSubmissionAdapter(object):
                 resolved = degraded_plan["resolved"]
                 if require_iox and resolved.get("platform") != "iox":
                     return reject(409, "device is not an IOx target")
-                undeploy_env = {"IRIS_FORCE_AGENT_ONLY": "1"}
+                undeploy_env["IRIS_FORCE_AGENT_ONLY"] = "1"
                 if resolved.get("platform") != "iox":
                     def on_success():
                         self.record_store.retire_device(

@@ -18857,6 +18857,11 @@
                   },
                   "telemetry_stream": {
                     "type": "boolean"
+                  },
+                  "log": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable detailed IOx command output in the job log. Onboarding also enables download logs on IOx and IOS-XR. Guest Shell logging is configured separately."
                   }
                 },
                 "required": [],
@@ -18864,7 +18869,8 @@
               },
               "example": {
                 "telemetry": true,
-                "telemetry_stream": false
+                "telemetry_stream": false,
+                "log": false
               }
             }
           }
@@ -19187,13 +19193,19 @@
                 "properties": {
                   "force": {
                     "type": "boolean"
+                  },
+                  "log": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable detailed IOx command output in the job log. Onboarding also enables download logs on IOx and IOS-XR. Guest Shell logging is configured separately."
                   }
                 },
                 "required": [],
                 "additionalProperties": true
               },
               "example": {
-                "force": false
+                "force": false,
+                "log": false
               }
             }
           }
@@ -47762,6 +47774,11 @@
                   },
                   "telemetry_stream": {
                     "type": "boolean"
+                  },
+                  "log": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable detailed IOx command output in the job log. Onboarding also enables download logs on IOx and IOS-XR. Guest Shell logging is configured separately."
                   }
                 },
                 "required": [],
@@ -47769,7 +47786,8 @@
               },
               "example": {
                 "telemetry": true,
-                "telemetry_stream": false
+                "telemetry_stream": false,
+                "log": false
               }
             }
           }
@@ -48061,13 +48079,19 @@
                 "properties": {
                   "force": {
                     "type": "boolean"
+                  },
+                  "log": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable detailed IOx command output in the job log. Onboarding also enables download logs on IOx and IOS-XR. Guest Shell logging is configured separately."
                   }
                 },
                 "required": [],
                 "additionalProperties": true
               },
               "example": {
-                "force": false
+                "force": false,
+                "log": false
               }
             }
           }

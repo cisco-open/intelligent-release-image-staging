@@ -685,6 +685,8 @@
               <p class="muted">Installs the IRIS agent on each selected device and starts staging its assigned images.</p>
               <label class="check-row"><input type="checkbox" id="onboard-telemetry" checked> Telemetry reports</label>
               <label class="check-row"><input type="checkbox" id="onboard-telemetry-stream"> Telemetry streaming (live samples)</label>
+              <label class="check-row"><input type="checkbox" id="onboard-log" aria-describedby="onboard-log-help"> Detailed logs</label>
+              <p class="muted" id="onboard-log-help">Extra command output for IOx jobs. Also enables download logs on IOx and IOS-XR.</p>
             </div>
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="onboard-cancel">Cancel</button>
@@ -718,6 +720,8 @@
                 otherwise. Any record for the device is abandoned once the
                 teardown succeeds, so it can be onboarded again.
               </div>
+              <label class="check-row"><input type="checkbox" id="undeploy-log" aria-describedby="undeploy-log-help"> Detailed logs</label>
+              <p class="muted" id="undeploy-log-help">Extra command output for IOx jobs.</p>
             </div>
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="undeploy-cancel">Cancel</button>

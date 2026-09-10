@@ -8632,7 +8632,82 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'href="/help-server.html"' in html
 
 
-def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_job_log_option_reaches_onboard_and_recorded_undeploy(
+        tmp_path, monkeypatch, options, expected):
+    monkeypatch.setenv("IRIS_LOG", str(tmp_path / "server-log"))
+    seen = []
+
+    def run_fn(path, env, output):
+        seen.append(env.copy())
+        return 0
+
+    host, port, stop = _serve_inband(tmp_path, run_fn)
+    try:
+        ck, csrf = _auth(host, port)
+        headers = {"Cookie": ck, "X-CSRF-Token": csrf}
+        for action in ("onboard", "undeploy"):
+            body = dict(options)
+            if action == "onboard":
+                body.update(telemetry=False, telemetry_stream=True)
+            status, _, response = _req(
+                host, port, "POST", "/api/devices/edge/" + action,
+                body, headers=headers)
+            assert status == 200, response
+            job = _wait_onboard_job(
+                host, port, ck, json.loads(response)["job_id"])
+            assert job["state"] == "done", job
+            assert seen[-1].get("IRIS_LOG") == expected, action
+            assert "IRIS_FORCE_AGENT_ONLY" not in seen[-1], action
+            if action == "onboard":
+                assert seen[-1]["IRIS_TELEMETRY"] == "off"
+                assert seen[-1]["IRIS_TELEMETRY_STREAM"] == "on"
+        assert len(seen) == 2
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("action,force", [
+    ("onboard", False), ("undeploy", False), ("undeploy", True),
+], ids=["onboard", "recorded-undeploy", "forced-undeploy"])
+@pytest.mark.parametrize("value", [
+    None, 0, 1, 0.0, "on", "false", [], {},
+], ids=["null", "zero", "one", "float", "on", "false", "list", "object"])
+def test_job_log_option_rejects_non_boolean_before_planning_or_enqueue(
+        tmp_path, monkeypatch, action, force, value):
+    reached = []
+
+    def forbidden(*args, **kwargs):
+        reached.append(True)
+        raise ValueError("unexpected planning or enqueue")
+
+    host, port, stop = _serve_inband(tmp_path, forbidden)
+    adapter = stop.__self__.onboard_submission
+    for owner, name in (
+            (adapter, "_plan"), (adapter, "_teardown_plan"),
+            (adapter.record_store, "recoverable_for_device"),
+            (adapter.record_store, "create"), (adapter.onboard, "start")):
+        monkeypatch.setattr(owner, name, forbidden)
+    try:
+        ck, csrf = _auth(host, port)
+        status, _, response = _req(
+            host, port, "POST", "/api/devices/edge/" + action,
+            {"log": value, "force": force},
+            headers={"Cookie": ck, "X-CSRF-Token": csrf})
+        assert status == 400, response
+        assert json.loads(response)["error"] == "log must be a bool"
+        assert reached == []
+    finally:
+        stop()
+
+
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_force_undeploy_delivers_the_force_flag_to_the_recipe(
+        tmp_path, options, expected):
     """A forced undeploy must reach the teardown recipe with
     IRIS_FORCE_AGENT_ONLY=1.
 
@@ -8653,17 +8728,22 @@ def test_force_undeploy_delivers_the_force_flag_to_the_recipe(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         st, _, b = _req(host, port, "POST", "/api/devices/edge/undeploy",
-                        {"force": True},
+                        dict(options, force=True),
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
             "forced undeploy reached the recipe without the force flag")
+        assert seen.get("IRIS_LOG") == expected
     finally:
         stop()
 
 
-def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
+@pytest.mark.parametrize("options,expected", [
+    ({}, "off"), ({"log": False}, "off"), ({"log": True}, "on"),
+], ids=["default", "off", "on"])
+def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(
+        tmp_path, options, expected):
     """The same force-flag delivery test above, but for an xr-host/xr-appmgr
     device: force must resolve to device/xr-uninstall.sh (not one of the
     IOS-XE teardown scripts) and IRIS_FORCE_AGENT_ONLY=1 must reach it the
@@ -8687,12 +8767,13 @@ def test_force_undeploy_delivers_the_force_flag_to_xr_uninstall(tmp_path):
     try:
         ck, csrf = _auth(host, port)
         st, _, b = _req(host, port, "POST", "/api/devices/xr1/undeploy",
-                        {"force": True},
+                        dict(options, force=True),
                         headers={"Cookie": ck, "X-CSRF-Token": csrf})
         assert st == 200, b
         _wait_onboard_job(host, port, ck, json.loads(b)["job_id"])
         assert seen.get("IRIS_FORCE_AGENT_ONLY") == "1", (
             "forced XR undeploy reached the recipe without the force flag")
+        assert seen.get("IRIS_LOG") == expected
         assert ran_script.get("path", "").endswith("device/xr-uninstall.sh"), (
             "forced XR undeploy did not run device/xr-uninstall.sh: %r"
             % ran_script.get("path"))
