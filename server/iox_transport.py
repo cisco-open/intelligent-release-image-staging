@@ -1727,6 +1727,25 @@ def _delete_absent(purpose, payload):
         _DELETE_ABSENT_RE.match(line.strip()) for line in lines)
 
 
+# The stage probe's whole job is to PROVE the staging directory is gone, and
+# IOS proves it with "%Error opening <path> (No such file or directory)" on a
+# `dir` of the absent path. That is the success condition -- but the strict
+# classifier read the %Error as a rejection, so a teardown that had removed
+# everything failed at its final verification step. Scoped to the probe's
+# `dir` lines and to that exact message; the recipe's own residue check
+# already reads it as clean.
+_PROBE_PURPOSES = frozenset(("cleanup_stage_probe",))
+_DIR_ABSENT_RE = re.compile(
+    br"(?im)^%\s*Error opening\b.*\(No such file or directory\)\s*$")
+
+
+def _dir_absent(purpose, line, payload):
+    if purpose not in _PROBE_PURPOSES or not line.strip().startswith(b"dir "):
+        return False
+    lines = [l for l in payload.split(b"\n") if l.strip()]
+    return bool(lines) and all(_DIR_ABSENT_RE.match(l.strip()) for l in lines)
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2421,7 +2440,8 @@ class IoxTransport(object):
                     if (_app_already_absent(purpose, payload) or
                             _cleanup_absent(purpose, payload) or
                             _vlan_already_absent(purpose, line, payload) or
-                            _delete_absent(purpose, payload)):
+                            _delete_absent(purpose, payload) or
+                            _dir_absent(purpose, line, payload)):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
