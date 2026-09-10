@@ -177,6 +177,15 @@ The supplied `Content-Length` is not a valid non-negative integer.
 A role definition, role graph, network, or QoS value violates the closed policy
 schema. Correct the named field and validate the complete candidate again.
 
+## invalid_roles_csv
+
+A roles CSV sent to `POST /api/v1/peer-policy/roles/import-csv` does not follow
+the `iris-role` grammar: a missing `role` header, an unknown column, a row
+without a role, a duplicate role, a non-integer QoS cell, or a malformed
+network. The problem's `detail` names the row or field. Nothing was written;
+fix the file and preview again. Policy refusals inside a well-formed file
+(unknown peer, reserved name, isolated role) keep their own codes.
+
 ## invalid_policy_request
 
 A role/QoS route received an unknown query key, unknown body field, malformed

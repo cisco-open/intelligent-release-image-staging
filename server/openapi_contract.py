@@ -25,6 +25,7 @@ ERROR_STATUSES = (400, 401, 403, 404, 405, 408, 409, 411, 412, 413, 415,
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
 POLICY_MUTATIONS = {
     ("PUT", "/peer-policy/roles/{name}"),
+    ("POST", "/peer-policy/roles/import-csv"),
     ("DELETE", "/peer-policy/roles/{name}"),
     ("PUT", "/peer-policy/qos"),
     ("POST", "/devices/{device_id}/role"),
@@ -843,6 +844,11 @@ def _policy_business_errors(route):
     specific = {
         ("GET", "/peer-policy"): {},
         ("GET", "/peer-policy/roles"): {503: ("policy_unavailable",)},
+        ("GET", "/peer-policy/roles/export-csv"): {503: ("policy_unavailable",)},
+        ("POST", "/peer-policy/roles/import-csv"): {
+            409: ("role_reserved_name", "role_isolated", "role_in_use"),
+            413: ("payload-too-large",),
+            422: ("invalid_policy", "invalid_roles_csv")},
         ("GET", "/peer-policy/explain"): {
             422: ("principal_unresolvable",), 503: ("policy_unavailable",)},
         ("GET", "/devices/{device_id}/effective-qos"): {
@@ -1661,6 +1667,9 @@ def _resource_suffix(route):
 # handler actually requires.  ``required_body`` is false only for operations
 # whose established v1 wire form permits an empty body.
 _JSON_REQUESTS = {
+    "/peer-policy/roles/import-csv": ({
+        "csv": "role,restricted,peers,seed_up_bps\nboat,true,boat;fiber,12500000\nfiber,true,fiber;boat,\n",
+        "confirm_token": "candidate-bound-sha256"}, ("csv",), True),
     "/peer-policy/roles/{name}": ({"restricted": True, "peers": ["boat"],
         "origin": True, "nets": [], "on_stale": "keep", "qos": {},
         "confirm_token": "candidate-bound-sha256"}, (), True),
@@ -1873,6 +1882,7 @@ def _json_success_example(route):
         "/peer-policy/roles": {"revision": 4, "degraded": False, "fail_closed": False,
             "roles": {"boat": {"restricted": True, "peers": ["boat"], "origin": True}}},
         "/peer-policy/roles/{name}": _policy_write_example(),
+        "/peer-policy/roles/import-csv": {**_policy_write_example(), "roles": 2},
         "/peer-policy/qos": _policy_write_example(),
         "/devices/{device_id}/role": {**_policy_write_example(), "partial": False,
             "applied": 1, "failed": {}, "direction": "tighten",
@@ -2261,9 +2271,12 @@ def _success(route):
                        "content": {"text/plain": _media(
                            {"type": "string"}, "onboard started\n")}}
     if path.endswith("export-csv") or path.endswith("example-csv"):
+        sample = ("role,restricted,peers,origin,nets,on_stale\nboat,true,boat;fiber,true,,keep\n"
+                  if suffix == "/peer-policy/roles/export-csv"
+                  else "device_id,device_ip\n")
         return "200", {"description": "CSV document",
                        "content": {"text/csv": _media(
-                           {"type": "string"}, "device_id,device_ip\n")}}
+                           {"type": "string"}, sample)}}
     if path.endswith("/healthz") or path.endswith("/readyz"):
         return "200", {"description": "Non-disclosing probe result",
                        "content": {"application/json": _media(
@@ -2661,7 +2674,7 @@ def _success(route):
         media["examples"] = {
             "confirmationRequired": {"value": example},
             "noConfirmation": {"value": no_confirmation}}
-        if route.method == "POST":
+        if suffix in ("/devices/{device_id}/role", "/devices/bulk-role"):
             noop = {key: value for key, value in no_confirmation.items()
                     if key not in {"candidate_revision", *_blast_example()}}
             noop.update(dry_run=False, direction="neutral")
@@ -3002,6 +3015,8 @@ def _resource_path_exception(route):
          "verification job action"),
         (r"^/devices/(?:import-csv|bulk-credential|bulk-role)$",
          "fleet batch action"),
+        (r"^/peer-policy/roles/(?:import-csv|export-csv)$",
+         "role definition batch action"),
         (r"^/devices/\{device_id\}/(?:role|effective-qos|assign|credential|platform|forget-host-key|request-report|adopt|onboard|undeploy)$",
          "device workflow action"),
         (r"^/onboard/(?:jobs/\{job_id\}/abort|cancel-queued)$",

@@ -277,6 +277,21 @@
             <ul class="policy-members" id="policy-role-members"></ul>
             <p id="policy-origin-qos"></p>
             <p id="policy-mutual-origin"></p>
+            <h3>Role definitions</h3>
+            <p class="muted">Roles a device can be set to, with their peer access and speed limits. Rates are bytes per second (0 = unlimited); a blank field inherits the global default. Import replaces every definition with the file, in the same CSV grammar as <code>iris-role</code>.</p>
+            <div class="role-def-actions">
+              <button class="btn" type="button" id="role-def-new">New role…</button>
+              <button class="btn ghost" type="button" id="role-def-import">Import CSV…</button>
+              <button class="btn ghost" type="button" id="role-def-export">Export CSV</button>
+              <input type="file" id="role-def-file" accept=".csv,text/csv" hidden>
+            </div>
+            <div class="role-def-wrap">
+              <table class="tbl dense role-def-table" aria-label="Role definitions">
+                <thead><tr><th>Role</th><th>Restricted</th><th>Peer roles</th><th>Origin</th><th>Networks</th><th>QoS overrides</th><th>Actions</th></tr></thead>
+                <tbody id="role-def-rows"><tr><td colspan="7" class="muted">Expand this panel to load role definitions.</td></tr></tbody>
+              </table>
+            </div>
+            <p class="role-message" id="role-def-status" role="status" aria-live="polite"></p>
             <h3>Instruction delivery</h3>
             <dl class="policy-counts">
               <div><dt>Highest issued revision</dt><dd id="policy-issued-revision">—</dd></div>
@@ -303,7 +318,7 @@
               <li><strong>Agent-asserted:</strong> instruction identity and state, applied options, QoS drift, and pointer skew.</li>
             </ul>
             <p class="muted"><code>violation = 0 does not mean compliant</code>. Application is the latest report, not verified compliance or proof of current device state.</p>
-            <p class="muted">Declared roles appear in the table. Drift counts differences from peer policy. An explicit ACL assignment shadows a role. Role and QoS definitions are managed through the API or CLI.</p>
+            <p class="muted">Declared roles appear in the table. Drift counts differences from peer policy. An explicit ACL assignment shadows a role. Role definitions are edited above; global QoS defaults and tracker <code>qos_state</code> remain API/CLI.</p>
           </div>
         </details>
         <!-- One control row for the whole table. Magnetic Table > Placement >
@@ -745,6 +760,41 @@
             <div class="modal-foot">
               <button class="btn ghost" type="button" id="role-modal-cancel">Cancel</button>
               <button class="btn" type="button" id="apply-role-selected">Preview change</button>
+            </div>
+          </div>
+        </div>
+        <div id="role-def-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="role-def-modal-title" aria-describedby="role-def-modal-help">
+          <div class="modal modal-wide role-def-modal">
+            <div class="modal-head">
+              <span id="role-def-modal-title">New role</span>
+              <button class="btn ghost icon-only" type="button" id="role-def-modal-x" aria-label="Close">&#10005;</button>
+            </div>
+            <div class="modal-body">
+              <p id="role-def-modal-help">Preview the effect before saving; this changes peer policy only. Blank QoS fields inherit the global default.</p>
+              <div class="role-def-grid">
+                <label class="field" for="rd-name"><span class="field-label">Role name <span class="muted">a–z, 0–9, . _ - (max 32)</span></span><input id="rd-name" maxlength="32" placeholder="e.g. boat" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-peers"><span class="field-label">Peer roles <span class="muted">comma separated; itself is implied</span></span><input id="rd-peers" placeholder="e.g. fiber" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-nets"><span class="field-label">Networks <span class="muted">IPv4 prefixes, comma separated</span></span><input id="rd-nets" placeholder="e.g. 10.20.0.0/16" autocomplete="off" spellcheck="false"></label>
+                <label class="field" for="rd-on-stale"><span class="field-label">When instructions expire</span>
+                  <select id="rd-on-stale">
+                    <option value="">Inherit (keep for restricted, defaults otherwise)</option>
+                    <option value="keep">Keep the last verified QoS</option>
+                    <option value="defaults">Fall back to defaults</option>
+                  </select>
+                </label>
+                <label class="check-row"><input type="checkbox" id="rd-restricted"> Restricted — members may only pair with the peer roles listed</label>
+                <label class="check-row"><input type="checkbox" id="rd-origin" checked> Origin — the tracker may introduce the origin seeder to members</label>
+              </div>
+              <h4>Speed limits <span class="muted">bytes per second · 0 = unlimited · otherwise at least 8192 · blank = inherit</span></h4>
+              <div class="role-def-grid" id="rd-rates"></div>
+              <h4>Swarm and agent cadence <span class="muted">blank = inherit</span></h4>
+              <div class="role-def-grid" id="rd-swarm"></div>
+              <p class="role-preview" id="role-def-preview" aria-live="polite" hidden></p>
+              <p class="role-message" id="role-def-msg" role="status" aria-live="polite"></p>
+            </div>
+            <div class="modal-foot">
+              <button class="btn ghost" type="button" id="role-def-cancel">Cancel</button>
+              <button class="btn" type="button" id="role-def-save">Preview change</button>
             </div>
           </div>
         </div>

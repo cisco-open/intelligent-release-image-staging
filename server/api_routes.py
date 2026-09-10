@@ -30,6 +30,8 @@ class Route:
 _CONSOLE_RESOURCES = (
     ("GET", "/peer-policy", "Read peer policy"),
     ("GET", "/peer-policy/roles", "List role definitions"),
+    ("GET", "/peer-policy/roles/export-csv", "Export role definitions as CSV"),
+    ("POST", "/peer-policy/roles/import-csv", "Replace role definitions from CSV"),
     ("PUT", "/peer-policy/roles/{name}", "Replace a role definition"),
     ("DELETE", "/peer-policy/roles/{name}", "Delete a role definition"),
     ("PUT", "/peer-policy/qos", "Replace global or role QoS"),

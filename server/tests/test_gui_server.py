@@ -12416,6 +12416,10 @@ def role_api(tmp_path):
             host, port, method, path, body, headers=hh)
         return status, response_headers, json.loads(raw) if raw else None
 
+    def request_raw(method, path):
+        return _req(host, port, method, path, headers=dict(headers))
+
+    request.raw = request_raw
     yield request, fleet, cat
     stop()
 
@@ -12423,6 +12427,7 @@ def role_api(tmp_path):
 @pytest.mark.parametrize("method,path,body", [
     ("PUT", "/api/peer-policy/roles/fiber", {"restricted": False}),
     ("DELETE", "/api/peer-policy/roles/boat", None),
+    ("POST", "/api/peer-policy/roles/import-csv", {"csv": "role\nboat\n"}),
     ("PUT", "/api/peer-policy/qos", {"qos": {"numwant": 25}}),
     ("POST", "/api/devices/d1/role", {"role": "boat"}),
     ("POST", "/api/devices/bulk-role", {"device_ids": ["d1"], "role": "boat"}),
@@ -12482,6 +12487,135 @@ def test_role_qos_preview_confirmation_and_delete(role_api):
     status, headers, body = request("DELETE", "/api/peer-policy/roles/empty",
                                     {"confirm_token": preview["confirm_token"]})
     assert status == 204 and body is None and "ETag" in headers
+
+
+ROLES_CSV = (
+    "role,restricted,peers,origin,nets,on_stale,seed_up_bps,telemetry_pause\n"
+    "boat,true,boat;fiber,true,10.20.0.0/16,keep,12500000,false\n"
+    "fiber,true,fiber;boat,,,,,\n")
+
+
+def test_role_definitions_csv_import_previews_then_replaces_every_definition(role_api):
+    """#222: the Console's Import CSV is one atomic replacement in the
+    iris-role grammar, behind the same CAS + preview + confirmation contract
+    as every other policy write; the export is that grammar byte for byte."""
+    import role_csv
+    request, fleet, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    status, headers, preview = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1", {"csv": ROLES_CSV})
+    assert status == 200, preview
+    assert preview["dry_run"] is True and preview["roles"] == 2
+    assert preview["confirm_token"]
+    assert _loaded_peer_policy(cat).document == before
+    status, headers, committed = request(
+        "POST", "/api/peer-policy/roles/import-csv",
+        {"csv": ROLES_CSV, "confirm_token": preview["confirm_token"]})
+    assert status == 200, committed
+    assert committed["dry_run"] is False and committed["roles"] == 2
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    doc = _loaded_peer_policy(cat).document
+    assert set(doc["roles"]["defs"]) == {"boat", "fiber"}
+    assert doc["roles"]["defs"]["boat"] == {
+        "restricted": True, "peers": ["boat", "fiber"], "origin": True,
+        "nets": ["10.20.0.0/16"], "on_stale": "keep",
+        "qos": {"seed_up_bps": 12500000, "telemetry_pause": False}}
+    status, headers, raw = request.raw("GET", "/api/peer-policy/roles/export-csv")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/csv")
+    assert headers["Content-Disposition"] == "attachment; filename=roles.csv"
+    assert headers["ETag"] == gui_server._revision_etag(
+        "peer-policy", committed["revision"])
+    assert raw.decode("utf-8") == role_csv.export_roles_csv(doc)
+    # The export re-imports as a no-op candidate: same definitions, same file.
+    assert role_csv.parse_roles_csv(raw.decode("utf-8")) == doc["roles"]["defs"]
+
+
+def test_role_definitions_csv_import_refuses_bad_grammar_with_the_cell_named(role_api):
+    request, fleet, cat = role_api
+    before = _loaded_peer_policy(cat).document
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,bogus\nboat,1\n"})
+    assert status == 422
+    assert problem["code"] == "invalid_roles_csv"
+    assert problem["detail"] == "unknown roles CSV field: bogus"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,seed_up_bps\nboat,fast\n"})
+    assert status == 422 and problem["code"] == "invalid_roles_csv"
+    assert problem["detail"] == "seed_up_bps must be an integer"
+    # A well-formed file with a policy refusal keeps the policy code, and the
+    # message still reaches the operator.
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,peers\nboat,boat;ghost\n"})
+    assert status == 422 and problem["code"] == "invalid_policy"
+    assert problem["detail"] == "peer references unknown role"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1", {"csv": 7})
+    assert status == 422 and problem["code"] == "invalid_policy_request"
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role\nboat\n", "extra": 1})
+    assert status == 422 and problem["code"] == "invalid_policy_request"
+    assert _loaded_peer_policy(cat).document == before
+
+
+def test_role_definitions_csv_import_cannot_drop_a_declared_role(role_api):
+    request, fleet, cat = role_api
+    fleet.upsert({"device_id": "d1", "device_ip": "10.0.0.1", "role": "boat"})
+    before = _loaded_peer_policy(cat).document
+    status, _, problem = request(
+        "POST", "/api/peer-policy/roles/import-csv?dry_run=1",
+        {"csv": "role,restricted\nfiber,true\n"})
+    assert status == 409, problem
+    assert problem["code"] == "role_in_use"
+    assert problem["roles"] == ["boat"]
+    assert _loaded_peer_policy(cat).document == before
+
+
+def test_role_definitions_export_refuses_degraded_policy(role_api):
+    request, fleet, cat = role_api
+    path = os.path.join(cat.state_dir, "peer-policy.json")
+    with open(path, "w") as f:
+        f.write("{not json")
+    status, headers, raw = request.raw("GET", "/api/peer-policy/roles/export-csv")
+    assert status == 503
+    assert headers["Content-Type"] == "application/problem+json"
+    assert json.loads(raw)["code"] == "policy_unavailable"
+
+
+def test_role_definitions_editor_wired_in_console():
+    """#222: definitions are created, edited, deleted, imported and exported
+    from the Console through the Set role contract (dry run, then commit with
+    the preview token), not through a JSON blob."""
+    with open(os.path.join(gui_server.WEBROOT, "index.html")) as f:
+        html = f.read()
+    with open(os.path.join(gui_server.WEBROOT, "app.js")) as f:
+        js = f.read()
+    panel = html.split('id="peer-policy-panel"')[1].split("</details>")[0]
+    for cid in ('id="role-def-new"', 'id="role-def-import"', 'id="role-def-export"',
+                'id="role-def-file"', 'id="role-def-rows"', 'id="role-def-status"'):
+        assert cid in panel, cid + " must live inside the Peer policy panel"
+    modal = html.split('id="role-def-modal"')[1].split('id="sched-modal"')[0]
+    for cid in ('id="rd-name"', 'id="rd-peers"', 'id="rd-nets"', 'id="rd-on-stale"',
+                'id="rd-restricted"', 'id="rd-origin"', 'id="rd-rates"', 'id="rd-swarm"',
+                'id="role-def-preview"', 'id="role-def-save"'):
+        assert cid in modal, cid + " must live inside the role editor"
+    assert "managed through the API or CLI" not in html
+    assert "/api/v1/peer-policy/roles/import-csv?dry_run=1" in js
+    assert "/api/v1/peer-policy/roles/export-csv" in js
+    save = js.split("getElementById('role-def-save').addEventListener")[1]
+    assert "?dry_run=1" in save and "confirm_token" in save
+    assert "wireModal('role-def-modal'" in js
+    # every role-scoped QoS key is editable, none of the global-only ones is
+    import role_csv
+    for key in role_csv.ROLE_QOS_FIELDS:
+        assert "['%s'," % key in js, key
+    for key in ("origin_up_bps", "origin_per_torrent_up_bps", "origin_max_peers"):
+        assert "'%s'" % key not in js.split("ROLE_QOS_FIELDS = [")[1].split("];")[0]
 
 
 def test_role_policy_view_and_effective_qos(role_api):

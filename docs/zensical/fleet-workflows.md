@@ -130,6 +130,12 @@ iris-role import fleet/roles.csv --confirm '<preview token>'
 iris-role export > fleet/roles.exported.csv
 ```
 
+The Console offers the same file round trip: **Peer policy → Role
+definitions → Import CSV… / Export CSV** on the Devices page use one shared
+parser and writer with `iris-role`, so either surface's export imports in the
+other. The Console also edits single definitions in place; see
+[Console](console.md#role-definitions).
+
 Import validates the whole role graph before writing, including references,
 symmetric restricted-role links, duplicate/canonical-equivalent networks, QoS
 ranges, and reserved names. One bulk membership or CSV action creates one

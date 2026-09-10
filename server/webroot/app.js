@@ -2175,6 +2175,7 @@
     if (!overlay || overlay.hidden) return;
     overlay.hidden = true;
     if (id === 'role-modal') cancelRoleDialog();
+    if (id === 'role-def-modal') cancelRoleDefinitionDialog();
     // Return focus to whatever opened it -- if that button has since been
     // hidden with the bulk bar (the batch cleared the selection), focus()
     // on it is simply a no-op and the browser falls back to the document.
@@ -2209,6 +2210,7 @@
   wireModal('undeploy-modal', ['undeploy-cancel', 'undeploy-modal-x']);
   wireModal('cred-modal', ['cred-modal-cancel', 'cred-modal-x']);
   wireModal('role-modal', ['role-modal-cancel', 'role-modal-x']);
+  wireModal('role-def-modal', ['role-def-cancel', 'role-def-modal-x']);
   wireModal('sched-modal', ['sched-modal-cancel', 'sched-modal-x']);
   document.getElementById('onboard-selected').addEventListener('click', function () {
     openModal('onboard-modal');
@@ -3126,6 +3128,7 @@
         ' newly denied devices. This additional origin restriction is not active.' +
         (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
       : 'Mutual-origin preflight status unavailable.';
+    syncRoleDefinitionsWithPolicy();
   }
 
   var rolePreview = null, roleDialogGeneration = 0, roleRequestBusy = false;
@@ -3178,6 +3181,10 @@
       }).join('');
     sel.value = '';
     sel.disabled = false;
+    if (!Object.keys((peerPolicy.roles || {}).members || {}).length) {
+      document.getElementById('role-modal-msg').textContent =
+        'No roles are defined yet. Expand Peer policy above the table and choose New role.';
+    }
     openModal('role-modal');
   });
   document.getElementById('role-selected').addEventListener('change', function () {
@@ -3269,6 +3276,444 @@
     }
   });
   // ---- End role workflow ----
+
+  // ---- Role definitions: create, edit, delete, import, export ----
+  // Definitions are the policy's own objects (GET /peer-policy/roles), read
+  // when the Peer policy panel is open and again after every definition
+  // write. The Set role dialog and the Role filter keep reading the member
+  // map from /peer-policy, which lists every defined role, so a new
+  // definition reaches them on the next device refresh. Every write follows
+  // the Set role contract: strong CAS on the revision read BEFORE preview,
+  // one dry run, then one commit carrying that preview's confirmation token.
+  var ROLE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+  var ROLE_QOS_FIELDS = [
+    ['seed_up_bps', 'Upload while seeding', 'rate'],
+    ['seed_down_bps', 'Download while seeding', 'rate'],
+    ['leech_up_bps', 'Upload while downloading', 'rate'],
+    ['leech_down_bps', 'Download while downloading', 'rate'],
+    ['overall_up_bps', 'Overall upload', 'rate'],
+    ['overall_down_bps', 'Overall download', 'rate'],
+    ['per_peer_bps', 'Per-peer modelling rate', 'rate'],
+    ['request_peer_speed_limit_bps', 'Requested peer speed', 'rate'],
+    ['max_peers', 'Peers per torrent', '1–1000'],
+    ['fanout', 'Fanout multiplier', '1–1000, ≤ peers per torrent'],
+    ['max_concurrent', 'Concurrent torrents', '1–1000'],
+    ['numwant', 'Peers per announce', '4–200'],
+    ['announce_min_interval_s', 'Announce interval', 'seconds, 10–300'],
+    ['handout_budget', 'Handouts per window', '0–1000'],
+    ['catalog_tick_s', 'Catalog tick', 'seconds, 60–900, multiple of 60'],
+    ['telemetry_every_ticks', 'Telemetry every', 'ticks, 1–60'],
+    ['telemetry_pause', 'Pause telemetry', 'bool']
+  ];
+  var roleDefinitions = {}, roleDefinitionsRevision = null, roleDefinitionsOk = false;
+  var roleDefinitionsError = '', roleDefinitionsLoading = false;
+  var roleDefEditing = null, roleDefPreview = null, roleDefBusy = false, roleDefGeneration = 0;
+
+  function renderRoleQosFields() {
+    var rates = [], swarm = [];
+    ROLE_QOS_FIELDS.forEach(function (f) {
+      var key = f[0], label = f[1], kind = f[2], html;
+      if (kind === 'bool') {
+        html = '<label class="field"><span class="field-label">' + esc(label) + '</span>' +
+          '<select data-qos="' + key + '"><option value="">Inherit</option>' +
+          '<option value="true">Yes</option><option value="false">No</option></select></label>';
+      } else {
+        html = '<label class="field"><span class="field-label">' + esc(label) +
+          ' <span class="muted">' + (kind === 'rate' ? 'bytes/s' : esc(kind)) + '</span></span>' +
+          '<input data-qos="' + key + '" inputmode="numeric" placeholder="inherit" autocomplete="off">' +
+          (kind === 'rate' ? '<span class="muted rate-hint" data-rate-hint="' + key + '"></span>' : '') +
+          '</label>';
+      }
+      (kind === 'rate' ? rates : swarm).push(html);
+    });
+    document.getElementById('rd-rates').innerHTML = rates.join('');
+    document.getElementById('rd-swarm').innerHTML = swarm.join('');
+  }
+  function rateHint(raw) {
+    if (raw === '') return '';
+    if (!/^[0-9]+$/.test(raw)) return 'whole number of bytes per second';
+    var n = parseInt(raw, 10);
+    if (n === 0) return 'unlimited';
+    if (n < 8192) return 'too low: 0 or at least 8192';
+    var bits = n * 8;
+    return '≈ ' + (bits >= 1e9 ? (bits / 1e9).toFixed(2) + ' Gbit/s'
+      : bits >= 1e6 ? (bits / 1e6).toFixed(1) + ' Mbit/s' : (bits / 1e3).toFixed(0) + ' kbit/s');
+  }
+  function updateRateHints() {
+    document.querySelectorAll('#role-def-modal [data-rate-hint]').forEach(function (el) {
+      var input = document.querySelector('#role-def-modal [data-qos="' + el.getAttribute('data-rate-hint') + '"]');
+      el.textContent = input ? rateHint(input.value.trim()) : '';
+    });
+  }
+  renderRoleQosFields();
+  document.getElementById('role-def-modal').addEventListener('input', function (e) {
+    if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-qos')) updateRateHints();
+    // Any edit invalidates a pending preview: the commit must carry the
+    // token of exactly the candidate the operator reviewed.
+    if (roleDefPreview && !roleDefBusy) {
+      resetRoleDefinitionPreview();
+      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
+    }
+  });
+  document.getElementById('role-def-modal').addEventListener('change', function () {
+    if (roleDefPreview && !roleDefBusy) {
+      resetRoleDefinitionPreview();
+      document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
+    }
+  });
+
+  function resetRoleDefinitionPreview() {
+    roleDefPreview = null;
+    document.getElementById('role-def-preview').hidden = true;
+    document.getElementById('role-def-save').textContent = 'Preview change';
+  }
+  function cancelRoleDefinitionDialog() {
+    roleDefGeneration++;
+    resetRoleDefinitionPreview();
+  }
+  function setRoleDefBusy(busy) {
+    roleDefBusy = busy;
+    document.getElementById('role-def-save').disabled = busy;
+    renderRoleDefinitionControls();
+  }
+  function renderRoleDefinitionControls() {
+    var unavailable = !!roleCapabilityMessage();
+    ['role-def-new', 'role-def-import', 'role-def-export'].forEach(function (id) {
+      document.getElementById(id).disabled = unavailable || roleDefBusy;
+    });
+    document.querySelectorAll('#role-def-rows button').forEach(function (b) {
+      b.disabled = unavailable || roleDefBusy;
+    });
+  }
+  function policyRevisionFromEtag(etag) {
+    var m = /iris-peer-policy-(\d+)/.exec(etag || '');
+    return m ? parseInt(m[1], 10) : null;
+  }
+  async function policyWrite(method, url, payload, revision) {
+    var r = await fetch(url, {
+      method: method,
+      headers: csrfHdr({ 'Content-Type': 'application/json',
+                         'If-Match': '"iris-peer-policy-' + revision + '"' }),
+      body: JSON.stringify(payload || {})
+    });
+    var body = {};
+    if (r.status !== 204) { try { body = await r.json(); } catch (e) { body = {}; } }
+    if (!body || typeof body !== 'object') body = {};
+    return { ok: r.ok, status: r.status, body: body,
+             revision: typeof body.revision === 'number' ? body.revision : policyRevisionFromEtag(r.headers.get('ETag')) };
+  }
+  function roleDefinitionProblem(status, body, verb) {
+    body = body || {};
+    var code = body.code || body.error || '';
+    if (status === 412 || code === 'revision_conflict') return 'Peer policy changed. Refresh, then preview again.';
+    if (status === 428) return 'A fresh preview and confirmation are required. Preview again.';
+    if (code === 'role_in_use') {
+      var parts = [];
+      if (typeof body.member_count === 'number') {
+        parts.push(body.member_count + ' device(s) declare it' + (body.device_ids && body.device_ids.length
+          ? ' (' + body.device_ids.slice(0, 10).join(', ') + (body.truncated ? ', …' : '') + ')' : ''));
+      }
+      if (body.roles && body.roles.length) parts.push('declared roles missing from the file: ' + body.roles.join(', '));
+      if (body.referring_roles && body.referring_roles.length) parts.push('referred to by ' + body.referring_roles.join(', '));
+      if (body.referring_schedules && body.referring_schedules.length) parts.push('used by schedule(s) ' + body.referring_schedules.join(', '));
+      return verb + ' refused: role in use' + (parts.length ? ' — ' + parts.join('; ') : '') + '.';
+    }
+    if (code === 'operation_backlog_full') return 'The operation backlog is full (' +
+      policyCount(body.unacknowledged) + '/' + policyCount(body.capacity) +
+      '). Wait for the tracker to acknowledge operations, then preview again.';
+    if (status === 401) return 'Your session expired. Log in again, then preview again.';
+    if (status === 503) return verb + ' unavailable: check policy state and the tracker, then refresh before retrying.';
+    var reason = body.detail || code || ('HTTP ' + status);
+    if (code === 'role_isolated') reason = 'a role must permit itself; check the peer roles';
+    if (code === 'role_reserved_name') reason = 'that role name is reserved';
+    return verb + ' refused: ' + reason + '.';
+  }
+  function blastText(title, body) {
+    return title + '.\nMembership changes: ' + policyCount(body.member_delta) +
+      '\nDevices losing origin access: ' + policyCount(body.origin_access_lost) +
+      '\nEmpty permitted peer sets: ' + policyCount(body.empty_permitted_sets) +
+      '\nRole pairings stopped: ' + policyCount(body.role_pairs_stopped) +
+      '\nQoS policy changed: ' + (body.qos_changed === true ? 'yes' : body.qos_changed === false ? 'no' : 'unknown') +
+      '\nChanges affect new pairings; existing device-to-device sessions may continue.' +
+      (body.requires_confirmation ? '\nThis exceeds the confirmation threshold; applying confirms these effects.' : '');
+  }
+  function qosSummary(qos) {
+    var keys = Object.keys(qos || {});
+    if (!keys.length) return '<span class="muted">inherit</span>';
+    return keys.map(function (k) {
+      return '<span class="machine qos-chip">' + esc(k) + '=' + esc(String(qos[k])) + '</span>';
+    }).join('');
+  }
+  function renderRoleDefinitions() {
+    var rows = document.getElementById('role-def-rows');
+    if (!roleDefinitionsOk) {
+      rows.innerHTML = '<tr><td colspan="7" class="muted">' + esc(roleDefinitionsError || 'Role definitions unavailable.') + '</td></tr>';
+    } else {
+      var names = Object.keys(roleDefinitions).sort();
+      rows.innerHTML = names.map(function (name) {
+        var d = roleDefinitions[name] || {};
+        var peers = (d.peers || []).filter(function (p) { return p !== name; });
+        return '<tr>' +
+          '<td class="machine">' + esc(name) + '</td>' +
+          '<td>' + (d.restricted ? 'yes' : 'no') + '</td>' +
+          '<td class="machine">' + (peers.length ? esc(peers.join(', ')) : '<span class="muted">only itself</span>') + '</td>' +
+          '<td>' + (d.origin === false ? 'no' : 'yes') + '</td>' +
+          '<td class="machine">' + (d.nets && d.nets.length ? esc(d.nets.join(', ')) : '—') + '</td>' +
+          '<td class="qos">' + qosSummary(d.qos) + '</td>' +
+          '<td><button class="linkish role-def-edit" type="button" data-role="' + esc(name) + '">Edit</button> · ' +
+          '<button class="linkish danger-link role-def-delete" type="button" data-role="' + esc(name) + '">Delete</button></td></tr>';
+      }).join('') || '<tr><td colspan="7" class="muted">No roles defined. Choose New role, or import a roles CSV.</td></tr>';
+    }
+    renderRoleDefinitionControls();
+  }
+  async function loadRoleDefinitions(background) {
+    if (roleDefinitionsLoading) return;
+    roleDefinitionsLoading = true;
+    try {
+      var r = await fetch('/api/v1/peer-policy/roles', background ? { headers: { 'X-IRIS-Poll': '1' } } : {});
+      var body = null;
+      try { body = r.ok ? await r.json() : null; } catch (e) { body = null; }
+      roleDefinitionsOk = !!body && typeof body === 'object' && body.roles && typeof body.roles === 'object';
+      if (roleDefinitionsOk) {
+        roleDefinitions = body.roles;
+        roleDefinitionsRevision = body.revision;
+        roleDefinitionsError = '';
+        if (typeof body.revision === 'number' &&
+            (typeof peerPolicy.revision !== 'number' || body.revision > peerPolicy.revision)) {
+          peerPolicy.revision = body.revision;
+        }
+      } else {
+        roleDefinitionsError = r.status === 401 ? 'Your session expired; log in again.'
+          : 'Role definitions unavailable (' + r.status + ').';
+      }
+    } catch (e) {
+      roleDefinitionsOk = false;
+      roleDefinitionsError = 'Role definitions unavailable.';
+    } finally {
+      roleDefinitionsLoading = false;
+      renderRoleDefinitions();
+    }
+  }
+  // Called from renderPeerPolicyPanel on every device refresh: keep the
+  // gating current and, while the panel is open, follow the policy revision
+  // so a definition written elsewhere (CLI, another session) shows up.
+  function syncRoleDefinitionsWithPolicy() {
+    renderRoleDefinitionControls();
+    var panel = document.getElementById('peer-policy-panel');
+    if (panel.open && peerPolicyReadOk && roleDefinitionsOk && !roleDefBusy &&
+        typeof peerPolicy.revision === 'number' && peerPolicy.revision !== roleDefinitionsRevision) {
+      loadRoleDefinitions(true);
+    }
+  }
+  document.getElementById('peer-policy-panel').addEventListener('toggle', function (e) {
+    if (e.target.open) loadRoleDefinitions();
+  });
+
+  function openRoleDefinitionEditor(name) {
+    var d = name ? (roleDefinitions[name] || {}) : {};
+    roleDefEditing = name || null;
+    roleDefGeneration++;
+    resetRoleDefinitionPreview();
+    document.getElementById('role-def-msg').textContent = '';
+    document.getElementById('role-def-modal-title').textContent = name ? 'Edit role ' + name : 'New role';
+    var nameEl = document.getElementById('rd-name');
+    nameEl.value = name || '';
+    nameEl.disabled = !!name;
+    document.getElementById('rd-peers').value = (d.peers || []).filter(function (p) { return p !== name; }).join(', ');
+    document.getElementById('rd-nets').value = (d.nets || []).join(', ');
+    document.getElementById('rd-on-stale').value = d.on_stale || '';
+    document.getElementById('rd-restricted').checked = !!d.restricted;
+    document.getElementById('rd-origin').checked = d.origin !== false;
+    var qos = d.qos || {};
+    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
+      var key = el.getAttribute('data-qos');
+      el.value = Object.prototype.hasOwnProperty.call(qos, key) ? String(qos[key]) : '';
+    });
+    updateRateHints();
+    document.getElementById('role-def-save').disabled = false;
+    openModal('role-def-modal');
+    if (name) document.getElementById('rd-peers').focus();
+  }
+  function roleDefinitionFromForm() {
+    var name = document.getElementById('rd-name').value.trim();
+    if (!ROLE_NAME_RE.test(name)) {
+      return { error: 'Role name must be 1–32 characters of a–z, 0–9, dot, underscore or hyphen, starting with a letter or digit.' };
+    }
+    var listOf = function (id) {
+      return document.getElementById(id).value.split(/[\s,;]+/).filter(Boolean);
+    };
+    var peers = [name], bad = null;
+    listOf('rd-peers').forEach(function (p) {
+      if (!ROLE_NAME_RE.test(p)) bad = bad || p;
+      else if (peers.indexOf(p) === -1) peers.push(p);
+    });
+    if (bad) return { error: 'Peer role name is invalid: ' + bad };
+    var def = { restricted: document.getElementById('rd-restricted').checked, peers: peers,
+                origin: document.getElementById('rd-origin').checked };
+    var nets = listOf('rd-nets');
+    if (nets.length) def.nets = nets;
+    var onStale = document.getElementById('rd-on-stale').value;
+    if (onStale) def.on_stale = onStale;
+    var qos = {}, qosError = null;
+    document.querySelectorAll('#role-def-modal [data-qos]').forEach(function (el) {
+      var key = el.getAttribute('data-qos'), raw = el.value.trim();
+      if (!raw) return;
+      if (key === 'telemetry_pause') { qos[key] = raw === 'true'; return; }
+      if (!/^[0-9]+$/.test(raw)) {
+        qosError = qosError || (key + ' must be a whole number' + (/_bps$/.test(key) ? ' of bytes per second' : '') + '.');
+        return;
+      }
+      qos[key] = parseInt(raw, 10);
+    });
+    if (qosError) return { error: qosError };
+    if (Object.keys(qos).length) def.qos = qos;
+    // A definition PUT is a full replacement, so the tracker-only qos_state
+    // overlay (API-configured, not edited here) rides along unchanged.
+    if (roleDefEditing && roleDefinitions[roleDefEditing] && roleDefinitions[roleDefEditing].qos_state) {
+      def.qos_state = roleDefinitions[roleDefEditing].qos_state;
+    }
+    return { name: name, definition: def };
+  }
+  document.getElementById('role-def-new').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
+    openRoleDefinitionEditor(null);
+  });
+  document.getElementById('role-def-rows').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button[data-role]') : null;
+    if (!b || b.disabled || roleDefBusy) return;
+    var name = b.getAttribute('data-role');
+    if (b.classList.contains('role-def-edit')) openRoleDefinitionEditor(name);
+    else if (b.classList.contains('role-def-delete')) deleteRoleDefinition(name);
+  });
+  document.getElementById('role-def-save').addEventListener('click', async function () {
+    if (roleDefBusy) return;
+    var msg = document.getElementById('role-def-msg');
+    var warning = roleCapabilityMessage();
+    if (warning) { msg.textContent = warning; resetRoleDefinitionPreview(); return; }
+    var committing = !!roleDefPreview;
+    var built = committing ? roleDefPreview : roleDefinitionFromForm();
+    if (built.error) { msg.textContent = built.error; return; }
+    var revision = committing ? roleDefPreview.revision : peerPolicy.revision;
+    if (typeof revision !== 'number') { msg.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    var payload = Object.assign({}, built.definition);
+    if (committing) payload.confirm_token = roleDefPreview.confirm_token;
+    var generation = roleDefGeneration;
+    var verb = roleDefEditing ? 'Replace role ' : 'Create role ';
+    setRoleDefBusy(true);
+    msg.textContent = committing ? 'Saving role… Closing this dialog does not cancel the request.' : 'Previewing change…';
+    try {
+      var res = await policyWrite('PUT', '/api/v1/peer-policy/roles/' + encodeURIComponent(built.name) +
+        (committing ? '' : '?dry_run=1'), payload, revision);
+      if (!committing && generation !== roleDefGeneration) return;
+      if (!res.ok) {
+        msg.textContent = roleDefinitionProblem(res.status, res.body, committing ? 'Save' : 'Preview');
+        resetRoleDefinitionPreview();
+        return;
+      }
+      if (committing) {
+        if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+        document.getElementById('role-def-status').textContent = 'Role ' + built.name + ' saved at policy revision ' +
+          policyCount(res.revision) + '.';
+        closeModal('role-def-modal');
+        loadRoleDefinitions();
+        refreshDevices().catch(function () {});
+        return;
+      }
+      roleDefPreview = { name: built.name, definition: built.definition, revision: revision,
+                         confirm_token: res.body.confirm_token };
+      var previewEl = document.getElementById('role-def-preview');
+      previewEl.textContent = blastText(verb + built.name, res.body);
+      previewEl.hidden = false;
+      msg.textContent = 'Review the preview, then choose Save role to apply or Cancel to leave definitions unchanged.';
+      document.getElementById('role-def-save').textContent = 'Save role';
+    } catch (e) {
+      msg.textContent = committing
+        ? 'Response unavailable. The role may have been saved; refresh and review before trying again.'
+        : 'Preview unavailable. No commit was sent; try again.';
+      resetRoleDefinitionPreview();
+    } finally {
+      setRoleDefBusy(false);
+      if (roleDefPreview) document.getElementById('role-def-save').focus();
+    }
+  });
+  async function deleteRoleDefinition(name) {
+    if (roleDefBusy) return;
+    var status = document.getElementById('role-def-status');
+    var warning = roleCapabilityMessage();
+    if (warning) { status.textContent = warning; return; }
+    var revision = peerPolicy.revision;
+    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    var url = '/api/v1/peer-policy/roles/' + encodeURIComponent(name);
+    setRoleDefBusy(true);
+    status.textContent = 'Previewing deletion of ' + name + '…';
+    try {
+      var preview = await policyWrite('DELETE', url + '?dry_run=1', {}, revision);
+      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Delete'); return; }
+      if (!confirm(blastText('Delete role ' + name, preview.body) + '\n\nDelete this role definition?')) {
+        status.textContent = 'Deletion of ' + name + ' cancelled; nothing changed.';
+        return;
+      }
+      var res = await policyWrite('DELETE', url, { confirm_token: preview.body.confirm_token }, revision);
+      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Delete'); return; }
+      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+      status.textContent = 'Role ' + name + ' deleted' +
+        (typeof res.revision === 'number' ? ' at policy revision ' + res.revision : '') + '.';
+      loadRoleDefinitions();
+      refreshDevices().catch(function () {});
+    } catch (e) {
+      status.textContent = 'Response unavailable. The role may have been deleted; refresh and review before retrying.';
+    } finally {
+      setRoleDefBusy(false);
+    }
+  }
+  document.getElementById('role-def-import').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    var warning = roleCapabilityMessage();
+    if (warning) { document.getElementById('role-def-status').textContent = warning; return; }
+    document.getElementById('role-def-file').click();
+  });
+  document.getElementById('role-def-file').addEventListener('change', function (e) {
+    var f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () { importRoleDefinitions(String(rd.result || ''), f.name); };
+    rd.readAsText(f);
+  });
+  async function importRoleDefinitions(csv, filename) {
+    if (roleDefBusy) return;
+    var status = document.getElementById('role-def-status');
+    var revision = peerPolicy.revision;
+    if (typeof revision !== 'number') { status.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    setRoleDefBusy(true);
+    status.textContent = 'Previewing import of ' + filename + '…';
+    try {
+      var preview = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv?dry_run=1', { csv: csv }, revision);
+      if (!preview.ok) { status.textContent = roleDefinitionProblem(preview.status, preview.body, 'Import'); return; }
+      var text = blastText('Replace every role definition with the ' + policyCount(preview.body.roles) +
+        ' role(s) in ' + filename, preview.body) + '\n\nRoles missing from the file are removed. Continue?';
+      if (!confirm(text)) { status.textContent = 'Import of ' + filename + ' cancelled; nothing changed.'; return; }
+      var res = await policyWrite('POST', '/api/v1/peer-policy/roles/import-csv',
+        { csv: csv, confirm_token: preview.body.confirm_token }, revision);
+      if (!res.ok) { status.textContent = roleDefinitionProblem(res.status, res.body, 'Import'); return; }
+      if (typeof res.revision === 'number') peerPolicy.revision = res.revision;
+      status.textContent = 'Imported ' + policyCount(res.body.roles) + ' role definition(s) from ' + filename +
+        ' at policy revision ' + policyCount(res.revision) + '.';
+      loadRoleDefinitions();
+      refreshDevices().catch(function () {});
+    } catch (e) {
+      status.textContent = 'Import response unavailable. Definitions may have changed; refresh and review before retrying.';
+    } finally {
+      setRoleDefBusy(false);
+    }
+  }
+  document.getElementById('role-def-export').addEventListener('click', function () {
+    if (roleDefBusy) return;
+    downloadCsv('/api/v1/peer-policy/roles/export-csv', 'roles.csv');
+  });
+  // ---- End role definitions ----
 
   // Quarantine/release the whole selection. The peer-policy API is one device
   // per call and carries a revision, so these run in sequence and carry the

@@ -868,3 +868,23 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .table-actions { width:100%; }
   .selbar-actions { margin-left:0; width:100%; }
 }
+
+/* Role definitions: the editable table inside the Peer policy panel and its
+   editor modal. The table scrolls inside its own wrapper so a role with many
+   QoS overrides never widens the page. */
+.role-def-actions { display:flex; flex-wrap:wrap; gap:var(--sp-sm); margin:var(--sp-sm) 0; }
+.role-def-wrap { overflow-x:auto; margin-bottom:var(--sp-sm); }
+.role-def-table th, .role-def-table td { white-space:nowrap; }
+.role-def-table td.qos { white-space:normal; min-width:200px; }
+.role-def-table td:last-child { white-space:nowrap; }
+.qos-chip { display:inline-block; font-size:12px; line-height:18px; padding:0 6px; border-radius:999px;
+  background:var(--surface-subtle); margin:1px 2px 1px 0; }
+.modal.modal-wide { width:min(840px, 100%); max-height:min(92vh, 960px); }
+.role-def-modal h4 { margin:var(--sp-md) 0 var(--sp-xs); font-size:13px; font-weight:600; }
+.role-def-modal h4 .muted { font-weight:400; margin-left:var(--sp-sm); }
+.role-def-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));
+  gap:var(--sp-sm) var(--sp-md); margin-bottom:var(--sp-sm); }
+.role-def-grid .field { display:flex; }
+.role-def-grid .field > input, .role-def-grid .field > select { width:100%; }
+.role-def-grid .check-row { grid-column:1 / -1; }
+.role-def-grid .rate-hint { font-size:11px; line-height:14px; min-height:14px; }

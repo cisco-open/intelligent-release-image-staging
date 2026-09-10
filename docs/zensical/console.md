@@ -309,12 +309,37 @@ The existing quarantine filter and per-row/bulk quarantine actions remain in
 place. Quarantine intent uses its existing badge and stays distinct from the
 tracker's last enforcement state.
 
-The Console intentionally has no role-policy JSON editor and no QoS editor.
-Role pair explanations are available only through the documented API. Tracker
-`qos_state` is also API-only: configure, preserve, or remove it through the
-documented management API. Use `iris-role` and scalar-only CSV definitions for
-role membership and scalar QoS; tracker-state effective-QoS explanations are
-exposed through the API, while the Console does not edit the nested state map.
+### Role definitions
+
+The **Peer policy** disclosure also holds the **Role definitions** table: one
+row per defined role with its restricted flag, peer roles, origin access,
+networks, and QoS overrides, plus **Edit** and **Delete** per row. **New
+role…** opens the editor: role name, peer roles (the role itself is implied),
+IPv4 networks, the instruction-expiry fallback, the restricted and origin
+switches, the eight speed limits in bytes per second (0 = unlimited, otherwise
+at least 8192; a live hint shows the Mbit/s equivalent), and the swarm and
+agent cadence values. A blank QoS field inherits the global default. Saving
+follows the Set role contract exactly: **Preview change** sends one dry run
+with the pre-preview ETag and shows the impact counts; **Save role** commits
+that candidate with the preview's confirmation token; editing any field after
+a preview discards it. Delete previews first and asks for confirmation before
+the committed DELETE. Editing an existing role carries its tracker `qos_state`
+overlay along unchanged, because a definition write is a full replacement.
+
+**Import CSV…** replaces every definition with the chosen file, in the same
+grammar `iris-role import` and `fleet/roles.csv.example` use, after a preview
+and an explicit confirmation that names how many roles the file holds; roles
+missing from the file are removed, and a role a device still declares refuses
+the import as `role_in_use`. **Export CSV** downloads the current definitions
+in that grammar, so a file exported here imports unchanged with `iris-role`
+and vice versa. All three controls, like Set role, are disabled while the
+capability banner shows or the policy is degraded.
+
+The Console still has no role-policy JSON editor: definitions are edited as
+typed fields, and global QoS defaults, per-device QoS, and tracker `qos_state`
+stay API-only. Configure, preserve, or remove `qos_state` through the
+documented management API; the Console never edits the nested tracker state
+map. Role pair explanations are available only through the documented API.
 
 Tracker/quarantine discovery alone does not sever existing connections or
 remove retained peers. Applied verified device deny lists may cooperatively

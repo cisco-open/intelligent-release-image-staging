@@ -59,6 +59,7 @@ import otlp
 import peer_endpoints
 import peer_policy
 import peer_enforcement
+import role_csv
 import role_management
 import schedule_runner
 import schedule_validation
@@ -3345,6 +3346,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 self._task7_session_contract = (self.command, route.path) in {
                     ("GET", "/internal/v1/peer-policy"),
                     ("GET", "/internal/v1/peer-policy/roles"),
+                    ("GET", "/internal/v1/peer-policy/roles/export-csv"),
+                    ("POST", "/internal/v1/peer-policy/roles/import-csv"),
                     ("GET", "/internal/v1/peer-policy/explain"),
                     ("GET", "/internal/v1/devices/{device_id}/effective-qos"),
                     ("PUT", "/internal/v1/peer-policy/roles/{name}"),
@@ -4403,6 +4406,25 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                            (("Cache-Control", "no-store"),
                             ("X-IRIS-Certificate-Source",
                              "custom" if override else "built-in")))
+                return
+            if path == "/api/peer-policy/roles/export-csv":
+                # The Console's role export is the iris-role export grammar
+                # byte for byte, so a file from either surface imports in the
+                # other. Degraded/fail-closed policy is refused rather than
+                # exported: an LKG fallback is not the operator's definitions.
+                if app.session_info(self._sid()) is None:
+                    self._session_refusal()
+                    return
+                auth_path, lkg_path, _ = policy_paths()
+                policy = peer_policy.load_policy(auth_path, lkg_path)
+                revision = policy.document["revision"]
+                if policy.degraded or policy.fail_closed:
+                    self._policy_problem(503, "policy_unavailable", revision)
+                    return
+                body = role_csv.export_roles_csv(policy.document).encode("utf-8")
+                self._send(200, "text/csv; charset=utf-8", body, extra_headers=[
+                    ("Content-Disposition", "attachment; filename=roles.csv"),
+                    ("ETag", _revision_etag("peer-policy", revision))])
                 return
             if path in ("/api/peer-policy/roles", "/api/peer-policy/explain") or (
                     path.startswith("/api/devices/") and path.endswith("/effective-qos")):
@@ -5634,7 +5656,29 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 options = dict(expected_revision=revision, dry_run=dry_run,
                                precommit=precommit)
                 coordinator = role_coordinator()
-                if path.startswith("/api/peer-policy/roles/"):
+                extra = {}
+                if path == "/api/peer-policy/roles/import-csv":
+                    # One atomic replacement of every definition, exactly as
+                    # ``iris-role import``: the whole role graph is validated
+                    # before anything is written, and a role a device still
+                    # declares cannot be dropped (role_in_use). The grammar
+                    # message names the offending row or field so the
+                    # operator can fix the file without reading server logs.
+                    if set(body) - {"csv", "confirm_token"} or \
+                            not isinstance(body.get("csv"), str):
+                        raise ValueError("bad import fields")
+                    try:
+                        definitions = role_csv.parse_roles_csv(body["csv"])
+                    except role_csv.RolesCsvError as exc:
+                        raise peer_policy.PolicyError(
+                            str(exc), code="invalid_roles_csv", detail=str(exc))
+                    except peer_policy.PolicyError as exc:
+                        exc.details.setdefault("detail", str(exc))
+                        raise
+                    committed = coordinator.replace_definitions(
+                        definitions, actor, **options)
+                    extra["roles"] = len(definitions)
+                elif path.startswith("/api/peer-policy/roles/"):
                     name = unquote(path[len("/api/peer-policy/roles/"):])
                     if self.command == "DELETE":
                         if set(body) - {"confirm_token"}:
@@ -5696,7 +5740,7 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                     return
                 result = {"ok": True, "revision": committed["revision"],
                           "candidate_revision": committed["revision"],
-                          "dry_run": dry_run, **preview}
+                          "dry_run": dry_run, **preview, **extra}
                 headers = [("ETag", _revision_etag("peer-policy", committed["revision"]))]
                 if not dry_run:
                     self._audit("peer_policy_change", "device", actor=actor,
@@ -6068,7 +6112,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                 # rather than held whole in memory.
                 self._handle_offline_refresh(length)
                 return
-            if path == "/api/devices/import-csv":
+            if path in ("/api/devices/import-csv",
+                        "/api/peer-policy/roles/import-csv"):
                 cap = _MAX_CSV
             elif path in ("/api/devices/bulk-credential",
                            "/api/devices/bulk-role"):
@@ -6740,7 +6785,8 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
                                   % (stats["imported"], stats["new"],
                                      stats["updated"], stats["skipped"]))
                 self._json(200, stats); return
-            if path == "/api/devices/bulk-role":
+            if path in ("/api/devices/bulk-role",
+                        "/api/peer-policy/roles/import-csv"):
                 self._policy_mutation(path, actor, raw)
                 return
             if path == "/api/devices/bulk-credential":

@@ -1256,6 +1256,804 @@
         }
       }
     },
+    "/api/v1/peer-policy/roles/export-csv": {
+      "get": {
+        "operationId": "console_get_api_v1_peer_policy_roles_export_csv",
+        "summary": "Export role definitions as CSV",
+        "description": "Export role definitions as CSV. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "CSV document",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "role,restricted,peers,origin,nets,on_stale\nboat,true,boat;fiber,true,,keep\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid content length or Request body not supported",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "request-body-not-supported"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid content length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "request-body-not-supported": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#request-body-not-supported",
+                      "title": "Request body not supported",
+                      "status": 400,
+                      "code": "request-body-not-supported"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management api unavailable or Policy unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "policy_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management api unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "policy_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_unavailable",
+                      "title": "Policy unavailable",
+                      "status": 503,
+                      "code": "policy_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-iris-v1-resource-path-exception": "role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API"
+      }
+    },
+    "/api/v1/peer-policy/roles/import-csv": {
+      "post": {
+        "operationId": "console_post_api_v1_peer_policy_roles_import_csv",
+        "summary": "Replace role definitions from CSV",
+        "description": "Replace role definitions from CSV. Browser-facing BFF route; session/CSRF decisions are repeated by the state owner before request-body forwarding. role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API.",
+        "tags": [
+          "console"
+        ],
+        "x-iris-service": "console",
+        "x-iris-security": "consoleSession",
+        "servers": [
+          {
+            "url": "https://iris.example:8080",
+            "description": "Operator Console; replace with the configured public origin"
+          }
+        ],
+        "security": [
+          {
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "description": "1 previews the locked candidate without persistence; 0 commits after required confirmation.",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                0,
+                1
+              ]
+            },
+            "example": 1
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "\"iris-peer-policy-4\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replace role definitions from CSV response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "ConsolePeerPolicyRolesImportCsvResponse",
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "candidate_revision": {
+                      "type": "integer"
+                    },
+                    "dry_run": {
+                      "type": "boolean"
+                    },
+                    "member_delta": {
+                      "type": "integer"
+                    },
+                    "origin_access_lost": {
+                      "type": "integer"
+                    },
+                    "empty_permitted_sets": {
+                      "type": "integer"
+                    },
+                    "role_pairs_stopped": {
+                      "type": "integer"
+                    },
+                    "qos_changed": {
+                      "type": "boolean"
+                    },
+                    "requires_confirmation": {
+                      "type": "boolean"
+                    },
+                    "confirm_token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "roles": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "revision",
+                    "candidate_revision",
+                    "dry_run",
+                    "member_delta",
+                    "origin_access_lost",
+                    "empty_permitted_sets",
+                    "role_pairs_stopped",
+                    "qos_changed",
+                    "requires_confirmation",
+                    "confirm_token",
+                    "roles"
+                  ],
+                  "additionalProperties": true
+                },
+                "examples": {
+                  "confirmationRequired": {
+                    "value": {
+                      "ok": true,
+                      "revision": 5,
+                      "candidate_revision": 5,
+                      "dry_run": true,
+                      "member_delta": 1,
+                      "origin_access_lost": 0,
+                      "empty_permitted_sets": 0,
+                      "role_pairs_stopped": 0,
+                      "qos_changed": false,
+                      "requires_confirmation": true,
+                      "confirm_token": "candidate-bound-sha256",
+                      "roles": 2
+                    }
+                  },
+                  "noConfirmation": {
+                    "value": {
+                      "ok": true,
+                      "revision": 5,
+                      "candidate_revision": 5,
+                      "dry_run": true,
+                      "member_delta": 0,
+                      "origin_access_lost": 0,
+                      "empty_permitted_sets": 0,
+                      "role_pairs_stopped": 0,
+                      "qos_changed": false,
+                      "requires_confirmation": false,
+                      "confirm_token": null,
+                      "roles": 2
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"iris-peer-policy-4\""
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid content length or Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-content-length",
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid-content-length": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-content-length",
+                      "title": "Invalid content length",
+                      "status": 400,
+                      "code": "invalid-content-length"
+                    }
+                  },
+                  "invalid-request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                      "title": "Invalid request",
+                      "status": 400,
+                      "code": "invalid-request"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Csrf validation failed",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                  "title": "Csrf validation failed",
+                  "status": 403,
+                  "code": "csrf-validation-failed"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operation backlog full or Revision conflict or Role in use or Role isolated or Role reserved name",
+            "x-iris-problem-codes": [
+              "operation_backlog_full",
+              "revision_conflict",
+              "role_in_use",
+              "role_isolated",
+              "role_reserved_name"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "operation_backlog_full": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#operation_backlog_full",
+                      "title": "Operation backlog full",
+                      "status": 409,
+                      "code": "operation_backlog_full"
+                    }
+                  },
+                  "revision_conflict": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#revision_conflict",
+                      "title": "Revision conflict",
+                      "status": 409,
+                      "code": "revision_conflict"
+                    }
+                  },
+                  "role_in_use": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_in_use",
+                      "title": "Role in use",
+                      "status": 409,
+                      "code": "role_in_use"
+                    }
+                  },
+                  "role_isolated": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_isolated",
+                      "title": "Role isolated",
+                      "status": 409,
+                      "code": "role_isolated"
+                    }
+                  },
+                  "role_reserved_name": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_reserved_name",
+                      "title": "Role reserved name",
+                      "status": 409,
+                      "code": "role_reserved_name"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "Content length required",
+            "x-iris-problem-codes": [
+              "content-length-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#content-length-required",
+                  "title": "Content length required",
+                  "status": 411,
+                  "code": "content-length-required"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition failed",
+            "x-iris-problem-codes": [
+              "precondition_failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_failed",
+                  "title": "Precondition failed",
+                  "status": 412,
+                  "code": "precondition_failed"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid policy or Invalid policy request or Invalid roles csv",
+            "x-iris-problem-codes": [
+              "invalid_policy",
+              "invalid_policy_request",
+              "invalid_roles_csv"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid_policy": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_policy",
+                      "title": "Invalid policy",
+                      "status": 422,
+                      "code": "invalid_policy"
+                    }
+                  },
+                  "invalid_policy_request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_policy_request",
+                      "title": "Invalid policy request",
+                      "status": 422,
+                      "code": "invalid_policy_request"
+                    }
+                  },
+                  "invalid_roles_csv": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_roles_csv",
+                      "title": "Invalid roles csv",
+                      "status": 422,
+                      "code": "invalid_roles_csv"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Confirmation required or Precondition required",
+            "x-iris-problem-codes": [
+              "confirmation_required",
+              "precondition_required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "confirmation_required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#confirmation_required",
+                      "title": "Confirmation required",
+                      "status": 428,
+                      "code": "confirmation_required"
+                    }
+                  },
+                  "precondition_required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_required",
+                      "title": "Precondition required",
+                      "status": 428,
+                      "code": "precondition_required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Management api unavailable or Policy unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "management-api-unavailable",
+              "policy_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "management-api-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-api-unavailable",
+                      "title": "Management api unavailable",
+                      "status": 503,
+                      "code": "management-api-unavailable"
+                    }
+                  },
+                  "policy_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_unavailable",
+                      "title": "Policy unavailable",
+                      "status": 503,
+                      "code": "policy_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-iris-v1-resource-path-exception": "role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ConsolePeerPolicyRolesImportCsvRequest",
+                "type": "object",
+                "properties": {
+                  "csv": {
+                    "type": "string"
+                  },
+                  "confirm_token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "csv"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "csv": "role,restricted,peers,seed_up_bps\nboat,true,boat;fiber,12500000\nfiber,true,fiber;boat,\n",
+                "confirm_token": "candidate-bound-sha256"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/peer-policy/roles/{name}": {
       "put": {
         "operationId": "console_put_api_v1_peer_policy_roles_name",
@@ -31137,6 +31935,704 @@
                 "schema": {
                   "type": "string"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/peer-policy/roles/export-csv": {
+      "get": {
+        "operationId": "management_get_internal_v1_peer_policy_roles_export_csv",
+        "summary": "Export role definitions as CSV",
+        "description": "Export role definitions as CSV. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "CSV document",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "role,restricted,peers,origin,nets,on_stale\nboat,true,boat;fiber,true,,keep\n"
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Policy unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "policy_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "policy_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_unavailable",
+                      "title": "Policy unavailable",
+                      "status": 503,
+                      "code": "policy_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-iris-v1-resource-path-exception": "role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API"
+      }
+    },
+    "/internal/v1/peer-policy/roles/import-csv": {
+      "post": {
+        "operationId": "management_post_internal_v1_peer_policy_roles_import_csv",
+        "summary": "Replace role definitions from CSV",
+        "description": "Replace role definitions from CSV. Internal HTTPS route; requires the scoped current or previous file-mounted tier credential. role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API.",
+        "tags": [
+          "management"
+        ],
+        "x-iris-service": "management",
+        "x-iris-security": "managementBearer+consoleSession",
+        "servers": [
+          {
+            "url": "https://iris-server:9443",
+            "description": "Internal management API"
+          }
+        ],
+        "security": [
+          {
+            "managementBearer": [],
+            "consoleSession": [],
+            "csrfHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "description": "1 previews the locked candidate without persistence; 0 commits after required confirmation.",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                0,
+                1
+              ]
+            },
+            "example": 1
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": true,
+            "description": "Constant-time validated token from the console session",
+            "schema": {
+              "type": "string"
+            },
+            "example": "session-csrf-token"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "One exact strong policy ETag. Missing: 428; stale: 412; race under the policy lock: 409. Confirmation is candidate-bound at threshold zero, including every changed QoS document.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "\"iris-peer-policy-4\""
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Replace role definitions from CSV response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "ManagementPeerPolicyRolesImportCsvResponse",
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "revision": {
+                      "type": "integer"
+                    },
+                    "candidate_revision": {
+                      "type": "integer"
+                    },
+                    "dry_run": {
+                      "type": "boolean"
+                    },
+                    "member_delta": {
+                      "type": "integer"
+                    },
+                    "origin_access_lost": {
+                      "type": "integer"
+                    },
+                    "empty_permitted_sets": {
+                      "type": "integer"
+                    },
+                    "role_pairs_stopped": {
+                      "type": "integer"
+                    },
+                    "qos_changed": {
+                      "type": "boolean"
+                    },
+                    "requires_confirmation": {
+                      "type": "boolean"
+                    },
+                    "confirm_token": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "roles": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "revision",
+                    "candidate_revision",
+                    "dry_run",
+                    "member_delta",
+                    "origin_access_lost",
+                    "empty_permitted_sets",
+                    "role_pairs_stopped",
+                    "qos_changed",
+                    "requires_confirmation",
+                    "confirm_token",
+                    "roles"
+                  ],
+                  "additionalProperties": true
+                },
+                "examples": {
+                  "confirmationRequired": {
+                    "value": {
+                      "ok": true,
+                      "revision": 5,
+                      "candidate_revision": 5,
+                      "dry_run": true,
+                      "member_delta": 1,
+                      "origin_access_lost": 0,
+                      "empty_permitted_sets": 0,
+                      "role_pairs_stopped": 0,
+                      "qos_changed": false,
+                      "requires_confirmation": true,
+                      "confirm_token": "candidate-bound-sha256",
+                      "roles": 2
+                    }
+                  },
+                  "noConfirmation": {
+                    "value": {
+                      "ok": true,
+                      "revision": 5,
+                      "candidate_revision": 5,
+                      "dry_run": true,
+                      "member_delta": 0,
+                      "origin_access_lost": 0,
+                      "empty_permitted_sets": 0,
+                      "role_pairs_stopped": 0,
+                      "qos_changed": false,
+                      "requires_confirmation": false,
+                      "confirm_token": null,
+                      "roles": 2
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"iris-peer-policy-4\""
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "x-iris-problem-codes": [
+              "invalid-request"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid-request",
+                  "title": "Invalid request",
+                  "status": 400,
+                  "code": "invalid-request"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Console session required or Management authentication required",
+            "x-iris-problem-codes": [
+              "console-session-required",
+              "management-authentication-required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "console-session-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#console-session-required",
+                      "title": "Console session required",
+                      "status": 401,
+                      "code": "console-session-required"
+                    }
+                  },
+                  "management-authentication-required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#management-authentication-required",
+                      "title": "Management authentication required",
+                      "status": 401,
+                      "code": "management-authentication-required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Authentication challenge for this service boundary",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "Bearer"
+              }
+            }
+          },
+          "403": {
+            "description": "Csrf validation failed",
+            "x-iris-problem-codes": [
+              "csrf-validation-failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#csrf-validation-failed",
+                  "title": "Csrf validation failed",
+                  "status": 403,
+                  "code": "csrf-validation-failed"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Route not found",
+            "x-iris-problem-codes": [
+              "route-not-found"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#route-not-found",
+                  "title": "Route not found",
+                  "status": 404,
+                  "code": "route-not-found"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operation backlog full or Revision conflict or Role in use or Role isolated or Role reserved name",
+            "x-iris-problem-codes": [
+              "operation_backlog_full",
+              "revision_conflict",
+              "role_in_use",
+              "role_isolated",
+              "role_reserved_name"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "operation_backlog_full": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#operation_backlog_full",
+                      "title": "Operation backlog full",
+                      "status": 409,
+                      "code": "operation_backlog_full"
+                    }
+                  },
+                  "revision_conflict": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#revision_conflict",
+                      "title": "Revision conflict",
+                      "status": 409,
+                      "code": "revision_conflict"
+                    }
+                  },
+                  "role_in_use": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_in_use",
+                      "title": "Role in use",
+                      "status": 409,
+                      "code": "role_in_use"
+                    }
+                  },
+                  "role_isolated": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_isolated",
+                      "title": "Role isolated",
+                      "status": 409,
+                      "code": "role_isolated"
+                    }
+                  },
+                  "role_reserved_name": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#role_reserved_name",
+                      "title": "Role reserved name",
+                      "status": 409,
+                      "code": "role_reserved_name"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Precondition failed",
+            "x-iris-problem-codes": [
+              "precondition_failed"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_failed",
+                  "title": "Precondition failed",
+                  "status": 412,
+                  "code": "precondition_failed"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload too large",
+            "x-iris-problem-codes": [
+              "payload-too-large"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "example": {
+                  "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#payload-too-large",
+                  "title": "Payload too large",
+                  "status": 413,
+                  "code": "payload-too-large"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid policy or Invalid policy request or Invalid roles csv",
+            "x-iris-problem-codes": [
+              "invalid_policy",
+              "invalid_policy_request",
+              "invalid_roles_csv"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "invalid_policy": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_policy",
+                      "title": "Invalid policy",
+                      "status": 422,
+                      "code": "invalid_policy"
+                    }
+                  },
+                  "invalid_policy_request": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_policy_request",
+                      "title": "Invalid policy request",
+                      "status": 422,
+                      "code": "invalid_policy_request"
+                    }
+                  },
+                  "invalid_roles_csv": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#invalid_roles_csv",
+                      "title": "Invalid roles csv",
+                      "status": 422,
+                      "code": "invalid_roles_csv"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Confirmation required or Precondition required",
+            "x-iris-problem-codes": [
+              "confirmation_required",
+              "precondition_required"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "confirmation_required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#confirmation_required",
+                      "title": "Confirmation required",
+                      "status": 428,
+                      "code": "confirmation_required"
+                    }
+                  },
+                  "precondition_required": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#precondition_required",
+                      "title": "Precondition required",
+                      "status": 428,
+                      "code": "precondition_required"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Policy unavailable or Service unavailable",
+            "x-iris-problem-codes": [
+              "policy_unavailable",
+              "service-unavailable"
+            ],
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                },
+                "examples": {
+                  "policy_unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#policy_unavailable",
+                      "title": "Policy unavailable",
+                      "status": 503,
+                      "code": "policy_unavailable"
+                    }
+                  },
+                  "service-unavailable": {
+                    "value": {
+                      "type": "https://cisco-open.github.io/intelligent-release-image-staging/docs/problems/#service-unavailable",
+                      "title": "Service unavailable",
+                      "status": 503,
+                      "code": "service-unavailable"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before a retry when known",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-iris-v1-resource-path-exception": "role definition batch action: retained for the shipped console and the one-to-one BFF/management dispatch boundary; a rename would be breaking and is reserved for a future major API",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "ManagementPeerPolicyRolesImportCsvRequest",
+                "type": "object",
+                "properties": {
+                  "csv": {
+                    "type": "string"
+                  },
+                  "confirm_token": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "writeOnly": true
+                  }
+                },
+                "required": [
+                  "csv"
+                ],
+                "additionalProperties": false
+              },
+              "example": {
+                "csv": "role,restricted,peers,seed_up_bps\nboat,true,boat;fiber,12500000\nfiber,true,fiber;boat,\n",
+                "confirm_token": "candidate-bound-sha256"
               }
             }
           }

@@ -866,6 +866,8 @@ def test_unsupported_methods_authenticate_first_across_services(tmp_path):
 @pytest.mark.parametrize("method,suffix", [
     ("GET", "/peer-policy/roles"), ("PUT", "/peer-policy/roles/boat"),
     ("DELETE", "/peer-policy/roles/boat"), ("PUT", "/peer-policy/qos"),
+    ("GET", "/peer-policy/roles/export-csv"),
+    ("POST", "/peer-policy/roles/import-csv"),
     ("POST", "/devices/d1/role"), ("POST", "/devices/bulk-role"),
     ("GET", "/devices/d1/effective-qos"), ("GET", "/peer-policy/explain"),
 ])
@@ -943,6 +945,7 @@ def policy_tiers(tmp_path, monkeypatch):
 @pytest.mark.parametrize("method,suffix,body", [
     ("PUT", "/peer-policy/roles/new", {"restricted": False}),
     ("DELETE", "/peer-policy/roles/boat", {}),
+    ("POST", "/peer-policy/roles/import-csv", {"csv": "role\nboat\n"}),
     ("PUT", "/peer-policy/qos", {"qos": {"max_peers": 4}}),
     ("POST", "/devices/d1/role", {"role": "boat"}),
     ("POST", "/devices/bulk-role", {"role": "boat", "device_ids": ["d1"]}),
@@ -1001,6 +1004,8 @@ def test_policy_contract_live_problem_status_code_type_and_headers(policy_tiers)
     ("GET", "/devices/d1/effective-qos", "/devices/{device_id}/effective-qos", None),
     ("PUT", "/peer-policy/roles/boat", "/peer-policy/roles/{name}", {"restricted": True}),
     ("DELETE", "/peer-policy/roles/boat", "/peer-policy/roles/{name}", {}),
+    ("POST", "/peer-policy/roles/import-csv", "/peer-policy/roles/import-csv", {"csv": "role\nboat\n"}),
+    ("GET", "/peer-policy/roles/export-csv", "/peer-policy/roles/export-csv", None),
     ("PUT", "/peer-policy/qos", "/peer-policy/qos", {"qos": {}}),
     ("POST", "/devices/d1/role", "/devices/{device_id}/role", {"role": None}),
     ("POST", "/devices/bulk-role", "/devices/bulk-role", {"role": None, "device_ids": ["d1"]}),

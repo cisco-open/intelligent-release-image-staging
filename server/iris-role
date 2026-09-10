@@ -16,19 +16,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gui_fleet       # noqa: E402
 import peer_policy     # noqa: E402
+import role_csv        # noqa: E402
 import role_management # noqa: E402
 import schedules       # noqa: E402
 
 
-ROLE_QOS_FIELDS = (
-    "max_peers", "per_peer_bps", "fanout", "seed_up_bps",
-    "seed_down_bps", "leech_up_bps", "leech_down_bps", "overall_up_bps",
-    "overall_down_bps", "max_concurrent", "request_peer_speed_limit_bps",
-    "announce_min_interval_s", "numwant", "handout_budget",
-    "catalog_tick_s", "telemetry_every_ticks", "telemetry_pause")
-ROLE_CSV_FIELDS = (
-    "role", "restricted", "peers", "origin", "nets", "on_stale",
-    *ROLE_QOS_FIELDS)
+ROLE_QOS_FIELDS = role_csv.ROLE_QOS_FIELDS
+ROLE_CSV_FIELDS = role_csv.ROLE_CSV_FIELDS
 
 
 def _paths():
@@ -48,26 +42,11 @@ def _print_json(value):
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def _bool(value, field, blank=None):
-    value = str(value or "").strip().lower()
-    if not value and blank is not None:
-        return blank
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise ValueError("%s must be true or false" % field)
-
-
-def _qos_value(name, value):
-    if name == "telemetry_pause":
-        return _bool(value, name)
-    try:
-        if not str(value).strip() or any(c in str(value) for c in ".eE"):
-            raise ValueError
-        return int(value)
-    except (TypeError, ValueError):
-        raise ValueError("%s must be an integer" % name) from None
+_bool = role_csv.parse_bool
+_qos_value = role_csv.parse_qos_value
+_nets = role_csv.parse_nets
+_csv_definitions = role_csv.parse_roles_csv
+_export_roles = role_csv.export_roles_csv
 
 
 def _qos_args(values):
@@ -83,22 +62,6 @@ def _qos_args(values):
             raise ValueError("duplicate role QoS key: %s" % name)
         qos[name] = _qos_value(name, value)
     return qos
-
-
-def _nets(values):
-    result = []
-    seen = set()
-    for value in values or ():
-        try:
-            canonical = str(ipaddress.IPv4Network(value, strict=False))
-        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError,
-                ValueError):
-            raise ValueError("invalid role network: %s" % value) from None
-        if canonical in seen:
-            raise ValueError("duplicate role network: %s" % canonical)
-        seen.add(canonical)
-        result.append(value)
-    return result
 
 
 def _definition(args):
@@ -117,79 +80,6 @@ def _definition(args):
     if qos:
         definition["qos"] = qos
     return definition
-
-
-def _csv_definitions(text):
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames or "role" not in reader.fieldnames:
-        raise ValueError("roles CSV requires a role header")
-    unknown = set(reader.fieldnames) - set(ROLE_CSV_FIELDS)
-    if unknown:
-        raise ValueError("unknown roles CSV field: %s" % sorted(unknown)[0])
-    definitions = {}
-    for number, row in enumerate(reader, 2):
-        name = str(row.get("role") or "").strip()
-        if not name:
-            if any(str(value or "").strip() for value in row.values()):
-                raise ValueError("row %d has no role" % number)
-            continue
-        peer_policy.validate_role_name(name)
-        if name in definitions:
-            raise ValueError("duplicate role: %s" % name)
-        definition = {
-            "restricted": _bool(row.get("restricted"), "restricted", False)}
-        peers = [item.strip() for item in
-                 str(row.get("peers") or "").split(";") if item.strip()]
-        definition["peers"] = peers or [name]
-        origin = str(row.get("origin") or "").strip()
-        if origin:
-            definition["origin"] = _bool(origin, "origin")
-        nets = [item.strip() for item in
-                str(row.get("nets") or "").split(";") if item.strip()]
-        if nets:
-            definition["nets"] = _nets(nets)
-        on_stale = str(row.get("on_stale") or "").strip()
-        if on_stale:
-            definition["on_stale"] = on_stale
-        qos = {}
-        for field in ROLE_QOS_FIELDS:
-            value = row.get(field)
-            if value is not None and str(value).strip():
-                qos[field] = _qos_value(field, value)
-        if qos:
-            definition["qos"] = qos
-        definitions[name] = definition
-    # Validate all cross-role references before a store exists or changes.
-    candidate = peer_policy.base_document()
-    candidate["roles"] = {"defs": definitions, "role_of": {},
-                          "qos_default": {}, "qos_device": {}}
-    candidate["roles_present"] = True
-    peer_policy.validate_document(candidate)
-    return definitions
-
-
-def _export_roles(document):
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=ROLE_CSV_FIELDS,
-                            lineterminator="\n")
-    writer.writeheader()
-    definitions = document.get("roles", {}).get("defs", {})
-    for name in sorted(definitions):
-        definition = definitions[name]
-        row = {
-            "role": name,
-            "restricted": str(bool(definition.get("restricted", False))).lower(),
-            "peers": ";".join(definition.get("peers", [name])),
-            "origin": (str(definition["origin"]).lower()
-                       if "origin" in definition else ""),
-            "nets": ";".join(definition.get("nets", [])),
-            "on_stale": definition.get("on_stale", ""),
-        }
-        for key, value in definition.get("qos", {}).items():
-            if key in ROLE_QOS_FIELDS:
-                row[key] = str(value).lower() if isinstance(value, bool) else value
-        writer.writerow(row)
-    return output.getvalue()
 
 
 def _load_policy():

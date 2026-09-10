@@ -12,6 +12,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Define roles from the Console. The Peer policy panel on the Devices page
+  gains a Role definitions table with New role, Edit and Delete, an editor
+  for peer roles, networks, the restricted and origin switches and every
+  role-scoped QoS value including the speed limits, and Import CSV / Export
+  CSV in the `iris-role` grammar. Every write keeps the Set role contract
+  (strong ETag, preview, confirmation token). Two new routes back the file
+  round trip: `GET /api/v1/peer-policy/roles/export-csv` and
+  `POST /api/v1/peer-policy/roles/import-csv`, which replaces every
+  definition atomically and reports grammar problems as `invalid_roles_csv`
+  with the offending row or field in `detail` (issue #222).
 - Run the IOx agent on Catalyst 8000 routers. Platform `iox` on a
   `router-routed` or `router-nat` row attaches the app through the same
   IRIS-owned VirtualPortGroup (and NAT footprint) the Guest Shell router
