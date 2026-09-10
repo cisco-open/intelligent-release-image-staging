@@ -1786,11 +1786,17 @@ def _classify_transition(purpose, payload):
     if len(lines) != 1:
         return "other", "silence" if not lines else "unsupported_response"
     value = lines[0].lower()
-    if (purpose == "verification_disable" and
-            value == b"app hosting verification disabled successfully"):
+    # IE-3x00/C9300 say "app hosting verification ..."; a Catalyst 8000V says
+    # "app signature verification ...". Same success, different platform
+    # wording -- the exact IE/C9K literal made every C8000V install fail here
+    # right after the disable that had already succeeded.
+    if (purpose == "verification_disable" and value in (
+            b"app hosting verification disabled successfully",
+            b"app signature verification disabled successfully")):
         return "disabled_successfully", None
-    if (purpose == "verification_enable" and
-            value == b"app hosting verification enabled successfully"):
+    if (purpose == "verification_enable" and value in (
+            b"app hosting verification enabled successfully",
+            b"app signature verification enabled successfully")):
         return "enabled_successfully", None
     if (purpose == "verification_disable" and value ==
             b"the process for the command is not responding or is otherwise unavailable"):
