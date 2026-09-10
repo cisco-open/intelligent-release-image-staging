@@ -194,8 +194,25 @@ ROOT_COPY_TMP_SUFFIX = ".iris-tmp"
 # Cisco image-artifact names only — anchored on the platform image prefix so we
 # never match unrelated files. Plus the literal packages.conf. Either may also
 # carry ROOT_COPY_TMP_SUFFIX (a root-copy replacement's own in-flight name).
+#
+# This is a DELETION allowlist, so a prefix is added only for a family the
+# agent stages on and whose artifact names were read off real hardware:
+#   cat9k   Catalyst 9300 (cat9k_iosxe .bin/.conf, cat9k-*.pkg)
+#   ie3x00  IE-3x00 (ie3x00-universalk9 .bin)
+#   c8000v  Catalyst 8000V (c8000v-universalk9 .bin; the install-mode set is
+#           c8000v-mono-universalk9 / c8000v-rpboot / c8000v-firmware_* .pkg
+#           plus packages.conf — `dir bootflash:` on a lab C8000V, 2026-09-10)
+# Other Catalyst 8000 hardware (C8200/C8300/C8500) is deliberately NOT listed:
+# its image prefixes have not been confirmed on a box.
+#
+# A .pkg set that is the INSTALLED image (a C8000V deployed from the ISO
+# reports 'System image file is "cdrom0:packages.conf"' while the committed
+# packages sit at bootflash: root) is never a candidate: detect_mode() reads
+# that as install mode, and iris_agent._reclaim_for_mode only consults this
+# allowlist in bundle mode, where the running image is a .bin and the caller
+# protects it (plus the BOOT target and IRIS's own copies) by name.
 _ARTIFACT_RE = re.compile(
-    r"^(cat9k|ie3x00)[A-Za-z0-9._-]*\.(bin|pkg|conf)(\.iris-tmp)?$")
+    r"^(cat9k|ie3x00|c8000v)[A-Za-z0-9._-]*\.(bin|pkg|conf)(\.iris-tmp)?$")
 _TMP_PACKAGES_CONF = "packages.conf" + ROOT_COPY_TMP_SUFFIX
 
 
