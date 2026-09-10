@@ -9,9 +9,11 @@ report and a credential resolution must not cost the whole fleet.
 Every assertion here is deterministic — bytes and files touched, and index
 builds counted — never wall time.
 """
+import builtins
 import collections
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -663,3 +665,391 @@ def test_task13_durable_fsync_failures_propagate_with_honest_visibility(
         assert restarted.get("a") is None
     else:
         assert restarted.get("a") == {"n": 1}
+
+
+# ---------------------------------------------------------------------------
+# #245: a read-only export snapshot must distinguish unavailable data from an
+# empty store, or the exporter forgets delivered reports and replays the ring.
+# ---------------------------------------------------------------------------
+
+def _snapshot_disk(root):
+    """Include names, contents and mtimes so reads cannot silently migrate."""
+    snapshot = {}
+    for entry in [root, *sorted(root.rglob("*"))]:
+        stat = entry.stat()
+        snapshot[str(entry.relative_to(root))] = (
+            stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size,
+            entry.read_bytes() if entry.is_file() else None)
+    return snapshot
+
+
+def _strict_fixture_rows():
+    first = "first-device"
+    second = next("other-device-%d" % i for i in range(1000)
+                  if keyed_state.bucket_of("other-device-%d" % i)
+                  != keyed_state.bucket_of(first))
+    return {first: [_v2("a" * 32, "b" * 32)],
+            second: [_v2("c" * 32, "d" * 32)]}
+
+
+@pytest.mark.parametrize("layout", ["fresh", "empty-shards", "empty-legacy"])
+def test_strict_read_accepts_known_empty_store_without_creating_files(
+        tmp_path, monkeypatch, layout):
+    path = str(tmp_path / "telemetry.json")
+    if layout == "empty-shards":
+        _seed(path, {})
+    elif layout == "empty-legacy":
+        Path(path).write_text("{}")
+    before = _snapshot_disk(tmp_path)
+
+    def unexpected_snapshot(*args, **kwargs):
+        pytest.fail("read_all must never invoke the migrating writer snapshot")
+
+    monkeypatch.setattr(keyed_state.KeyedState, "snapshot", unexpected_snapshot)
+    assert keyed_state.read_all(path, strict=True) == {}
+    assert _snapshot_disk(tmp_path) == before
+
+
+def test_strict_read_legacy_document_is_read_only(tmp_path, monkeypatch):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    Path(path).write_text(json.dumps(rows))
+    before = _snapshot_disk(tmp_path)
+
+    def unexpected_snapshot(*args, **kwargs):
+        pytest.fail("a read-only snapshot must not migrate the legacy document")
+
+    monkeypatch.setattr(keyed_state.KeyedState, "snapshot", unexpected_snapshot)
+    assert keyed_state.read_all(path, strict=True) == rows
+    assert _snapshot_disk(tmp_path) == before
+
+
+def test_strict_read_merges_legacy_and_shards_without_migration(tmp_path):
+    path = str(tmp_path / "telemetry.json")
+    legacy = {"legacy-only": [_v2("a" * 32, "b" * 32)],
+              "overlap": [_v2("c" * 32, "d" * 32)]}
+    shards = {"shard-only": [_v2("e" * 32, "f" * 32)],
+              "overlap": [_v2("1" * 32, "2" * 32)]}
+    Path(path).write_text(json.dumps(legacy))
+    _seed(path, shards)
+    before = _snapshot_disk(tmp_path)
+    assert keyed_state.read_all(path, strict=True) == dict(legacy, **shards)
+    assert _snapshot_disk(tmp_path) == before
+
+
+def test_strict_read_migrated_store_does_not_open_retired_legacy_guard(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    Path(path + ".migrated").write_text(json.dumps({"retired-device": []}))
+    Path(path).write_text("IRIS rollback guard: this is deliberately not JSON")
+    before = _snapshot_disk(tmp_path)
+    original_open = builtins.open
+    opened = []
+
+    def open_without_guard(filename, *args, **kwargs):
+        opened.append(os.fspath(filename))
+        if os.fspath(filename) == path:
+            raise PermissionError("the retired guard must not be opened")
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", open_without_guard)
+        assert keyed_state.read_all(path, strict=True) == rows
+    assert path not in opened
+    assert _snapshot_disk(tmp_path) == before
+
+
+@pytest.mark.parametrize("layout", ["missing-parent", "migrated-missing-shards"])
+def test_strict_read_missing_store_infrastructure_is_not_empty(tmp_path, layout):
+    if layout == "missing-parent":
+        path = str(tmp_path / "missing" / "telemetry.json")
+    else:
+        path = str(tmp_path / "telemetry.json")
+        Path(path + ".migrated").write_text("{}")
+    before = _snapshot_disk(tmp_path)
+    with pytest.raises(keyed_state.KeyedStateError):
+        keyed_state.read_all(path, strict=True)
+    assert keyed_state.read_all(path) == {}
+    assert _snapshot_disk(tmp_path) == before
+
+
+@pytest.mark.parametrize("source", ["legacy", "shard"])
+@pytest.mark.parametrize("bad_json", ["{ broken", "[]", "null", "42", '"text"'])
+def test_strict_read_rejects_corrupt_or_nonobject_source_without_partial_result(
+        tmp_path, source, bad_json):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    expected_best_effort = dict(rows)
+    if source == "legacy":
+        damaged = Path(path)
+    else:
+        bad_key = next(iter(rows))
+        damaged = Path(keyed_state.shard_dir(path)) / (
+            "%02x.json" % keyed_state.bucket_of(bad_key))
+        del expected_best_effort[bad_key]
+    damaged.write_text(bad_json)
+    before = _snapshot_disk(tmp_path)
+    with pytest.raises(keyed_state.KeyedStateError):
+        keyed_state.read_all(path, strict=True)
+    assert keyed_state.read_all(path) == expected_best_effort
+    assert _snapshot_disk(tmp_path) == before
+
+
+@pytest.mark.parametrize("source", ["legacy", "shard"])
+def test_strict_read_permission_failure_aborts_complete_snapshot(
+        tmp_path, monkeypatch, source):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    expected_best_effort = dict(rows)
+    if source == "legacy":
+        Path(path).write_text(json.dumps({"legacy-only": []}))
+        unreadable = path
+    else:
+        bad_key = next(iter(rows))
+        unreadable = os.path.join(keyed_state.shard_dir(path),
+                                 "%02x.json" % keyed_state.bucket_of(bad_key))
+        del expected_best_effort[bad_key]
+    before = _snapshot_disk(tmp_path)
+    original_open = builtins.open
+
+    def fail_open(filename, *args, **kwargs):
+        if os.fspath(filename) == unreadable:
+            raise PermissionError("injected unreadable report source")
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", fail_open)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+        assert keyed_state.read_all(path) == expected_best_effort
+    assert _snapshot_disk(tmp_path) == before
+
+
+@pytest.mark.parametrize("failure", ["permission", "missing", "mid-iteration"])
+def test_strict_read_directory_scan_failure_is_not_empty(
+        tmp_path, monkeypatch, failure):
+    path = str(tmp_path / "telemetry.json")
+    _seed(path, _strict_fixture_rows())
+    directory = keyed_state.shard_dir(path)
+    original_scandir = os.scandir
+    before = _snapshot_disk(tmp_path)
+
+    class InterruptedScan:
+        def __enter__(self):
+            self.entries = original_scandir(directory)
+            return self
+
+        def __exit__(self, *args):
+            self.entries.close()
+
+        def __iter__(self):
+            yield next(self.entries)
+            raise OSError("injected directory iteration failure")
+
+    def fail_scandir(filename):
+        if os.fspath(filename) != directory:
+            return original_scandir(filename)
+        if failure == "mid-iteration":
+            return InterruptedScan()
+        error = PermissionError if failure == "permission" else FileNotFoundError
+        raise error("injected report directory failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(keyed_state.os, "scandir", fail_scandir)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+        assert keyed_state.read_all(path) == {}
+    assert _snapshot_disk(tmp_path) == before
+
+
+def test_strict_read_listed_shard_disappearing_aborts_instead_of_returning_partial(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    victim = sorted(Path(keyed_state.shard_dir(path)).glob("*.json"))[-1]
+    lost_rows = json.loads(victim.read_text())
+    original_open = builtins.open
+    removed = []
+
+    def disappearing_open(filename, *args, **kwargs):
+        if os.fspath(filename) == str(victim) and not removed:
+            victim.unlink()
+            removed.append(str(victim))
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", disappearing_open)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+    assert removed == [str(victim)]
+    assert keyed_state.read_all(path) == {
+        key: row for key, row in rows.items() if key not in lost_rows}
+
+
+@pytest.mark.parametrize(("source", "transition"), [
+    ("legacy", "appears"), ("shard", "appears"),
+    ("shard", "disappears"), ("shard", "replaced"),
+])
+def test_strict_read_migration_marker_change_aborts_snapshot(
+        tmp_path, monkeypatch, source, transition):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    legacy = json.dumps({"legacy-only": []})
+    Path(path).write_text(legacy)
+    marker = Path(path + ".migrated")
+    if transition != "appears":
+        marker.write_text("{}")
+    target = path if source == "legacy" else str(
+        sorted(Path(keyed_state.shard_dir(path)).glob("*.json"))[0])
+    before_shards = _shard_bytes(path)
+    original_open = builtins.open
+    changed = []
+
+    def transition_open(filename, *args, **kwargs):
+        if os.fspath(filename) == target and not changed:
+            changed.append(transition)
+            if transition == "appears":
+                marker.write_text("{}")
+            elif transition == "disappears":
+                marker.unlink()
+            else:
+                replacement = tmp_path / "replacement-marker"
+                replacement.write_text("{}")
+                os.replace(replacement, marker)
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", transition_open)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+    assert changed == [transition]
+    assert _shard_bytes(path) == before_shards
+    assert Path(path).read_text() == legacy
+
+
+@pytest.mark.parametrize("replaced", ["parent", "shard-directory"])
+def test_strict_read_directory_replacement_during_scan_aborts_snapshot(
+        tmp_path, monkeypatch, replaced):
+    parent = tmp_path / "store"
+    parent.mkdir()
+    path = str(parent / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    directory = keyed_state.shard_dir(path)
+    original_scandir = os.scandir
+    changed = []
+
+    def replace_before_scan(filename):
+        if os.fspath(filename) == directory and not changed:
+            changed.append(replaced)
+            if replaced == "parent":
+                os.rename(parent, tmp_path / "retired-store")
+                parent.mkdir()
+            else:
+                os.rename(directory, parent / "retired-shards")
+            os.mkdir(directory)
+        return original_scandir(filename)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(keyed_state.os, "scandir", replace_before_scan)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+    assert changed == [replaced]
+
+
+def test_strict_read_accepts_normal_atomic_shard_update_during_scan(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    _seed(path, rows)
+    key = next(iter(rows))
+    shard = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of(key))
+    updated_ring = [_v2("e" * 32, "f" * 32)]
+    original_open = builtins.open
+    updated = []
+
+    def update_before_open(filename, *args, **kwargs):
+        if os.fspath(filename) == str(shard) and not updated:
+            updated.append(key)
+            temporary = shard.with_suffix(".next")
+            temporary.write_text(json.dumps({key: updated_ring}))
+            os.replace(temporary, shard)
+        return original_open(filename, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", update_before_open)
+        assert keyed_state.read_all(path, strict=True) == dict(
+            rows, **{key: updated_ring})
+    assert updated == [key]
+
+
+def test_strict_read_symlink_target_disappearing_during_scan_is_not_hidden(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    missing_key = next(iter(rows))
+    missing_row = rows.pop(missing_key)
+    _seed(path, rows)
+    directory = keyed_state.shard_dir(path)
+    target = tmp_path / "disappearing-shard-target"
+    target.write_text(json.dumps({missing_key: missing_row}))
+    candidate = Path(directory) / (
+        "%02x.json" % keyed_state.bucket_of(missing_key))
+    candidate.symlink_to(target)
+    original_scandir = os.scandir
+    removed = []
+
+    class VanishingTargetScan:
+        def __enter__(self):
+            self.entries = original_scandir(directory)
+            return self
+
+        def __exit__(self, *args):
+            self.entries.close()
+
+        def __iter__(self):
+            for entry in self.entries:
+                if entry.name == candidate.name and not removed:
+                    target.unlink()
+                    removed.append(entry.name)
+                yield entry
+
+    def scan_with_vanishing_target(filename):
+        if os.fspath(filename) == directory:
+            return VanishingTargetScan()
+        return original_scandir(filename)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(keyed_state.os, "scandir", scan_with_vanishing_target)
+        with pytest.raises(keyed_state.KeyedStateError):
+            keyed_state.read_all(path, strict=True)
+        # DirEntry.is_file() returns False for the now-dangling symlink,
+        # silently losing a device if it is used to filter candidate shards.
+        assert keyed_state.read_all(path) == rows
+    assert removed == [candidate.name]
+    assert candidate.is_symlink()
+    assert not target.exists()
+
+
+def test_strict_read_nonregular_json_candidate_is_not_silently_ignored(tmp_path):
+    path = str(tmp_path / "telemetry.json")
+    rows = _strict_fixture_rows()
+    nonregular_key = next(iter(rows))
+    del rows[nonregular_key]
+    _seed(path, rows)
+    candidate = Path(keyed_state.shard_dir(path)) / (
+        "%02x.json" % keyed_state.bucket_of(nonregular_key))
+    candidate.mkdir()
+    before = _snapshot_disk(tmp_path)
+
+    with pytest.raises(keyed_state.KeyedStateError):
+        keyed_state.read_all(path, strict=True)
+    assert keyed_state.read_all(path) == rows
+    assert _snapshot_disk(tmp_path) == before

@@ -2133,10 +2133,12 @@ def _read_attestations(state_dir):
 
 def _read_reports(state_dir):
     """The catalog's telemetry.json ({device_id: [oldest..newest stored
-    reports]}) or {} if it isn't there yet / unreadable / not a dict. Read
-    fresh each call (small, ring-bounded file — 5 reports x <=16 KB per
-    device). Telemetry never breaks on bad input."""
-    return keyed_state.read_all(os.path.join(state_dir, "telemetry.json"))
+    reports]}). Read fresh each call (5 reports x <=16 KB per device).
+    An unreadable or incomplete snapshot raises so sample() skips the export
+    pass without pruning delivery cursors or pinned sender attribution. Only
+    a successful empty read means the ring is empty."""
+    return keyed_state.read_all(os.path.join(state_dir, "telemetry.json"),
+                                strict=True)
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,

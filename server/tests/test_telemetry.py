@@ -2,7 +2,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import http.client
+import io
 import json
 import os
 import socket
@@ -11,6 +13,7 @@ import time
 
 import pytest
 
+import keyed_state
 import metrics
 import otlp
 import telemetry
@@ -1215,11 +1218,11 @@ def test_read_reports_missing_file_returns_empty(tmp_path):
     assert telemetry._read_reports(str(tmp_path)) == {}
 
 
-def test_read_reports_garbage_returns_empty(tmp_path):
-    (tmp_path / "telemetry.json").write_text("{not json!!!")
-    assert telemetry._read_reports(str(tmp_path)) == {}
-    (tmp_path / "telemetry.json").write_text('["a list, not a dict"]')
-    assert telemetry._read_reports(str(tmp_path)) == {}
+@pytest.mark.parametrize("payload", ["{not json!!!", '["not an object"]'])
+def test_read_reports_garbage_is_unknown_not_empty(tmp_path, payload):
+    (tmp_path / "telemetry.json").write_text(payload)
+    with pytest.raises(keyed_state.KeyedStateError):
+        telemetry._read_reports(str(tmp_path))
 
 
 def test_read_reports_parses_valid_ring(tmp_path):
@@ -4364,6 +4367,121 @@ def test_pinned_attribution_is_bounded_to_the_report_ring(tmp_path):
                               "received_at": 9})
     hub._export_new_reports()
     assert store.get("r9") is None
+
+
+@pytest.mark.parametrize("failure", [
+    "directory", "shard-permission", "corrupt-shard", "nonobject-shard"])
+def test_failed_report_snapshot_preserves_delivery_and_attribution_until_recovery(
+        tmp_path, monkeypatch, failure):
+    """An incomplete scan must not retire delivered IDs or their first
+    classification, even when another shard was read successfully."""
+    directory = tmp_path / "telemetry.d"
+    directory.mkdir()
+    first_shard = directory / "00.json"
+    failed_shard = directory / "01.json"
+    first_shard.write_text(json.dumps({"rtr-04": [_transfer_record_report()]}))
+    failed_shard.write_text(json.dumps({
+        "rtr-05": [_transfer_record_report("r2", 2)]}))
+    # A migrated store intentionally retains an invalid legacy rollback guard.
+    (tmp_path / "telemetry.json").write_text("migrated: rollback prohibited")
+    (tmp_path / "telemetry.json.migrated").write_text("{}")
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    sent = []
+    exporter = otlp.OTLPLogExporter(
+        "http://collector.invalid:4318", sender=lambda _url, body: sent.append(body))
+    devices = {"rtr-07": {"swarm_ip": "10.0.0.7"}}
+    hub = telemetry.Telemetry(
+        _seeded_registry(), exporter=exporter,
+        reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        device_info=lambda: devices, report_attribution=store)
+    hub._export_new_reports()
+    original_records = {telemetry._otlp_record_event_id(record): record["attributes"]
+                        for record in hub.log_queue.snapshot()}
+    assert hub.log_queue.flush(lambda _batch: None) == 6
+    hub._export_new_reports()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    pins = store.snapshot()
+    pin_bytes = open(store.path, "rb").read()
+    pin_mtime = os.stat(store.path).st_mtime_ns
+    assert set(pins) == {"r1", "r2"}
+
+    original_open, original_scandir = builtins.open, os.scandir
+
+    def faulty_open(filename, *args, **kwargs):
+        if os.fspath(filename) == str(failed_shard):
+            if failure == "shard-permission":
+                raise PermissionError("unreadable report shard")
+            if failure == "corrupt-shard":
+                return io.StringIO("{invalid")
+            if failure == "nonobject-shard":
+                return io.StringIO("[]")
+        return original_open(filename, *args, **kwargs)
+
+    def faulty_scandir(filename):
+        if os.fspath(filename) == str(directory) and failure == "directory":
+            raise PermissionError("unreadable report directory")
+        return original_scandir(filename)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", faulty_open)
+        patch.setattr(keyed_state.os, "scandir", faulty_scandir)
+        hub.sample()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    assert hub.log_queue.queued == 0 and sent == []
+    assert store.snapshot() == pins
+    assert open(store.path, "rb").read() == pin_bytes
+    assert os.stat(store.path).st_mtime_ns == pin_mtime
+
+    # Recovery sees the same delivered ring with changed live identity; it
+    # neither replays the records nor drops the original attribution pins.
+    devices.clear()
+    hub._registry = PeerRegistry()
+    hub.sample()
+    assert hub._seen_report_event_ids == {"r1", "r2"}
+    assert hub.log_queue.queued == 0 and sent == []
+    assert store.snapshot() == pins
+    replay = telemetry.Telemetry(
+        PeerRegistry(), reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        device_info=lambda: {}, report_attribution=store)
+    replay._export_new_reports()
+    assert {telemetry._otlp_record_event_id(record): record["attributes"]
+            for record in replay.log_queue.snapshot()} == original_records
+
+    # A genuinely new report still enters the queue after recovery.
+    first_shard.write_text(json.dumps({"rtr-04": [
+        _transfer_record_report(),
+        {"schema": "v2", "report_id": "r3", "received_at": 3}]}))
+    hub._export_new_reports()
+    assert [telemetry._otlp_record_event_id(record)
+            for record in hub.log_queue.snapshot()] == ["r3"]
+
+
+@pytest.mark.parametrize("empty_store", [
+    "missing-fresh", "empty-directory", "empty-legacy", "empty-migrated"])
+def test_verified_empty_report_store_prunes_delivery_and_attribution(
+        tmp_path, empty_store):
+    path = tmp_path / "telemetry.json"
+    path.write_text(json.dumps({"rtr-04": [_transfer_record_report()]}))
+    store = report_attribution.ReportAttributionStore(str(tmp_path))
+    hub = telemetry.Telemetry(
+        _seeded_registry(), reports_info=lambda: telemetry._read_reports(str(tmp_path)),
+        report_attribution=store)
+    hub._export_new_reports()
+    assert hub.log_queue.flush(lambda _batch: None) == 3
+    assert "r1" in hub._seen_report_event_ids
+    assert store.get("r1") is not None
+    path.unlink()
+    if empty_store in {"empty-directory", "empty-migrated"}:
+        (tmp_path / "telemetry.d").mkdir()
+    if empty_store == "empty-legacy":
+        path.write_text("{}")
+    if empty_store == "empty-migrated":
+        path.write_text("migrated: rollback prohibited")
+        (tmp_path / "telemetry.json.migrated").write_text("{}")
+    hub._export_new_reports()
+    assert hub._seen_report_event_ids == set()
+    assert store.snapshot() == {}
+    assert hub.log_queue.queued == 0
 
 
 def test_report_attribution_store_pins_once_and_reads_bad_state_as_empty(

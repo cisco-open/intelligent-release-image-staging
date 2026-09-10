@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Telemetry preserves delivered report IDs and pinned peer attribution when
+  a report-ring snapshot cannot be fully read, avoiding replay after a
+  transient storage read failure (#245).
 - IOx download preflight preserves an existing IOS root image when space is
   tight. It reserves one image for the download and still requires native
   size and SHA-512 verification before adopting the destination (#254).
