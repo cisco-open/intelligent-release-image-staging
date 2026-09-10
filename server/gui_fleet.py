@@ -668,6 +668,8 @@ class FleetStore:
             # partial upsert changing type must not retain stale values
             # from the old family and then fail validation (or, worse,
             # retarget a plan).
+            if incoming_management_type != "routed":
+                merged.pop("svi_igp", None)
             old_router = previous_record.get("management_type") in _ROUTER_TYPES
             new_router = incoming_management_type in _ROUTER_TYPES
             old_xr = previous_record.get("management_type") == "xr-host"

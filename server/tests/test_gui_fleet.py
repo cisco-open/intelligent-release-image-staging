@@ -181,6 +181,23 @@ def test_svi_igp_rejected_outside_routed_management_type(tmp_path):
         fs.upsert(dict(_XRHOST, svi_igp="isis"))
 
 
+@pytest.mark.parametrize("igp", ["none", "isis"])
+@pytest.mark.parametrize("target", ["inband", "router-routed", "xr-host"])
+def test_management_type_change_drops_prior_svi_igp(tmp_path, igp, target):
+    fs = _fs(tmp_path)
+    before = fs.upsert(dict(_ROUTED, svi_igp=igp))
+    if target == "inband":
+        patch = {"device_id": "d1", "management_type": target,
+                 "inband_vlan": "120"}
+    else:
+        patch = dict(_ROUTER if target == "router-routed" else _XRHOST,
+                     device_id="d1")
+    after = fs.upsert(patch)
+    assert after["management_type"] == target
+    assert not after.get("svi_igp")
+    assert after["registration_id"] == before["registration_id"]
+
+
 def test_svi_igp_csv_roundtrip(tmp_path):
     """The new column sits between nat_interface and platform; an isis row
     imports, exports with the value intact, and re-imports identically."""
