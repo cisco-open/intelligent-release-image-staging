@@ -608,22 +608,26 @@
        exact either way.
        Records dedupe on event.id: a report re-exported after a server restart
        repeats it, and the sender class is pinned on first export, so the
-       copies are identical.
+       copies are identical. Fresh report pulls have NEW event ids but can
+       repeat the same capture, so retain the largest cumulative byte count
+       per (receiver, image, transfer, peer address) before sums or display.
+       Distinct unknown addresses and distinct transfers stay separate. Keep
+       the selected row's own capture time and completeness flag.
        Span is 1h, not the 60s/300s used by the sampled series above: these are
        one-shot completion events, not a polled series, and a 60s bucket draws
        a comb of single columns instead of a shape. -->
   <row>
     <panel>
       <title>Bytes received, by source</title>
-      <description>Bytes each device reported receiving, bucketed by hour and stacked by who sent them: origin (the seeder), peer device (another IRIS device), unknown (a peer the server could not name — a normal outcome, not an error). A visible "peer device" band is the direct evidence that peer-to-peer distribution carried load. An empty bucket is a bucket no transfer completed in, not proof of zero traffic.</description>
+      <description>Cumulative bytes each device reported receiving, grouped by the selected capture's hour and stacked by who sent them: origin (the seeder), peer device (another IRIS device), unknown (a peer the server could not name — a normal outcome, not an error). A visible "peer device" band is the direct evidence that peer-to-peer distribution carried load. Report pulls do not add bytes. These capture totals are not an hourly traffic rate, and an empty bucket is not proof of zero traffic.</description>
       <chart>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval source=case('iris.peer.attribution'=="origin","origin",'iris.peer.attribution'=="device","peer device",1==1,"unknown") | eval MiB=tonumber('iris.transfer.session_bytes_from_peer')/1048576 | timechart span=1h sum(MiB) BY source</query>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval source=case('iris.peer.attribution'=="origin","origin",'iris.peer.attribution'=="device","peer device",1==1,"unknown") | eval MiB=received_bytes/1048576 | timechart span=1h sum(MiB) BY source</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="charting.chart">column</option>
         <option name="charting.chart.stackMode">stacked</option>
-        <option name="charting.axisTitleY.text">MiB received per hour, by source</option>
+        <option name="charting.axisTitleY.text">MiB received, by capture hour</option>
         <option name="charting.chart.nullValueMode">zero</option>
         <option name="charting.legend.placement">bottom</option>
         <option name="charting.drilldown">none</option>
@@ -643,7 +647,7 @@
       <title>Share of bytes from peer devices</title>
       <single>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval b=tonumber('iris.transfer.session_bytes_from_peer') | stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes, sum(b) AS all_bytes | eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),round(100*coalesce(peer_bytes,0)/all_bytes,1)) | fields pct</query>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval b=received_bytes | stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes, sum(b) AS all_bytes | eval pct=if(isnull(all_bytes) OR all_bytes&lt;=0,null(),round(100*coalesce(peer_bytes,0)/all_bytes,1)) | fields pct</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>
@@ -660,7 +664,7 @@
       <title>Peer-to-peer transfers (measured, device-reported)</title>
       <table>
         <search>
-          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" "iris.peer.attribution"="device" | dedup "event.id" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval "MiB from this peer"=round(tonumber('iris.transfer.session_bytes_from_peer')/1048576,1) | eval Image=coalesce('iris.image.name','iris.image.id') | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver, "iris.transfer_record.capture_complete" AS "Capture complete" | table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete" | sort - _time | head 100 | appendpipe [ stats count AS n | where n==0 | eval Sender="— no device-to-device peer transfer records in this window (none captured, which is not the same as none happened) —" | fields Sender ]</query>
+          <query>search index=iris_logs source=iris sourcetype=otel:logs "otel.log.name"="iris.device.peer_transfer_record" | dedup "event.id" | eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer') | sort 0 -received_bytes | dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address" | where 'iris.peer.attribution'=="device" | eval img_cat=replace("$img$","\.SPA\.bin$|\.bin$","") | where 'iris.image.id'==img_cat OR "$img$"=="*" | eval "MiB from this peer"=round(received_bytes/1048576,1) | eval Image=coalesce('iris.image.name','iris.image.id') | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver, "iris.transfer_record.capture_complete" AS "Capture complete" | table _time, Sender, Receiver, Image, "MiB from this peer", "Capture complete" | sort - _time | head 100 | appendpipe [ stats count AS n | where n==0 | eval Sender="— no device-to-device peer transfer records in this window (none captured, which is not the same as none happened) —" | fields Sender ]</query>
           <earliest>$tr.earliest$</earliest><latest>$tr.latest$</latest>
         </search>
         <option name="drilldown">none</option>

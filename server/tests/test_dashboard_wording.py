@@ -66,6 +66,42 @@ def test_splunk_dashboard_is_well_formed_xml():
     ET.parse(os.path.join(DASHBOARDS, "splunk-iris-swarm.xml"))
 
 
+def test_splunk_peer_evidence_collapses_repeated_capture_before_aggregation():
+    """A Console pull repeats the same counters with a fresh report/event id.
+    The real Splunk fixture checks the arithmetic; this guards both shipped
+    copies against returning to event-id-only deduplication."""
+    import xml.etree.ElementTree as ET
+    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    section = document.split("### Peer-to-peer evidence\n", 1)[1].split(
+        "### Assignment to confirmed seeding", 1)[0]
+    docs_queries = re.findall(r"```spl\n(.*?)```", section, re.S)
+    xml_queries = [query.text for query in ET.fromstring(_splunk_text()).iter("query")
+                   if '"otel.log.name"="iris.device.peer_transfer_record"' in query.text]
+    assert len(docs_queries) == len(xml_queries) == 3
+    for query in docs_queries + xml_queries:
+        commands = [command.strip() for command in query.split("|")]
+        numeric = next(i for i, command in enumerate(commands)
+                       if command.startswith("eval received_bytes=tonumber("))
+        maximum = commands.index("sort 0 -received_bytes")
+        collapse = commands.index(
+            'dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"')
+        assert numeric < maximum < collapse
+        # Filtering to device rows first could resurrect an older device
+        # classification that the selected cumulative capture did not carry.
+        assert '"iris.peer.attribution"="device"' not in commands[0]
+        aggregations = [i for i, command in enumerate(commands)
+                        if command.startswith(("stats ", "timechart ", "table "))]
+        assert aggregations and min(aggregations) > collapse
+
+
+def test_splunk_per_sender_table_keeps_distinct_unknown_peer_addresses():
+    document = open(os.path.join(REPO, "docs", "zensical", "splunk.md")).read()
+    query = next(query for query in re.findall(r"```spl\n(.*?)```", document, re.S)
+                 if "max(received_bytes)" in query)
+    group = query.split("BY ", 1)[1]
+    assert '"network.peer.address"' in group
+
+
 def test_splunk_eval_syntax_single_quotes_dotted_fields():
     """The file's own header states the rule: dotted field names need SINGLE
     quotes in eval syntax, which `where` uses. A double-quoted token there is a

@@ -360,11 +360,11 @@ index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
 | eval source=coalesce('iris.peer.device_id', "unknown")
 | stats max(received_bytes) AS received_bytes
     values("iris.transfer_record.capture_complete") AS capture_complete
-    values("network.peer.address") AS peer_address
-    BY "device.id", image, "iris.transfer.id", source, "iris.peer.attribution"
+    BY "device.id", image, "iris.transfer.id", "network.peer.address", source, "iris.peer.attribution"
 ```
 
-The query keeps the largest cumulative capture per transfer and sender.
+The query keeps the largest cumulative capture per transfer and peer address.
+The address keeps separate unnamed peers from collapsing into one `unknown` row.
 `source` is the sender: `origin` for the seeder, the sending device's id for
 a `device` row (`iris.peer.device_id` carries both), and `unknown` for a row
 the server could not name. That attribute is absent on unknown rows, and a
@@ -387,27 +387,39 @@ They read the same device-measured record as the search above, split by who
 sent the bytes, so a peer-to-peer claim rests on an observation rather than on
 a subtraction of two origin-side totals.
 
+A fresh report pull can repeat an existing capture under a new `event.id`.
+After removing retries by event ID, each search keeps the largest cumulative
+byte count for each receiver, image, transfer and peer address. Separate
+transfers and separate unknown peers remain distinct. The selected row keeps
+its capture time and completeness flag; a pull adds no received bytes.
+
 ```spl
 index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
   "otel.log.name"="iris.device.peer_transfer_record"
 | dedup "event.id"
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
 | eval source=case('iris.peer.attribution'=="origin","origin",
     'iris.peer.attribution'=="device","peer device",1==1,"unknown")
-| eval MiB=tonumber('iris.transfer.session_bytes_from_peer')/1048576
+| eval MiB=received_bytes/1048576
 | timechart span=1h sum(MiB) BY source
 ```
 
-Read the stacked columns as bytes arriving per hour: a visible *peer device*
-band is the traffic devices served each other, *origin* is the seeder's share
-of the same hour, and *unknown* is a peer the server could not name.
+Read the stacked columns as cumulative bytes grouped by the selected capture's
+hour. They do not measure traffic rate within that hour. A visible *peer device*
+band is traffic devices served each other, *origin* is the seeder's share of
+those captures, and *unknown* is a peer the server could not name.
 
 ```spl
 index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
   "otel.log.name"="iris.device.peer_transfer_record"
 | dedup "event.id"
-| eval b=tonumber('iris.transfer.session_bytes_from_peer')
-| stats sum(eval(if('iris.peer.attribution'=="device",b,null()))) AS peer_bytes,
-    sum(b) AS all_bytes
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| stats sum(eval(if('iris.peer.attribution'=="device",received_bytes,null()))) AS peer_bytes,
+    sum(received_bytes) AS all_bytes
 | eval pct=if(isnull(all_bytes) OR all_bytes<=0,null(),
     round(100*coalesce(peer_bytes,0)/all_bytes,1))
 | fields pct
@@ -419,9 +431,13 @@ carries origin and unknown rows too, so an unnamed peer never inflates it.
 
 ```spl
 index=iris_logs source=iris sourcetype=otel:logs earliest=-24h
-  "otel.log.name"="iris.device.peer_transfer_record" "iris.peer.attribution"="device"
+  "otel.log.name"="iris.device.peer_transfer_record"
 | dedup "event.id"
-| eval "MiB from this peer"=round(tonumber('iris.transfer.session_bytes_from_peer')/1048576,1)
+| eval received_bytes=tonumber('iris.transfer.session_bytes_from_peer')
+| sort 0 -received_bytes
+| dedup "device.id" "iris.image.id" "iris.transfer.id" "network.peer.address"
+| where 'iris.peer.attribution'=="device"
+| eval "MiB from this peer"=round(received_bytes/1048576,1)
 | eval Image=coalesce('iris.image.name','iris.image.id')
 | rename "iris.peer.device_id" AS Sender, "device.id" AS Receiver,
     "iris.transfer_record.capture_complete" AS "Capture complete"

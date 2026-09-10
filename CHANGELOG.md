@@ -60,6 +60,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Splunk peer-evidence queries count each cumulative transfer/peer capture
+  once across fresh report pulls and keep distinct unknown peer addresses;
+  chart labels describe capture totals rather than hourly traffic rate (#264).
 - Legacy root cleanup protects the running image and every assigned image,
   defers when those identities are unavailable, and preserves a file if any
   matching record marks it as operator-adopted (#258).
