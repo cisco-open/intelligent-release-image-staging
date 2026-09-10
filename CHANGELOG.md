@@ -65,6 +65,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   earlier now re-reads a bounded number of times instead of failing the
   store ("transcript metadata changed") or the admission ("session fence
   admission failed"); type, owner and mode refusals are never retried.
+  A server restart in the middle of an IOx attempt no longer leaves that
+  device refusing every later attempt with "active same-boot IOx session
+  fence": the fence records its supervisor's pid and start ticks, and a
+  supervisor that is gone (every process dies with the container while the
+  host boot id stays) now counts as dead, so the next attempt reaps the
+  fence and recovers the board.
 - Make IOx onboarding work against real IOS-XE. The IOx transport had been
   written against an idealised IOS that answers config commands silently,
   uses one spelling per error, and always asks for confirmation. An IE-3400

@@ -2875,6 +2875,44 @@ def test_reconcile_requires_ack_and_fresh_enabled_read(tmp_path):
                 call[1] == "reconcile_enabled"]
 
 
+def test_fence_supervisor_alive_requires_the_same_process(tmp_path):
+    module = _module()
+    ticks = int(open("/proc/%d/stat" % os.getpid()).read().split()[21])
+    live = {"supervisor_pid": os.getpid(), "supervisor_start_ticks": ticks}
+    assert module._fence_supervisor_alive(live) is True
+    assert module._fence_supervisor_alive(
+        dict(live, supervisor_start_ticks=ticks + 1)) is False
+    assert module._fence_supervisor_alive(
+        dict(live, supervisor_pid=2 ** 22 - 1)) is False
+    assert module._fence_supervisor_alive({}) is False
+
+
+def test_a_same_boot_fence_whose_supervisor_died_no_longer_blocks_the_board(tmp_path):
+    """The server runs in a container: a restart keeps the host boot id but
+    kills every supervisor. An attempt cut off that way used to leave its
+    device refusing every later attempt with 'active same-boot IOx session
+    fence' until the fence was deleted by hand (IE-3400, 2026-09-10)."""
+    journal = _journal(phase="indeterminate", state="unknown", revision=7)
+    store = _StatefulStore(tmp_path, records=[_record(journal=journal)],
+                           obligations=[journal])
+    transcript_ref = _write_header_transcript(tmp_path, "3" * 32)
+    fence_path = _write_active_fence(tmp_path, transcript_ref)
+    fence = json.loads(fence_path.read_text())
+    fence["supervisor_start_ticks"] += 1     # same pid number, another process
+    fence_path.write_text(json.dumps(fence, sort_keys=True))
+    factory = _TransportFactory(verification="enabled")
+    controller = _controller(tmp_path, store, factory)
+    try:
+        result = controller.reconcile_enabled(
+            "r1", journal["transaction_id"], 7, True, _Cancel())
+    finally:
+        controller.close()
+    assert result["error_category"] != "descendant_unreaped"
+    assert json.loads(fence_path.read_text())["supervisor_start_ticks"] != \
+        fence["supervisor_start_ticks"] or \
+        json.loads(fence_path.read_text())["state"] == "reaped"
+
+
 def test_reconciliation_does_not_clear_an_active_process_fence(tmp_path):
     journal = _journal(phase="indeterminate", state="unknown", revision=7)
     store = _StatefulStore(tmp_path, records=[_record(journal=journal)],

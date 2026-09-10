@@ -877,6 +877,25 @@ def _process_start_ticks(pid):
         return int(stream.read().split()[21])
 
 
+def _fence_supervisor_alive(fence):
+    """True only when the fence's supervisor is still this exact process.
+
+    A same-boot active fence used to be taken as a live descendant on the
+    boot id alone. The server runs in a container: a container restart
+    keeps the host boot id but kills every supervisor, so an attempt cut
+    off by a restart left its device refusing every later attempt with
+    'active same-boot IOx session fence' until the fence was removed by
+    hand (2026-09-10). The fence records the supervisor's pid and start
+    ticks; a pid that is gone, or reused by a process started at another
+    tick, is dead and its fence is stale.
+    """
+    try:
+        return (_process_start_ticks(fence["supervisor_pid"]) ==
+                fence["supervisor_start_ticks"])
+    except (OSError, ValueError, IndexError, TypeError, KeyError):
+        return False
+
+
 def _supervisor_send(peer, value, descriptors=()):
     body = _canonical(value)
     if len(body) > _SUPERVISOR_PACKET_BYTES:
@@ -2907,7 +2926,8 @@ class IoxController(object):
                     old = _read_json_strict(path, _SESSION_FILE_BYTES)
                     self._validate_fence(old, path)
                     if (old["state"] == "active" and
-                            old["boot_id"] == _boot_id()):
+                            old["boot_id"] == _boot_id() and
+                            _fence_supervisor_alive(old)):
                         attempt.fence = old
                         attempt.fence_path = path
                         raise _ControllerFailure(
@@ -4113,7 +4133,8 @@ class IoxController(object):
                         "IOx session fence is unreadable")
                 dummy.fence = fence
                 if (fence["state"] == "active" and
-                        fence["boot_id"] == _boot_id()):
+                        fence["boot_id"] == _boot_id() and
+                        _fence_supervisor_alive(fence)):
                     return self._base_result(
                         dummy, 5, "descendant_unreaped",
                         "active same-boot IOx session fence")
