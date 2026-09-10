@@ -1625,6 +1625,34 @@ def _app_already_absent(purpose, payload):
             _APP_ABSENT_RE.search(payload) is not None)
 
 
+# What IOS prints while saving, ahead of its verdict. The IE-3400 emits
+# "Building configuration..." before "[OK]"; other platforms answer with the
+# verdict alone.
+_SAVE_PROGRESS_RE = re.compile(br"^Building configuration\.*$", re.I)
+
+
+def _save_confirmed(payload):
+    """True when `write memory` reported success.
+
+    The check used to demand the payload be exactly b"[OK]\n". That is one
+    platform's output, not IOS's contract: an IE-3400 answers
+
+        Building configuration...
+        [OK]
+
+    so a save that had ALREADY SUCCEEDED was read as an unsupported
+    response, and the install failed at its very last step with the
+    application installed, activated and running on the device. Require the
+    verdict, allow the progress line before it, and accept nothing else --
+    an empty payload, a missing [OK] or any unrecognized line still fails.
+    """
+    lines = [line for line in payload.split(b"\n") if line.strip()]
+    if not lines or lines[-1].strip() != b"[OK]":
+        return False
+    return all(_SAVE_PROGRESS_RE.match(line.strip())
+               for line in lines[:-1])
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2321,7 +2349,8 @@ class IoxTransport(object):
                           not _only_ios_warnings(payload)):
                         raise IoxTransportError("unsupported_response", "configuration command returned payload")
                     if (purpose == "save" and line == b"write memory" and
-                            payload != b"[OK]\n" and payload_error is None):
+                            not _save_confirmed(payload) and
+                            payload_error is None):
                         raise IoxTransportError("unsupported_response", "save response was not exact")
                 dialogue.finish_process()
                 if purpose in ("remove_wrapper", "remove_certificate",
