@@ -326,6 +326,21 @@ def _router_subnet_check(app_ip, app_mask, app_gateway):
                          "distinct usable addresses in the app subnet")
 
 
+def _unexpected_detail(label, exc):
+    """Name an unexpected controller exception in the operator's job log.
+
+    These paths used to collapse every unforeseen failure into one fixed
+    sentence, so a job said only "IOx uninstall controller failed" and the
+    type and message were lost -- the operator's next move was a guess, and
+    each guess cost a rebuild. The controller's own exceptions carry fixed,
+    non-secret strings; the text is bounded and stripped of control
+    characters so a surprising payload cannot reshape the log.
+    """
+    text = "".join(ch for ch in str(exc) if 32 <= ord(ch) < 127)[:200]
+    return "%s: %s%s" % (label, type(exc).__name__,
+                         ": " + text if text else "")
+
+
 def _command_bytes(lines):
     if isinstance(lines, bytes):
         body = lines
@@ -3857,7 +3872,7 @@ class IoxController(object):
             supplied_category = getattr(exc, "category", None)
             category = supplied_category or "rejected"
             return self._finalize(attempt, _ControllerFailure(
-                category, "IOx install controller failed",
+                category, _unexpected_detail("IOx install controller failed", exc),
                 _RESULT_CODES.get(category, 2) if supplied_category else 2))
 
     def run_uninstall(self, request, prepare, preflight, on_output, cancel):
@@ -3939,7 +3954,7 @@ class IoxController(object):
             supplied_category = getattr(exc, "category", None)
             category = supplied_category or "rejected"
             return self._finalize(attempt, _ControllerFailure(
-                category, "IOx uninstall controller failed",
+                category, _unexpected_detail("IOx uninstall controller failed", exc),
                 _RESULT_CODES.get(category, 2) if supplied_category else 2))
 
     def recover_board(self, board_identity, cancel):
