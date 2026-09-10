@@ -2471,6 +2471,48 @@ def test_same_record_recovery_still_rejects_unrelated_record_drift(
     assert not recipe_started.exists()
 
 
+@pytest.mark.parametrize("router,mode,expected", [
+    (True, "router-routed", 1024),
+    (True, "router-nat", 1024),
+    (False, "routed", 2048),
+    (False, "inband", 2048),
+])
+def test_router_iox_reserves_less_persist_disk_than_a_switch(tmp_path, router,
+                                                             mode, expected):
+    """#238: on a router the app's persist-disk comes out of the same
+    bootflash: the image is staged on, and placement transiently needs the
+    scratch plus the root copy. A 2 GiB reservation left a ~1 GiB image
+    nowhere to land on a 4.8 GiB Catalyst 8000V. Switches are unaffected --
+    their IOx storage is a separate sdflash:/flash:."""
+    module = _module()
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    request = _request(action="install")
+    attempt = module._Attempt(controller, "install", request, _Cancel(), False)
+    attempt.target = {
+        "package_fs": "bootflash:" if router else "flash:",
+        "target_fs": "bootflash:" if router else "sdflash:",
+        "pkg": "iris-amd64.tar" if router else "iris-arm64.tar",
+        "management_type": mode,
+        "app_ip": "100.90.171.2", "app_mask": "255.255.255.252",
+        "app_gateway": "100.90.171.1", "svi_ip": "10.66.6.1",
+        "svi_mask": "255.255.255.252", "guest_ip": "10.66.6.2",
+        "vpg_number": "1", "app_intf": "AppGigabitEthernet1/1",
+        "nat_interface": "GigabitEthernet1", "bt_listen_port": "6881",
+        "ios_ssh_host": "100.90.171.1",
+        "telemetry": "on", "telemetry_stream": "off", "log": "off",
+    }
+    attempt.credentials = {"device_user": "operator", "device_pass": "pw",
+                           "catalog_token": "0123456789abcdef"}
+    try:
+        rendered = controller._render_command(
+            attempt, "configure_app").decode("ascii")
+    finally:
+        controller.close()
+    assert "  persist-disk %d" % expected in rendered.splitlines()
+    assert "  cpu 400" in rendered and "  memory 768" in rendered
+
+
 @pytest.mark.parametrize("name,action,teardown_mode", [
     ("remove_app_config", "install", None),
     ("cleanup_config", "uninstall", "recorded"),

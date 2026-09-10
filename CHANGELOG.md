@@ -38,6 +38,14 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Leave a router enough flash to stage onto. When IOx runs on a router the
+  app's `persist-disk` is carved out of the same `bootflash:` the image is
+  staged to, and placement transiently needs the IOS-side scratch and the
+  root copy at once. Reserving 2 GiB left a ~1 GiB image nowhere to land on
+  a 4.8 GiB Catalyst 8000V, and the agent correctly but unhelpfully reported
+  `flash_full` on a device that looked far from full. Router deployments now
+  reserve 1024 MiB; switches keep 2048 MiB, where IOx storage is a separate
+  `sdflash:`/`flash:` and does not compete with staging (issue #238).
 - Stage images on a Catalyst 8000V. That platform publishes its only writable
   disk under three names at once (`bootflash: flash: crashinfo:`), and the
   agent's filesystem chooser discarded any disk whose alias list contained

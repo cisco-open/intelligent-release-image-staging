@@ -4458,6 +4458,16 @@ class IoxController(object):
         elif name == "remove_app_config":
             lines = (["configure terminal"] + emptied_app_block() +
                      ["no app-hosting appid %s" % appid, "end"])
+        # The app's persist-disk is carved out of the SAME filesystem the
+        # image is staged on when IOx runs on a router: a Catalyst 8000V has
+        # one 4.8 GiB bootflash: and nothing else. Placement transiently needs
+        # the IOS-side scratch AND the root copy at once (~2x the image), so a
+        # 2 GiB reservation left a ~1 GiB image with nowhere to land and the
+        # agent reported flash_full on a device that looked far from full
+        # (issue #238). Switches keep 2048: IOx there lives on sdflash:
+        # (IE-3400: 9.6 GiB) or flash:, separate from the staging budget.
+        # 1024 MiB still holds any image the swarm can hand this platform,
+        # since a bigger one could not be placed on bootflash: anyway.
         elif name == "configure_app":
             catalog_url = self.config.get("catalog_url")
             if catalog_url is None:
@@ -4492,7 +4502,8 @@ class IoxController(object):
                 "app-hosting appid %s" % appid] + vnic + [
                 " app-default-gateway %s guest-interface 0" % gateway,
                 " app-resource profile custom",
-                "  cpu 400", "  memory 768", "  persist-disk 2048",
+                "  cpu 400", "  memory 768",
+                "  persist-disk %d" % (1024 if router else 2048),
                 "  vcpu 1", " app-resource docker",
                 '  run-opts 1 "-e IRIS_DEVICE_ID=%s"' %
                     _get(attempt.request, "device_id"),
