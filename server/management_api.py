@@ -931,6 +931,29 @@ class ScheduleTargetError(RuntimeError):
         super().__init__(message)
 
 
+def _iox_credential_projection(creds):
+    """Hand the IOx controller only the credential fields it admits.
+
+    CredentialStore.get_secrets returns the stored profile whole, and that
+    record carries bookkeeping the controller's closed field set does not
+    admit -- `created_at`, written by set_profile on every profile. Wiring
+    it through unprojected failed EVERY IOx onboard and undeploy with
+    "credential resolver returned unknown fields". Project here rather than
+    widen the controller's allowlist: refusing an unexpected field is the
+    behaviour that should be preserved, and the controller has no business
+    seeing bookkeeping it does not use.
+    """
+    def resolve(reference):
+        record = creds.get_secrets(reference)
+        if not isinstance(record, dict):
+            return record
+        return dict(
+            (key, record[key]) for key in
+            ("name", "device_user", "device_pass", "enable_secret")
+            if key in record)
+    return resolve
+
+
 def _resolved_with_resources(resolved, resources):
     """The bound plan a job hands the platform, carrying the record's own
     ownership claim.
@@ -7670,7 +7693,7 @@ def main():
                 "session_seconds": 7200,
                 "restoration_reserve_seconds": 180,
                 "application_id": "iris",
-                "credential_resolver": creds.get_secrets,
+                "credential_resolver": _iox_credential_projection(creds),
                 "enrollment_token_minter": lambda device_id:
                     gui_onboard._default_mint(device_id, server_dir),
                 "instruction_bootstrap_materializer":
