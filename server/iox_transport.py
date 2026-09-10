@@ -1875,16 +1875,28 @@ class _Dialogue(object):
             lambda data: self._echo_end(data, expected_echo))
         payload_start = echo_end
         if question is not None:
+            # The confirmation is CONDITIONAL. `file prompt quiet` suppresses
+            # it -- and IRIS sets that itself during prepare_iox_scp -- so the
+            # device may answer with its prompt and never ask. Waiting
+            # unconditionally hung the teardown until the deadline: the
+            # question is shorter than nothing that ever arrived, so the
+            # mismatch branch could not fire either and cleanup_config died
+            # on a timeout with the app already removed.
+            asked = []
             def question_seen(data):
                 tail = data[echo_end:]
                 if tail == question:
+                    asked.append(True)
                     return len(data)
-                if len(tail) >= len(question) and tail != question:
+                if self._suffix_prompt(data, echo_end) is not None:
+                    return len(data)
+                if len(tail) >= len(question) and not question.startswith(tail):
                     raise IoxTransportError("unsupported_response", "interactive question mismatch")
                 return None
             question_end = self.wait_until(question_seen)
-            self.send(answer + b"\n")
-            payload_start = question_end
+            if asked:
+                self.send(answer + b"\n")
+                payload_start = question_end
 
         def final(data):
             found = self._suffix_prompt(data, payload_start)
