@@ -3126,9 +3126,12 @@
       ' · ' + policyCount(origin.applied_download_count) + '/' + policyCount(origin.target_download_count) +
       ' downloads applied · last reconciled: ' + (typeof origin.last_reconciled_at === 'number'
         ? fmtDate(origin.last_reconciled_at) : 'never') + '. Origin limits apply globally or per torrent, not per role.';
+    var preflightCount = mutual.newly_denied_device_count;
+    var preflightText = Number.isSafeInteger(preflightCount) && preflightCount >= 0
+      ? 'Mutual-origin preflight only: ' + preflightCount + ' newly denied devices.'
+      : 'Mutual-origin preflight count unavailable.';
     document.getElementById('policy-mutual-origin').textContent = mutual.mode === 'preflight'
-      ? 'Mutual-origin preflight only: ' + policyCount(mutual.newly_denied_device_count) +
-        ' newly denied devices. This additional origin restriction is not active.' +
+      ? preflightText + ' This additional origin restriction is not active.' +
         (enforcement.stale ? ' Tracker status is stale; check the tracker process.' : '')
       : 'Mutual-origin preflight status unavailable.';
     syncRoleDefinitionsWithPolicy();

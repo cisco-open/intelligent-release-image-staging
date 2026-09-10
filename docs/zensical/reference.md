@@ -456,6 +456,12 @@ first shows `waiting-heartbeat`, then follows the agent's reported status.
 
 ### Peer policy
 
+`enforcement.mutual_origin` contains `mode: "preflight"` and the nullable
+`newly_denied_device_count`. A `null` count means the result is unavailable,
+including when the protected seeder IPv4 address is unknown. Zero means the
+evaluation completed with no newly denied devices. This observation does not
+activate additional mutual-origin enforcement.
+
 Role and QoS writes share the peer-policy revision. Read the current ETag first,
 send that exact strong value in `If-Match`, preview with `dry_run=1`, and send
 the preview's `confirm_token` with the identical candidate. The confirmation

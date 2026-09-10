@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Mutual-origin preflight reports an unavailable count when the protected
+  seeder IPv4 address is unknown. Console, API and telemetry distinguish
+  unavailable evidence from a completed zero-count result (#240).
 - Telemetry preserves delivered report IDs and pinned peer attribution when
   a report-ring snapshot cannot be fully read, avoiding replay after a
   transient storage read failure (#245).

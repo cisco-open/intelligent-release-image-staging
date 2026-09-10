@@ -114,7 +114,7 @@ def _paths(tmp_path):
     }
 
 
-def _reconciler(tmp_path, aria):
+def _reconciler(tmp_path, aria, protected_seeder_ip=None):
     paths = _paths(tmp_path)
     peer_policy.initialize(paths["policy"], paths["lkg"])
     rec = tracker.TrackerReconciler(
@@ -126,6 +126,7 @@ def _reconciler(tmp_path, aria):
         pending_queue=peer_endpoints.PendingEndpointQueue(),
         active_participants=lambda: [],
         revoked_principals=lambda: set(),
+        protected_seeder_ip=protected_seeder_ip,
         now=lambda: 1000.0)
     return rec, paths
 
@@ -586,7 +587,7 @@ class TestPreflightReconcilerIntegration:
     def test_persists_preflight_but_applies_only_current_blocklist(self,
                                                                   tmp_path):
         aria = FakeAria(gids=())
-        rec, paths = _reconciler(tmp_path, aria)
+        rec, paths = _reconciler(tmp_path, aria, "10.0.0.1")
         doc = _configured_doc()
         doc["roles"]["defs"] = {
             "boat": {"restricted": True, "peers": ["boat"],
@@ -615,7 +616,7 @@ class TestPreflightReconcilerIntegration:
 
     def test_policy_fail_closed_preserves_last_valid_preflight(self, tmp_path):
         aria = FakeAria(gids=())
-        rec, paths = _reconciler(tmp_path, aria)
+        rec, paths = _reconciler(tmp_path, aria, "10.0.0.1")
         doc = _configured_doc()
         doc["roles"]["defs"] = {
             "boat": {"restricted": True, "peers": ["boat"],
@@ -646,7 +647,7 @@ class TestPreflightReconcilerIntegration:
                                                                 tmp_path):
         oq = _module()
         aria = FakeAria(gids=())
-        rec, paths = _reconciler(tmp_path, aria)
+        rec, paths = _reconciler(tmp_path, aria, "10.0.0.1")
         rec.run_once()
         with open(paths["enforcement"]) as handle:
             prior = json.load(handle)
@@ -666,15 +667,15 @@ class TestPreflightReconcilerIntegration:
             json.dump(prior, handle)
         rec._note_pass_failure(RuntimeError("secret"))
         assert json.load(open(paths["enforcement"]))["mutual_origin"] == {
-            "mode": "preflight", "newly_denied_device_count": 0,
-            "newly_denied_device_ids": [],
+            "mode": "preflight", "newly_denied_device_count": None,
+            "newly_denied_device_ids": None,
         }
         assert oq.read_status(paths["origin_qos"])["last_error"] == "origin_reconcile_failed"
 
     def test_endpoint_store_failure_preserves_valid_prior_preflight(
             self, tmp_path, monkeypatch):
         aria = FakeAria(gids=())
-        rec, paths = _reconciler(tmp_path, aria)
+        rec, paths = _reconciler(tmp_path, aria, "10.0.0.1")
         rec.run_once()
         with open(paths["enforcement"]) as handle:
             prior = json.load(handle)
@@ -691,3 +692,111 @@ class TestPreflightReconcilerIntegration:
         status = rec.run_once()
         assert status["state"] == "fail_closed"
         assert status["mutual_origin"] == prior["mutual_origin"]
+
+    @pytest.mark.parametrize("protected_ip", [
+        None, "", "unknown", "seeder.example", "2001:db8::1", "10.0.0.999",
+        167772161, True,
+    ])
+    def test_unknown_seeder_keeps_preflight_unknown_and_current_acl_applied(
+            self, tmp_path, protected_ip):
+        aria = FakeAria(gids=())
+        rec, paths = _reconciler(tmp_path, aria, protected_ip)
+        doc = _configured_doc()
+        doc["acls"]["lan-only"] = {"rules": [
+            {"seq": 10, "action": "permit",
+             "match": {"type": "cidr", "value": "10.0.0.0/24"}},
+            {"seq": 20, "action": "deny", "match": {"type": "any"}},
+        ]}
+        doc["assignments"] = {
+            "permitted": "lan-only",
+            "denied": peer_policy.RESERVED_QUARANTINE,
+        }
+        peer_policy.validate_document(doc)
+        for path in (paths["policy"], paths["lkg"]):
+            with open(path, "w") as handle:
+                json.dump(doc, handle)
+        for device_id, address in (("permitted", "10.0.0.9"),
+                                   ("denied", "10.0.0.10")):
+            peer_endpoints.record_endpoint(
+                paths["endpoints"],
+                type("P", (), {"type": "device", "id": device_id})(),
+                address, 6881, 1000.0)
+
+        status = rec.run_once()
+
+        assert status["state"] == "enforced"
+        assert status["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": None,
+            "newly_denied_device_ids": None,
+        }
+        assert status["desired_ip_count"] == 1
+        assert status["desired_hash"] == blocklist_reconciler.canonical_hash(
+            ["10.0.0.10"])
+        assert aria.blocklist_calls == [["10.0.0.10"]]
+        assert json.load(open(paths["enforcement"])) == status
+
+    def test_known_seeder_with_no_prospective_denials_reports_known_zero(
+            self, tmp_path):
+        aria = FakeAria(gids=())
+        rec, _ = _reconciler(tmp_path, aria, "10.0.0.1")
+        assert rec.run_once()["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": 0,
+            "newly_denied_device_ids": [],
+        }
+        assert aria.blocklist_calls == [[]]
+
+    def test_seeder_address_changes_refresh_preflight_without_reapplying_acl(
+            self, tmp_path):
+        aria = FakeAria(gids=())
+        rec, _ = _reconciler(tmp_path, aria, "10.0.0.1")
+        known = {
+            "mode": "preflight", "newly_denied_device_count": 0,
+            "newly_denied_device_ids": [],
+        }
+        assert rec.run_once()["mutual_origin"] == known
+        rec._protected_seeder_ip = None
+        assert rec.run_once()["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": None,
+            "newly_denied_device_ids": None,
+        }
+        rec._protected_seeder_ip = "10.0.0.1"
+        assert rec.run_once()["mutual_origin"] == known
+        assert aria.blocklist_calls == [[]]
+
+    @pytest.mark.parametrize("failure", [
+        "policy", "endpoint_store", "unexpected_exception",
+    ])
+    @pytest.mark.parametrize("lost_address", [None, "invalid", True])
+    def test_lost_seeder_address_does_not_preserve_numeric_preflight_on_failure(
+            self, tmp_path, monkeypatch, failure, lost_address):
+        aria = FakeAria(gids=())
+        rec, paths = _reconciler(tmp_path, aria, "10.0.0.1")
+        prior = rec.run_once()
+        prior["mutual_origin"] = {
+            "mode": "preflight", "newly_denied_device_count": 1,
+            "newly_denied_device_ids": ["boat-1"],
+        }
+        with open(paths["enforcement"], "w") as handle:
+            json.dump(prior, handle)
+        rec._protected_seeder_ip = lost_address
+        if failure == "policy":
+            for path in (paths["policy"], paths["lkg"]):
+                with open(path, "w") as handle:
+                    handle.write("{broken")
+        elif failure == "endpoint_store":
+            def corrupt(*args, **kwargs):
+                raise peer_endpoints.EndpointStoreError("bad endpoint store")
+            monkeypatch.setattr(tracker._peer_endpoints, "fresh_endpoints", corrupt)
+
+        if failure == "unexpected_exception":
+            rec._note_pass_failure(RuntimeError("private exception detail"))
+            status = json.load(open(paths["enforcement"]))
+            assert status["state"] == "degraded"
+        else:
+            status = rec.run_once()
+            assert status["state"] == "fail_closed"
+        assert status["mutual_origin"] == {
+            "mode": "preflight", "newly_denied_device_count": None,
+            "newly_denied_device_ids": None,
+        }
+        assert aria.blocklist_calls == [[]]

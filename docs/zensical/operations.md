@@ -586,7 +586,10 @@ state, option/download counts, timestamp, and a closed error code. They contain
 no GIDs, addresses, option values, or hashes.
 
 The mutual-origin result beside that status is still #153 preflight evidence.
-It does not change the applied blocklist. A `shared_permit_deny` NAT conflict is
+An unknown protected seeder IPv4 address makes the count unavailable (`null`),
+and the Console labels it accordingly. A count of zero means the evaluation
+completed with no newly denied devices. Preflight does not change the applied
+blocklist. A `shared_permit_deny` NAT conflict is
 counted and the shared address stays unblocked, because a global IP block would
 also cut off the permitted principal.
 

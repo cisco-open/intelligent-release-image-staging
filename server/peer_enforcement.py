@@ -76,6 +76,8 @@ def validate_mutual_origin(value):
 
     Typed device ids are retained for the authenticated ``/swarm`` identity
     join. Management readers project only the count; no address is accepted.
+    A paired null count/list means the preflight is unknown; zero and [] mean
+    it was evaluated successfully and found no newly denied devices.
     """
     if not isinstance(value, dict) or set(value) != _MUTUAL_ORIGIN_KEYS:
         raise EnforcementError("bad mutual_origin fields")
@@ -83,6 +85,8 @@ def validate_mutual_origin(value):
         raise EnforcementError("bad mutual_origin mode")
     count = value.get("newly_denied_device_count")
     ids = value.get("newly_denied_device_ids")
+    if count is None and ids is None:
+        return _unknown_mutual_origin()
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         raise EnforcementError("bad newly_denied_device_count")
     if not isinstance(ids, list) or len(ids) > peer_endpoints.SUPPORTED_DEVICES:
@@ -99,16 +103,20 @@ def validate_mutual_origin(value):
     }
 
 
+def _unknown_mutual_origin():
+    return {
+        "mode": MUTUAL_ORIGIN_MODE,
+        "newly_denied_device_count": None,
+        "newly_denied_device_ids": None,
+    }
+
+
 def mutual_origin_from_status(status):
     """Read only a validated preflight object from an untrusted status dict."""
     try:
         return validate_mutual_origin(status.get("mutual_origin"))
     except (AttributeError, EnforcementError):
-        return validate_mutual_origin({
-            "mode": MUTUAL_ORIGIN_MODE,
-            "newly_denied_device_count": 0,
-            "newly_denied_device_ids": [],
-        })
+        return _unknown_mutual_origin()
 
 
 def _atomic_write_json(path, obj):
@@ -176,11 +184,7 @@ def build_status(state, aria_session_id, desired_hash, applied_revision,
         raise EnforcementError(
             "enforced requires a current session and desired hash")
     if mutual_origin is None:
-        mutual_origin = {
-            "mode": MUTUAL_ORIGIN_MODE,
-            "newly_denied_device_count": 0,
-            "newly_denied_device_ids": [],
-        }
+        mutual_origin = _unknown_mutual_origin()
     mutual_origin = validate_mutual_origin(mutual_origin)
     status_codes.validate_ack_epoch(operation_ack_epoch)
     result = {

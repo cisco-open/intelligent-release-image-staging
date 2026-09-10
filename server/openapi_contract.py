@@ -1917,7 +1917,9 @@ def _json_success_example(route):
                 "pointer_skew": 0, "issued_revision_label": "r12"},
             "instruction_keys": _instruction_custody_example(),
             "enforcement": {"state": None, "stale": False,
-                            "desired_ip_count": 1, "conflict_count": 0}},
+                            "desired_ip_count": 1, "conflict_count": 0,
+                            "mutual_origin": {"mode": "preflight",
+                                "newly_denied_device_count": None}}},
         "/peer-policy/quarantine/{device_id}": {
             "ok": True, "revision": 5, "quarantined": True},
         "/audit": {"events": [{"ts": 1788470400, "event": "login",
@@ -2596,6 +2598,17 @@ def _success(route):
             _ref("TrackerQosStateMap")
     if suffix == "/peer-policy":
         schema["properties"]["roles_supported"]["const"] = True
+        mutual = schema["properties"]["enforcement"]["properties"]["mutual_origin"]
+        mutual["additionalProperties"] = False
+        mutual["properties"]["mode"]["const"] = "preflight"
+        mutual["properties"]["newly_denied_device_count"] = {
+            "type": ["integer", "null"], "minimum": 0,
+            "description": (
+                "Prospective count only; additional mutual-origin enforcement "
+                "is inactive. Null means unavailable, including when the "
+                "protected seeder IPv4 address is unknown. Zero is a completed "
+                "preflight with no newly denied devices."),
+        }
         schema["properties"]["roles"]["properties"]["members"] = {
             "type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
         schema["properties"]["fleet_rollup"] = \

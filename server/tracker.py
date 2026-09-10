@@ -1119,8 +1119,7 @@ class TrackerReconciler:
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
                 last_error=_status_codes.PEER_RECONCILE_FAILED,
-                mutual_origin=_peer_enforcement.mutual_origin_from_status(
-                    prior))
+                mutual_origin=self._prior_mutual_origin(prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
         except Exception:
             pass
@@ -1299,8 +1298,7 @@ class TrackerReconciler:
                 conflicts=prior.get("conflicts"),
                 last_effect=prior.get("last_effect"),
                 last_error=_status_codes.ENDPOINT_STORE_UNAVAILABLE,
-                mutual_origin=_peer_enforcement.mutual_origin_from_status(
-                    prior))
+                mutual_origin=self._prior_mutual_origin(prior))
             _peer_enforcement.write_status(self._enforcement_path, status)
             qos_status_written = True
             if qos_status is not None:
@@ -1479,6 +1477,12 @@ class TrackerReconciler:
             now=now,
             last_error=last_error)
 
+    def _prior_mutual_origin(self, prior):
+        """Preserve a validated observation only while its required IP is known."""
+        if not _reconciler.valid_protected_seeder_ipv4(self._protected_seeder_ip):
+            prior = {}
+        return _peer_enforcement.mutual_origin_from_status(prior)
+
     def _build_status(self, now, policy, derived, desired_hash, outcome,
                       pending_outstanding):
         applied_revision = None
@@ -1534,15 +1538,14 @@ class TrackerReconciler:
         if state == "enforced" and (not session or not eff_hash):
             state = "degraded"
         if policy.fail_closed:
-            mutual_origin = _peer_enforcement.mutual_origin_from_status(
+            mutual_origin = self._prior_mutual_origin(
                 _peer_enforcement.read_status(self._enforcement_path) or {})
         else:
+            ids = derived.newly_denied_device_ids
             mutual_origin = {
                 "mode": _peer_enforcement.MUTUAL_ORIGIN_MODE,
-                "newly_denied_device_count": len(
-                    derived.newly_denied_device_ids),
-                "newly_denied_device_ids": list(
-                    derived.newly_denied_device_ids),
+                "newly_denied_device_count": None if ids is None else len(ids),
+                "newly_denied_device_ids": None if ids is None else list(ids),
             }
         return _peer_enforcement.build_status(
             state=state, aria_session_id=session, desired_hash=eff_hash,

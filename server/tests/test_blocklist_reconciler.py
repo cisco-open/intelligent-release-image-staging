@@ -59,6 +59,12 @@ def test_canonical_quarantine_flows_through_shared_evaluator():
 SEEDER = Principal("service", "seeder")
 SEEDER_IP = "192.0.2.10"
 
+_UNKNOWN_SEEDER_ADDRESSES = [
+    None, "", " ", "iris.example", "REPLACE_WITH_STATIC_EXTERNAL_IP",
+    "::1", "::ffff:10.9.9.9", "999.0.0.1", "10.0.0", "010.0.0.1",
+    "10.9.9.9/32", 0, 1, 168364297, True, False, b"10.9.9.9", [], {},
+]
+
 
 def _role_doc(device_ids=("boat-1",), origin=False):
     doc = peer_policy.base_document()
@@ -384,6 +390,86 @@ class TestDeniedRetention:
 # ---------------------------------------------------------------------------
 
 class TestMutualOriginPreflight:
+    @pytest.mark.parametrize("match_type", ["host", "cidr"])
+    def test_unknown_origin_is_not_a_false_address_acl_denial(self, match_type):
+        doc = peer_policy.base_document()
+        doc["acls"]["address-permit"] = {"rules": [
+            {"seq": 10, "action": "permit", "match": {
+                "type": match_type,
+                "value": "10.9.9.9" if match_type == "host" else "10.0.0.0/8"}},
+            {"seq": 20, "action": "permit",
+             "match": {"type": "device", "value": "d1"}},
+            {"seq": 30, "action": "deny", "match": {"type": "any"}},
+        ]}
+        doc["assignments"]["d1"] = "address-permit"
+        peer_policy.validate_document(doc)
+        durable = _endpoints(("device:d1", "device", "d1", "10.0.0.3"))
+        known = br.derive_denied_set(_pr(doc), durable, {}, [], set(), "10.9.9.9")
+        unknown = br.derive_denied_set(_pr(doc), durable, {}, [], set(), None)
+        assert known.denied_ips == unknown.denied_ips == []
+        assert known.prospective_denied_ips == []
+        assert known.prospective_conflicts == []
+        assert known.newly_denied_device_ids == []
+        assert unknown.prospective_denied_ips is None
+        assert unknown.prospective_conflicts is None
+        assert unknown.newly_denied_device_ids is None
+        # Actual admission remains fail-closed for an unknown address. Only
+        # the optional prospective calculation declines to claim an answer.
+        assert peer_policy.mutual_permit(
+            doc, SEEDER, None, Principal("device", "d1"), "10.0.0.3") is False
+
+    @pytest.mark.parametrize("address", _UNKNOWN_SEEDER_ADDRESSES)
+    def test_unknown_origin_skips_mutual_evaluation_without_changing_apply(
+            self, monkeypatch, address):
+        doc = _quarantine_doc("isolated", "shared-denied")
+        doc["acls"]["deny-address"] = {"rules": [
+            {"seq": 10, "action": "deny",
+             "match": {"type": "host", "value": "10.0.0.4"}},
+            {"seq": 20, "action": "permit", "match": {"type": "any"}},
+        ]}
+        doc["assignments"]["acl-denied"] = "deny-address"
+        durable = _endpoints(
+            ("device:acl-denied", "device", "acl-denied", "10.0.0.4"),
+            ("device:isolated", "device", "isolated", "10.0.0.5"),
+            ("device:revoked", "device", "revoked", "10.0.0.6"),
+            ("device:shared-denied", "device", "shared-denied", "10.0.0.7"),
+            ("device:shared-permitted", "device", "shared-permitted", "10.0.0.7"))
+        revoked = {"device:revoked"}
+        known = br.derive_denied_set(_pr(doc), durable, {}, [], revoked, SEEDER_IP)
+
+        def unexpected_mutual(*_args, **_kwargs):
+            pytest.fail("unknown protected address must not be preflighted")
+
+        monkeypatch.setattr(peer_policy, "mutual_permit", unexpected_mutual)
+        unknown = br.derive_denied_set(_pr(doc), durable, {}, [], revoked, address)
+        assert unknown.denied_ips == known.denied_ips == [
+            "10.0.0.4", "10.0.0.5", "10.0.0.6"]
+        assert unknown.conflicts == known.conflicts
+        assert len(unknown.conflicts) == 1
+        assert unknown.conflicts[0]["ipv4"] == "10.0.0.7"
+        assert unknown.apply_empty is True and unknown.fail_closed is False
+        assert unknown.prospective_denied_ips is None
+        assert unknown.prospective_conflicts is None
+        assert unknown.newly_denied_device_ids is None
+        aria = FakeAria()
+        assert br.apply_blocklist(
+            aria, unknown.denied_ips, unknown.apply_empty).success is True
+        assert aria.calls == [known.denied_ips]
+
+    @pytest.mark.parametrize("address", _UNKNOWN_SEEDER_ADDRESSES)
+    def test_only_string_ipv4_can_establish_known_origin(self, address):
+        assert br.valid_protected_seeder_ipv4(address) is False
+
+    @pytest.mark.parametrize("address", ["10.9.9.9", "192.0.2.10", "0.0.0.0"])
+    def test_valid_string_ipv4_establishes_known_origin(self, address):
+        assert br.valid_protected_seeder_ipv4(address) is True
+
+    def test_derived_set_without_preflight_defaults_to_unknown(self):
+        derived = br.DerivedSet([], [], True, False)
+        assert derived.prospective_denied_ips is None
+        assert derived.prospective_conflicts is None
+        assert derived.newly_denied_device_ids is None
+
     def test_role_origin_false_is_reported_but_current_apply_stays_empty(self):
         doc = _role_doc()
         result = br.derive_denied_set(
@@ -564,9 +650,9 @@ class TestMutualOriginPreflight:
             _endpoints(("device:d1", "device", "d1", "10.0.0.13")),
             {}, [], set(), SEEDER_IP)
         assert result.denied_ips == ["10.0.0.13"]
-        assert result.prospective_denied_ips == []
-        assert result.prospective_conflicts == []
-        assert result.newly_denied_device_ids == []
+        assert result.prospective_denied_ips is None
+        assert result.prospective_conflicts is None
+        assert result.newly_denied_device_ids is None
 
 
 # ---------------------------------------------------------------------------

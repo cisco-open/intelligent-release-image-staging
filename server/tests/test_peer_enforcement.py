@@ -217,6 +217,11 @@ class TestGuiReader:
 
 class TestMutualOriginPreflightStatus:
     @staticmethod
+    def _unknown():
+        return {"mode": "preflight", "newly_denied_device_count": None,
+                "newly_denied_device_ids": None}
+
+    @staticmethod
     def _summary(ids=("boat-1", "boat-2")):
         return {
             "mode": "preflight",
@@ -234,11 +239,67 @@ class TestMutualOriginPreflightStatus:
         assert peer_enforcement.mutual_origin_from_status(
             peer_enforcement.read_status(path)) == self._summary()
 
-    def test_omitted_summary_defaults_to_empty_preflight(self):
+    def test_omitted_summary_defaults_to_unknown_preflight(self):
         status = peer_enforcement.build_status(
             state="pending", aria_session_id=None, desired_hash=None,
             applied_revision=None, desired_ip_count=0, now=1.0)
-        assert status["mutual_origin"] == self._summary(())
+        assert status["mutual_origin"] == self._unknown()
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "preflight", "newly_denied_device_count": None,
+         "newly_denied_device_ids": None},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": []},
+    ])
+    def test_unknown_and_verified_zero_roundtrip_distinctly(self, path, summary):
+        status = peer_enforcement.build_status(
+            state="enforced", aria_session_id="s", desired_hash="h",
+            applied_revision=1, desired_ip_count=0, now=1.0,
+            mutual_origin=summary)
+        peer_enforcement.write_status(path, status)
+        assert peer_enforcement.read_status(path)["mutual_origin"] == summary
+        assert peer_enforcement.mutual_origin_from_status(status) == summary
+
+    @pytest.mark.parametrize("summary", [
+        {"mode": "preflight", "newly_denied_device_count": None,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 0,
+         "newly_denied_device_ids": None},
+        {"mode": "preflight", "newly_denied_device_count": "0",
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 0.0,
+         "newly_denied_device_ids": []},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": [True]},
+        {"mode": "preflight", "newly_denied_device_count": 1,
+         "newly_denied_device_ids": "d1"},
+    ])
+    def test_mixed_null_and_invalid_preflight_is_rejected_but_projects_unknown(
+            self, summary):
+        with pytest.raises(peer_enforcement.EnforcementError):
+            peer_enforcement.validate_mutual_origin(summary)
+        assert peer_enforcement.mutual_origin_from_status(
+            {"mutual_origin": summary}) == self._unknown()
+        status = peer_enforcement.build_status("enforced", "s", "h", 1, 0, 1)
+        status["mutual_origin"] = summary
+        # Malformed status cannot authorize an operation acknowledgement.
+        assert peer_enforcement.parse_status(status) is None
+
+    @pytest.mark.parametrize("prior", [None, {}, [], {"mutual_origin": None}])
+    def test_absent_prior_preflight_projects_unknown(self, prior):
+        assert peer_enforcement.mutual_origin_from_status(prior) == self._unknown()
+
+    def test_old_status_without_preflight_preserves_ack_and_marks_unknown(self):
+        status = peer_enforcement.build_status(
+            "enforced", "s", "h", 7, 2, 10,
+            last_operation_exported_revision=4,
+            operation_ack_epoch="a" * 32)
+        del status["mutual_origin"]
+        parsed = peer_enforcement.parse_status(status)
+        assert parsed["mutual_origin"] == self._unknown()
+        assert parsed["applied_revision"] == 7
+        assert parsed["last_operation_exported_revision"] == 4
+        assert parsed["operation_ack_epoch"] == "a" * 32
 
     @pytest.mark.parametrize("summary", [
         {"mode": "enforced", "newly_denied_device_count": 0,
@@ -283,7 +344,7 @@ class TestMutualOriginPreflightStatus:
             "newly_denied_device_ids": ["same", "same"],
         }}
         assert peer_enforcement.mutual_origin_from_status(malformed) \
-            == self._summary(())
+            == self._unknown()
 
     def test_status_never_serializes_raw_address_carrier(self, path):
         status = peer_enforcement.build_status(

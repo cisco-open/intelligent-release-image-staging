@@ -1783,6 +1783,26 @@ class TestPeerPolicyEnforcementFacts:
         blob = json.dumps(row, sort_keys=True)
         assert "newly_denied_device_ids" not in blob
 
+    @pytest.mark.parametrize("count,ids,expected", [
+        (None, None, None), (0, [], False),
+    ])
+    def test_unknown_preflight_omits_fact_but_known_zero_reports_false(
+            self, count, ids, expected):
+        enforcement = {
+            "state": "enforced", "conflicts": [],
+            "mutual_origin": {
+                "mode": "preflight", "newly_denied_device_count": count,
+                "newly_denied_device_ids": ids,
+            },
+        }
+        row = self._row(self._hub(enforcement=enforcement))
+        fact = row["peer_enforcement"]
+        if expected is None:
+            assert "mutual_origin_preflight" not in fact
+        else:
+            assert fact["mutual_origin_preflight"] is expected
+        assert "blocked" not in fact
+
     def test_malformed_preflight_never_creates_typed_fact(self):
         enforcement = {
             "state": "enforced", "conflicts": [],

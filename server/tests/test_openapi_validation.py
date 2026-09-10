@@ -330,6 +330,26 @@ def test_final_repair_shared_prefix_digit_bound():
         sys.set_int_max_str_digits(original)
 
 
+def test_policy_preflight_schema_distinguishes_unknown_and_zero_without_ids():
+    import openapi_contract
+    spec = openapi_contract.build_document()
+    for prefix in ("/api/v1", "/internal/v1"):
+        response = spec["paths"][prefix + "/peer-policy"]["get"]["responses"]["200"]
+        schema = response["content"]["application/json"]["schema"]["properties"][
+            "enforcement"]["properties"]["mutual_origin"]
+        validator = OAS32Validator(schema)
+        for count in (None, 0, 2):
+            validator.validate({"mode": "preflight", "newly_denied_device_count": count})
+        for bad in (
+                {"mode": "preflight"},
+                {"mode": "enforced", "newly_denied_device_count": 0},
+                {"mode": "preflight", "newly_denied_device_count": 0,
+                 "newly_denied_device_ids": []},
+                *[{"mode": "preflight", "newly_denied_device_count": value}
+                  for value in (-1, 1.5, False, "0")]):
+            assert list(validator.iter_errors(bad)), bad
+
+
 def test_policy_contract_qos_subsets_ranges_and_complete_role_definition():
     import openapi_contract
     spec = openapi_contract.build_document()

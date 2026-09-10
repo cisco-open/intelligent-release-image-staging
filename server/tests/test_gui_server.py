@@ -466,6 +466,28 @@ assert.equal(el('role-preview').hidden, true);
 ''')
 
 
+def test_peer_policy_panel_distinguishes_unknown_preflight_from_zero():
+    _run_role_console_js(r'''
+peerPolicy = {roles_supported: true, roles_present: true,
+  enforcement: {stale: true, mutual_origin: {mode: 'preflight'}}};
+for (const count of [null, undefined, false, '0', -1, NaN]) {
+  peerPolicy.enforcement.mutual_origin.newly_denied_device_count = count;
+  renderPeerPolicyPanel();
+  const text = el('policy-mutual-origin').textContent;
+  assert.match(text, /preflight count unavailable/i);
+  assert.doesNotMatch(text, /newly denied devices/);
+  assert.match(text, /restriction is not active/);
+  assert.match(text, /Tracker status is stale/);
+}
+peerPolicy.enforcement.mutual_origin.newly_denied_device_count = 0;
+renderPeerPolicyPanel();
+assert.match(el('policy-mutual-origin').textContent, /0 newly denied devices/);
+delete peerPolicy.enforcement.mutual_origin;
+renderPeerPolicyPanel();
+assert.match(el('policy-mutual-origin').textContent, /status unavailable/);
+''')
+
+
 def test_peer_policy_panel_count_only_and_capability_banner_behavior():
     _run_role_console_js(r'''
 peerPolicy = {revision: 7, roles_supported: true, roles_present: true,
@@ -1927,7 +1949,11 @@ def test_peer_policy_get_and_durable_quarantine_operation(tmp_path):
         stop()
 
 
-def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(tmp_path):
+@pytest.mark.parametrize("count,device_ids", [
+    (2, ["preflight-a", "preflight-b"]), (0, []), (None, None),
+])
+def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(
+        tmp_path, count, device_ids):
     host, port, (_, _, _, cat), stop = _serve_full(tmp_path)
     try:
         cookie, _ = _auth(host, port)
@@ -1935,8 +1961,8 @@ def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(tmp_path)
             "enforced", "session-1", "block-hash", 1, 0, 1000.0,
             mutual_origin={
                 "mode": "preflight",
-                "newly_denied_device_count": 2,
-                "newly_denied_device_ids": ["preflight-a", "preflight-b"],
+                "newly_denied_device_count": count,
+                "newly_denied_device_ids": device_ids,
             })
         tracker_status["endpoint_ips"] = ["10.0.0.99"]
         peer_enforcement.write_status(
@@ -1957,7 +1983,7 @@ def test_peer_policy_view_projects_preflight_count_and_safe_origin_qos(tmp_path)
         assert status == 200
         view = json.loads(raw)
         assert view["enforcement"]["mutual_origin"] == {
-            "mode": "preflight", "newly_denied_device_count": 2,
+            "mode": "preflight", "newly_denied_device_count": count,
         }
         # A syntactically valid file with an impossible enforced state is
         # neutral as a unit; redaction cannot leave a false success claim.

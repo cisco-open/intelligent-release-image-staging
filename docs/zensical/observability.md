@@ -75,7 +75,7 @@ Read these fields literally:
 | --- | --- |
 | `roles_supported` / `roles_present` | This management binary understands roles / role state has existed in this policy. Presence is not an enforcement-success claim. |
 | `enforcement.state`, `applied_revision`, `stale` | Tracker blocklist reconciliation result and freshness. An old `enforced` value becomes stale after five minutes. |
-| `enforcement.mutual_origin.mode = preflight` | Issue #153 is observation only. `newly_denied_device_count` predicts a future mutual-origin block; those devices are not added to the applied origin blocklist by this phase. |
+| `enforcement.mutual_origin.mode = preflight` | Issue #153 is observation only. `newly_denied_device_count` predicts a future mutual-origin block. It is `null` when unavailable, including an unknown protected seeder IPv4 address; `0` means a completed preflight found no newly denied devices. This phase does not add those devices to the applied origin blocklist. |
 | `origin_qos.state`, `target_download_count`, `applied_download_count` | Whether the global/per-torrent origin options reached every active origin GID. These are counts, not per-role throughput. |
 | `fleet_rollup.issued_revision`, `fleet_rollup.applied` | Nullable current issued policy revision; accepted identity counts grouped by decimal policy revision, never instruction serial. Unavailable heartbeat evidence must not be inferred as zero application. |
 | `fleet_rollup.states.pre-instructions` | Inventory devices whose heartbeat lacks the instruction protocol capability marker; IOS software version alone is not capability evidence. |
@@ -95,7 +95,8 @@ as `role`, `role_unknown`, and `role_shadowed_by`. That role can differ from the
 Fleet-declared role shown in Devices while `role_drift` exists. A typed device
 may also carry the boolean `mutual_origin_preflight`; this is joined by
 authenticated device ID,
-never inferred from an address. Shared NAT conflicts report the reason and
+never inferred from an address. The field is omitted when preflight is
+unavailable; a completed zero-count result reports `false`. Shared NAT conflicts report the reason and
 `global_block_applied: false` without turning an aggregate count into a claim
 that a particular device was blocked.
 

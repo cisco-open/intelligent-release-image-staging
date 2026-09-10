@@ -41,13 +41,29 @@ DerivedSet = collections.namedtuple(
     ["denied_ips", "conflicts", "apply_empty", "fail_closed",
      "prospective_denied_ips", "prospective_conflicts",
      "newly_denied_device_ids"],
-    defaults=((), (), ()))
+    defaults=(None, None, None))
 
 ApplyOutcome = collections.namedtuple(
     "ApplyOutcome", ["applied", "success", "aria_session_id", "desired_hash",
                      "applied_revision", "last_effect", "last_error"])
 
 _SESSION_UNSET = object()
+
+
+def valid_protected_seeder_ipv4(value):
+    """Whether a configured address can support the origin preflight.
+
+    IPv4Address also accepts integers and bytes; configuration must provide
+    an IPv4 string. Missing values, hostnames and unreplaced placeholders do
+    not establish an address against which host/CIDR ACLs can be evaluated.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        ipaddress.IPv4Address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _endpoint_ips(snapshot):
@@ -161,6 +177,7 @@ def _derive_valid(policy_result, durable_endpoints, pending_endpoints,
     doc = policy_result.document
     compiled = policy_result.roles or peer_policy.compile_roles(doc)
     seeder = _Struct("service", "seeder")
+    origin_known = valid_protected_seeder_ipv4(protected_seeder_ip)
     revoked_principals = set(revoked_principals or ())
     # Merge durable + pending; a key present in both contributes both IPs.
     current_denied_by_ip = {}
@@ -182,6 +199,8 @@ def _derive_valid(policy_result, durable_endpoints, pending_endpoints,
             else:
                 current_permitted_by_ip.setdefault(ip, set()).add(key)
 
+            if not origin_known:
+                continue
             prospective_denied = current_denied or not peer_policy.mutual_permit(
                 doc, seeder, protected_seeder_ip, principal, ip,
                 compiled=compiled)
@@ -194,6 +213,12 @@ def _derive_valid(policy_result, durable_endpoints, pending_endpoints,
 
     denied_ips, conflicts = _resolved_set(
         current_denied_by_ip, current_permitted_by_ip)
+    if not origin_known:
+        # Current enforcement remains authoritative. Without a valid origin
+        # address the prospective pair result is unknown, never a zero count
+        # or an address-ACL denial inferred from a missing subject address.
+        return DerivedSet(denied_ips=denied_ips, conflicts=conflicts,
+                          apply_empty=True, fail_closed=False)
     prospective_denied_ips, prospective_conflicts = _resolved_set(
         prospective_denied_by_ip, prospective_permitted_by_ip)
     newly_denied_ips = set(prospective_denied_ips) - set(denied_ips)
@@ -232,9 +257,7 @@ def _derive_emergency(durable_endpoints, pending_endpoints,
     # If no address is known, nothing is applied -> no false success. Otherwise
     # the full emergency list is applied on fresh sessions/recovery.
     return DerivedSet(denied_ips=denied, conflicts=[],
-                      apply_empty=bool(denied), fail_closed=True,
-                      prospective_denied_ips=[], prospective_conflicts=[],
-                      newly_denied_device_ids=[])
+                      apply_empty=bool(denied), fail_closed=True)
 
 
 # ---------------------------------------------------------------------------

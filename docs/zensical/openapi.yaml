@@ -495,13 +495,37 @@
                         },
                         "conflict_count": {
                           "type": "integer"
+                        },
+                        "mutual_origin": {
+                          "title": "ConsolePeerPolicyResponseEnforcementMutual_Origin",
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "const": "preflight"
+                            },
+                            "newly_denied_device_count": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "description": "Prospective count only; additional mutual-origin enforcement is inactive. Null means unavailable, including when the protected seeder IPv4 address is unknown. Zero is a completed preflight with no newly denied devices."
+                            }
+                          },
+                          "required": [
+                            "mode",
+                            "newly_denied_device_count"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
                         "state",
                         "stale",
                         "desired_ip_count",
-                        "conflict_count"
+                        "conflict_count",
+                        "mutual_origin"
                       ],
                       "additionalProperties": true
                     }
@@ -599,7 +623,11 @@
                     "state": null,
                     "stale": false,
                     "desired_ip_count": 1,
-                    "conflict_count": 0
+                    "conflict_count": 0,
+                    "mutual_origin": {
+                      "mode": "preflight",
+                      "newly_denied_device_count": null
+                    }
                   }
                 }
               }
@@ -31323,13 +31351,37 @@
                         },
                         "conflict_count": {
                           "type": "integer"
+                        },
+                        "mutual_origin": {
+                          "title": "ManagementPeerPolicyResponseEnforcementMutual_Origin",
+                          "type": "object",
+                          "properties": {
+                            "mode": {
+                              "type": "string",
+                              "const": "preflight"
+                            },
+                            "newly_denied_device_count": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ],
+                              "minimum": 0,
+                              "description": "Prospective count only; additional mutual-origin enforcement is inactive. Null means unavailable, including when the protected seeder IPv4 address is unknown. Zero is a completed preflight with no newly denied devices."
+                            }
+                          },
+                          "required": [
+                            "mode",
+                            "newly_denied_device_count"
+                          ],
+                          "additionalProperties": false
                         }
                       },
                       "required": [
                         "state",
                         "stale",
                         "desired_ip_count",
-                        "conflict_count"
+                        "conflict_count",
+                        "mutual_origin"
                       ],
                       "additionalProperties": true
                     }
@@ -31427,7 +31479,11 @@
                     "state": null,
                     "stale": false,
                     "desired_ip_count": 1,
-                    "conflict_count": 0
+                    "conflict_count": 0,
+                    "mutual_origin": {
+                      "mode": "preflight",
+                      "newly_denied_device_count": null
+                    }
                   }
                 }
               }

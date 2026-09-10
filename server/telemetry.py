@@ -2400,7 +2400,8 @@ def _mutual_origin_preflight_ids(enforcement):
             enforcement.get("mutual_origin"))
     except _peer_enforcement.EnforcementError:
         return None
-    return frozenset(summary["newly_denied_device_ids"])
+    ids = summary["newly_denied_device_ids"]
+    return None if ids is None else frozenset(ids)
 
 
 def _peer_enforcement_fact(enforcement, derived_denied,

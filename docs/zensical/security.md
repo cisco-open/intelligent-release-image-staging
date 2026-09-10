@@ -228,7 +228,9 @@ devices a future mutual origin ACL would newly deny, but it continues applying
 the prior self-evaluation blocklist. `origin: false` controls whether the
 tracker introduces the origin; it does not yet add that device's address to the
 origin's aria2 blocklist. The management surface exposes the preflight count,
-not the device IDs or addresses.
+not the device IDs or addresses. When the protected seeder IPv4 address is
+unknown, the prospective result is unavailable (`null`), not a completed zero
+or a deny-all result. Existing ACL enforcement retains its normal behavior.
 
 Issue #153 remains open through one full release of preflight observation. A
 later, separately reviewed activation would apply the
