@@ -5672,7 +5672,7 @@ def build_deps(cfg, conf_path, state_path=None):  # pragma: no cover
             name, prefix, cli_execute),
         # IOx has a real vty: hash synchronously. The Guest Shell's
         # `cli` module cannot sit through a long command, hence its
-        # asynchronous EEM policy and receipt files instead.
+        # asynchronous EEM policy and attestation files instead.
         verify_root=(
             (lambda name, prefix, digest: _verify_iox_root(
                 name, prefix, digest, cli_execute))
