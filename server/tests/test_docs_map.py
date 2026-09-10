@@ -1492,8 +1492,12 @@ def test_docs_phase2_window_sizing_and_the_pool_share_rule():
     _require("operations.md", [
         "`IRIS_ONBOARD_CONCURRENCY`", "`IRIS_ONBOARD_JOB_TIMEOUT`",
         "7-10 minutes", "250-device"])
-    _assert_unit(operations, ("10", "rounds", "pool"),
-                 "a 250-device wave must be stated in pool rounds")
+    sizing = _compact(_section(operations, "Sizing a maintenance window"))
+    assert re.search(r"\b12 scheduled jobs\b", sizing), \
+        "the default pool must expose its 12 scheduled slots"
+    assert re.search(
+        r"\b250-device\b.{0,200}\b21 rounds\b.{0,200}\b147-210 minutes\b",
+        sizing), "250 devices need 21 scheduled-pool rounds, or 147-210 minutes"
     # Half the pool is reserved for manual work, so a window can never starve
     # an operator out of their own console.
     _assert_unit(operations, ("half", "manual", "reserved"),
