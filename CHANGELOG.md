@@ -51,6 +51,10 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx containers use SCP when onboarding configures no shared filesystem.
+  Earlier packages invented a C9300 share on C8000V and IE-3400 devices,
+  preventing placement despite a complete download. Redeployment clears
+  those stale defaults while preserving explicitly configured shares.
 - IOx onboarding retries the IE-3400's exact activation-busy refusal within
   the existing activation deadline. Every retry is recorded and cancellable;
   other responses remain failures instead of triggering another activation.

@@ -187,11 +187,11 @@ case "$DEVICE_PLATFORM" in
     # explicit, validated installer override remains supported for IOx models
     # whose storage policy is known by their deployment record.
     TARGET_FS="${IRIS_TARGET_FS:-}"
-    # C9K installers mount this path; IE3x00 has no mount and the existing
-    # share probe falls back to SCP. The target filesystem itself is proved
-    # from IOS show/dir output by flash_target.py, never guessed here.
-    SHARE_DIR="${IRIS_SHARE_DIR:-/mnt/share}"
-    SHARE_IOS_PATH="${IRIS_SHARE_IOS_PATH:-usbflash1:iox_host_data_share}"
+    # Only a deployment that mounts an IOS-visible share supplies this pair.
+    # With no share, C8000V and IE3x00 use the agent's SCP hand-off. Inventing
+    # a share here makes its failed probe refuse placement before SCP runs.
+    SHARE_DIR="${IRIS_SHARE_DIR:-}"
+    SHARE_IOS_PATH="${IRIS_SHARE_IOS_PATH:-}"
     ;;
   xr-appmgr)
     STAGE_DIR="/hostmount"
@@ -229,12 +229,16 @@ if [ "$DEVICE_PLATFORM" = iox ]; then
   [ -z "$TARGET_FS" ] \
     || printf '%s' "$TARGET_FS" | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:$' \
     || fatal "IRIS_TARGET_FS must be a safe IOS filesystem prefix such as sdflash:"
-  absolute_path IRIS_SHARE_DIR "$SHARE_DIR"
-  single_line IRIS_SHARE_IOS_PATH "$SHARE_IOS_PATH"
-  printf '%s' "$SHARE_IOS_PATH" \
-    | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' \
-    || fatal "IRIS_SHARE_IOS_PATH must be a safe IOS filesystem path"
-  case "${SHARE_IOS_PATH#*:}" in *../*|../*|*/..|..) fatal "IRIS_SHARE_IOS_PATH must not contain '..'" ;; esac
+  if [ -n "$SHARE_DIR" ] || [ -n "$SHARE_IOS_PATH" ]; then
+    [ -n "$SHARE_DIR" ] && [ -n "$SHARE_IOS_PATH" ] \
+      || fatal "IRIS_SHARE_DIR and IRIS_SHARE_IOS_PATH must be set together"
+    absolute_path IRIS_SHARE_DIR "$SHARE_DIR"
+    single_line IRIS_SHARE_IOS_PATH "$SHARE_IOS_PATH"
+    printf '%s' "$SHARE_IOS_PATH" \
+      | grep -Eq '^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' \
+      || fatal "IRIS_SHARE_IOS_PATH must be a safe IOS filesystem path"
+    case "${SHARE_IOS_PATH#*:}" in *../*|../*|*/..|..) fatal "IRIS_SHARE_IOS_PATH must not contain '..'" ;; esac
+  fi
 else
   [ "${IRIS_TARGET_FS+x}" != x ] || fatal "xr-appmgr forbids IRIS_TARGET_FS; target is harddisk:"
   [ "${IRIS_SHARE_DIR+x}" != x ] || fatal "xr-appmgr forbids IRIS_SHARE_DIR"
@@ -672,6 +676,8 @@ if [ "$DEVICE_PLATFORM" = iox ]; then
   [ -z "$TARGET_FS" ] || reconcile_conf_fact target_fs "$TARGET_FS"
   reconcile_conf_fact mode ""
   reconcile_conf_fact runtime_mode container
+  # Deployment facts include the absence of a share: clear stale defaults
+  # from older packages so they cannot suppress this platform's SCP path.
   reconcile_conf_fact share_dir "$SHARE_DIR"
   reconcile_conf_fact share_ios_path "$SHARE_IOS_PATH"
 else
