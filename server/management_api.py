@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -7771,8 +7772,13 @@ def main():
             except Exception:
                 pass
         term_latch.restore()
+        # A fatal startup failure with no detail is undebuggable; the operator
+        # sees only "refusing to start" and a crash loop. The exception type
+        # and message name a stale lock, an unreadable record, an already-bound
+        # endpoint. traceback goes to stderr, which the container captures.
         print("iris-management: controller initialization failed; refusing "
               "to start", file=sys.stderr, flush=True)
+        traceback.print_exc()
         sys.exit(2)
     # Schedule recovery starts only after deployment records were recovered and
     # all state-owner adapters were constructed. Importing or calling
