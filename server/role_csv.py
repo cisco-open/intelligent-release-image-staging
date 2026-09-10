@@ -77,11 +77,15 @@ def parse_roles_csv(text):
     reader = csv.DictReader(io.StringIO(text))
     if not reader.fieldnames or "role" not in reader.fieldnames:
         raise RolesCsvError("roles CSV requires a role header")
+    if len(set(reader.fieldnames)) != len(reader.fieldnames):
+        raise RolesCsvError("duplicate roles CSV field")
     unknown = set(reader.fieldnames) - set(ROLE_CSV_FIELDS)
     if unknown:
         raise RolesCsvError("unknown roles CSV field: %s" % sorted(unknown)[0])
     definitions = {}
     for number, row in enumerate(reader, 2):
+        if None in row:
+            raise RolesCsvError("row %d has extra cells" % number)
         name = str(row.get("role") or "").strip()
         if not name:
             if any(str(value or "").strip() for value in row.values()):

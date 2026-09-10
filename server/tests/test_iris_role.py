@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 import gui_fleet
 import peer_policy
 
@@ -208,6 +210,24 @@ def test_iris_role_import_rejects_duplicate_and_undefined_peer_without_write(
     assert result.returncode != 0
     assert "duplicate role network" in result.stderr.lower()
     assert not (tmp_path / "peer-policy.json").exists()
+
+
+@pytest.mark.parametrize("text", [
+    "role,restricted,restricted\nboat,false,true\n",
+    "role,restricted\nboat,true,unexpected\n",
+])
+def test_iris_role_import_rejects_ambiguous_csv_without_policy_mutation(
+        tmp_path, text):
+    before = _run(tmp_path, "define", "boat", "--restricted")
+    assert before.returncode == 0, before.stderr
+    policy_path = tmp_path / "peer-policy.json"
+    original = policy_path.read_bytes()
+    csv_path = tmp_path / "ambiguous.csv"
+    csv_path.write_text(text)
+    result = _run(tmp_path, "import", str(csv_path))
+    assert result.returncode != 0
+    assert "duplicate roles CSV field" in result.stderr or "extra cells" in result.stderr
+    assert policy_path.read_bytes() == original
 
 
 def test_iris_role_define_rejects_canonically_duplicate_networks(tmp_path):
