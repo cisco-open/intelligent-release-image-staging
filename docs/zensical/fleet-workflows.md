@@ -138,17 +138,22 @@ other. The Console also edits single definitions in place; see
 
 Import validates the whole role graph before writing, including references,
 symmetric restricted-role links, duplicate/canonical-equivalent networks, QoS
-ranges, and reserved names. One bulk membership or CSV action creates one
+ranges, and reserved names. Duplicate CSV headers and rows with extra cells
+are rejected before any policy write. One bulk membership or CSV action creates one
 policy revision and one tracker-outbox event. A partial two-store write reports
 the exact failed rows and `role_drift`; correct the storage problem and reapply
-the same intent. Roles change server-side swarm policy only. They add no device
-VLAN, ACL, environment variable, or package setting in any management type.
+the same intent. Role definitions control tracker peering and the QoS/control
+values delivered to instruction-capable agents through verified instructions.
+Tracker-specific `tracker_qos` remains server-side. Role changes add no device
+VLAN, IOS ACL, environment variable, or package setting.
 
-The change stops new tracker introductions but does not sever connections or
-remove peer addresses already retained by aria2. When containment cannot wait,
-unassign every image from the device so its current agent removes the torrents
-on its next tick. Any future device rate/cap remains cooperative in the presence
-of a privileged device administrator; Phase 0 delivers no device rate setting.
+Tracker policy changes stop new introductions; device application is a separate
+observation in the Console's instruction status. Unassigning every image asks
+the current agent to remove its torrents after its next successful due policy
+poll and successful aria2 application; cadence and RPC failures can delay that
+removal. Device controls remain cooperative in the presence of a privileged
+device administrator;
+configured intent alone does not prove that a device applied it.
 
 ### Batch operations in the Console
 

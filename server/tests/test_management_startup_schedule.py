@@ -37,7 +37,7 @@ def test_management_schedule_admission_and_startup_cleanup(
         def validate(self, *_args, **_kwargs):
             return None
 
-        def dispatch(self, _schedule, _occurrence, device_id, _receipt):
+        def dispatch(self, _schedule, _occurrence, device_id, _prior):
             admitted.append(device_id)
             return {"status": "ok", "reason": "assigned"}
 

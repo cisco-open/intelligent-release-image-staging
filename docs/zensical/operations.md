@@ -119,10 +119,11 @@ own console, and it also means a window has half the pool, not all of it, when
 you size it.
 
 Size from pool rounds, not from device count. A **250-device** wave of routers
-needs at least **10 rounds** of the scheduled half of the pool, and each round
-costs a router recipe, so budget on the order of 70-100 minutes of window for
-it plus margin — not the 7-10 minutes one device takes. A window that is too
-short does not run late: it closes, and every device it never reached says so.
+needs at least **21 rounds** of the scheduled half of the pool, and each round
+costs a router recipe, so budget on the order of 147-210 minutes of window for
+it plus margin. At the window end, admission closes and queued jobs are
+cancelled; already-running jobs are allowed to finish. Every device the
+window never reached receives a `window_closed` outcome.
 
 ## Scheduled outcomes
 

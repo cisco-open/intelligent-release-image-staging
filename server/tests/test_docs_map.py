@@ -140,25 +140,18 @@ def test_index_groups_pages_under_their_own_section():
 # a doc that misdescribes the system.
 
 
-def _changelog_current(lower=False):
-    """The current operator-visible change set: Unreleased plus the section
-    for the version in VERSION.
+def _changelog_release(version, lower=False):
+    """Read the release that introduced the feature under test.
 
-    A release cut moves entries from '## [Unreleased]' to a dated heading.
-    These are contract assertions about what the release SAYS, not about which
-    side of the cut the entries happen to sit on today, so they read both
-    sections and never need re-pinning when a version is cut.
+    A later patch release need not repeat historical feature announcements.
+    Pin these historical contracts to their release instead of VERSION, which
+    advances whenever unrelated fixes ship.
     """
     with open(os.path.join(REPO, "CHANGELOG.md")) as fh:
         changelog = fh.read()
-    with open(os.path.join(REPO, "VERSION")) as fh:
-        version = fh.read().strip()
-    sections = []
-    for heading in ("## [Unreleased]", "## [%s]" % version):
-        if heading in changelog:
-            sections.append(changelog.split(heading, 1)[1].split("\n## ", 1)[0])
-    assert sections, "CHANGELOG has neither Unreleased nor a %s section" % version
-    text = "\n".join(sections)
+    heading = "## [%s]" % version
+    assert heading in changelog, "CHANGELOG has no %s section" % version
+    text = changelog.split(heading, 1)[1].split("\n## ", 1)[0]
     return text.lower() if lower else text
 
 
@@ -857,7 +850,7 @@ def test_workstream_d_docs_state_legacy_loss_and_downgrade_truth():
                re.search(r"clear|remove", line)
                for line in op_sentences)
 
-    unreleased = _changelog_current(lower=True)
+    unreleased = _changelog_release("2026.09.10", lower=True)
     assert "unreleased" in changelog
     assert "pre-d" not in unreleased
     assert re.search(r"ordinary.{0,100}(?:acl|assignment).{0,120}preserv",
@@ -1425,7 +1418,7 @@ def test_docs_phase1_observability_states_evidence_and_revisions():
 
 
 def test_docs_phase1_changelog_and_release_boundary():
-    unreleased = _changelog_current()
+    unreleased = _changelog_release("2026.09.10")
     _assert_section_terms(unreleased, "Phase 1 instructions",
                           ("encrypted instruction", "custody", "Guest Shell",
                            "IOx", "verification"),
@@ -1560,6 +1553,6 @@ def test_docs_phase2_csv_template_and_validation_are_mapped():
     assert "iris-schedule import" in readme and "iris-schedule export" in readme
     _assert_unit(_page("validation.md"), ("schedule", "window", "stage"),
                  "validation must cover a scheduled staging window")
-    current = _changelog_current(lower=True)
+    current = _changelog_release("2026.09.10.1", lower=True)
     for entry in ("schedule", "wave", "target"):
         assert entry in current, entry

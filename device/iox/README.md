@@ -119,92 +119,35 @@ itself remains unchanged and does not need rebuilding.
 > auth where the platform supports it. Rotating the credential means re-running
 > the installer with the new value.
 
-## Deploy to the device (proven recipe)
+## Deploy to the device
 
-1. **Publish + assign an IE image** (server) — required for the device to join a
-   swarm and appear on the map:
-   ```
-   docker compose -f server/docker-compose.yml exec iris \
-     iris-publish /opt/images/iosxe/IE3400/<image>.bin
-   docker compose -f server/docker-compose.yml exec iris \
-     iris-assign <device-id> <image-id>
-   ```
+Use the [Console/API onboarding workflow](../../docs/zensical/fleet-workflows.md)
+or the server's [IOx control CLI](../../docs/zensical/reference.md#iox-control-cli).
+`install.sh` and `uninstall.sh` are private controller recipes; real execution
+requires their inherited controller channel and cannot be run standalone.
 
-2. **Mint the device token** (server):
-   `docker compose -f server/docker-compose.yml exec iris iris-mint-enrollment <device-id>`
+1. Register the device with its management type, network fields and credential
+   profile. Select the IOx platform supported by its model.
+2. Build and stage the architecture-matched package and current public catalog
+   certificate. Supply the two approved public instruction roots and initialize
+   the server's instruction custody as described in the
+   [IOx guide](../../docs/zensical/iox.md).
+3. Submit **Onboard**. The controller owns enrollment, identity checks, HTTPS
+   package/certificate/envelope fetches, application configuration and lifecycle.
+   It records and restores any IRIS-owned device-global verification change
+   before starting the app. Follow the recorded recovery procedure after an
+   interrupted attempt; do not disable verification manually as a prerequisite.
+4. Confirm a successful job and `RUNNING` in `show app-hosting list`. Publish
+   and assign an appropriate image, then verify staging and swarm membership
+   separately from agent onboarding.
 
-3. **Make the package and certificate available**: place the
-   architecture-matched tar in the server's `artifacts/` directory; server
-   bring-up already stages the current public certificate there as
-   `iris-catalog.pem`. `install.sh` validates both locally, installs the
-   catalog trustpoint over its authenticated, host-key-checked SSH session,
-   and has the device fetch them (and its sealed instruction envelope) from
-   the artifact server with `copy https:`, authenticated with the device's
-   own enrollment credential (`ip http client username` / `password`, set
-   for each copy and removed after it). Nothing is pushed over SCP. If you
-   are not using the one-shot installer, copy both files to the device
-   manually.
-
-   These are also the artifact prerequisites for **Console one-click
-   onboarding**: once `iris-arm64.tar` and the public certificate are staged,
-   the Console picks this installer automatically for
-   IE-3x00/IR1101/IR18xx devices (by `model`/`platform`, or by live
-   auto-detection) — see [Web Console](../../docs/zensical/console.md).
-   Onboarding fails fast if the package is missing or the certificate cannot
-   be validated.
-
-4. **On the device** — 3 gotchas, all required:
-   - Keep app-hosting signature verification enabled for a signed package.
-     Only an unsigned local package requires `app-hosting verification
-     disable`, issued in EXEC mode; `install.sh` detects which policy applies.
-   - The `app-hosting appid iris` block **must** include an `app-vnic` interface,
-     and is applied with **no explicit `exit` lines** (IOS auto-pops; explicit
-     exits silently drop the app-vnic). Use the VLAN, guest address, and SVI
-     selected for this device (see the block below).
-   - `app-hosting install appid iris package flash:<package>.tar` → `activate` →
-     `app-hosting data appid iris copy flash:iris-catalog.pem
-     iris-catalog.pem` → `start` (DEPLOYED → ACTIVATED → application-data
-     certificate → RUNNING). Activation mounts application storage. Deliver the
-     certificate before starting the app; a failed copy leaves it unstarted.
-
-   ```
-   app-hosting appid iris
-    app-vnic AppGigabitEthernet trunk
-     vlan <vlan> guest-interface 0
-      guest-ipaddress <guest-ip> netmask <mask>
-    app-default-gateway <svi-ip> guest-interface 0
-    app-resource profile custom
-     cpu 400
-     memory 768
-     persist-disk 2048
-     vcpu 1
-    app-resource docker
-     run-opts 1 "-e IRIS_DEVICE_ID=<device-id>"
-     run-opts 2 "-e IRIS_DEVICE_SSH_PASS=<pw>"
-     run-opts 3 "-e IRIS_CATALOG_TOKEN=<token>"
-     run-opts 4 "-e IRIS_CATALOG_URL=https://<server-ip>:8443"
-     run-opts 5 "-e IRIS_DEVICE_SSH_HOST=<svi-ip>"
-     run-opts 6 "-e IRIS_DEVICE_SSH_USER=<user>"
-     run-opts 7 "-e IRIS_DEVICE_PLATFORM=iox"
-     run-opts 8 "-e IRIS_TELEMETRY=on"
-    !                                  C9k share-mount transfer only:
-     run-opts 11 "-v /vol/usb1/iox_host_data_share:/mnt/share"
-   ```
-
-   `install.sh` emits separate numbered `run-opts` lines because Catalyst app
-   hosting limits each option line. For the validated C9300 path, use the
-   amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
-   `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` (run-opts 11 above; also
-   `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
-   target exists). A Catalyst 8000 has no share (its CAF ignores `-v`
-   run options; verified 2026-09-10) and uses the scp push. IE-3x00 defaults remain
-   ARM64, `AppGigabitEthernet1/1`, and `sdflash:` with no share mount.
-
-5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
-   iris` (Status 0). The device then refreshes its token, downloads the assigned
-   image over the swarm, and appears on the Console swarm map
-   (`https://<server-ip>:8080/`, Swarm tab) labeled with its model; the
-   heartbeat carries model/version/free read over SSH-to-self.
+The controller chooses the platform's application interface, storage and share
+settings. Catalyst 9300 uses the validated SSD share; Catalyst 8000V and IE-3400
+use SSH/SCP to IOS for image placement. Onboarding fetches its files over HTTPS
+and supplies the public certificate and sealed envelope before starting the app.
+See [IOx runtime behavior](../../docs/zensical/iox.md#runtime-behavior) for the
+platform details and [device-global verification](../../docs/zensical/iox.md#device-global-package-verification)
+for the authority and recovery rules.
 
 ## On-box staging target
 
