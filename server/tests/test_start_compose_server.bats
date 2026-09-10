@@ -28,7 +28,7 @@ setup() {
   # from a test run, so ownership is simulated: stat reports the runtime uid by
   # default, and the refusal test below overrides it (issue #204).
   : > "$REPO/artifacts/.gitkeep"
-  printf '#!/usr/bin/env bash\necho 10001\n' > "$STUB/stat"
+  printf '#!/usr/bin/env bash\ncase "$2" in %%u) echo 10001 ;; %%g) id -g ;; *) /usr/bin/stat "$@" ;; esac\n' > "$STUB/stat"
   printf '#!/usr/bin/env bash\necho "sudo must not be reached from a test" >&2\nexit 1\n' > "$STUB/sudo"
   chmod +x "$STUB/stat" "$STUB/sudo"
   # present so the script reaches the XR freshness block below it
@@ -122,7 +122,7 @@ run_bringup() {
   # fix it from a container that has no Docker socket (issue #204). Stub stat
   # to report a foreign owner, and sudo to refuse, so the preflight has to
   # report rather than repair.
-  printf '#!/usr/bin/env bash\necho 1000\n' > "$STUB/stat"
+  printf '#!/usr/bin/env bash\ncase "$2" in %%u) echo 1000 ;; %%g) id -g ;; *) /usr/bin/stat "$@" ;; esac\n' > "$STUB/stat"
   chmod +x "$STUB/stat"
   run_bringup
   [ "$status" -eq 1 ]

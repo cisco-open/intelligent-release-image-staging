@@ -97,11 +97,15 @@ artifacts:
 ```bash
 chmod 600 "$IRIS_AGE_KEY_FILE_HOST"
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"
-sudo chown -R 10001:10001 artifacts          # or "$IRIS_ARTIFACTS_HOST_DIR"
+sudo chown -R 10001:"$(id -g)" artifacts && sudo chmod -R g+w artifacts   # or "$IRIS_ARTIFACTS_HOST_DIR"
 ```
 
 Keep the age identity at mode `600` (or `400`); changing the owner does
-not change the mode. `IRIS_ARTIFACTS_HOST_DIR` defaults to `../artifacts` relative to
+not change the mode. `artifacts/` has two writers — the server self-provisions
+the Guest Shell bundle and certificate as uid 10001, and
+`tools/build-device-image.sh` writes the canonical OCI archive there as you —
+so it is owned by 10001 with your group given write access, not `10001:10001`.
+`tools/start-compose-server.sh` sets this for you. `IRIS_ARTIFACTS_HOST_DIR` defaults to `../artifacts` relative to
 `server/docker-compose.yml`, which is the repository's `artifacts/` directory.
 
 ### Volume permissions

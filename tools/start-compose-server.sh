@@ -90,23 +90,32 @@ fi
 # absent with no way to fix it from a container that has no Docker socket.
 # Grant it here instead of leaving that to be discovered after an onboarding
 # fails (issue #204).
+# Two writers share artifacts/: the server (uid 10001) self-provisions the
+# bundle and certificate, and the host-side device-image builder writes the
+# canonical OCI archive and its manifest there as the OPERATOR. Owner 10001
+# plus the operator's group with group-write serves both; 10001:10001 -- what
+# the docs used to say -- silently breaks the second writer.
 mkdir -p "$REPO/artifacts"
+OPERATOR_GID="$(id -g)"
 artifacts_uid="$(stat -c %u "$REPO/artifacts" 2>/dev/null || echo -1)"
-if [ "$artifacts_uid" != "$IRIS_RUNTIME_UID" ]; then
-  if sudo -n chown -R "$IRIS_RUNTIME_UID:$IRIS_RUNTIME_UID" "$REPO/artifacts" 2>/dev/null; then
-    echo ">> granted uid $IRIS_RUNTIME_UID ownership of $REPO/artifacts"
+artifacts_gid="$(stat -c %g "$REPO/artifacts" 2>/dev/null || echo -1)"
+if [ "$artifacts_uid" != "$IRIS_RUNTIME_UID" ] || [ "$artifacts_gid" != "$OPERATOR_GID" ] || [ ! -w "$REPO/artifacts" ]; then
+  if sudo -n chown -R "$IRIS_RUNTIME_UID:$OPERATOR_GID" "$REPO/artifacts" 2>/dev/null \
+      && sudo -n chmod -R g+w "$REPO/artifacts" 2>/dev/null; then
+    echo ">> granted uid $IRIS_RUNTIME_UID and group $OPERATOR_GID write access to $REPO/artifacts"
   else
     cat >&2 <<EOF
-!! $REPO/artifacts is owned by uid $artifacts_uid, but the server runs as uid
-   $IRIS_RUNTIME_UID and cannot chown a host path from inside the image.
+!! $REPO/artifacts is owned by $artifacts_uid:$artifacts_gid, but it needs owner
+   uid $IRIS_RUNTIME_UID (the server, which cannot chown a host path from inside
+   the image) and group $OPERATOR_GID with write access (you, for the device-image
+   builder).
 
-Left as it is, the server starts and then cannot write its own artifacts: the
-Guest Shell bundle is never provisioned, iris-catalog.pem is never staged, and
-device onboarding has nothing to hand a device.
+Left as it is, either the server cannot self-provision its bundle and
+certificate, or the package builders cannot write the canonical device image.
 
 Grant it, then start me again:
 
-  sudo chown -R $IRIS_RUNTIME_UID:$IRIS_RUNTIME_UID "$REPO/artifacts"
+  sudo chown -R $IRIS_RUNTIME_UID:$OPERATOR_GID "$REPO/artifacts" && sudo chmod -R g+w "$REPO/artifacts"
 EOF
     exit 1
   fi

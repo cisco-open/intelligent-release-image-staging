@@ -60,7 +60,7 @@ boundary before the first start, and again whenever either is recreated:
 # from the repository root
 mkdir -p artifacts
 sudo chown 10001 "$IRIS_AGE_KEY_FILE_HOST"                 # keep it mode 600
-sudo chown -R 10001:10001 artifacts
+sudo chown -R 10001:"$(id -g)" artifacts && sudo chmod -R g+w artifacts   # server owns it; you can write it
 ```
 
 If you enable authenticated Prometheus scraping, create another raw token with
