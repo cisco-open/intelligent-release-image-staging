@@ -1576,6 +1576,7 @@ def test_cleanup_confirmation_is_answered_once_in_the_config_step(tmp_path, peer
 
 @pytest.mark.parametrize("purpose,payloads,expected_category", [
     ("copy_instructions", ["Copy complete\n"], None),
+    ("copy_instructions", ["%Error copying private instruction envelope\n"], "rejected"),
     ("remove_instructions", ["", ""], None),
     ("remove_instructions", ["", "iris-instructions-" + "d" * 32 +
                               ".envelope\n"], "rejected"),
@@ -1601,6 +1602,7 @@ def test_instruction_command_parses_private_payload_then_exposes_no_path_or_stre
     assert _value(result, "error_category") == expected_category
     assert _value(result, "stdout") == b""
     assert _value(result, "stderr") == b""
+    assert _value(result, "failure_payload") == b""
     records = _records(
         _transcript_path(tmp_path / "state").read_bytes())
     decoded = b"".join(
@@ -3462,3 +3464,33 @@ def test_hardware_activation_busy_does_not_retry_ambiguous_or_unauthorized_work(
     assert _value(result, "framing_complete") is False
     assert _value(result, "error_category") is not None
     assert peer.received() == ["terminal length 0", "terminal width 512", command.decode(), "exit"]
+
+
+@pytest.mark.parametrize("refusal", [
+    b"% Authorization failed.\n",
+    b"% Invalid input detected at '^' marker.\n",
+    b"% Error removing unit-login-SECRET\n",
+])
+def test_cleanup_failure_quotes_rejected_response_after_accepted_advisory(
+        tmp_path, peer_factory, refusal):
+    steps = _with_payload(
+        hw.IE3400_CLEANUP_CONFIG_STEPS,
+        b"no event manager applet IRIS-COPYROOT", refusal)
+    result, unused = _replay(
+        tmp_path, peer_factory, "cleanup_config", steps, hw.IE3400_HOST)
+    assert result["error_category"] is not None
+    assert result["framing_complete"] is False
+    detail = _verification_module()._command_failure_detail("cleanup_config", result)
+    assert "No such applet" not in detail
+    assert "unit-login-SECRET" not in detail
+    expected = refusal.strip().replace(b"unit-login-SECRET", b"<redacted>")
+    assert detail.endswith("device said " + expected.decode("ascii"))
+
+
+def test_successful_cleanup_does_not_offer_an_accepted_advisory_as_failure(
+        tmp_path, peer_factory):
+    result, unused = _replay(tmp_path, peer_factory, "cleanup_config",
+                             hw.IE3400_CLEANUP_CONFIG_STEPS, hw.IE3400_HOST)
+    assert result["error_category"] is None
+    assert _verification_module()._command_failure_detail(
+        "cleanup_config", result) == "IOx command failed: cleanup_config"

@@ -2451,7 +2451,8 @@ class IoxTransport(object):
             self.transcript.append(record, restoration=restoration)
             self._check_active(deadline)
 
-    def _result(self, child, stdout, stderr, framing, category, deadline):
+    def _result(self, child, stdout, stderr, framing, category, deadline,
+                failure_payload=b""):
         reference = self.transcript.reference()
         try:
             self._check_active(deadline)
@@ -2466,7 +2467,7 @@ class IoxTransport(object):
             stdout_truncated=stdout.truncated,
             stderr_truncated=stderr.truncated,
             framing_complete=bool(framing), error_category=category,
-            transcript_ref=reference)
+            failure_payload=failure_payload, transcript_ref=reference)
 
     def _supervisor_reap_process(self, child, deadline):
         if self.supervisor is None:
@@ -2537,6 +2538,7 @@ class IoxTransport(object):
         category = None
         framing = False
         semantic_error = None
+        failure_payload = b""
         try:
             self._check_active(deadline)
             if not isinstance(command_bytes, bytes):
@@ -2620,6 +2622,7 @@ class IoxTransport(object):
                         if (_TRUSTPOINT_ACCEPTED_RE.search(payload) is None and
                                 semantic_error is None):
                             semantic_error = "rejected"
+                            failure_payload = payload[:4096]
                         continue
                     activation_attempts = 0
                     while True:
@@ -2664,6 +2667,10 @@ class IoxTransport(object):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
+                        # Bind operator diagnostics to the first rejected
+                        # response, after the per-command advisory allowances.
+                        # Dialogue payloads have already passed the redactor.
+                        failure_payload = payload[:4096]
                     if line == b"configure terminal":
                         if payload not in (
                                 b"",
@@ -2780,6 +2787,7 @@ class IoxTransport(object):
             stdout.finish()
             stderr.finish()
             payload_spans = []
+            failure_payload = b""
 
         # A failed pre-spawn validation has no command_start to close.
         if command_id in getattr(self.transcript, "_commands", {}):
@@ -2821,7 +2829,9 @@ class IoxTransport(object):
                 category = exc.category
             framing = False
         return self._result(
-            child, stdout, stderr, framing, category, deadline)
+            child, stdout, stderr, framing, category, deadline,
+            failure_payload=failure_payload if category in (
+                "rejected", "unsupported_response", "unsupported_syntax") else b"")
 
     @staticmethod
     def _startup_category(stderr):

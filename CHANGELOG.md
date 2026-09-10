@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx failure details quote the rejected command response instead of an
+  earlier accepted cleanup advisory; instruction payloads stay private (#252).
 - Kubernetes preserves private authority-file permissions on PVC remounts;
   documented storage preparation prevents setgid inheritance into authority
   directories and provides a targeted recovery procedure (#257).

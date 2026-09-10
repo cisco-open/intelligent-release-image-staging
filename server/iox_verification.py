@@ -476,9 +476,10 @@ def _command_failure_detail(purpose, result):
     A job used to end with only "IOx command failed", and the operator had to
     decode the transcript to learn that the router had answered
     '% node--1:dbm:IOxMan:Resource Profile-names is not specified' to the
-    first line of the app block. The first '%' line the device printed is
-    the verdict IOS itself chose to show; quote it bounded and printable.
-    The transport already redacts credentials from captured output.
+    first line of the app block. Current transports bind the diagnostic to
+    the first rejected response, excluding earlier accepted advisories.
+    Older adapters expose only their complete capture. All quoted output
+    remains bounded, printable, and already redacted by the transport.
     """
     detail = "IOx command failed: %s" % purpose
     # A timeout is the transport giving up on a prompt, not a verdict: an
@@ -486,7 +487,7 @@ def _command_failure_detail(purpose, result):
     # IRIS" answer to a trustpoint removal, say) would misname the cause.
     if _get(result, "timed_out", False):
         return detail + ": timed out waiting for the device's prompt"
-    stdout = _get(result, "stdout", b"")
+    stdout = _get(result, "failure_payload", _get(result, "stdout", b""))
     if isinstance(stdout, (bytes, bytearray)):
         match = _IOS_REFUSAL_RE.search(bytes(stdout))
         if match is not None:
