@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Malformed telemetry report rings preserve delivered-event IDs and pinned
+  attribution until a complete valid snapshot is available (#245).
 - Splunk peer-evidence queries count each cumulative transfer/peer capture
   once across fresh report pulls and keep distinct unknown peer addresses;
   chart labels describe capture totals rather than hourly traffic rate (#264).

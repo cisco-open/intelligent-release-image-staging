@@ -2137,8 +2137,16 @@ def _read_reports(state_dir):
     An unreadable or incomplete snapshot raises so sample() skips the export
     pass without pruning delivery cursors or pinned sender attribution. Only
     a successful empty read means the ring is empty."""
-    return keyed_state.read_all(os.path.join(state_dir, "telemetry.json"),
-                                strict=True)
+    reports = keyed_state.read_all(os.path.join(state_dir, "telemetry.json"),
+                                   strict=True)
+    # Skipping a malformed ring or report would turn corruption into apparent
+    # eviction and retire that report's delivered ID and sender attribution.
+    # Legacy report dictionaries remain valid; only their containers are checked.
+    if any(not isinstance(ring, list)
+           or any(not isinstance(report, dict) for report in ring)
+           for ring in reports.values()):
+        raise keyed_state.KeyedStateError("report snapshot unavailable")
+    return reports
 
 
 def _peer_row(p, total, up_now, devices_by_id, report_by_device,

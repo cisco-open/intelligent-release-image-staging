@@ -4390,7 +4390,8 @@ def test_pinned_attribution_is_bounded_to_the_report_ring(tmp_path):
 
 
 @pytest.mark.parametrize("failure", [
-    "directory", "shard-permission", "corrupt-shard", "nonobject-shard"])
+    "directory", "shard-permission", "corrupt-shard", "nonobject-shard",
+    "nonlist-ring", "nonobject-report"])
 def test_failed_report_snapshot_preserves_delivery_and_attribution_until_recovery(
         tmp_path, monkeypatch, failure):
     """An incomplete scan must not retire delivered IDs or their first
@@ -4435,6 +4436,10 @@ def test_failed_report_snapshot_preserves_delivery_and_attribution_until_recover
                 return io.StringIO("{invalid")
             if failure == "nonobject-shard":
                 return io.StringIO("[]")
+            if failure == "nonlist-ring":
+                return io.StringIO(json.dumps({"rtr-05": "invalid ring"}))
+            if failure == "nonobject-report":
+                return io.StringIO(json.dumps({"rtr-05": [None]}))
         return original_open(filename, *args, **kwargs)
 
     def faulty_scandir(filename):
