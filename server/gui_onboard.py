@@ -2334,9 +2334,27 @@ class OnboardService:
                         # router preflight and must be observed, never
                         # assumed. Its refusals name the collision, so they
                         # are worth surfacing verbatim.
+                        # The IOx env deliberately carries no DEVICE_USER/
+                        # DEVICE_PASS -- a controller-custodied job hands its
+                        # credentials to the controller, not the recipe env.
+                        # The router preflight is a read-only SSH probe that
+                        # must still log in, so give it a credential-bearing
+                        # copy resolved from the device's own profile.
+                        router_env = dict(env)
+                        try:
+                            _pf_cred = self.creds.get_secrets(
+                                callback_dev.get("credential_profile_id") or "")
+                        except Exception:
+                            _pf_cred = None
+                        if isinstance(_pf_cred, dict) and _pf_cred.get("device_user"):
+                            router_env["DEVICE_USER"] = _pf_cred["device_user"]
+                            router_env["DEVICE_PASS"] = _pf_cred.get("device_pass", "")
+                            router_env["DEVICE_ENABLE"] = (
+                                _pf_cred.get("enable_secret")
+                                or _pf_cred.get("device_pass", ""))
                         try:
                             router_evidence = self._router_preflight(
-                                callback_dev, env, plan)
+                                callback_dev, router_env, plan)
                         except Exception as exc:
                             self._persist_os_family(
                                 device_id, callback_dev, prior_family)
