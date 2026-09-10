@@ -1707,6 +1707,26 @@ def _vlan_already_absent(purpose, line, payload):
     return b"% Invalid input" in payload
 
 
+# Deleting a staged file that is already gone is benign during teardown.
+# cleanup_files removes the wrapper, certificates and share unconditionally,
+# so on a retry (or after a partial teardown) the files are absent and IOS
+# answers "%Error deleting <path> (No such file or directory)". remove_wrapper
+# and remove_certificate have their own absent-file proof (a closing dir
+# probe); cleanup_files does not, so its absent deletes were read as
+# rejections and the teardown failed with nothing left to remove.
+_FILE_CLEANUP_PURPOSES = frozenset(("cleanup_files",))
+_DELETE_ABSENT_RE = re.compile(
+    br"(?im)^%\s*Error deleting\b.*\(No such file or directory\)\s*$")
+
+
+def _delete_absent(purpose, payload):
+    if purpose not in _FILE_CLEANUP_PURPOSES:
+        return False
+    lines = [line for line in payload.split(b"\n") if line.strip()]
+    return bool(lines) and all(
+        _DELETE_ABSENT_RE.match(line.strip()) for line in lines)
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2400,7 +2420,8 @@ class IoxTransport(object):
                     payload_error = _classify_ios_error(payload)
                     if (_app_already_absent(purpose, payload) or
                             _cleanup_absent(purpose, payload) or
-                            _vlan_already_absent(purpose, line, payload)):
+                            _vlan_already_absent(purpose, line, payload) or
+                            _delete_absent(purpose, payload)):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
@@ -2464,7 +2485,8 @@ class IoxTransport(object):
             # Same allowance as the per-line pass above: this second
             # classification runs on the final payload and would otherwise
             # re-impose the rejection the loop just forgave.
-            if _app_already_absent(purpose, response_payload):
+            if (_app_already_absent(purpose, response_payload) or
+                    _delete_absent(purpose, response_payload)):
                 ios_error = None
             if ios_error is not None:
                 category = ios_error
