@@ -1090,6 +1090,10 @@ for index, expected in enumerate(commands):
     if command != expected:
         trace("wrong_command", expected=expected)
         sys.exit(101)
+    if scenario.get("stderr_hex"):
+        # Emit before the command echo, so the transport must pump this
+        # diagnostic before it can observe the response's final prompt.
+        write(bytes.fromhex(scenario["stderr_hex"]), 2)
     no_early_input()
     if scenario.get("hang") == "command":
         if scenario.get("ignore_term"):
@@ -3386,3 +3390,111 @@ def test_hardware_cleanup_retry_allowances_reject_unrelated_or_extra_payload(
     result, unused = _replay(tmp_path, peer_factory, purpose, steps, hw.C8000V_HOST)
     assert _value(result, "framing_complete") is False
     assert _value(result, "error_category") is not None
+
+
+def test_hardware_activation_busy_retries_once_and_preserves_both_replies(
+        tmp_path, peer_factory, monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_ACTIVATE_BUSY_RETRY_SECONDS", 0.01, raising=False)
+    command = b"app-hosting activate appid iris"
+    peer = peer_factory(commands=[command.decode()] * 2,
+                        payload=[hw.IE3400_ACTIVATE_BUSY.decode(), hw.ACTIVATED.decode()],
+                        host=hw.IE3400_HOST)
+    transport, unused = _transport(tmp_path, peer, purpose="app_activate")
+    result = _command(transport, command)
+    peer.assert_reaped()
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert peer.received() == ["terminal length 0", "terminal width 512",
+                               command.decode(), command.decode(), "exit"]
+    loaded = module._load_transcript_prefix(
+        str(tmp_path / "state"), result["transcript_ref"], CONTROLLER)
+    assert len(loaded["commands"]) == 1
+    recorded = loaded["commands"][1]
+    spans = recorded["end"]["payload_spans"]
+    assert [recorded["stdout"][s["offset"]:s["offset"] + s["length"]] for s in spans] == [
+        hw.IE3400_ACTIVATE_BUSY, hw.ACTIVATED]
+
+
+def test_hardware_activation_busy_stops_at_the_original_deadline(
+        tmp_path, peer_factory):
+    command = b"app-hosting activate appid iris"
+    peer = peer_factory(commands=[command.decode()] * 2,
+                        payload=hw.IE3400_ACTIVATE_BUSY.decode(), host=hw.IE3400_HOST)
+    transport, unused = _transport(tmp_path, peer, purpose="app_activate")
+    result = _command(transport, command, timeout=0.4)
+    peer.assert_reaped()
+    assert _value(result, "error_category") == "timeout"
+    assert _value(result, "framing_complete") is False
+    assert peer.received().count(command.decode()) == 1
+    assert hw.IE3400_ACTIVATE_BUSY in _value(result, "stdout")
+
+
+def test_hardware_activation_busy_cancellation_prevents_the_retry(
+        tmp_path, peer_factory, monkeypatch):
+    module = _module()
+    cancel = threading.Event()
+    original_wait = module.IoxTransport._wait_activation_retry
+
+    def cancel_at_retry(self, deadline):
+        cancel.set()
+        return original_wait(self, deadline)
+
+    monkeypatch.setattr(module.IoxTransport, "_wait_activation_retry", cancel_at_retry)
+    command = b"app-hosting activate appid iris"
+    peer = peer_factory(commands=[command.decode()] * 2,
+                        payload=hw.IE3400_ACTIVATE_BUSY.decode(), host=hw.IE3400_HOST)
+    transport, unused = _transport(tmp_path, peer, purpose="app_activate", cancel=cancel)
+    result = _command(transport, command)
+    peer.assert_reaped()
+    assert _value(result, "error_category") == "cancelled"
+    assert _value(result, "framing_complete") is False
+    assert peer.received().count(command.decode()) == 1
+
+
+def test_hardware_activation_busy_has_a_fixed_attempt_ceiling(
+        tmp_path, peer_factory, monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module, "_ACTIVATE_BUSY_RETRY_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(module, "_ACTIVATE_BUSY_MAX_ATTEMPTS", 3, raising=False)
+    command = b"app-hosting activate appid iris"
+    peer = peer_factory(commands=[command.decode()] * 4,
+                        payload=hw.IE3400_ACTIVATE_BUSY.decode(), host=hw.IE3400_HOST)
+    transport, unused = _transport(tmp_path, peer, purpose="app_activate")
+    result = _command(transport, command)
+    peer.assert_reaped()
+    assert _value(result, "error_category") == "rejected"
+    assert _value(result, "framing_complete") is False
+    assert peer.received().count(command.decode()) == 3
+
+
+def test_hardware_activation_busy_with_invalid_utf8_diagnostic_never_retries(
+        tmp_path, peer_factory):
+    command = b"app-hosting activate appid iris"
+    peer = peer_factory(commands=[command.decode()] * 2,
+                        payload=hw.IE3400_ACTIVATE_BUSY.decode(),
+                        stderr_hex="ff", host=hw.IE3400_HOST)
+    transport, unused = _transport(tmp_path, peer, purpose="app_activate")
+    result = _command(transport, command)
+    peer.assert_reaped()
+    assert _value(result, "error_category") == "unsupported_response"
+    assert _value(result, "framing_complete") is False
+    assert peer.received().count(command.decode()) == 1
+    assert b"\xff" in _value(result, "stderr")
+
+
+@pytest.mark.parametrize("purpose,command,payload", [
+    ("app_start", b"app-hosting start appid iris", hw.IE3400_ACTIVATE_BUSY),
+    ("app_activate", b"app-hosting activate appid other", hw.IE3400_ACTIVATE_BUSY),
+    ("app_activate", b"app-hosting activate appid iris",
+     hw.IE3400_ACTIVATE_BUSY + b"% Authorization failed\n"),
+    ("app_activate", b"app-hosting activate appid iris",
+     hw.IE3400_ACTIVATE_BUSY + b"Unexpected operation result\n"),
+], ids=["other-action", "other-app", "extra-error", "extra-payload"])
+def test_hardware_activation_busy_does_not_retry_ambiguous_or_unauthorized_work(
+        tmp_path, peer_factory, purpose, command, payload):
+    result, peer = _replay(tmp_path, peer_factory, purpose, ((command, payload),),
+                          hw.IE3400_HOST)
+    assert _value(result, "framing_complete") is False
+    assert _value(result, "error_category") is not None
+    assert peer.received() == ["terminal length 0", "terminal width 512", command.decode(), "exit"]

@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx onboarding retries the IE-3400's exact activation-busy refusal within
+  the existing activation deadline. Every retry is recorded and cancellable;
+  other responses remain failures instead of triggering another activation.
 - IOx undeploy retries accept IOS's exact already-absent VirtualPortGroup
   response and the revocation reminder after removing an enrolled IRIS
   trustpoint. Cleanup can finish after a partial teardown on Catalyst 8000V

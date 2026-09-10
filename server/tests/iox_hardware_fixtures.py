@@ -208,6 +208,10 @@ UNINSTALLING = b"Uninstalling 'iris'. Use 'show app-hosting list' for progress.\
 IE3400_INSTALL_COMMAND = b'app-hosting install appid iris package flash:iris-872886fb9c2efbe257b09299f73320ee.tar'
 IE3400_INSTALLING = b"Installing package 'flash:iris-872886fb9c2efbe257b09299f73320ee.tar' for 'iris'. Use 'show app-hosting list' for progress.\n\n"
 ACTIVATED = b'iris activated successfully\nCurrent state is: ACTIVATED\n\n'
+# IE-3400 onboarding job 94a48bbfd9e5e82c, 2026-09-10: activation did
+# not begin, but the old transport reported success and the state stayed DEPLOYED.
+IE3400_ACTIVATE_BUSY = (
+    b"'iris' cannot be activated at this time. Another operation is in progress. Try again later.\n\n")
 STARTED = b'iris started successfully\nCurrent state is: RUNNING\n'
 C8000V_COPY_CERTIFICATE_COMMAND = b'app-hosting data appid iris copy bootflash:iris-ca.pem iris-catalog.pem'
 C8000V_COPY_CERTIFICATE = b'Successfully copied file /bootflash/iris-ca.pem to iris as iris-catalog.pem\n'

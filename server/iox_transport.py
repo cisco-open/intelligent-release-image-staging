@@ -1864,8 +1864,30 @@ def _trustpoint_removal(purpose, line):
     return purpose == _TRUSTPOINT_PURPOSE and line.strip() == _TRUSTPOINT_REMOVE
 
 
+_ACTIVATE_BUSY_RETRY_SECONDS = 5.0
+_ACTIVATE_BUSY_MAX_ATTEMPTS = 60
+_ACTIVATE_COMMAND_RE = re.compile(br"app-hosting activate appid ([A-Za-z0-9_.-]{1,64})")
+_ACTIVATE_BUSY_RE = re.compile(
+    br"'([A-Za-z0-9_.-]{1,64})' cannot be activated at this time\. "
+    br"Another operation is in progress\. Try again later\.")
+
+
+def _activation_not_started(purpose, line, payload):
+    """Only the recorded, app-bound refusal proves activation did not start."""
+    if purpose != "app_activate":
+        return False
+    command = _ACTIVATE_COMMAND_RE.fullmatch(line)
+    reply = _ACTIVATE_BUSY_RE.fullmatch(payload.strip())
+    return bool(command and reply and command.group(1) == reply.group(1))
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
+        if _ACTIVATE_BUSY_RE.fullmatch(line.strip()):
+            # Unlike most IOS errors this refusal has no '%' prefix. An
+            # exact, authorized activation may retry it below; every other
+            # occurrence remains a failure, including busy plus extra output.
+            return "rejected"
         lower = line.lower()
         if (lower.startswith(b"% invalid input") or
                 lower.startswith(b"% incomplete command") or
@@ -2375,6 +2397,15 @@ class IoxTransport(object):
         if self._clock() >= deadline:
             raise IoxTransportError("timeout")
 
+    def _wait_activation_retry(self, deadline):
+        retry_at = min(deadline, self._clock() + _ACTIVATE_BUSY_RETRY_SECONDS)
+        while True:
+            self._check_active(deadline)
+            remaining = retry_at - self._clock()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.05, remaining))
+
     def _environment(self):
         environment = {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -2624,10 +2655,38 @@ class IoxTransport(object):
                                 semantic_error is None):
                             semantic_error = "rejected"
                         continue
-                    payload, span, prompt_kind = dialogue.command_step(
-                        line, expected, question=question, answer=answer)
-                    framed_payloads.append(payload)
-                    payload_spans.append({"offset": span[0], "length": span[1]})
+                    activation_attempts = 0
+                    while True:
+                        payload, span, prompt_kind = dialogue.command_step(
+                            line, expected, question=question, answer=answer)
+                        framed_payloads.append(payload)
+                        payload_spans.append({"offset": span[0], "length": span[1]})
+                        activation_attempts += 1
+                        if not (len(executable) == 1 and not in_config and
+                                _activation_not_started(purpose, line, payload)):
+                            break
+                        # IE-3400 CAF can still be busy after the install
+                        # reports DEPLOYED. The exact refusal proves this
+                        # mutation did not start; repeat only that command in
+                        # its existing authority, SSH session and deadline.
+                        # Every attempt remains in the same transcript, with
+                        # its own payload span. Unknown outcomes never retry.
+                        if (stdout.invalid_control or stderr.invalid_control or
+                                stdout.invalid_utf8 or stderr.invalid_utf8):
+                            raise IoxTransportError("unsupported_response")
+                        # UTF-8 flags are finalized only when the stream
+                        # closes. Validate the bounded captures now, before
+                        # another mutation; a partial diagnostic fails closed.
+                        try:
+                            bytes(stdout.data).decode("utf-8")
+                            bytes(stderr.data).decode("utf-8")
+                        except UnicodeDecodeError:
+                            raise IoxTransportError("unsupported_response")
+                        if stdout.truncated or stderr.truncated:
+                            raise IoxTransportError("readback_unknown")
+                        if activation_attempts >= _ACTIVATE_BUSY_MAX_ATTEMPTS:
+                            raise IoxTransportError("rejected", "application activation remained busy")
+                        self._wait_activation_retry(operation_deadline)
                     payload_error = _classify_ios_error(payload)
                     if (_app_already_absent(purpose, payload) or
                             _cleanup_absent(purpose, payload) or
