@@ -2199,6 +2199,128 @@ def test_recorded_teardown_never_inherits_unrecorded_cleanup_paths(tmp_path):
     assert projected.get("share_guest_path") != "/operator/unowned"
 
 
+@pytest.mark.parametrize("persisted_log", ["off", "on"])
+@pytest.mark.parametrize("requested_log", [None, "off", "on"],
+                         ids=["default", "off", "on"])
+def test_recorded_target_uses_job_log_option_without_inheriting_seed_authority(
+        tmp_path, persisted_log, requested_log):
+    record = _record(address="192.0.2.10")
+    record["resolved"].update(
+        log=persisted_log, telemetry="off", management_type="inband",
+        inband_vlan=120, app_ip="192.0.2.11", app_gateway="192.0.2.1",
+        app_mask="255.255.255.0", share_host_path="/iox_data/iris",
+        share_ios_path="flash:guest-share/iris")
+    before = copy.deepcopy(record)
+    seed = _Bag(
+        host="198.51.100.99", port=2222, platform="guestshell",
+        resources=[{"kind": "iox-app", "ownership": "operator-owned"}],
+        management_type="routed", inband_vlan=999, app_ip="198.51.100.11",
+        app_gateway="198.51.100.1", telemetry="on", package_fs="disk0:",
+        share_host_path="/operator/unowned",
+        share_ios_path="flash:operator/unowned")
+    if requested_log is not None:
+        seed["log"] = requested_log
+    seed_before = copy.deepcopy(seed)
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path, records=[record]),
+        _TransportFactory())
+    try:
+        projected = controller._record_target(record, seed, "uninstall")
+    finally:
+        controller.close()
+    assert projected["host"] == "192.0.2.10"
+    assert projected["port"] == 22
+    assert projected["platform"] == "iox"
+    assert projected["resources"] == record["resources"]
+    assert projected["management_type"] == "inband"
+    assert projected["inband_vlan"] == 120
+    assert projected["app_ip"] == "192.0.2.11"
+    assert projected["app_gateway"] == "192.0.2.1"
+    assert projected["package_fs"] == "flash:"
+    assert projected["telemetry"] == "off"
+    assert projected["share_host_path"] == "/iox_data/iris"
+    assert projected["share_ios_path"] == "flash:guest-share/iris"
+    assert record == before and seed == seed_before
+    assert projected["log"] == (requested_log or "off")
+
+
+@pytest.mark.parametrize("requested_log", ["off", "on"])
+def test_strict_recovery_reread_preserves_attempt_log_only(
+        tmp_path, requested_log):
+    journal = _journal(phase="disable_intent", state="enabled", revision=2)
+    record = _record(journal=journal)
+    record["resolved"].update(
+        log="off" if requested_log == "on" else "on",
+        management_type="inband", inband_vlan=120)
+    store = _StatefulStore(tmp_path, records=[record], obligations=[journal])
+    controller = _controller(tmp_path, store, _TransportFactory())
+    request = _request(action="uninstall", record_id="r1")
+    request["target"].update(
+        log=requested_log, inband_vlan=999,
+        resources=[{"kind": "iox-app", "ownership": "operator-owned"}],
+        share_ios_path="flash:operator/unowned")
+    attempt = _module()._Attempt(controller, "recover", request, _Cancel())
+    try:
+        reread = controller._strict_recovery_binding(attempt, journal)
+    finally:
+        controller.close()
+    assert reread == record
+    assert [call for call in store.calls if call[0] == "get"] == [
+        ("get", "r1", True)]
+    assert attempt.target["host"] == record["resolved"]["device_ip"]
+    assert attempt.target["resources"] == record["resources"]
+    assert attempt.target["inband_vlan"] == 120
+    assert "share_ios_path" not in attempt.target
+    assert attempt.target["log"] == requested_log
+    assert store.records["r1"] == record
+
+
+@pytest.mark.parametrize("requested_log", [None, "off", "on"],
+                         ids=["default", "off", "on"])
+def test_production_recorded_uninstall_recipe_obeys_job_log_option(
+        tmp_path, monkeypatch, requested_log):
+    echo = b"Device#show app-hosting list\n"
+    original_command = _StatefulTransport.command
+
+    def command_with_echo(transport, command_id, command_bytes, deadline):
+        result = original_command(
+            transport, command_id, command_bytes, deadline)
+        if transport._purpose(command_id, command_bytes) == "app_list":
+            result["stdout"] = echo + result["stdout"]
+        return result
+
+    monkeypatch.setattr(_StatefulTransport, "command", command_with_echo)
+    record = _record()
+    record["resolved"].update(
+        log="off" if requested_log == "on" else "on",
+        management_type="inband", inband_vlan=120,
+        model="IE-3400-8T2S", app_gateway="192.0.2.1")
+    store = _StatefulStore(tmp_path, records=[record])
+    factory = _TransportFactory(recipe_compatible=True)
+    timeline = []
+    prepare, preflight, output = _callbacks(timeline, record_id="r1")
+    recipe = Path(__file__).resolve().parents[2] / "device/iox/uninstall.sh"
+    controller = _controller(
+        tmp_path, store, factory,
+        recipe_argv_by_action={"uninstall": ["/bin/bash", str(recipe)]})
+    request = _request(action="uninstall", record_id="r1")
+    if requested_log is not None:
+        request["target"]["log"] = requested_log
+    try:
+        result = controller.run_uninstall(
+            request, prepare, preflight, output, _Cancel())
+    finally:
+        controller.close()
+    assert result["result_code"] == 0, result
+    rendered = _rendered_output(timeline)
+    assert "[1/4] remove app: iris" in rendered
+    assert "[4/4] verify cleanup and save" in rendered
+    assert "app removed (poll 1/24)" in rendered
+    assert bool(_command_calls(factory, "app_list"))
+    assert (echo.decode().strip() in rendered) is (requested_log == "on")
+    assert store.records["r1"]["resolved"] == record["resolved"]
+
+
 @pytest.mark.parametrize("adopted", [False, True])
 def test_record_without_historical_identity_requires_two_matching_live_reads(
         tmp_path, adopted):

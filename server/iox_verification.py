@@ -3688,6 +3688,10 @@ class IoxController(object):
             projected["pkg"] = ("iris-amd64.tar" if re.match(
                 r"^C[89]", resolved["model"], re.I) else "iris-arm64.tar")
         projected["resources"] = copy.deepcopy(record.get("resources") or [])
+        # Logging is a per-job option, not durable device authority. Keep the
+        # caller's choice across recorded teardown and recovery rereads while
+        # every address, resource and cleanup path still comes from the record.
+        projected["log"] = _get(seed, "log", "off")
         validated = self._validate_target(projected, action)
         # Inventory/request values select the durable record; they never
         # retarget it.  The controller uses this closed projection of the

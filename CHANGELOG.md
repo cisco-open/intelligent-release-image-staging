@@ -56,6 +56,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Recorded IOx undeploy honors the current job's detailed-log option while
+  preserving record-owned device addresses and cleanup resources (#255).
 - IOx job logs name the package and certificate steps `fetch_wrapper` and
   `fetch_certificate`, matching their HTTPS delivery path (#249).
 - IOx install preflight reads only named collision lines and HTTP credential
