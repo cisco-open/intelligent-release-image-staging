@@ -1496,17 +1496,22 @@ def _image_filename(deps, entry, img_id):
 
 
 def _root_file_origin(state, fname):
-    """The recorded provenance of the per-image record that placed `fname`
-    at the target-FS root, or None when no record claims it.
+    """Conservative provenance across every record claiming a root filename.
 
     pending_root_deletes carries bare filenames (not image ids), so the
-    owning record has to be found by its root_file field rather than looked
-    up directly. None here means exactly what a found record's missing
-    'origin' means: unproven — every deletion site treats it as adopted."""
+    owning records have to be found by root_file rather than looked up by id.
+    Different image ids may name the same file over time. Any explicit
+    adoption protects it; downloaded is proved only when every claim agrees.
+    None means unproven and retains the caller's platform-specific legacy
+    policy."""
+    origins = []
     for value in state.values():
         if _is_image_entry(value) and value.get("root_file") == fname:
-            return value.get("origin")
-    return None
+            origins.append(value.get("origin"))
+    if "adopted" in origins:
+        return "adopted"
+    return "downloaded" if origins and all(
+        origin == "downloaded" for origin in origins) else None
 
 
 def _protect_adopted_root(deps, entry, fname):
@@ -1819,7 +1824,7 @@ def _send_set_heartbeat(deps, sid, state, ids, ticks,
 
 def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
                  legacy_pointer=False, plan_row=None,
-                 instruction_attestation=None):
+                 instruction_attestation=None, assigned_ids=()):
     """Stage ONE image of the assigned set and return its status string.
 
     This is the whole of the pre-multi-image run_once() from the catalog
@@ -2278,6 +2283,28 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
     pending = state.get("pending_root_deletes") or []
     if pending:
         fs = state.get("stage_fs", "flash:")
+        # A legacy queue may name an image assigned again since it was
+        # queued, including a sibling staged later in this tick. Keep both
+        # its current catalog filename and its last placed root filename.
+        # An unavailable sibling cannot authorize deletion of an unknown
+        # destination; retry the cleanup once the whole set is resolvable.
+        assigned_files = {image["filename"].casefold()}
+        assigned_known = True
+        for assigned_id in assigned_ids:
+            try:
+                assigned = (image if assigned_id == img_id else
+                            deps.catalog.get_image(assigned_id))
+                filename = assigned["filename"]
+                if not isinstance(filename, str) or not _FILENAME_RE.fullmatch(filename):
+                    raise ValueError("invalid assigned filename")
+                assigned_files.add(filename.casefold())
+                entry = state.get(assigned_id)
+                root = entry.get("root_file") if isinstance(entry, dict) else None
+                if isinstance(root, str) and _FILENAME_RE.fullmatch(root):
+                    assigned_files.add(root.casefold())
+            except Exception:
+                assigned_known = False
+                break
         doomed = [n for n in pending
                   if n != image["filename"] and _FILENAME_RE.match(n)]
         deletable = [n for n in doomed
@@ -2288,16 +2315,25 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             if protected not in deletable:
                 deps.emit("ROOTCOPY-KEPT",
                           "left in place: operator-adopted %s" % protected)
-        # The BOOT target is never on the delete list either: a replaced root
-        # copy the operator has since pointed BOOT at is the file the device
-        # boots next. Resolved out of the queue like an adopted file (a retry
-        # could never change what BOOT says); an unreadable BOOT variable
-        # keeps the whole queue for the next tick and deletes nothing now.
+        # Neither the running image nor the next BOOT target may be deleted.
+        # An operator can point BOOT elsewhere while still running an older
+        # IRIS-placed image, so these are independent facts. Protected names
+        # are resolved like adopted files; an unreadable fact keeps the queue
+        # for the next tick and authorizes no destructive work.
         boot = _boot_target(deps)
-        if boot is None:
+        running = None
+        if boot is not None:
+            try:
+                running = _ios_basename(deps.running_image())
+            except Exception:
+                pass
+        if boot is None or not running or not assigned_known:
+            unavailable = ("BOOT variable unreadable" if boot is None else
+                           "running image unreadable" if not running else
+                           "assigned image unavailable")
             deps.emit("CLEANUP-PENDING",
-                      "replaced-image cleanup deferred: BOOT variable "
-                      "unreadable; will retry")
+                      "replaced-image cleanup deferred: %s; "
+                      "will retry" % unavailable)
             deletable = []
             still = list(doomed)
         else:
@@ -2305,6 +2341,16 @@ def _stage_image(cfg, deps, state, img_id, tele_on, stream_on, tick,
             for kept in [n for n in deletable if _is_boot_target(boot, n)]:
                 deps.emit("ROOTCOPY-KEPT",
                           "left in place: %s is the BOOT target" % kept)
+                deletable.remove(kept)
+            for kept in [n for n in deletable
+                         if running.casefold() == n.casefold()]:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: %s is the running image" % kept)
+                deletable.remove(kept)
+            for kept in [n for n in deletable
+                         if n.casefold() in assigned_files]:
+                deps.emit("ROOTCOPY-KEPT",
+                          "left in place: %s is an assigned image" % kept)
                 deletable.remove(kept)
         if deletable:
             deps.reclaim_bundle(fs, deletable)
@@ -3872,7 +3918,8 @@ def run_once(cfg, deps, state, tick_seconds=60):
                                   legacy_pointer=(idx == 0),
                                   plan_row=plan_rows.get(img_id),
                                   instruction_attestation=
-                                  instruction_attestation)
+                                  instruction_attestation,
+                                  assigned_ids=ids)
         except Exception as exc:
             status = _contained_stage_failure(
                 cfg, deps, state, img_id, tick, tele_on, stream_on, exc)

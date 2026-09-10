@@ -5134,6 +5134,94 @@ def test_pending_root_delete_is_deferred_when_boot_variable_is_unreadable():
                for m, msg in emitted)
 
 
+@pytest.mark.parametrize("running", ["old.bin", "bootflash:/OLD.BIN"])
+def test_pending_root_delete_keeps_running_image_when_boot_points_elsewhere(running):
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    boot["image"] = "next.bin"
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin", "older.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                         "origin": "downloaded"}}
+    deps = deps._replace(
+        running_image=lambda: running,
+        root_present=lambda fname, prefix="flash:", expected_size=None:
+            fname == "old.bin")
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == [("flash:", ["older.bin"])]
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "old.bin is the running image" in msg
+               for m, msg in emitted)
+
+
+@pytest.mark.parametrize("failure", [None, "", RuntimeError("read unavailable")])
+def test_pending_root_delete_defers_when_running_image_is_unreadable(failure):
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, boot, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    boot["image"] = "next.bin"
+    state = {"schema_version": iris_agent._STATE_SCHEMA,
+             "image_id": "img2", "pending_root_deletes": ["old.bin"],
+             "old-img": {"root_file": "old.bin", "copied": True,
+                         "origin": "downloaded"}}
+
+    def running_image():
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    deps = deps._replace(running_image=running_image)
+    iris_agent.run_once(CFG, deps, state)
+    assert bundle_reclaimed == []
+    assert state["pending_root_deletes"] == ["old.bin"]
+    assert any(m == "CLEANUP-PENDING" and "running image unreadable" in msg
+               for m, msg in emitted)
+
+
+@pytest.mark.parametrize("copy_in_place", [False, True])
+@pytest.mark.parametrize("older_origin", [None, "downloaded"])
+def test_pending_root_delete_preserves_any_explicit_adoption(copy_in_place,
+                                                           older_origin):
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, emitted, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA, "image_id": "img2",
+             "pending_root_deletes": ["operator.bin"],
+             "older": {"parked": True, "root_file": "operator.bin",
+                       "origin": older_origin, "copied": True},
+             "adopted": {"parked": True, "root_file": "operator.bin",
+                         "origin": "adopted", "copied": True}}
+    iris_agent.run_once(CFG, deps._replace(copy_in_place=copy_in_place), state)
+    assert bundle_reclaimed == []
+    assert "pending_root_deletes" not in state
+    assert any(m == "ROOTCOPY-KEPT" and "operator-adopted operator.bin" in text
+               for m, text in emitted)
+
+
+def test_pending_root_delete_preserves_conflicting_unknown_xr_provenance():
+    cat = FakeCatalog({"approved_image_id": "img2"},
+                      {"id": "img2", "filename": "img2.bin", "size": 7,
+                       "sha256": "def"})
+    deps, _, _, _, _, _, _, bundle_reclaimed = make_deps(
+        cat, {"/stage/img2.bin": 7}, verify_ok=True)
+    state = {"schema_version": iris_agent._STATE_SCHEMA, "image_id": "img2",
+             "pending_root_deletes": ["operator.bin"],
+             "older": {"parked": True, "root_file": "operator.bin",
+                       "origin": "downloaded", "copied": True},
+             "unknown": {"parked": True, "root_file": "operator.bin",
+                         "copied": True}}
+    iris_agent.run_once(CFG, deps._replace(copy_in_place=True), state)
+    assert bundle_reclaimed == []
+    assert "pending_root_deletes" not in state
+
+
 def test_deps_contract_has_no_arbitrary_ios_passthrough():
     # IRIS-09-006: the old `ios` field was an arbitrary IOS-exec seam with no
     # production caller — the one place any IOS command could have run. Its

@@ -72,6 +72,35 @@ class MultiCatalog:
         return self.hb_response
 
 
+@pytest.mark.parametrize("sibling_unavailable", [False, True])
+def test_legacy_root_cleanup_protects_assigned_sibling(sibling_unavailable):
+    catalog = MultiCatalog([_img("a"), _img("b")])
+    if sibling_unavailable:
+        catalog.raises.add("b")
+    deps, rec = make_deps(catalog, {"/stage/a.bin": 5, "/stage/b.bin": 5})
+    state = {
+        "schema_version": iris_agent._STATE_SCHEMA,
+        "stage_fs": "flash:",
+        "pending_root_deletes": ["b.bin", "obsolete.bin"],
+        "b": {"root_file": "b.bin", "origin": "downloaded",
+              "done": True, "copied": True, "sha": "b-sha"},
+    }
+    deps = deps._replace(
+        root_present=lambda name, prefix="flash:", expected_size=None:
+            name != "obsolete.bin")
+    iris_agent.run_once(CFG, deps, state)
+    if sibling_unavailable:
+        assert rec["bundle_reclaimed"] == []
+        assert state["pending_root_deletes"] == ["b.bin", "obsolete.bin"]
+        assert any(m == "CLEANUP-PENDING" and "assigned image unavailable" in text
+                   for m, text in rec["emitted"])
+    else:
+        assert rec["bundle_reclaimed"] == [("flash:", ["obsolete.bin"])]
+        assert "pending_root_deletes" not in state
+        assert any(m == "ROOTCOPY-KEPT" and "b.bin is an assigned image" in text
+                   for m, text in rec["emitted"])
+
+
 def make_deps(catalog, sizes, free=9_000_000_000, root_ok=True,
               verify_ok=True, mode="bundle", reclaimables=()):
     """Fake Deps + a `rec` dict of everything the agent did to the device."""

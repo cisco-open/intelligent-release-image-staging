@@ -60,6 +60,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Legacy root cleanup protects the running image and every assigned image,
+  defers when those identities are unavailable, and preserves a file if any
+  matching record marks it as operator-adopted (#258).
 - Public catalog-certificate publication reports copy or rename failures
   and preserves the previously served certificate (#263).
 - Malformed persisted peer-attribution entries can be repaired by later
