@@ -3319,6 +3319,7 @@
   var roleDefinitions = {}, roleDefinitionsRevision = null, roleDefinitionsOk = false;
   var roleDefinitionsError = '', roleDefinitionsLoading = false;
   var roleDefEditing = null, roleDefPreview = null, roleDefBusy = false, roleDefGeneration = 0;
+  var roleDefRevision = null, roleDefOriginal = {};
 
   function renderRoleQosFields() {
     var rates = [], swarm = [];
@@ -3359,6 +3360,7 @@
   renderRoleQosFields();
   document.getElementById('role-def-modal').addEventListener('input', function (e) {
     if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-qos')) updateRateHints();
+    roleDefGeneration++;
     // Any edit invalidates a pending preview: the commit must carry the
     // token of exactly the candidate the operator reviewed.
     if (roleDefPreview && !roleDefBusy) {
@@ -3367,6 +3369,7 @@
     }
   });
   document.getElementById('role-def-modal').addEventListener('change', function () {
+    roleDefGeneration++;
     if (roleDefPreview && !roleDefBusy) {
       resetRoleDefinitionPreview();
       document.getElementById('role-def-msg').textContent = 'The definition changed. Preview again before saving.';
@@ -3521,8 +3524,12 @@
   });
 
   function openRoleDefinitionEditor(name) {
-    var d = name ? (roleDefinitions[name] || {}) : {};
+    var d = JSON.parse(JSON.stringify(name ? (roleDefinitions[name] || {}) : {}));
     roleDefEditing = name || null;
+    // The form and its unedited overlay belong to this exact read. Polling
+    // cannot lend a stale editor a newer revision that bypasses its CAS.
+    roleDefRevision = name ? roleDefinitionsRevision : peerPolicy.revision;
+    roleDefOriginal = d;
     roleDefGeneration++;
     resetRoleDefinitionPreview();
     document.getElementById('role-def-msg').textContent = '';
@@ -3580,8 +3587,8 @@
     if (Object.keys(qos).length) def.qos = qos;
     // A definition PUT is a full replacement, so the tracker-only qos_state
     // overlay (API-configured, not edited here) rides along unchanged.
-    if (roleDefEditing && roleDefinitions[roleDefEditing] && roleDefinitions[roleDefEditing].qos_state) {
-      def.qos_state = roleDefinitions[roleDefEditing].qos_state;
+    if (roleDefEditing && roleDefOriginal.qos_state) {
+      def.qos_state = roleDefOriginal.qos_state;
     }
     return { name: name, definition: def };
   }
@@ -3606,8 +3613,8 @@
     var committing = !!roleDefPreview;
     var built = committing ? roleDefPreview : roleDefinitionFromForm();
     if (built.error) { msg.textContent = built.error; return; }
-    var revision = committing ? roleDefPreview.revision : peerPolicy.revision;
-    if (typeof revision !== 'number') { msg.textContent = 'Peer policy revision unknown. Refresh, then try again.'; return; }
+    var revision = committing ? roleDefPreview.revision : roleDefRevision;
+    if (typeof revision !== 'number') { msg.textContent = 'Peer policy revision unknown. Close this editor, refresh, and reopen it.'; return; }
     var payload = Object.assign({}, built.definition);
     if (committing) payload.confirm_token = roleDefPreview.confirm_token;
     var generation = roleDefGeneration;
@@ -3617,9 +3624,15 @@
     try {
       var res = await policyWrite('PUT', '/api/v1/peer-policy/roles/' + encodeURIComponent(built.name) +
         (committing ? '' : '?dry_run=1'), payload, revision);
-      if (!committing && generation !== roleDefGeneration) return;
+      if (!committing && generation !== roleDefGeneration) {
+        msg.textContent = 'The definition changed. Preview again before saving.';
+        return;
+      }
       if (!res.ok) {
         msg.textContent = roleDefinitionProblem(res.status, res.body, committing ? 'Save' : 'Preview');
+        if (res.status === 412 || res.body.code === 'revision_conflict') {
+          msg.textContent = 'Peer policy changed. Close this editor, refresh, and reopen the current definition before previewing again.';
+        }
         resetRoleDefinitionPreview();
         return;
       }
@@ -4168,13 +4181,14 @@
   async function latestOccurrence(id) {
     var base = '/api/v1/schedules/' + encodeURIComponent(id) + '/occurrences';
     var probe = await fetch(base + '?limit=1');
-    if (!probe.ok) return null;
+    if (!probe.ok) return;
     var head = await probe.json();
-    if (!head.total) return null;
+    if (head.total === 0) return null;
+    if (!Number.isSafeInteger(head.total) || head.total < 0) return;
     var page = await fetch(base + '?limit=1&offset=' + (head.total - 1));
-    if (!page.ok) return null;
+    if (!page.ok) return;
     var body = await page.json();
-    return (body.occurrences || [])[0] || null;
+    return (body.occurrences || [])[0];
   }
 
   async function reaffirmSchedule(row) {
@@ -4232,11 +4246,11 @@
     var body = await response.json();
     if (mine !== schedRefreshGeneration) return;
     SCHEDULES = body.schedules || [];
-    var latest = {};
+    var latest = Object.create(null);
     for (var i = 0; i < SCHEDULES.length && i < SCHED_HISTORY_ROWS; i++) {
       try {
         latest[SCHEDULES[i].id] = await latestOccurrence(SCHEDULES[i].id);
-      } catch (e) { latest[SCHEDULES[i].id] = null; }
+      } catch (e) { latest[SCHEDULES[i].id] = undefined; }
       if (mine !== schedRefreshGeneration) return;
     }
     rows.innerHTML = SCHEDULES.length ? SCHEDULES.map(function (row) {
@@ -4244,7 +4258,7 @@
       var run = occurrence
         ? [occurrence.state, scheduleDeltaText(occurrence),
            scheduleWaveText(occurrence)].filter(function (part) { return part; }).join(' · ')
-        : 'no run yet';
+        : occurrence === null ? 'no run yet' : 'run history unavailable';
       return '<tr data-id="' + esc(row.id) + '"><td class="machine"><b>' +
         esc(row.id) + '</b></td><td>' + esc(row.kind) + '</td><td>' +
         esc(scheduleTargetSummary(row)) + '</td><td>' +
@@ -4363,7 +4377,7 @@
           (body.title || body.error || response.status) + '.';
       }
     } catch (e) {
-      msg.textContent = 'Schedule not created; the request did not complete.';
+      msg.textContent = 'Response unavailable. The schedule may have been created; refresh schedules before trying again.';
     } finally {
       setBulkBusy(false);
     }

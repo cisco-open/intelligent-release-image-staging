@@ -197,7 +197,7 @@ function preview(extra = {}) {
     role_pairs_stopped: 1, qos_changed: true, ...extra};
 }
 ''' + code + '\n(async () => {\n' + script + '\n})().catch(e => {console.error(e); process.exit(1);});',
-        text=True, capture_output=True)
+        text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -254,6 +254,7 @@ def test_role_definition_editor_edit_discards_a_stale_preview_and_carries_qos_st
     _run_role_console_js(r'''
 roleDefinitions = {boat: {restricted: true, peers: ['boat'], qos: {seed_up_bps: 12500000},
   qos_state: {seeder: {numwant: 4}}}};
+roleDefinitionsRevision = 7;
 roleDefinitionsOk = true;
 openRoleDefinitionEditor('boat');
 assert.equal(el('rd-name').disabled, true);

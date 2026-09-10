@@ -60,6 +60,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Role editing discards previews after form changes and retains the revision
+  originally opened, preventing stale forms from overwriting newer policy
+  (#268, #269).
+- Schedule history distinguishes unavailable evidence from zero runs, and
+  a lost creation response no longer claims the schedule was not created
+  (#273, #276).
+- Management startup admits no scheduled work after a latched termination
+  request and cleans up partially started background work (#277).
+- Maintenance-window guidance uses the scheduled worker limit and distinguishes
+  closing admission from draining running jobs; the IOx README directs operators
+  through the controller workflow (#274, #278).
 - XR command batches wait for each router prompt, preventing queued log
   reads or logout from being lost after a `run` command (#253).
 - Schedule quarantine diagnostics retain a wave gate that already opened,
