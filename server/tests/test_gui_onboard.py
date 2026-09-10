@@ -4983,19 +4983,16 @@ def test_cancelled_authority_waiter_preserves_physical_manual_worker_slot(monkey
 def test_catalyst_8000_offers_router_and_iox_and_resolves_the_iox_arch():
     """IOx on a Catalyst 8000: amd64 package, bootflash staging -- the
     installer derives the VirtualPortGroup vnic from the router management
-    type, so the arch env carries no AppGig interface. It DOES carry a share
-    (issue #228): a router hands the image to IOS through the bind-mounted
-    bootflash share plus an IOS-internal copy, never over scp, so the two
-    paths must be here for the recipe to render run-opts 12-14 and mkdir."""
+    type, so the arch env carries no AppGig interface. It carries NO share
+    either: a C8000V cannot bind-mount bootflash: into the app (CAF ignores
+    the -v run option; verified 2026-09-10), so the router hands the image to
+    IOS over the scp push and the recipe keeps its SCP server step."""
     assert gui_onboard.install_options_for("C8000V") == ["router", "iox"]
     env = gui_onboard._iox_arch_env("r1", "C8000V")
     assert env == {"PKG": "iris-amd64.tar", "PKG_FS": "bootflash:",
-                   "TARGET_FS": "bootflash:",
-                   "SHARE_HOST_PATH": "/bootflash/iox_host_data_share",
-                   "SHARE_IOS_PATH": "bootflash:iox_host_data_share"}
+                   "TARGET_FS": "bootflash:"}
     assert "APP_INTF" not in env
-    # the host path is the app-hosting view of the SAME bootflash: directory
-    assert env["SHARE_HOST_PATH"] == "/" + env["SHARE_IOS_PATH"].replace(":", "/")
+    assert "SHARE_HOST_PATH" not in env and "SHARE_IOS_PATH" not in env
     assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "iox"}) == "iox"
     assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "router"}) == "router"
     with pytest.raises(ValueError, match="router or iox"):

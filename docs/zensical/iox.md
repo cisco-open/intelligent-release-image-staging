@@ -50,9 +50,9 @@ IRIS-owned `VirtualPortGroup<N>` (and, for `router-nat`, the same NAT ACL,
 overload rule and BitTorrent static translation) that the Guest Shell router
 recipe creates, attaches the app with `app-vnic gateway0 virtualportgroup N`,
 and points its SSH-to-self at the VPG address. The package is the amd64 IOx
-tar and the staging target is `bootflash:`, reached through a bind-mounted
-share on that same filesystem (`bootflash:iox_host_data_share`) exactly as on
-a Catalyst 9300 — see the hand-off section below.
+tar and the staging target is `bootflash:`, reached over the scp push — a
+C8000V cannot bind-mount its bootflash into the app — see the hand-off
+section below.
 Teardown removes the app and the VPG, and un-marks a NAT outside interface
 only when the deployment record says IRIS marked it. Package verification is
 handled exactly as below — the controller disables and restores the
@@ -148,11 +148,13 @@ The hand-off of the verified scratch file to IOS depends on the platform:
   leftovers, a tiny probe proves IOS can actually read the share before any
   multi-GB copy is committed, the transient copy is removed after placement,
   and undeploy deletes the prefixed files.
-- **Catalyst 8000V (share mount)**: the same mechanism on the router's own
-  filesystem — the share is `bootflash:iox_host_data_share`, host-side
-  `/bootflash/iox_host_data_share`, and the IOS-internal copy places the
-  image at the `bootflash:` root. The two paths are defined in one place,
-  `server/gui_onboard.py`'s `_C8K_IOX_ENV`.
+- **Catalyst 8000V (scp push)**: the router exposes no IOS-visible directory
+  to an IOx app (verified on IOS-XE 17.15.5: CAF accepts a `-v` run option for
+  `bootflash:iox_host_data_share` but never mounts it, and `app-hosting data`
+  copies only into the app), so it uses the same scp push as the IE-3400 and
+  its SCP server stays enabled. Measured alternative, not implemented: IOS
+  pulling the staged file from the app with `copy http://<app-ip>` moved a
+  973 MB image in 153 s against about 124 s over scp.
 - **IE-3400 (scp push)**: IOx cannot bind-mount the SD card there, so the
   container SCP-pushes the scratch to `guest-share/iris` through the device's
   SCP server and then runs a plain `copy` for the final placement, attested

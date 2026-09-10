@@ -46,6 +46,21 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Devices seed again after a container is recreated: when aria2 no longer
+  holds a staged image the agent already finished and verified, the agent
+  re-adds it (`RESEED`) instead of reporting the image ready while announcing
+  to no tracker (#248).
+- IOx onboarding enables the device's SCP server only on platforms that hand
+  the image to IOS over scp (IE-3x00 and Catalyst 8000, which cannot
+  bind-mount their staging filesystem into the app); a Catalyst 9300 with the
+  SSD share never enables it, and a share-configured device whose share is
+  unusable fails the placement with a `ROOTCOPY-FAIL` naming the reason
+  instead of falling back to scp (#228).
+- `tools/get-aria2c.sh` now also takes the handed-in binary from
+  `deliverables/aria2c-<cpu>`, the same place the device package builders
+  use, so the Kubernetes and Compose image builds pick up a new aria2c from
+  one drop; the Kubernetes guide documents the rebuild-and-recopy steps an
+  aria2c pin change requires.
 - Device agent: a per-image staging failure (for example no provable writable
   IOS staging filesystem) no longer suppresses the heartbeat. The device
   registers with stage_state `error` and the bounded, redacted exception text

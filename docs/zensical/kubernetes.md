@@ -55,7 +55,10 @@ reconciliation rather than blindly retrying a device operation. See
 [Management Type and VLAN Ownership](management-type.md).
 
 IOx onboarding needs `iris-arm64.tar` and/or `iris-amd64.tar` under
-`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. Copy each package's
+`/data/artifacts`; IOS-XR onboarding needs `iris-xr.rpm`. When the aria2c pin
+in `tools/aria2c.sha256` changes, refresh both `deliverables/` binaries,
+rebuild both images and every device package from them, and copy the packages
+again: the agents must be file-identical across packages. Copy each package's
 adjacent `.manifest` as well, because readiness binds the served wrapper bytes
 to their canonical OCI provenance. Kubernetes does not run host-side package
 builders. Build the deployment-neutral packages elsewhere and copy them to the

@@ -45,7 +45,14 @@ its published port. Settings reports that URL separately from the server IP.
 ## Build and pin both images
 
 Build from the repository root and push each tier to a registry the cluster can
-pull from:
+pull from. `tools/get-aria2c.sh` installs the handed-in seeder client from
+`deliverables/aria2c-x86_64` (or `ARIA2C_DELIVERABLE`) and verifies it against
+`tools/aria2c.sha256`; a copy that does not match the pin fails closed, so a
+change to that pin (a new aria2c build) means: refresh both `deliverables/`
+binaries, rebuild BOTH images, rebuild every device package with the same
+binaries, and copy the packages to the pod again (see
+[Provide the device packages](#provide-the-device-packages)) before rolling the
+Deployments — the device agents must be file-identical across packages.
 
 ```bash
 tools/get-aria2c.sh amd64

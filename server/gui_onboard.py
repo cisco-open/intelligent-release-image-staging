@@ -297,20 +297,18 @@ _C9K_MODEL = r"^C9[0-9]{3}"
 # device's SCP server stays off (issue #228: SCP is for IE-3x00 only, the one
 # IOx platform that cannot bind-mount its staging filesystem into the app).
 #
-# THE one place the Catalyst 8000 share pair is defined. A router's bootflash:
-# IS the app-hosting host filesystem, so the host side is /bootflash/<dir> and
-# the IOS side bootflash:<dir>. If CAF refuses this host path on some router,
-# change these TWO values here and nowhere else -- nothing downstream
-# hard-codes them (device/iox/install.sh and the controller recipe take them
-# as SHARE_HOST_PATH / SHARE_IOS_PATH inputs).
+# No share on a Catalyst 8000: verified on a C8000V (IOS-XE 17.15.5) on
+# 2026-09-10 -- CAF accepts a `-v /bootflash/iox_host_data_share:/mnt/share`
+# run option but never mounts it, the only bootflash mount the app gets
+# (/local/local1/core_dir) is invisible to IOS `dir`, and `app-hosting data`
+# copies only INTO the app. The router therefore hands the image to IOS over
+# the scp push, and its SCP server stays enabled (issue #228).
 _C8K_MODEL = r"^C8[0-9]{3}"
 _ROUTER_MANAGEMENT_TYPES = frozenset(("router-routed", "router-nat"))
 _C8K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "PKG_FS": "bootflash:",
     "TARGET_FS": "bootflash:",
-    "SHARE_HOST_PATH": "/bootflash/iox_host_data_share",
-    "SHARE_IOS_PATH": "bootflash:iox_host_data_share",
 }
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",

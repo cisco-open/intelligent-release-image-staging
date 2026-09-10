@@ -92,7 +92,7 @@ what decides the image hand-off (issue #228):
 | Platform | `SHARE_HOST_PATH` | `SHARE_IOS_PATH` | Hand-off |
 | --- | --- | --- | --- |
 | Catalyst 9300 | `/vol/usb1/iox_host_data_share` | `usbflash1:iox_host_data_share` | share mount + IOS-internal `copy` |
-| Catalyst 8000 | `/bootflash/iox_host_data_share` | `bootflash:iox_host_data_share` | share mount + IOS-internal `copy` |
+| Catalyst 8000 | *(none — CAF does not mount `-v` paths)* | *(none)* | scp push to `guest-share/iris` |
 | IE-3x00 / IR1x01 | *(none)* | *(none)* | scp push to `guest-share/iris` |
 
 Both pairs live in `server/gui_onboard.py` (`_C9K_IOX_ENV`, `_C8K_IOX_ENV`) —
@@ -196,9 +196,8 @@ itself remains unchanged and does not need rebuilding.
    amd64 package, `APP_INTF=AppGigabitEthernet1/0/1`, `TARGET_FS=flash:`, and
    `SHARE_HOST_PATH=/vol/usb1/iox_host_data_share` (run-opts 11 above; also
    `mkdir usbflash1:iox_host_data_share` before activation so the bind-mount
-   target exists). A Catalyst 8000 uses the same shape with
-   `SHARE_HOST_PATH=/bootflash/iox_host_data_share` and
-   `SHARE_IOS_PATH=bootflash:iox_host_data_share`. IE-3x00 defaults remain
+   target exists). A Catalyst 8000 has no share (its CAF ignores `-v`
+   run options; verified 2026-09-10) and uses the scp push. IE-3x00 defaults remain
    ARM64, `AppGigabitEthernet1/1`, and `sdflash:` with no share mount.
 
 5. **Verify**: `show app-hosting list` (RUNNING), `show app-hosting detail appid
@@ -221,8 +220,8 @@ How the agent hands the downloaded image to IOS depends on the platform:
   (container-created subdirs lock the container out on this platform).
   Before the multi-GB copy the agent probes that IOS can actually read the
   share; the transient share copy is removed after a verified placement.
-- **C8k (share mount)**: the same mechanism against the router's own
-  `bootflash:iox_host_data_share` (host-side `/bootflash/…`).
+- **C8k (scp push)**: no IOS-visible directory reaches the app on a C8000V,
+  so it uses the IE-3x00 scp push below.
 - **IE-3x00 (scp push)**: IOx can't bind-mount `sdflash:` there, so the agent
   **scp-pushes** the image to `<target>guest-share/iris/` through the device's
   SCP server (`ip scp server enable`, set by `install.sh` **only** for a
