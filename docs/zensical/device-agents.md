@@ -32,7 +32,7 @@ onboarding is not saved. IOS-XR has no running/startup split to bridge — a
 
 ## Guest Shell path
 
-Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to `bootflash:`). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
+Catalyst 9300 devices and Catalyst 8000 routers use Guest Shell (routers through an IRIS-managed VirtualPortGroup, staging to `bootflash:`; a router can run the [IOx app](iox.md#catalyst-8000-routers) through that same VirtualPortGroup instead). The generated installer configures the device-side plumbing and then the EEM timer keeps the agent alive.
 
 ```mermaid
 flowchart TB
@@ -586,7 +586,7 @@ selection shown below.
 | Catalyst 9300 IOx | `iox` | Live writable-media policy, normally `flash:` via the SSD share | Common device container and SSH-to-self IOS commands. |
 | IE-3400 IOx | `iox` | Live writable-media policy, normally `sdflash:` | Common device container and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | n/a | `bootflash:` | Guest Shell through a VirtualPortGroup. |
-| Catalyst 8000 IOx | amd64 | `bootflash:` | The IOx app through the same VirtualPortGroup; see [IOx](iox.md#catalyst-8000-routers). |
+| Catalyst 8000 IOx | `iox` | `bootflash:` | The IOx app (amd64 package) through the same VirtualPortGroup; see [IOx](iox.md#catalyst-8000-routers). |
 | Cisco 8000 series (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see

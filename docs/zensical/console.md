@@ -210,8 +210,8 @@ Management type alone controls the network fields in Add Device. Model is
 optional free text; known models narrow the **Agent install** choices without
 changing the management type. A model such as `C3650` can be saved, but that
 does not confirm hardware support. XR host selects `xr-appmgr`, router modes
-select `router`, and routed/inband modes require a compatible Guest Shell or
-IOx choice.
+offer `router` (Guest Shell) or `iox`, and routed/inband modes require a
+compatible Guest Shell or IOx choice.
 
 Router choices show the VPG number and app addressing; Router NAT also requires
 the outside interface. Both target the Catalyst 8000 family and are validated on

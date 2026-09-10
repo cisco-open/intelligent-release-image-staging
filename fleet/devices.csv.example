@@ -31,7 +31,8 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 # 'platform' is LAST: choose 'guestshell', 'iox', 'router', or 'xr-appmgr'. A
 #   blank imported value is an inventory transition state; known IOS-XE models
 #   can resolve at onboard, while uncertainty and IOS-XR without xr-appmgr fail closed.
-#   Inband supports Guest Shell and IOx (IE-3x00, C9300); DHCP is NOT supported.
+#   Inband supports Guest Shell and IOx (IE-3x00, C9300); router-routed and
+#   router-nat support Guest Shell and IOx (Catalyst 8000); DHCP is NOT supported.
 # ios_ssh_host: OPTIONAL for inband IOx. The app SSHes to the switch's mgmt IP
 #   (device_ip) by default; set this only to override it. Blank for Guest Shell.
 #
@@ -45,5 +46,7 @@ device_id,device_ip,management_type,iris_vlan,svi_ip,svi_mask,app_ip,app_mask,ap
 # ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,,iox
 # C8000v router NAT example (VPG 10; use an operator-selected outside interface):
 # edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router
+# C8000v IOx-on-router example (VPG 11, routed; same VirtualPortGroup, app instead of Guest Shell):
+# edge-c8kv-iox,192.0.2.41,router-routed,,,,10.8.0.6,255.255.255.252,10.8.0.5,,,C8000V,11,,,,iox
 # Cisco 8201 IOS-XR example (no app-network fields):
 # edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,,xr-appmgr

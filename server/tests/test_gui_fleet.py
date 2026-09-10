@@ -1457,9 +1457,9 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
 
 
 @pytest.mark.parametrize("record, expected", [
-    # A Catalyst 8000V on a router management type runs the router recipe and
-    # nothing else -- the case an operator hit by picking IOx and watching the
-    # dropdown snap back.
+    # A Catalyst 8000V on a router management type offers the router recipe
+    # (Guest Shell) and the IOx app. Picking IOx used to snap back because the
+    # fleet store refused it; that was the bug this pins.
     ({"management_type": "router-routed", "model": "C8000V"}, ["router", "iox"]),
     ({"management_type": "router-nat", "model": ""}, ["router", "iox"]),
     ({"management_type": "xr-host", "model": "8201"}, ["xr-appmgr"]),

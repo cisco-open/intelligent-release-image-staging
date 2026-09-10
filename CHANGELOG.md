@@ -28,6 +28,22 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Make IOx onboarding work against real IOS-XE. The IOx transport had been
+  written against an idealised IOS that answers config commands silently,
+  uses one spelling per error, and always asks for confirmation. An IE-3400
+  (17.15) does none of that, and every install and teardown failed at the
+  first mismatch. The controller now forces the legacy SCP protocol (`-O`;
+  OpenSSH 9 defaults to SFTP, which IOS does not implement), reads the
+  app-hosting verification state through a filtered `dir`, accepts IOS's
+  advisory banners, save-progress line, optional `[yes/no]` confirmation, and
+  both spellings of an already-absent app, and treats already-absent config,
+  files and directories as success during teardown -- each narrowly, so a
+  genuine error still fails. Alongside: the recipe's `python3` was not on
+  the controller's PATH in the slimmed image, the credential resolver handed
+  the controller a `created_at` it refuses and a blank enable secret it read
+  as invalid, and the install request never carried its ownership claim or
+  `guest_ip`. IOx onboarding could not have worked through the Console
+  before this.
 - Make IOx on Catalyst 8000 actually reach the device. The recipe understood
   the router management types, but the two components a live onboard runs
   through did not: the Console's plan gate refused platform `iox` on a router

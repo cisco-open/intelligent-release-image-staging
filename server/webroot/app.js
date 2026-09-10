@@ -1573,7 +1573,7 @@
       var platVal = d.platform || '';
       // Offer only the installs this row can actually take. The server's
       // fleet store refuses the rest (a router management type runs the
-      // router recipe and nothing else, xr-host only the appmgr container),
+      // router recipe or the IOx app, xr-host only the appmgr container),
       // and an operator who picked one used to watch the dropdown silently
       // snap back on the next refresh with the reason parked in the status
       // line. A refused choice is now unselectable and says why; the stored

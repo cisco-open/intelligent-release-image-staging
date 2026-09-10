@@ -3704,7 +3704,7 @@ def test_router_nat_preflight_ownership_persists_and_undeploy_uses_record(tmp_pa
             stop()
 
 
-def test_platform_endpoint_allows_router_only_for_router_management_types(tmp_path):
+def test_platform_endpoint_allows_router_for_router_management_types(tmp_path):
     host, port, fleet, _record_store, stop = _serve_router(tmp_path, lambda p, e, on: 0)
     try:
         fleet.upsert({"device_id": "switch", "device_ip": "192.0.2.20",
@@ -13879,8 +13879,8 @@ def test_agent_install_dropdown_offers_only_what_the_row_can_take():
     the status line. The row now carries the server's own answer
     (install_options) and refuses the choice up front, with the reason on the
     option itself. The stored value stays selectable so the inventory is never
-    hidden, and the server-side refusal is untouched -- this is presentation
-    of the same rule, not a second one."""
+    hidden. The server-side rule (install_options_for_record) stays the one
+    source of truth; this is presentation of it, not a second rule."""
     js = _webroot("app.js")
     render = js.split("var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr']", 1)[1].split(".join('')", 1)[0]
     assert "d.install_options" in js

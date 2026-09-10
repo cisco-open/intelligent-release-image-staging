@@ -11,7 +11,8 @@
 #     and with it $CAF_APP_PERSISTENT_DIR/iris where aria2 stages images and
 #     the --on-bt-download-complete hook leaves its <image>.peers.json
 #     snapshots; the hook program itself lives in the app image)
-#   - remove the app-hosting appid + the IRIS VLAN/SVI
+#   - remove the app-hosting appid + the IRIS VLAN/SVI (or, on a router,
+#     the IRIS VirtualPortGroup and, for router-nat, its NAT footprint)
 #   - remove any IRIS-COPYROOT / IRIS-AGENT EEM applet the agent created at
 #     runtime for its plain-copy placement (no-op if absent — IOx has no 60s
 #     timer)

@@ -21,6 +21,10 @@
 #
 # Dry-run inputs:
 #   DEVICE_IP VLAN SVI_IP SVI_MASK GUEST_IP DEVICE_ID STAGE_HOST
+#   Router types (MANAGEMENT_TYPE=router-routed|router-nat) take, instead of
+#   VLAN/SVI: VPG_NUMBER APP_IP APP_MASK APP_GATEWAY, plus NAT_INTERFACE and
+#   BT_LISTEN_PORT (default 6881) for router-nat; PKG then defaults to
+#   iris-amd64.tar and PKG_FS/TARGET_FS to bootflash:.
 # Real execution receives its plan and credential references only through the
 # inherited private controller channel; it does not invoke the legacy runner.
 # Optional (defaults):

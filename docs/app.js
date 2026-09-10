@@ -52,8 +52,8 @@ const paths = {
     ],
   },
   router: {
-    title: "Catalyst 8000 Guest Shell",
-    copy: "Run the shared agent in Guest Shell through a routed or NAT VirtualPortGroup.",
+    title: "Catalyst 8000",
+    copy: "Run the shared agent in Guest Shell or as an IOx app through a routed or NAT VirtualPortGroup.",
     items: [
       "Checks device prerequisites before onboarding.",
       "Downloads image pieces through the private swarm.",

@@ -137,14 +137,13 @@ EOF
 # it is present (see the collisions list in gui_onboard.py). Leaving it behind
 # left the device exactly as stranded as before the teardown ran, which is the
 # one thing force mode exists to prevent.
-# The description router-install.sh writes into every VirtualPortGroup IRIS
-# creates (see device/router-install.sh, "interface VirtualPortGroup" block).
-# It is on-device proof of ownership that survives the loss of a record --
-# which is what makes the force path able to reclaim its own network config
-# without ever guessing about an operator's.
-# Both recipes describe the VirtualPortGroup they create: the Guest Shell
-# router recipe writes the literal above, the IOx-on-router recipe writes
-# "description IRIS IOx VPG" (server/iox_verification.py / device/iox/install.sh).
+# The description each recipe writes into the VirtualPortGroup it creates is
+# on-device proof of ownership that survives the loss of a record -- which is
+# what makes the force path able to reclaim its own network config without
+# ever guessing about an operator's. The Guest Shell router recipe writes
+# "description IRIS Guest Shell VPG" (device/router-install.sh, "interface
+# VirtualPortGroup" block); the IOx-on-router recipe writes "description IRIS
+# IOx VPG" (server/iox_verification.py / device/iox/install.sh).
 # The record-less reclaim must recognise EITHER, or an IOx app on a router
 # that lost its record leaves a VPG this force path cannot take back and
 # every re-onboard is refused for a collision (issues #209, #212).

@@ -307,7 +307,7 @@ def install_options_for_record(record):
     so a Console can offer only what the row can take instead of letting the
     operator pick a choice the server then refuses. It is deliberately a
     projection of validate_record's rules, not a second policy: router
-    management types run the router recipe and nothing else, xr-host runs the
+    management types run the router recipe (Guest Shell) or the IOx app, xr-host runs the
     appmgr container and nothing else, the two IOS-XE switch types run neither,
     and within that the model table narrows further. An inventory-only row
     (no management type yet) is narrowed by its model alone.
@@ -1313,5 +1313,6 @@ class FleetStore:
             "# edge-inband,192.0.2.20,inband,,,,192.0.2.21,255.255.255.0,192.0.2.1,120,,C9300-48UXM,,,,,guestshell",
             "# ie-inband-iox,192.0.2.30,inband,,,,192.0.2.31,255.255.255.0,192.0.2.1,120,192.0.2.1,IE-3400,,,,,iox",
             "# edge-c8kv,192.0.2.40,router-nat,,,,10.8.0.2,255.255.255.252,10.8.0.1,,,C8000V,10,GigabitEthernet1,,,router",
+            "# edge-c8kv-iox,192.0.2.41,router-routed,,,,10.8.0.6,255.255.255.252,10.8.0.5,,,C8000V,11,,,,iox",
             "# edge-xr,192.0.2.50,xr-host,,,,,,,,,8201,,,,,xr-appmgr",
         ]) + "\n"

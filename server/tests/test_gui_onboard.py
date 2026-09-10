@@ -474,7 +474,7 @@ def test_resolve_platform_model_map_catalyst_8000_router():
 
 
 def test_c8000_explicit_guestshell_is_rejected():
-    with pytest.raises(ValueError, match="platform router"):
+    with pytest.raises(ValueError, match="platform router or iox"):
         gui_onboard.resolve_platform({"device_id": "d", "model": "C8000V",
                                       "platform": "guestshell"})
 

@@ -24,7 +24,7 @@ IRIS reports staging progress and transfer measurements. These distinguish origi
 | Web console | Browser workflow for images, devices, assignments, onboarding, swarm status, settings, and audit events. |
 | Management types | Per-device **routed**, **inband**, **router-routed**, **router-nat**, or **xr-host**, with a record-backed deployment lifecycle. |
 | Guest Shell agent | Catalyst 9300 path that downloads through `aria2c` into the bind-mounted guest-share, verifies hashes, and copies the approved image to `flash:`. |
-| Catalyst 8000 router | Guest Shell through VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
+| Catalyst 8000 router | Guest Shell or the IOx app through an IRIS-owned VirtualPortGroup, staging to `bootflash:`. Designed for the Catalyst 8000 family; routed and NAT modes are lab-tested on Catalyst 8000V through verified staging and record-backed undeploy. |
 | IOx app | The shared IOx/XR image packaged for IE-3400 (arm64, stages to `sdflash:`) or SSD-equipped Catalyst 9300 (amd64, stages to `flash:` through the SSD share; the CLI installer's own default is `sdflash:`). |
 | IOS-XR appmgr agent | The same device image packaged for appmgr on Cisco 8000-series routers. It uses the router's network and stages directly to `harddisk:` through a bind mount. |
 | Network tools | CSV-driven inventory, per-device installers, assignments, and release packaging. |
