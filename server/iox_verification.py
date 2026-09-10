@@ -82,7 +82,16 @@ _RESULT_CODES = {
     "descendant_unreaped": 5,
 }
 
-_VERIFY_READ = b"show app-hosting infra"
+# Filtered deliberately. _classify_read (server/iox_transport.py) enforces a
+# closed grammar: the payload must be the ONE authoritative field and nothing
+# else, and its own comment says so. Unfiltered, `show app-hosting infra`
+# returns a whole block -- IOX version, CAF health, the interface mapping,
+# CPU quotas -- so the read could never satisfy the grammar on real hardware
+# and every install died at "initial verification read unknown" before the
+# device was touched. Filtering leaves the grammar strict: a device that
+# reports nothing still reads as silence, and a device that reports something
+# unexpected still fails closed.
+_VERIFY_READ = b"show app-hosting infra | include App signature verification"
 _VERIFY_DISABLE = b"app-hosting verification disable"
 _VERIFY_ENABLE = b"app-hosting verification enable"
 _IDENTITY = b"show version"
