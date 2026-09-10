@@ -34,8 +34,11 @@ import sys
 import tarfile
 import threading
 import time
+import types
 
 import pytest
+
+import iox_hardware_fixtures as hw
 
 
 ATTEMPT = "a" * 32
@@ -2510,3 +2513,557 @@ def test_snapshot_write_durability_failure_never_admits_or_advances_controller(
         assert crash._read_json(store.path) == {"records": {}}
     fault.assert_reached_and_cleaned()
     assert source.read_bytes() == body
+
+
+# ---------------------------------------------------------------------------
+# Hardware-shaped fixtures (issue #226).
+#
+# Everything the peer replays below is a verbatim IOS-XE reply recorded on
+# 2026-09-10 from an IE-3400-8T2S (17.15.4) and Catalyst 8000V routers
+# (17.15.5); iox_hardware_fixtures carries the bytes and their provenance.
+# Each dialect the transport learnt to tolerate that day is pinned through
+# the recorded exchange (framing_complete and error_category), and each
+# tolerance has a negative that puts a recorded, genuinely different error
+# in the same slot and proves it still fails.
+# ---------------------------------------------------------------------------
+
+
+def _verification_module():
+    return importlib.import_module("iox_verification")
+
+
+def _replay(tmp_path, peer_factory, purpose, steps, host, stderr=None,
+            question=None, question_index=None, timeout=2.5):
+    """Replay recorded (command, payload) steps through the real transport."""
+    scenario = {
+        "commands": [line.decode("ascii") for line, unused in steps],
+        "payload": [payload.decode("ascii") for unused, payload in steps],
+        "host": host,
+    }
+    if stderr is not None:
+        scenario["stderr"] = stderr.decode("ascii")
+    if question is not None:
+        scenario["question"] = question
+        scenario["question_index"] = question_index
+    peer = peer_factory(**scenario)
+    # One private state root per replay: a test may replay several
+    # exchanges, and every transport owns its own transcript.
+    root = tmp_path / ("replay-%d" % len(list(tmp_path.glob("replay-*"))))
+    root.mkdir(mode=448)
+    transport, unused = _transport(root, peer, purpose=purpose)
+    result = _command(transport, b"\n".join(line for line, unused in steps),
+                      timeout=timeout)
+    peer.assert_reaped()
+    return result, peer
+
+
+def _with_payload(steps, command, payload):
+    """Recorded steps with one command's reply swapped for another recorded line."""
+    replaced = tuple((line, payload if line == command else reply)
+                     for line, reply in steps)
+    assert replaced != tuple(steps)
+    return replaced
+
+
+def _ok_result(stdout):
+    return {"returncode": 0, "timed_out": False, "stdout_truncated": False,
+            "stderr_truncated": False, "framing_complete": True,
+            "error_category": None, "stdout": stdout, "stderr": b""}
+
+
+def test_hardware_identity_excerpts_resolve_both_platforms():
+    """`show version` from the IE-3400 (a 'Model Number' line) and the
+    C8000V (only 'cisco C8000V (VXE) processor ... memory.', which b040b2f
+    had to learn) both resolve to an exact identity."""
+    module = _verification_module()
+    fake = types.SimpleNamespace(_transport_ok=module.IoxController._transport_ok)
+    ie = module.IoxController._identity_from_result(fake, _ok_result(hw.IE3400_SHOW_VERSION))
+    assert (ie["model"], ie["board_identity"], ie["os_family"]) == (
+        "IE-3400-8T2S", hw.IE3400_BOARD, "xe")
+    c8k = module.IoxController._identity_from_result(fake, _ok_result(hw.C8000V_SHOW_VERSION))
+    assert (c8k["model"], c8k["board_identity"], c8k["os_family"]) == (
+        "C8000V", hw.C8000V_BOARD, "xe")
+
+
+@pytest.mark.parametrize("purpose,steps,host", [
+    ("iox_status", hw.IE3400_IOX_STATUS_STEPS, hw.IE3400_HOST),
+    ("iox_status", hw.C8000V_IOX_STATUS_STEPS, hw.C8000V_HOST),
+    ("storage_prereq", hw.IE3400_STORAGE_PREREQ_STEPS, hw.IE3400_HOST),
+    ("routing_prereq", hw.IE3400_ROUTING_PREREQ_STEPS, hw.IE3400_HOST),
+    ("routing_prereq", hw.C8000V_ROUTING_PREREQ_STEPS, hw.C8000V_HOST),
+    ("cleanup_config_probe", hw.IE3400_CONFIG_PROBE_STEPS, hw.IE3400_HOST),
+], ids=["iox-ie3400-dockerd", "iox-c8000v-libvirtd", "storage-ie3400",
+        "routing-ie3400", "routing-c8000v", "config-probe-ie3400"])
+def test_hardware_status_reads_pass_the_closed_transport(tmp_path, peer_factory, purpose, steps, host):
+    """Exec reads with no '%' line -- `show iox` with Dockerd (IE-3400) or
+    Libvirtd only (C8000V), the storage and routing prerequisites, the
+    residue probe -- complete with their payload intact."""
+    result, unused = _replay(tmp_path, peer_factory, purpose, steps, host)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    for unused_line, payload in steps:
+        assert payload in _value(result, "stdout")
+
+
+def test_hardware_verification_grammar_reads_recorded_replies():
+    """The filtered read is exactly one field on both platforms; the
+    unfiltered block the IE-3400 returned before fa92bf1 never satisfied the
+    closed grammar (readback_unknown) and still must not. The C8000V's
+    transition wording is accepted only for its own verb."""
+    module = _module()
+    assert module._classify_read(hw.VERIFY_READ_ENABLED) == ("enabled", None)
+    assert module._classify_read(hw.VERIFY_READ_DISABLED) == ("disabled", None)
+    assert module._classify_read(hw.IE3400_VERIFY_READ_UNFILTERED) == ("unknown", "readback_unknown")
+    assert module._classify_transition("verification_disable", hw.C8000V_VERIFY_DISABLED) == (
+        "disabled_successfully", None)
+    assert module._classify_transition("verification_enable", hw.C8000V_VERIFY_ENABLED) == (
+        "enabled_successfully", None)
+    assert module._classify_transition("verification_enable", hw.C8000V_VERIFY_DISABLED) == (
+        "other", "unsupported_response")
+    assert module._classify_transition("verification_disable", hw.C8000V_VERIFY_ENABLED) == (
+        "other", "unsupported_response")
+
+
+def _transition_session(tmp_path, peer, purpose):
+    phase = "disable_intent" if purpose == "verification_disable" else "restore_intent"
+    context = _start(purpose=purpose)
+    context.update(record_id="transition-record", transaction_id=TRANSACTION,
+                   revision=1, phase=phase)
+    acknowledgement = {
+        "schema_version": 1, "type": "journal_ack", "record_id": "transition-record",
+        "transaction_id": TRANSACTION, "revision": 1, "phase": phase,
+        "event": phase, "at": AT,
+    }
+    return _transport(tmp_path, peer, purpose=purpose, context=context,
+                      journal_ack=acknowledgement)
+
+
+@pytest.mark.parametrize("purpose,command,payload,transition", [
+    ("verification_disable", b"app-hosting verification disable",
+     hw.C8000V_VERIFY_DISABLED, "disabled_successfully"),
+    ("verification_enable", b"app-hosting verification enable",
+     hw.C8000V_VERIFY_ENABLED, "enabled_successfully"),
+])
+def test_hardware_c8000v_verification_wording_replays_as_success(
+        tmp_path, peer_factory, purpose, command, payload, transition):
+    """bc4e5f2: 'App signature verification ... successfully' (with the
+    blank line the router adds, and ssh's 'closed by remote host' notice on
+    stderr) records the successful transition."""
+    peer = peer_factory(commands=[command.decode("ascii")],
+                        payload=payload.decode("ascii"), host=hw.C8000V_HOST,
+                        stderr=hw.C8000V_SSH_STDERR.decode("ascii"))
+    transport, unused = _transition_session(tmp_path, peer, purpose)
+    result = _command(transport, command)
+    ends = [row for row in _records(_transcript_path(tmp_path / "state").read_bytes())
+            if row["type"] == "command_end"]
+    assert len(ends) == 1
+    assert ends[0]["transition_response"] == transition
+    assert ends[0]["error_category"] is None
+    assert ends[0]["framing_complete"] is True
+    assert _value(result, "error_category") is None
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "stderr") == hw.C8000V_SSH_STDERR
+    peer.assert_reaped()
+
+
+def test_hardware_c8000v_pre_fix_disable_record_still_loads_with_its_stored_verdict(tmp_path):
+    """Issue #227 on the record that caused it: ad6e0e07 cmd 12 was
+    classified at 07:26 as transition 'other' / unsupported_response, two
+    minutes before bc4e5f2 taught the classifier the C8000V wording. Today's
+    classifier reads the same bytes as disabled_successfully; the loader
+    must return the STORED verdict rather than refuse the store."""
+    stdout = hw.C8000V_VERIFY_DISABLE_STDOUT
+    stderr = hw.C8000V_SSH_STDERR_101
+    recorded = hw.C8000V_VERIFY_DISABLE_RECORDED
+    span = recorded["payload_spans"][0]
+    assert len(stdout) == recorded["stdout_observed_bytes"]
+    assert len(stderr) == recorded["stderr_observed_bytes"]
+    assert stdout[span["offset"]:span["offset"] + span["length"]] == hw.C8000V_VERIFY_DISABLED
+    assert _module()._classify_transition(
+        "verification_disable", hw.C8000V_VERIFY_DISABLED)[0] == "disabled_successfully"
+
+    writer = _writer(tmp_path)
+    writer.append(_start(purpose="verification_disable"))
+    writer.append(_stream(stdout))
+    writer.append(_stream(stderr, stream="stderr"))
+    end = _end(stdout=len(stdout), stderr=len(stderr))
+    end.update(recorded)
+    writer.append(end)
+
+    loaded = _module()._load_transcript_prefix(str(tmp_path), writer.reference(), CONTROLLER)
+    command = loaded["commands"][1]
+    assert command["end"]["transition_response"] == "other"
+    assert command["end"]["error_category"] == "unsupported_response"
+    assert command["end"]["framing_complete"] is True
+
+
+@pytest.mark.parametrize("purpose,command,payload", [
+    ("app_stop", b"app-hosting stop appid iris", hw.APP_ABSENT_STOP),
+    ("app_deactivate", b"app-hosting deactivate appid iris", hw.APP_ABSENT_STOP),
+    ("app_uninstall", b"app-hosting uninstall appid iris", hw.APP_ABSENT_UNINSTALL),
+])
+def test_hardware_absent_app_replies_complete_the_state_clearing_steps(
+        tmp_path, peer_factory, purpose, command, payload):
+    """237b3a4/5efeb02/dc00bfb: both IOS spellings of an absent app mean
+    the state-clearing step's goal is already met. The raw classifier still
+    reads the line as a rejection; the allowance is per purpose."""
+    result, unused = _replay(tmp_path, peer_factory, purpose, ((command, payload),),
+                             hw.IE3400_HOST, stderr=hw.IE3400_SSH_STDERR)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert _module()._classify_ios_error(payload) == "rejected"
+    assert _module()._app_already_absent(purpose, payload)
+
+
+def test_hardware_absent_app_reply_is_still_a_rejection_outside_the_state_clearing_steps(
+        tmp_path, peer_factory):
+    result, unused = _replay(tmp_path, peer_factory, "app_start",
+                             ((b"app-hosting start appid iris", hw.APP_ABSENT_STOP),),
+                             hw.IE3400_HOST)
+    assert _value(result, "error_category") == "rejected"
+    assert _value(result, "framing_complete") is False
+    assert not _module()._app_already_absent("app_start", hw.APP_ABSENT_STOP)
+    # A running app that refuses to stop is not "absent" either.
+    assert not _module()._app_already_absent("app_stop", hw.IE3400_STOP_DEPLOYED)
+
+
+@pytest.mark.parametrize("purpose,command,payload", [
+    ("app_stop", b"app-hosting stop appid iris", hw.IE3400_STOP_DEPLOYED),
+    ("app_deactivate", b"app-hosting deactivate appid iris", hw.IE3400_DEACTIVATE_DEPLOYED),
+    ("app_stop", b"app-hosting stop appid iris", hw.IE3400_STOPPED),
+    ("app_deactivate", b"app-hosting deactivate appid iris", hw.IE3400_DEACTIVATED),
+    ("app_uninstall", b"app-hosting uninstall appid iris", hw.UNINSTALLING),
+    ("app_install", hw.IE3400_INSTALL_COMMAND, hw.IE3400_INSTALLING),
+    ("app_activate", b"app-hosting activate appid iris", hw.ACTIVATED),
+    ("app_start", b"app-hosting start appid iris", hw.STARTED),
+    ("copy_certificate", hw.C8000V_COPY_CERTIFICATE_COMMAND, hw.C8000V_COPY_CERTIFICATE),
+], ids=["stop-deployed", "deactivate-deployed", "stopped", "deactivated",
+        "uninstalling", "installing", "activated", "started", "copied"])
+def test_hardware_lifecycle_verdicts_without_a_percent_prefix_are_not_errors(
+        tmp_path, peer_factory, purpose, command, payload):
+    """IOS phrases lifecycle verdicts -- and even a wrong-state refusal such
+    as "Invalid 'stop' request. iris is in DEPLOYED" -- without a '%'
+    prefix. The transport records them as complete, unclassified output;
+    the controller's app-list probe is what decides the state."""
+    result, unused = _replay(tmp_path, peer_factory, purpose, ((command, payload),),
+                             hw.IE3400_HOST)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert payload in _value(result, "stdout")
+    assert _module()._classify_ios_error(payload) is None
+
+
+@pytest.mark.parametrize("state", ["INSTALLING", "DEPLOYED", "ACTIVATED", "RUNNING"])
+def test_hardware_app_list_table_passes_the_transport_intact(tmp_path, peer_factory, state):
+    result, unused = _replay(tmp_path, peer_factory, "app_list",
+                             ((b"show app-hosting list", hw.APP_LIST[state]),),
+                             hw.C8000V_HOST, stderr=hw.C8000V_SSH_STDERR)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert hw.APP_LIST[state] in _value(result, "stdout")
+    result, unused = _replay(tmp_path, peer_factory, "app_list",
+                             ((b"show app-hosting list", hw.APP_LIST_EMPTY),),
+                             hw.IE3400_HOST)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+
+
+def _preflight(stdout):
+    module = _verification_module()
+    result = _ok_result(stdout)
+    fake = types.SimpleNamespace(
+        _command=lambda *args, **kwargs: (result, None),
+        _transport_ok=module.IoxController._transport_ok,
+        config={"application_id": "iris"})
+    attempt = types.SimpleNamespace(target={}, identity={})
+    return module, fake, attempt
+
+
+def test_hardware_preflight_reads_the_app_state_column_and_the_iris_stanza():
+    """The install preflight parses the recorded `show app-hosting list`
+    table and running configuration as one capture: a DEPLOYED app with
+    its stanza is resumable, a RUNNING one makes the stanza a collision,
+    and a clean router passes."""
+    module, fake, attempt = _preflight(hw.c8000v_preflight(
+        hw.APP_LIST["DEPLOYED"], hw.C8000V_VPG_STANZA, hw.C8000V_APP_STANZA))
+    module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert attempt.identity == {"status": "passed", "resumable_app_state": "DEPLOYED"}
+
+    module, fake, attempt = _preflight(hw.c8000v_preflight(
+        hw.APP_LIST["RUNNING"], hw.C8000V_VPG_STANZA, hw.C8000V_APP_STANZA))
+    with pytest.raises(module._ControllerFailure) as error:
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert error.value.category == "rejected"
+    assert error.value.detail == "the iris app-hosting config already exists"
+    assert attempt.identity == {}
+
+    module, fake, attempt = _preflight(hw.c8000v_preflight(hw.APP_LIST_EMPTY))
+    module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert attempt.identity == {"status": "passed"}
+
+
+def test_hardware_ie3400_iox_advisory_is_not_a_protocol_violation(tmp_path, peer_factory):
+    """5eb1ddf: the IE-3400 answers `iox` with a 'Warning:' banner where the
+    C8000V is silent; both prepare_iox_scp batches complete."""
+    result, unused = _replay(tmp_path, peer_factory, "prepare_iox_scp",
+                             hw.IE3400_PREPARE_IOX_SCP_STEPS, hw.IE3400_HOST)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert hw.IE3400_IOX_WARNING in _value(result, "stdout")
+    result, unused = _replay(tmp_path, peer_factory, "prepare_iox_scp",
+                             hw.C8000V_PREPARE_IOX_SCP_STEPS, hw.C8000V_HOST)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    module = _module()
+    assert module._only_ios_warnings(hw.IE3400_IOX_WARNING)
+    assert not module._only_ios_warnings(hw.IE3400_IOX_WARNING + hw.C8000V_RESOURCE_PROFILE_REFUSAL)
+    assert not module._only_ios_warnings(hw.DISCRIMINATOR_ABSENT)
+
+
+@pytest.mark.parametrize("payload,category", [
+    (hw.DISCRIMINATOR_ABSENT, "unsupported_response"),
+    (hw.C8000V_RESOURCE_PROFILE_REFUSAL, "unsupported_response"),
+    (hw.IE3400_VLAN_ABSENT_INVALID_INPUT, "unsupported_syntax"),
+], ids=["notice", "ioxman-refusal", "invalid-input"])
+def test_hardware_iox_line_answering_anything_but_an_advisory_still_fails(
+        tmp_path, peer_factory, payload, category):
+    steps = _with_payload(hw.IE3400_PREPARE_IOX_SCP_STEPS, b"iox", payload)
+    result, unused = _replay(tmp_path, peer_factory, "prepare_iox_scp", steps, hw.IE3400_HOST)
+    assert _value(result, "error_category") == category
+    assert _value(result, "framing_complete") is False
+
+
+@pytest.mark.parametrize("purpose,steps,host", [
+    ("cleanup_config", hw.IE3400_CLEANUP_CONFIG_STEPS, hw.IE3400_HOST),
+    ("cleanup_config", hw.IE3400_CLEANUP_CONFIG_ABSENT_VLAN_STEPS, hw.IE3400_HOST),
+    ("cleanup_config", hw.C8000V_CLEANUP_CONFIG_STEPS, hw.C8000V_HOST),
+    ("cleanup_config", hw.IE3400_FORCED_TEARDOWN_PREFIX + ((b"end", b""),), hw.IE3400_HOST),
+    ("cleanup_config", hw.C8000V_FORCED_TEARDOWN_PREFIX + ((b"end", b""),), hw.C8000V_HOST),
+    ("remove_app_config", hw.IE3400_CLEANUP_CONFIG_STEPS, hw.IE3400_HOST),
+], ids=["ie3400-undeploy", "ie3400-absent-svi", "c8000v-undeploy",
+        "ie3400-forced-discriminator", "c8000v-forced-discriminator",
+        "installer-preclean"])
+def test_hardware_config_teardowns_with_already_absent_targets_complete(
+        tmp_path, peer_factory, purpose, steps, host):
+    """77d85dd/62fb022/54fea1f/f75622f/a59985f/f889833 together: the EEM,
+    trustpoint, policy and discriminator notices, the absent SVI's
+    invalid-input reply, the emptied app block, and the silent
+    `no app-hosting appid` under `file prompt quiet` all complete."""
+    result, unused = _replay(tmp_path, peer_factory, purpose, steps, host)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    for unused_line, payload in steps:
+        assert payload in _value(result, "stdout")
+
+
+def test_hardware_cleanup_confirmation_is_answered_when_the_device_asks(tmp_path, peer_factory):
+    """a59985f: when `no app-hosting appid` DOES ask '[yes/no]' the answer
+    is still sent once and the recorded advisories that follow still pass."""
+    result, peer = _replay(tmp_path, peer_factory, "cleanup_config",
+                           hw.IE3400_CLEANUP_CONFIG_STEPS, hw.IE3400_HOST,
+                           question="Are you sure you want to do this? [yes/no]:",
+                           question_index=1)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert peer.received().count("yes") == 1
+
+
+@pytest.mark.parametrize("command,payload,category", [
+    (b"no crypto pki trustpoint IRIS", hw.IE3400_VLAN_ABSENT_INVALID_INPUT, "unsupported_syntax"),
+    (b"no event manager applet IRIS-AGENT", hw.C8000V_RESOURCE_PROFILE_REFUSAL, "unsupported_response"),
+    (b"no ip http client secure-trustpoint IRIS", hw.IE3400_CLEANUP_FILES_STEPS[1][1], "rejected"),
+], ids=["invalid-input-off-a-vlan-line", "ioxman-refusal", "delete-error"])
+def test_hardware_config_teardown_still_fails_on_a_genuinely_different_error(
+        tmp_path, peer_factory, command, payload, category):
+    steps = _with_payload(hw.IE3400_CLEANUP_CONFIG_STEPS, command, payload)
+    result, unused = _replay(tmp_path, peer_factory, "cleanup_config", steps, hw.IE3400_HOST)
+    assert _value(result, "error_category") == category
+    assert _value(result, "framing_complete") is False
+
+
+def test_hardware_cleanup_absent_grammar_matches_each_recorded_notice_only_in_cleanup():
+    module = _module()
+    notices = hw.EEM_ABSENT + (hw.TRUSTPOINT_ABSENT, hw.POLICY_ABSENT, hw.DISCRIMINATOR_ABSENT)
+    for notice in notices:
+        assert module._cleanup_absent("cleanup_config", notice), notice
+        assert module._cleanup_absent("remove_app_config", notice), notice
+        assert not module._cleanup_absent("configure_app", notice), notice
+        assert not module._cleanup_absent("prepare_iox_scp", notice), notice
+    for other in (hw.C8000V_RESOURCE_PROFILE_REFUSAL, hw.IE3400_VLAN_ABSENT_INVALID_INPUT,
+                  hw.IE3400_CLEANUP_FILES_STEPS[0][1], hw.IE3400_STAGE_PROBE_STEPS[1][1],
+                  hw.IE3400_IOX_WARNING):
+        assert not module._cleanup_absent("cleanup_config", other), other
+    # The absent-SVI reply is forgiven by COMMAND, on the two VLAN removal
+    # forms only, and only during config cleanup.
+    absent = module._vlan_already_absent
+    assert absent("cleanup_config", b"no interface Vlan666", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert absent("cleanup_config", b"no vlan 666", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert absent("remove_app_config", b"no interface Vlan666", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert not absent("configure_app", b"no interface Vlan666", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert not absent("cleanup_config", b"no crypto pki trustpoint IRIS", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert not absent("cleanup_config", b"no interface VirtualPortGroup1", hw.IE3400_VLAN_ABSENT_INVALID_INPUT)
+    assert not absent("cleanup_config", b"no interface Vlan666", hw.C8000V_RESOURCE_PROFILE_REFUSAL)
+
+
+@pytest.mark.parametrize("purpose,steps,host", [
+    ("cleanup_files", hw.IE3400_CLEANUP_FILES_STEPS, hw.IE3400_HOST),
+    ("cleanup_files", hw.C8000V_CLEANUP_FILES_STEPS, hw.C8000V_HOST),
+    ("cleanup_stage_probe", hw.IE3400_STAGE_PROBE_STEPS, hw.IE3400_HOST),
+    ("cleanup_stage_probe", hw.C8000V_STAGE_PROBE_STEPS, hw.C8000V_HOST),
+], ids=["files-ie3400", "files-c8000v", "probe-ie3400", "probe-c8000v"])
+def test_hardware_file_teardown_and_stage_probe_read_absence_as_success(
+        tmp_path, peer_factory, purpose, steps, host):
+    """e65cde9/fa80f6c: '%Error deleting ... (No such file or directory)' on
+    a cleanup delete and '%Error opening ... (No such file or directory)'
+    on the stage probe's `dir` are the goal state, on flash: and bootflash:
+    alike."""
+    result, unused = _replay(tmp_path, peer_factory, purpose, steps, host)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    module = _module()
+    for line, payload in steps:
+        if payload:
+            assert module._classify_ios_error(payload) == "rejected"
+            assert (module._delete_absent(purpose, payload) or
+                    module._dir_absent(purpose, line, payload))
+
+
+@pytest.mark.parametrize("purpose,steps,command,payload,category", [
+    ("cleanup_files", hw.IE3400_CLEANUP_FILES_STEPS, b"delete /force flash:iris-ca.pem",
+     hw.IE3400_STAGE_PROBE_STEPS[1][1], "rejected"),
+    ("cleanup_stage_probe", hw.IE3400_STAGE_PROBE_STEPS, b"dir sdflash:guest-share/iris",
+     hw.IE3400_CLEANUP_FILES_STEPS[1][1], "rejected"),
+    ("cleanup_files", hw.C8000V_CLEANUP_FILES_STEPS, b"delete /force bootflash:iris-ca.pem",
+     hw.C8000V_RESOURCE_PROFILE_REFUSAL, "unsupported_response"),
+], ids=["open-error-on-a-delete", "delete-error-on-the-probe", "ioxman-refusal"])
+def test_hardware_file_teardown_still_fails_on_a_genuinely_different_error(
+        tmp_path, peer_factory, purpose, steps, command, payload, category):
+    host = hw.C8000V_HOST if b"bootflash" in command else hw.IE3400_HOST
+    result, unused = _replay(tmp_path, peer_factory, purpose,
+                             _with_payload(steps, command, payload), host)
+    assert _value(result, "error_category") == category
+    assert _value(result, "framing_complete") is False
+    module = _module()
+    assert not module._delete_absent(purpose, payload)
+    assert not module._dir_absent(purpose, command, payload)
+
+
+@pytest.mark.parametrize("host", [hw.IE3400_HOST, hw.C8000V_HOST])
+def test_hardware_save_with_the_progress_line_is_confirmed(tmp_path, peer_factory, host):
+    """3427458: 'Building configuration...' precedes '[OK]' on both
+    platforms; the verdict alone was never IOS's contract."""
+    result, unused = _replay(tmp_path, peer_factory, "save", hw.SAVE_STEPS, host)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert _module()._save_confirmed(hw.SAVE_CONFIRMED)
+
+
+def test_hardware_save_without_the_verdict_still_fails(tmp_path, peer_factory):
+    module = _module()
+    # The recorded reply cut before its verdict, and a recorded notice in
+    # the verdict's place, are both refusals.
+    assert not module._save_confirmed(hw.SAVE_CONFIRMED.split(b"[OK]")[0])
+    assert not module._save_confirmed(hw.DISCRIMINATOR_ABSENT)
+    result, unused = _replay(tmp_path, peer_factory, "save",
+                             _with_payload(hw.SAVE_STEPS, b"write memory", hw.DISCRIMINATOR_ABSENT),
+                             hw.IE3400_HOST)
+    assert _value(result, "error_category") == "unsupported_response"
+    assert _value(result, "framing_complete") is False
+
+
+def test_hardware_c8000v_resource_profile_refusal_fails_the_app_block_and_is_quoted(
+        tmp_path, peer_factory):
+    """Issue #230 as the transport saw it: IOxMan refuses the block, every
+    line after it is invalid input, and the step fails with the router's
+    first '%' line quoted in the operator's detail (c9a0fb6)."""
+    result, unused = _replay(tmp_path, peer_factory, "configure_app",
+                             hw.C8000V_CONFIGURE_APP_REFUSED_STEPS, hw.C8000V_HOST)
+    assert _value(result, "error_category") == "unsupported_response"
+    assert _value(result, "framing_complete") is False
+    assert _value(result, "returncode") == 0
+    detail = _verification_module()._command_failure_detail("configure_app", result)
+    assert detail == ("IOx command failed: configure_app: device said "
+                      "% node--1:dbm:IOxMan:Resource Profile-names is not specified")
+
+
+def test_hardware_refusal_quote_is_the_first_percent_line_of_the_recorded_output():
+    module = _verification_module()
+    assert module._command_failure_detail("cleanup_config", {
+        "stdout": hw.IE3400_CLEANUP_CONFIG_STDOUT}) == (
+        "IOx command failed: cleanup_config: device said %EEM: No such applet IRIS-AGENT")
+    assert module._command_failure_detail("app_stop", {
+        "stdout": hw.IE3400_STOP_DEPLOYED}) == "IOx command failed: app_stop"
+    assert module._command_failure_detail("cleanup_config", {
+        "stdout": hw.DISCRIMINATOR_ABSENT}) == "IOx command failed: cleanup_config"
+    assert module._IOS_REFUSAL_RE.search(hw.IE3400_VLAN_ABSENT_INVALID_INPUT).group(0) == (
+        b"% Invalid input detected at '^' marker.")
+    assert module._IOS_REFUSAL_RE.search(hw.GUESTSHELL_BAD_IP).group(0) == hw.GUESTSHELL_BAD_IP.rstrip(b"\n")
+
+
+@pytest.mark.parametrize("payload,category", [
+    (hw.C8000V_RESOURCE_PROFILE_REFUSAL, "unsupported_response"),
+    (hw.APP_ABSENT_STOP, "rejected"),
+    (hw.APP_ABSENT_UNINSTALL, "rejected"),
+    (hw.EEM_ABSENT[0], "unsupported_response"),
+    (hw.TRUSTPOINT_ABSENT, "unsupported_response"),
+    (hw.POLICY_ABSENT, "unsupported_response"),
+    (hw.IE3400_VLAN_ABSENT_INVALID_INPUT, "unsupported_syntax"),
+    (hw.IE3400_CLEANUP_FILES_STEPS[0][1], "rejected"),
+    (hw.IE3400_STAGE_PROBE_STEPS[1][1], "rejected"),
+    (hw.GUESTSHELL_BAD_IP, "unsupported_response"),
+    (hw.DISCRIMINATOR_ABSENT, None),
+    (hw.IE3400_IOX_WARNING, None),
+    (hw.IE3400_STOP_DEPLOYED, None),
+    (hw.SAVE_CONFIRMED, None),
+    (hw.UNINSTALLING, None),
+    (hw.IE3400_IOX_STATUS_STEPS[0][1], None),
+], ids=["ioxman", "app-absent", "no-app-found", "eem", "trustpoint", "policy",
+        "invalid-input", "delete", "opening", "bad-ip", "discriminator",
+        "warning", "invalid-stop", "save", "uninstalling", "show-iox"])
+def test_hardware_ios_error_classifier_reads_recorded_lines(payload, category):
+    """The raw '%' classifier's verdict on every recorded line, before any
+    purpose-scoped allowance. The allowances above are narrow exceptions
+    to these verdicts, never replacements for them."""
+    assert _module()._classify_ios_error(payload) == category
+
+
+def test_hardware_ssh_close_diagnostics_are_not_transport_failures(tmp_path, peer_factory):
+    """ssh's 'Connection to ... closed by remote host.' on stderr with
+    returncode 0 (every C8000V session) is not a connection failure and
+    does not disturb the read it accompanies."""
+    module = _module()
+    for stderr in (hw.IE3400_SSH_STDERR, hw.C8000V_SSH_STDERR, hw.C8000V_SCP_STDERR):
+        assert module.IoxTransport._startup_category(stderr) is None
+    peer = peer_factory(commands=[hw.VERIFY_READ_COMMAND.decode("ascii")],
+                        payload=hw.VERIFY_READ_ENABLED.decode("ascii"),
+                        host=hw.C8000V_HOST, stderr=hw.C8000V_SSH_STDERR.decode("ascii"))
+    transport, unused = _transport(tmp_path, peer)
+    result = _command(transport, hw.VERIFY_READ_COMMAND)
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    assert _value(result, "stderr") == hw.C8000V_SSH_STDERR
+    ends = [row for row in _records(_transcript_path(tmp_path / "state").read_bytes())
+            if row["type"] == "command_end"]
+    assert len(ends) == 1 and ends[0]["observed_state"] == "enabled"
+    peer.assert_reaped()
+
+
+def test_hardware_scp_upload_forces_the_legacy_protocol_and_tolerates_the_close_notice(
+        tmp_path, peer_factory):
+    """a1d92bb: IOS-XE's scp server has no SFTP, so the wrapper upload must
+    run scp with -O; the recorded successful upload's stderr is only ssh's
+    close notice."""
+    data = _archive(_member(payload=b"hardware upload fixture"))
+    path, snapshots = _wrapper(tmp_path, data)
+    peer = peer_factory(scp_stderr=hw.C8000V_SCP_STDERR.decode("ascii"))
+    transport, unused = _transport(tmp_path, peer, purpose="upload_wrapper")
+    with _admit(path, snapshots) as snapshot:
+        result = transport.upload(snapshot.fd, "bootflash:iris-" + TRANSACTION + ".tar",
+                                  time.monotonic() + 1.5)
+    assert _value(result, "returncode") == 0
+    assert _value(result, "framing_complete") is True
+    assert _value(result, "error_category") is None
+    spawns = [event for event in peer.events()
+              if event["event"] == "spawn" and event["binary"] == "scp"]
+    assert spawns and all("-O" in event["argv"] for event in spawns)
+    peer.assert_reaped()
