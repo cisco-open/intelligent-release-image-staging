@@ -11,6 +11,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.10]
+
 ### Fixed
 - Keep concurrent scheduled assignment receipts bound to their prepared policy
   baseline, preserve that baseline as the replacement conflict check when an
