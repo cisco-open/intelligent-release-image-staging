@@ -1653,6 +1653,41 @@ def _save_confirmed(payload):
                for line in lines[:-1])
 
 
+# Config-mode teardown steps and the IOS advisories that mean their target is
+# ALREADY GONE. cleanup_config removes every IRIS-named artifact
+# unconditionally -- that is what makes teardown idempotent -- so on real
+# hardware it routinely removes things the deployment never created (a routed
+# IOx device has no EEM applets or trustpoint; those belong to the Guest Shell
+# recipe) and IOS answers each `no` with an informational notice. These are
+# not command failures, but the strict classifier read every %-prefixed line
+# as one, so a recorded undeploy failed with the app already removed and the
+# config half not reconciled.
+_CONFIG_CLEANUP_PURPOSES = frozenset(("cleanup_config", "remove_app_config"))
+_CLEANUP_ABSENT_RE = re.compile(
+    br"(?im)^%\s*(?:"
+    br"EEM:\s*No such applet\b"          # no event manager applet <name>
+    br"|There is no\b.*\bto delete\b"    # no crypto/http trustpoint <name>
+    br"|Can't find\b"                     # no ... policy <name>
+    br"|.*\bnot (?:found|present|configured|exist(?:s)?)\b"
+    br")")
+
+
+def _cleanup_absent(purpose, payload):
+    """True when a config cleanup step's ONLY output is already-absent
+    advisories.
+
+    Narrow on purpose (config cleanup steps) and on message shape (IOS's
+    own 'nothing to remove' notices). A cleanup line that returns anything
+    else -- a real syntax error, unexpected output -- still fails, so the
+    teardown never waves through residue it could not remove.
+    """
+    if purpose not in _CONFIG_CLEANUP_PURPOSES:
+        return False
+    lines = [line for line in payload.split(b"\n") if line.strip()]
+    return bool(lines) and all(
+        _CLEANUP_ABSENT_RE.match(line.strip()) for line in lines)
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2344,7 +2379,8 @@ class IoxTransport(object):
                     framed_payloads.append(payload)
                     payload_spans.append({"offset": span[0], "length": span[1]})
                     payload_error = _classify_ios_error(payload)
-                    if _app_already_absent(purpose, payload):
+                    if (_app_already_absent(purpose, payload) or
+                            _cleanup_absent(purpose, payload)):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
@@ -2361,7 +2397,8 @@ class IoxTransport(object):
                         in_config = False
                     elif (in_config and question is None and payload and
                           payload_error is None and
-                          not _only_ios_warnings(payload)):
+                          not _only_ios_warnings(payload) and
+                          not _cleanup_absent(purpose, payload)):
                         raise IoxTransportError("unsupported_response", "configuration command returned payload")
                     if (purpose == "save" and line == b"write memory" and
                             not _save_confirmed(payload) and
