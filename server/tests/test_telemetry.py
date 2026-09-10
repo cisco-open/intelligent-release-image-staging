@@ -4539,6 +4539,34 @@ def test_report_attribution_store_pins_once_and_reads_bad_state_as_empty(
     assert _peer_rows(hub)[_ORIGIN_IP]["iris.peer.attribution"] == "origin"
 
 
+@pytest.mark.parametrize("writer", ["pin", "sync"])
+def test_report_attribution_repairs_a_rejected_entry_without_rewriting_valid_pins(
+        tmp_path, writer):
+    store = report_attribution.ReportAttributionStore(str(tmp_path),
+                                                      now_fn=lambda: 42.0)
+    store.sync({"r1", "r2"}, {"r1": ({_ORIGIN_IP}, {}),
+                              "r2": (set(), {"10.0.0.7": "rtr-07"})})
+    with open(store.path) as stream:
+        data = json.load(stream)
+    original = dict(data["reports"]["r1"])
+    data["reports"]["r2"] = {"origin": "invalid", "devices": {}}
+    with open(store.path, "w") as stream:
+        json.dump(data, stream)
+    assert store.get("r2") is None and "r2" not in store.snapshot()
+
+    if writer == "pin":
+        changed = store.pin("r2", {_ORIGIN_IP}, {})
+    else:
+        changed = store.sync({"r1", "r2"}, {
+            "r1": (set(), {}), "r2": ({_ORIGIN_IP}, {})})
+    assert changed is True
+    # First *valid* pin still wins; a rejected entry cannot block recovery.
+    recovered = report_attribution.ReportAttributionStore(str(tmp_path))
+    assert recovered.get("r2") == ({_ORIGIN_IP}, {})
+    with open(store.path) as stream:
+        assert json.load(stream)["reports"]["r1"] == original
+
+
 def test_report_attribution_sync_is_one_read_modify_write_per_pass(tmp_path):
     """The export pass reads the store once (snapshot) and writes it at most
     once (sync), whatever the fleet size; sync prunes and pins together and

@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Malformed persisted peer-attribution entries can be repaired by later
+  reports while valid first classifications remain unchanged (#262).
 - Instruction and keylist catalog endpoints emit the same bounded, redacted
   bearer-refusal diagnostics as other device routes (#233).
 - Release archives include the IOx client checksum manifest and abort before

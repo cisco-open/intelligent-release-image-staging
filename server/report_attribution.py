@@ -168,7 +168,7 @@ class ReportAttributionStore:
         changed = len(kept) != len(reports)
         for event_id, (origin_ips, device_by_ip) in (pins or {}).items():
             key = str(event_id)
-            if key in kept:
+            if self._view(kept.get(key)) is not None:
                 continue
             kept[key] = self._entry(origin_ips, device_by_ip)
             changed = True
@@ -185,7 +185,7 @@ class ReportAttributionStore:
         happened; a report already pinned is left as it was."""
         reports = self._read()
         key = str(event_id)
-        if key in reports:
+        if self._view(reports.get(key)) is not None:
             return False
         reports[key] = self._entry(origin_ips, device_by_ip)
         self._write(reports)
