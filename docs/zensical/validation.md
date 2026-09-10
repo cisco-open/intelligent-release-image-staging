@@ -153,6 +153,7 @@ including both architectures of the shared IOx/XR image.
 | Catalyst 9300 | Guest Shell | Lab-validated |
 | Catalyst 9300 | IOx on app-hosting SSD share | Lab-validated runtime and direct share hand-off to `flash:` |
 | Catalyst 8000V | Guest Shell (router, VirtualPortGroup) | Lab-validated |
+| Catalyst 8000V | IOx (router, VirtualPortGroup, amd64, `bootflash:`) | Lab-validated onboard and record-backed undeploy 2026-09-10; app runs on the IRIS-owned VirtualPortGroup |
 | IE-3400 | IOx | Lab-validated |
 | Cisco 8000 series (IOS-XR) | appmgr container (stages to `harddisk:`) | Lab-validated on a Cisco 8201 (IOS-XR 25.4.2): console onboard, direct-to-`harddisk:` staging with sha256 verification against the catalog, telemetry reporting, and record-driven teardown |
 
