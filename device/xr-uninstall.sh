@@ -423,6 +423,18 @@ files_line_match() {
 #     for free, since that line rides the SAME prompt.
 #   - XR timestamp lines, shaped "<weekday> <month> <day> <time> UTC"
 #     (`^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$`).
+# IRIS's OWN verification scratch directory is stripped too. The agent
+# creates it as tempfile.TemporaryDirectory(prefix='.iris-verify-',
+# dir=work_dir) (device/agent/instr.py) and normally removes it on context
+# exit -- but an agent killed mid-verification orphans it, and killing the
+# agent is precisely what this teardown does when it deactivates the app.
+# It then cannot be removed at all: the sweep's iris-work/* glob does not
+# match a dot-entry, and XR has no prompt-free directory removal (see
+# sweep_verify_request()'s comment). Left counted, a force teardown failed
+# on residue IRIS itself created, and no operator action could clear it.
+# This is the same ruling already applied to an empty iris-work: IRIS's own
+# inert artifact is not a leftover. Anything NOT matching this exact prefix
+# still counts, so real residue is never waved through (issue #223).
 # Anything else surviving that strip still counts as a real entry (this
 # hardware's nonempty rows are shaped
 # "<inode> <perms>. <n> <size> <date> <name>", same family as [5/5]'s own
@@ -438,6 +450,7 @@ workdir_has_entries() {
     | grep -vE '^[0-9]+ kbytes total \([0-9]+ kbytes free\)$' \
     | grep -vE '^[^[:space:]]*#' \
     | grep -vE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) .*UTC$' \
+    | grep -vE '(^|[[:space:]])\.iris-verify-[A-Za-z0-9_]+$' \
     | grep -q .
 }
 

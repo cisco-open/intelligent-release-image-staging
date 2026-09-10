@@ -1115,6 +1115,42 @@ _xr_call_body() {
   fi
 }
 
+# Issue #223, live-reproduced on 100.90.170.81 (2026-09-10): the agent's own
+# verification scratch directory, orphaned when this teardown killed the agent
+# mid-verify, was the ONLY thing left in iris-work -- and it failed the whole
+# undeploy. It cannot be removed by any means the recipe has (the sweep's
+# iris-work/* glob does not match a dot-entry; XR has no prompt-free directory
+# removal), so counting it made a force teardown permanently unclearable on
+# residue IRIS itself created.
+@test "live: an orphaned .iris-verify-* scratch dir alone is inert, not a leftover" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 drwx------. 2 4096 Sep 10 05:11 iris-work" \
+  FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
+  1048578 drwx------. 2 4096 Sep 10 05:11 .iris-verify-l1hzk3c8
+
+41968752 kbytes total (37648196 kbytes free)" \
+    run _xr_uninstall_run_live
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"undeploy complete"* ]] || return 1
+}
+
+# The same directory is NOT a blanket amnesty: a real leftover sitting beside
+# it still forbids, so the strip can never wave genuine residue through.
+@test "live: a real leftover beside the scratch dir still counts" {
+  _xr_uninstall_stub_setup
+  FAKE_DIR_HARDDISK="Directory of harddisk:/
+    12345 drwx------. 2 4096 Sep 10 05:11 iris-work" \
+  FAKE_WORKDIR_LISTING="Directory of harddisk:/iris-work
+  1048578 drwx------. 2 4096 Sep 10 05:11 .iris-verify-l1hzk3c8
+   655365 -rw-------. 1 2037 Sep 10 05:11 iris-agent.state
+
+41968752 kbytes total (37648196 kbytes free)" \
+    run _xr_uninstall_run_live
+  [ "$status" -ne 0 ] || return 1
+  [[ "$output" == *"artifacts still present"* ]]
+}
+
 # The D2-3 guard itself had no test: deleting the session-1 probe-rejection
 # check kept the suite green while re-arming the exact incident the composite
 # exists to prevent -- a rejected probe read as "app absent", deactivate
