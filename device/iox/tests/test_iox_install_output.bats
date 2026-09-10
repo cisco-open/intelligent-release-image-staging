@@ -433,6 +433,9 @@ def request(value):
         stdout='IOx service (CAF) : Running\nDockerd : Running\n'
         if scenario=='caf_missing': stdout='Dockerd : Running\n'
         if scenario=='dockerd_missing': stdout='IOx service (CAF) : Running\n'
+        # A Catalyst 8000V runs the app under Libvirtd, not Dockerd; CAF plus
+        # Libvirtd Running is ready (must NOT time out).
+        if scenario=='c8000v_libvirtd': stdout='IOx service (CAF) : Running\nLibvirtd 5.5.0 : Running\n'
         if scenario in ('caf_missing','dockerd_missing') and counts[name]>=2:
             code,category,detail=4,'timeout','waiting for IOx services exceeded the controller deadline'
             timed_out=True
@@ -885,6 +888,15 @@ PY
     _iox_assert_trace absent begin_install app_install
     rm -rf "$STUBDIR"
   done
+}
+
+@test "controller IOx readiness accepts a Catalyst 8000V running Libvirtd, not Dockerd" {
+  # A C8000V has no Dockerd; its app runtime is Libvirtd. CAF + Libvirtd
+  # Running is ready and the install must proceed, not hang to the deadline.
+  _iox_fixture_setup
+  run _iox_controller_run install c8000v_libvirtd
+  [ "$status" -eq 0 ]
+  _iox_assert_trace count iox_status 1
 }
 
 @test "controller finish failure sets a previously successful recipe exit" {

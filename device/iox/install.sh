@@ -479,8 +479,12 @@ PY
 
     for i in $(seq 1 24); do
       if request_capture out command iox_status; then :; else rc=$?; return "$rc"; fi
+      # The app runtime is Dockerd on IE-3x00/C9300 and Libvirtd on a
+      # Catalyst 8000V (KVM-based IOx); either being Running, with CAF, means
+      # the app-hosting infrastructure is ready. Requiring Dockerd alone hung
+      # every C8000V install here until the lifecycle deadline elapsed.
       if printf '%s' "$out" | grep -q 'IOx service (CAF).*Running' &&
-         printf '%s' "$out" | grep -q 'Dockerd.*Running'; then break; fi
+         printf '%s' "$out" | grep -qE 'Dockerd.*Running|Libvirtd.*Running'; then break; fi
       [ "$i" -lt 24 ] || { echo "ERROR: IOx services are not ready" >&2; return 4; }
     done
 
