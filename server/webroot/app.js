@@ -2595,10 +2595,13 @@
   // shows for an image, so a picker/drawer row never makes the operator go
   // find the id in the Images tab to see what it actually is. Falls back to
   // the bare id when the filename is not known (a stale id the catalog no
-  // longer has, or imageFilenames not loaded yet).
+  // longer has, or imageFilenames not loaded yet), and shows the id ONCE when
+  // it IS the filename: publish.derive_id strips only .SPA.bin/.bin, so an
+  // IOS-XR .iso/.tar image's id is its whole filename and would otherwise
+  // read "8000-x64-26.2.1.iso — 8000-x64-26.2.1.iso".
   function imageLabel(id) {
     var fn = imageFilenames[id];
-    return fn ? esc(id) + ' — ' + esc(fn) : esc(id);
+    return fn && fn !== id ? esc(id) + ' — ' + esc(fn) : esc(id);
   }
   // ---- Image picker: one control shared by the per-row assign button and
   // the bulk "Assign images to N devices…" toolbar action below. Both POST
