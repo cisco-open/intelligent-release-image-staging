@@ -323,8 +323,9 @@ def install_options_for_record(record):
     by_model = gui_onboard.install_options_for(model, record.get("os_family") or "")
     options = list(_ALL_PLATFORMS) if by_model is None else list(by_model)
     if management_type in _ROUTER_TYPES:
-        options = [p for p in options if p == "router"] or (
-            ["router"] if _C8K_RE.match(model or "") or not model else [])
+        # Router recipe first: it is what a blank platform auto-resolves to.
+        options = [p for p in ("router", "iox") if p in options] or (
+            ["router", "iox"] if _C8K_RE.match(model or "") or not model else [])
     elif management_type == "xr-host":
         options = [p for p in options if p == "xr-appmgr"]
     elif management_type in ("routed", "inband"):
@@ -372,8 +373,11 @@ def validate_record(record, allow_legacy=False):
         if model and not model_is_c8k:
             raise ValueError("router modes support the Catalyst 8000 family only; "
                              "%s is not yet supported" % model)
-        if effective_platform != "router":
-            raise ValueError("router management types require platform router or a C8xxx model")
+        # Guest Shell (the router recipe) or an IOx app -- both attach to the
+        # IRIS-owned VirtualPortGroup; a blank platform on a C8xxx still
+        # auto-resolves to the router recipe.
+        if effective_platform not in ("router", "iox"):
+            raise ValueError("router management types require platform router or iox, or a C8xxx model")
     elif model_is_c8k:
         raise ValueError("Catalyst 8000 models require management_type router-routed or router-nat")
     elif effective_platform == "router":

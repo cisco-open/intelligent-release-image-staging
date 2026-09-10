@@ -586,6 +586,7 @@ selection shown below.
 | Catalyst 9300 IOx | `iox` | Live writable-media policy, normally `flash:` via the SSD share | Common device container and SSH-to-self IOS commands. |
 | IE-3400 IOx | `iox` | Live writable-media policy, normally `sdflash:` | Common device container and SSH-to-self IOS commands. |
 | Catalyst 8000 Guest Shell | n/a | `bootflash:` | Guest Shell through a VirtualPortGroup. |
+| Catalyst 8000 IOx | amd64 | `bootflash:` | The IOx app through the same VirtualPortGroup; see [IOx](iox.md#catalyst-8000-routers). |
 | Cisco 8000 series (IOS-XR) | `xr-appmgr` | Fixed `harddisk:` | Common device container with a verified direct bind mount and no SSH path. |
 
 The router path targets the Catalyst 8000 family and is lab-tested on Catalyst 8000V; see

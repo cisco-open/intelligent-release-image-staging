@@ -326,7 +326,7 @@
   // enforces, said in the operator's terms rather than as a 400 after the fact.
   function installRefusal(d, platform) {
     var mt = d.management_type || '';
-    if (mt === 'router-routed' || mt === 'router-nat') return 'Router management types run Guest Shell on the router (platform router) only.';
+    if (mt === 'router-routed' || mt === 'router-nat') return 'Router management types run Guest Shell on the router (platform router) or an IOx app, both through the IRIS VirtualPortGroup.';
     if (mt === 'xr-host') return 'XR host runs the XR appmgr container only.';
     if (platform === 'router') return 'Platform router needs management type router-routed or router-nat.';
     if (platform === 'xr-appmgr') return 'The XR appmgr container needs management type xr-host.';

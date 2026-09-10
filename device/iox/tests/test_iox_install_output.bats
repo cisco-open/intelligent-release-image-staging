@@ -1175,3 +1175,42 @@ _assert_signal_finalization() {
   [[ "$output" == *'Application deployment did not complete; onboarding aborted.'* ]]
   [[ "$output" != *'onboard complete:'* ]]
 }
+
+
+@test "router-routed dry-run attaches the app to the VirtualPortGroup, never a VLAN or AppGig" {
+  MANAGEMENT_TYPE=router-routed VPG_NUMBER=0 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 PKG=iris-amd64.tar PKG_FS=bootflash: TARGET_FS=bootflash: \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"interface VirtualPortGroup0"* ]] && \
+  [[ "$output" == *"ip address 192.0.2.1 255.255.255.0"* ]] && \
+  [[ "$output" == *"app-vnic gateway0 virtualportgroup 0 guest-interface 0"* ]] && \
+  [[ "$output" == *"guest-ipaddress 192.0.2.21 netmask 255.255.255.0"* ]] && \
+  [[ "$output" == *"app-default-gateway 192.0.2.1 guest-interface 0"* ]] && \
+  [[ "$output" == *"IRIS_DEVICE_SSH_HOST=192.0.2.1"* ]] && \
+  [[ "$output" == *"IRIS_TARGET_FS=bootflash:"* ]] && \
+  [[ "$output" != *"AppGigabitEthernet"* ]] && \
+  [[ "$output" != *"interface Vlan"* ]] && \
+  [[ "$output" != *"ip nat"* ]]
+}
+
+@test "router-nat dry-run adds the NAT footprint device/router-install.sh would" {
+  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 APP_IP=10.0.2.5 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=10.0.2.1 NAT_INTERFACE=GigabitEthernet1 PKG=iris-amd64.tar \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *" ip nat inside"* ]] && \
+  [[ "$output" == *"interface GigabitEthernet1"* ]] && \
+  [[ "$output" == *"ip access-list standard IRIS-NAT-2"* ]] && \
+  [[ "$output" == *"permit 10.0.2.0 0.0.0.255"* ]] && \
+  [[ "$output" == *"ip nat inside source list IRIS-NAT-2 interface GigabitEthernet1 overload"* ]] && \
+  [[ "$output" == *"ip nat inside source static tcp 10.0.2.5 6881 interface GigabitEthernet1 6881"* ]] && \
+  [[ "$output" == *"app-vnic gateway0 virtualportgroup 2 guest-interface 0"* ]]
+}
+
+@test "a router type refuses an out-of-range VirtualPortGroup" {
+  MANAGEMENT_TYPE=router-routed VPG_NUMBER=32 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 run bash "$INSTALL" --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VPG_NUMBER must be between 0 and 31"* ]]
+}

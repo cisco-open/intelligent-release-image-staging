@@ -556,8 +556,22 @@ case "$MANAGEMENT_TYPE" in
     : "${INBAND_VLAN:?set INBAND_VLAN}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
     : "${IOS_SSH_HOST:?set IOS_SSH_HOST — the existing IOS management SVI the app SSHes to}"
     VLAN="$INBAND_VLAN"; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY" ;;
-  *) echo "ERROR: MANAGEMENT_TYPE must be routed or inband" >&2; exit 1 ;;
+  router-routed|router-nat)
+    # A Catalyst 8000 router has no AppGigabitEthernet: the app attaches to an
+    # IRIS-owned VirtualPortGroup exactly as the Guest Shell recipe
+    # (device/router-install.sh) does, and SSHes to the VPG address. The VPG,
+    # its NAT rules and the app are the whole footprint; no VLAN, SVI or trunk.
+    : "${VPG_NUMBER:?set VPG_NUMBER}"; : "${APP_IP:?set APP_IP}"; : "${APP_MASK:?set APP_MASK}"; : "${APP_GATEWAY:?set APP_GATEWAY}"
+    [[ "$VPG_NUMBER" =~ ^[0-9]+$ ]] && [ "$VPG_NUMBER" -ge 0 ] && [ "$VPG_NUMBER" -le 31 ] \
+      || { echo "ERROR: VPG_NUMBER must be between 0 and 31" >&2; exit 1; }
+    if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+      : "${NAT_INTERFACE:?set NAT_INTERFACE}"; BT_LISTEN_PORT="${BT_LISTEN_PORT:-6881}"
+    fi
+    VLAN=""; GUEST_IP="$APP_IP"; SVI_MASK="$APP_MASK"; GW_IP="$APP_GATEWAY"
+    IOS_SSH_HOST="${IOS_SSH_HOST:-$APP_GATEWAY}"; APP_VNIC="vpg" ;;
+  *) echo "ERROR: MANAGEMENT_TYPE must be routed, inband, router-routed, or router-nat" >&2; exit 1 ;;
 esac
+APP_VNIC="${APP_VNIC:-trunk}"
 
 CATALOG_URL="${CATALOG_URL:-https://$STAGE_HOST:8443}"
 APP_INTF="${APP_INTF:-AppGigabitEthernet1/1}"
@@ -684,7 +698,9 @@ for _budget in INSTALL_TIMEOUT ACTIVATE_TIMEOUT START_TIMEOUT STATE_POLL; do
   _uint_between "$_budget" "$_value" 1 86400
 done
 unset _budget _value
-_uint_between VLAN "$VLAN" 1 4094
+# A VPG-attached app has no VLAN; the VirtualPortGroup number was range-checked
+# where the router management types were parsed.
+[ "$APP_VNIC" = "vpg" ] || _uint_between VLAN "$VLAN" 1 4094
 _uint_between CPU "$CPU" 1 1048576
 _uint_between MEM "$MEM" 1 1048576
 _uint_between DISK "$DISK" 1 1048576
@@ -766,6 +782,54 @@ APPID=iris
 CATALOG_CA_REMOTE="iris-catalog.pem"
 
 ios_net() {           # networking + IOx enable (idempotent)
+if [ "$APP_VNIC" = "vpg" ]; then
+# Router: the same VirtualPortGroup and NAT footprint device/router-install.sh
+# creates for Guest Shell, described so teardown can recognise it as IRIS's.
+cat <<EOF
+iox
+!
+interface VirtualPortGroup$VPG_NUMBER
+ description IRIS IOx VPG
+ ip address $APP_GATEWAY $APP_MASK
+EOF
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+cat <<EOF
+ ip nat inside
+EOF
+fi
+cat <<EOF
+ no shutdown
+!
+EOF
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+network_values="$(python3 - "$APP_IP" "$APP_MASK" <<'NET'
+import ipaddress, sys
+network = ipaddress.IPv4Network("%s/%s" % (sys.argv[1], sys.argv[2]), strict=False)
+print(network.network_address); print(network.hostmask)
+NET
+)"
+APP_SUBNET="${network_values%%$'\n'*}"; APP_WILDCARD="${network_values##*$'\n'}"
+cat <<EOF
+interface $NAT_INTERFACE
+ ip nat outside
+!
+ip access-list standard IRIS-NAT-$VPG_NUMBER
+ permit $APP_SUBNET $APP_WILDCARD
+!
+ip nat inside source list IRIS-NAT-$VPG_NUMBER interface $NAT_INTERFACE overload
+ip nat inside source static tcp $APP_IP $BT_LISTEN_PORT interface $NAT_INTERFACE $BT_LISTEN_PORT
+!
+EOF
+fi
+cat <<EOF
+file prompt quiet
+!
+ip scp server enable
+!
+end
+EOF
+return
+fi
 if [ "$MANAGEMENT_TYPE" = "inband" ]; then
 # Inband: attach to the EXISTING operator-owned VLAN. IRIS creates NO vlan, SVI,
 # route, or VRF. The ONE allowed touch is the AppGig trunk, and only ADDITIVELY —
@@ -817,9 +881,20 @@ EOF
 appid_block() {       # app-hosting appid (NO explicit exit lines — IOS auto-pops,
 cat <<EOF
 app-hosting appid $APPID
+EOF
+if [ "$APP_VNIC" = "vpg" ]; then
+cat <<EOF
+ app-vnic gateway0 virtualportgroup $VPG_NUMBER guest-interface 0
+  guest-ipaddress $GUEST_IP netmask $SVI_MASK
+EOF
+else
+cat <<EOF
  app-vnic AppGigabitEthernet trunk
   vlan $VLAN guest-interface 0
    guest-ipaddress $GUEST_IP netmask $SVI_MASK
+EOF
+fi
+cat <<EOF
  app-default-gateway $GW_IP guest-interface 0
  app-resource profile custom
   cpu $CPU

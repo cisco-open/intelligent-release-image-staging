@@ -26,6 +26,21 @@ The installer reads the selected package from the server's local
 host-key-checked SCP session before driving app hosting. It does not put a
 credential in an artifact URL.
 
+## Catalyst 8000 routers
+
+A Catalyst 8000 router has no `AppGigabitEthernet`. With platform `iox` on a
+`router-routed` or `router-nat` row, the installer creates the same
+IRIS-owned `VirtualPortGroup<N>` (and, for `router-nat`, the same NAT ACL,
+overload rule and BitTorrent static translation) that the Guest Shell router
+recipe creates, attaches the app with `app-vnic gateway0 virtualportgroup N`,
+and points its SSH-to-self at the VPG address. The package is the amd64 IOx
+tar and the staging target is `bootflash:`; there is no shared-disk transfer.
+Teardown removes the app and the VPG, and un-marks a NAT outside interface
+only when the deployment record says IRIS marked it. Package verification is
+handled exactly as below — the controller disables and restores the
+device-global setting around an unsigned install — so nothing needs to be
+changed by hand on the router first.
+
 ## Device-global package verification
 
 Before onboarding, inspect `show app-hosting infra` and the other IOx apps on

@@ -1460,8 +1460,8 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
     # A Catalyst 8000V on a router management type runs the router recipe and
     # nothing else -- the case an operator hit by picking IOx and watching the
     # dropdown snap back.
-    ({"management_type": "router-routed", "model": "C8000V"}, ["router"]),
-    ({"management_type": "router-nat", "model": ""}, ["router"]),
+    ({"management_type": "router-routed", "model": "C8000V"}, ["router", "iox"]),
+    ({"management_type": "router-nat", "model": ""}, ["router", "iox"]),
     ({"management_type": "xr-host", "model": "8201"}, ["xr-appmgr"]),
     ({"management_type": "inband", "model": "C9300-48UXM"}, ["guestshell", "iox"]),
     ({"management_type": "inband", "model": "IE-3400-8T2S"}, ["iox"]),
@@ -1495,3 +1495,16 @@ def test_install_options_for_record_agrees_with_validate_record(tmp_path):
               "model": "C8000V"}
     for platform in gui_fleet.install_options_for_record(legacy):
         gui_fleet.validate_record(dict(legacy, platform=platform), allow_legacy=True)
+
+
+
+def test_router_types_accept_the_iox_app_on_a_catalyst_8000(tmp_path):
+    """A Catalyst 8000V runs either the Guest Shell router recipe or the IOx
+    app, both through the IRIS VirtualPortGroup. Anything else is refused,
+    and a blank platform still auto-resolves to the router recipe."""
+    fs = _fs(tmp_path)
+    saved = fs.upsert(dict(_ROUTER, model="C8000V", platform="iox"))
+    assert saved["platform"] == "iox"
+    with pytest.raises(ValueError, match="router or iox"):
+        fs.upsert(dict(_ROUTER, device_id="r2", model="C8000V", platform="guestshell"))
+    assert fs.upsert(dict(_ROUTER, device_id="r3", model="C8000V", platform=""))["platform"] == ""

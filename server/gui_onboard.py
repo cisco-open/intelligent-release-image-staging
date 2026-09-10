@@ -167,7 +167,7 @@ _MODEL_INSTALL_TABLE = (
     (r"^IE-?3", ("iox",)),        # IE-3x00: no Guest Shell on IOS-XE >=17.9
     (r"^IR1[018]", ("iox",)),     # IR1101/IR18xx are IOx-hosted the same way
     (r"^C9[0-9]{3}", ("guestshell", "iox")),
-    (r"^C8[0-9]{3}", ("router",)),
+    (r"^C8[0-9]{3}", ("router", "iox")),   # Guest Shell (auto) or an IOx app, both via VPG
     (r"^(ISR|ASR|CSR)", ("guestshell",)),  # legacy router mapping; not yet supported
 )
 _MODEL_PLATFORMS = tuple((pattern, options[0])
@@ -289,6 +289,16 @@ _ARM_IOX_MODELS = (r"^IE-?3", r"^IR1[018]")
 # `copy` onto bootflash — same final placement as Guest Shell, and no
 # CoPP-policed punt traffic. Stacked-member-overridable APP_INTF.
 _C9K_MODEL = r"^C9[0-9]{3}"
+# Catalyst 8000 -> amd64 IOx package attached through the IRIS VirtualPortGroup
+# (device/iox/install.sh derives the vnic form from the router management
+# type); no AppGig, no SSD share, staging straight to bootflash:.
+_C8K_MODEL = r"^C8[0-9]{3}"
+_ROUTER_MANAGEMENT_TYPES = frozenset(("router-routed", "router-nat"))
+_C8K_IOX_ENV = {
+    "PKG": "iris-amd64.tar",
+    "PKG_FS": "bootflash:",
+    "TARGET_FS": "bootflash:",
+}
 _C9K_IOX_ENV = {
     "PKG": "iris-amd64.tar",
     "APP_INTF": "AppGigabitEthernet1/0/1",
@@ -314,6 +324,8 @@ def _iox_arch_env(device_id, model):
         _refuse_xr(device_id)
     if model and re.match(_C9K_MODEL, model, re.IGNORECASE):
         return dict(_C9K_IOX_ENV)
+    if model and re.match(_C8K_MODEL, model, re.IGNORECASE):
+        return dict(_C8K_IOX_ENV)
     if model and any(re.match(p, model, re.IGNORECASE) for p in _ARM_IOX_MODELS):
         return {}
     raise ValueError(
@@ -449,8 +461,8 @@ def resolve_platform(dev, probe=None, os_family=None):
         if explicit == _XR_PLATFORM and family == "xe":
             _refuse_xr_platform_on_xe(device_id)
         if re.match(r"^C8[0-9]{3}", dev.get("model") or "", re.IGNORECASE) \
-                and explicit != "router":
-            raise ValueError("Catalyst 8000 models require platform router")
+                and explicit not in ("router", "iox"):
+            raise ValueError("Catalyst 8000 models require platform router or iox")
         return explicit
 
     def _match(model):
@@ -816,15 +828,20 @@ def _default_router_preflight(dev, env, resolved, repo_root):
         if candidate.overlaps(configured):
             raise ValueError("router app subnet %s is already configured" % candidate)
 
-    apps = sections["apps"]
-    if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
-        raise ValueError("guestshell is already enabled")
-    _check_iris_named_collisions(running, extra=(
-        (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
-    guest_share = sections["guest_share"]
-    if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
-            and not re.search(r"(?im)^No files in directory\s*$", guest_share):
-        raise ValueError("bootflash:guest-share is not empty")
+    # An IOx app on this router shares the VPG/subnet/NAT checks above but
+    # not the Guest Shell footprint: its app-hosting collisions (including a
+    # resumable retry of its own appid) are the IOx preflight's job, which
+    # runs alongside this one for that platform.
+    if resolved.get("platform") != "iox":
+        apps = sections["apps"]
+        if re.search(r"(?im)^\s*(?:app id\s*:\s*)?guestshell(?:\s|$)", apps):
+            raise ValueError("guestshell is already enabled")
+        _check_iris_named_collisions(running, extra=(
+            (r"(?m)^app-hosting appid guestshell\s*$", "guestshell app-hosting config"),))
+        guest_share = sections["guest_share"]
+        if re.search(r"(?im)Directory of\s+bootflash:/?guest-share/?", guest_share) \
+                and not re.search(r"(?im)^No files in directory\s*$", guest_share):
+            raise ValueError("bootflash:guest-share is not empty")
 
     evidence = {"status": "passed", "detected_model": model,
                 "device_identity": device_identity,
@@ -1023,6 +1040,9 @@ def bind_preflight(resolved, evidence, platform=None):
     if platform == "router":
         return apply_router_preflight(resolved, evidence)
     if platform == "iox":
+        if (resolved or {}).get("management_type") in _ROUTER_MANAGEMENT_TYPES:
+            return apply_iox_preflight(
+                apply_router_preflight(resolved, evidence), evidence)
         return apply_iox_preflight(resolved, evidence)
     if platform == "guestshell":
         return apply_guestshell_preflight(resolved, evidence)
@@ -1683,6 +1703,18 @@ class OnboardService:
         if platform == "router":
             return self._router_preflight(dev, env, resolved)
         if platform == "iox":
+            if resolved.get("management_type") in _ROUTER_MANAGEMENT_TYPES:
+                # A router carrying the IOx app needs both: the router checks
+                # own the VirtualPortGroup, subnet and NAT footprint; the IOx
+                # checks own the app-hosting collisions. Both read the same
+                # box, so they must agree on which box it is.
+                router = self._router_preflight(dev, env, resolved)
+                iox = self._iox_preflight(dev, env, resolved)
+                if (router.get("device_identity") or "") != (iox.get("device_identity") or ""):
+                    raise ValueError("router and IOx preflights saw different devices")
+                merged = dict(router)
+                merged.update({k: v for k, v in iox.items() if k != "detected_model"})
+                return merged
             return self._iox_preflight(dev, env, resolved)
         if platform == "guestshell":
             return self._guestshell_preflight(dev, env, resolved)

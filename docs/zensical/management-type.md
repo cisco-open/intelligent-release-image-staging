@@ -77,7 +77,9 @@ The supported management-type cells:
 | Inband | static | IOx (IE-3400, Catalyst 9300) | supported |
 | Inband | DHCP | any | rejected — separate capability gate |
 | `router-routed` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `router-routed` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup |
 | `router-nat` | static | Guest Shell (Catalyst 8000) | supported, lab-tested on Catalyst 8000V |
+| `router-nat` | static | IOx (Catalyst 8000) | supported; the app attaches through the same VirtualPortGroup and NAT footprint |
 | `xr-host` | none | XR appmgr container (Cisco 8000 series, IOS-XR) | supported |
 
 Inband install and teardown command streams never contain `vlan`,
@@ -111,7 +113,8 @@ improvement that applies equally to both.
 
 ## Router routed and router NAT — IRIS-managed VirtualPortGroup
 
-Catalyst 8000 routers use Guest Shell through `VirtualPortGroup<N>` (VPG), not
+Catalyst 8000 routers run either Guest Shell or an IOx app through
+`VirtualPortGroup<N>` (VPG), not
 a VLAN/SVI or AppGigabitEthernet interface. Support is **designed for the
 Catalyst 8000 family, lab-tested on Catalyst 8000V**. Both router modes onboard, stage a
 verified image, and undeploy from their deployment record, and both appear on the Swarm Map

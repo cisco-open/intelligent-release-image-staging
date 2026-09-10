@@ -12,6 +12,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Run the IOx agent on Catalyst 8000 routers. Platform `iox` on a
+  `router-routed` or `router-nat` row attaches the app through the same
+  IRIS-owned VirtualPortGroup (and NAT footprint) the Guest Shell router
+  recipe uses, stages to `bootflash:`, and tears down symmetrically under the
+  same ownership rules. The Console offers IOx alongside Guest Shell for those
+  rows; package verification is handled by the existing controller.
 - Make `tools/start-compose-server.sh` the complete first start. It lists every
   handed-in input a fresh clone is missing — `bin/aria2c`, `ioxclient`, the
   per-architecture `aria2c` deliverables, and the two instruction-root public

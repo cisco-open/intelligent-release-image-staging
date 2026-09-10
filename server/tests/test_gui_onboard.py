@@ -893,9 +893,11 @@ def test_install_options_for_iox_only_models():
         assert gui_onboard.install_options_for(model, "") == ["iox"], model
 
 
-def test_install_options_for_c8k_router_only():
+def test_install_options_for_c8k_router_first_then_iox():
+    # Guest Shell through the VirtualPortGroup is the auto default; the IOx
+    # app attaches through the same VPG and is the explicit alternative.
     for model in ("C8000V", "C8200-1N-4T", "C8300-2N2S-6T", "C8500-12X"):
-        assert gui_onboard.install_options_for(model, "") == ["router"], model
+        assert gui_onboard.install_options_for(model, "") == ["router", "iox"], model
 
 
 def test_install_options_for_legacy_router_family_guestshell():
@@ -4918,3 +4920,31 @@ def test_cancelled_authority_waiter_preserves_physical_manual_worker_slot(monkey
         service.shutdown()
     assert not service._scheduled_inflight and not service._scheduled_workers
     assert not service._reserved and service._active_work == 0
+
+
+
+def test_catalyst_8000_offers_router_and_iox_and_resolves_the_iox_arch():
+    """IOx on a Catalyst 8000: amd64 package, bootflash staging, no SSD share
+    -- the installer derives the VirtualPortGroup attachment from the router
+    management type, so the arch env carries no AppGig interface."""
+    assert gui_onboard.install_options_for("C8000V") == ["router", "iox"]
+    env = gui_onboard._iox_arch_env("r1", "C8000V")
+    assert env == {"PKG": "iris-amd64.tar", "PKG_FS": "bootflash:", "TARGET_FS": "bootflash:"}
+    assert "APP_INTF" not in env and "SHARE_HOST_PATH" not in env
+    assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "iox"}) == "iox"
+    assert gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "router"}) == "router"
+    with pytest.raises(ValueError, match="router or iox"):
+        gui_onboard.resolve_platform({"device_id": "r1", "model": "C8000V", "platform": "guestshell"})
+
+
+def test_iox_on_a_router_binds_both_preflights():
+    """The router evidence owns the VPG/NAT facts, the IOx evidence the
+    app-hosting facts; both must name the same box."""
+    resolved = {"management_type": "router-nat", "platform": "iox", "app_ip": "10.0.2.5",
+                "nat_interface": "GigabitEthernet1", "swarm_port": "6881", "vpg_number": "2"}
+    evidence = {"status": "passed", "device_identity": "FDO123", "detected_model": "C8000V",
+                "iox_preexisting": False, "file_prompt_quiet_preexisting": True,
+                "nat_interface": "GigabitEthernet1", "nat_outside_preexisting": True}
+    bound = gui_onboard.bind_preflight(resolved, evidence)
+    assert bound["device_identity"] == "FDO123" and bound["model"] == "C8000V"
+    assert bound["nat_outside_owned"] == "0" and bound["file_prompt_quiet_preexisting"] == "1"

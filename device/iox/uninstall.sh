@@ -88,8 +88,8 @@ _dry_fs() {
 }
 
 _dry_validate() {
-  case "$MANAGEMENT_TYPE" in routed|inband) ;; *)
-    echo "ERROR: MANAGEMENT_TYPE must be routed or inband" >&2; exit 2 ;;
+  case "$MANAGEMENT_TYPE" in routed|inband|router-routed|router-nat) ;; *)
+    echo "ERROR: MANAGEMENT_TYPE must be routed, inband, router-routed, or router-nat" >&2; exit 2 ;;
   esac
   case "$FORCE_AGENT_ONLY" in 0|1) ;; *)
     echo "ERROR: IRIS_FORCE_AGENT_ONLY must be 0 or 1" >&2; exit 2 ;;
@@ -144,6 +144,38 @@ yes
 EOF
 return
 fi
+if [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+# Router: remove the VirtualPortGroup and NAT footprint the install created,
+# under the same ownership rules as device/router-uninstall.sh -- a NAT outside
+# interface is only un-marked when the record says IRIS marked it.
+: "${VPG_NUMBER:?set VPG_NUMBER}"
+cat <<EOF
+no app-hosting appid $APPID
+no event manager applet IRIS-AGENT
+no event manager applet IRIS-COPYROOT
+no event manager applet IRIS-RECLAIM
+no event manager applet IRIS-RECLAIM-BUNDLE
+EOF
+if [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+cat <<EOF
+no ip access-list standard IRIS-NAT-$VPG_NUMBER
+EOF
+  if [ "${NAT_OUTSIDE_OWNED:-0}" = "1" ]; then
+cat <<EOF
+interface ${NAT_INTERFACE:?set NAT_INTERFACE}
+ no ip nat outside
+exit
+EOF
+  fi
+fi
+cat <<EOF
+no interface VirtualPortGroup$VPG_NUMBER
+no ip http client secure-trustpoint IRIS
+no crypto pki trustpoint IRIS
+yes
+EOF
+return
+fi
 cat <<EOF
 no app-hosting appid $APPID
 no event manager applet IRIS-AGENT
@@ -165,6 +197,8 @@ if [ "$DRY" -eq 1 ]; then
     "$APPID" "$APPID" "$APPID"
   if [ "$MANAGEMENT_TYPE" = "inband" ] || [ "$FORCE_AGENT_ONLY" = "1" ]; then
     echo "[2/4] remove IRIS configuration"
+  elif [ "$MANAGEMENT_TYPE" = "router-routed" ] || [ "$MANAGEMENT_TYPE" = "router-nat" ]; then
+    echo "[2/4] remove IRIS configuration and VirtualPortGroup $VPG_NUMBER"
   else
     echo "[2/4] remove IRIS configuration and VLAN $VLAN"
   fi

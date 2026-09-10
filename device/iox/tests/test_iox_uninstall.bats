@@ -995,3 +995,24 @@ _assert_signal_finalization() {
     rm -rf "$STUBDIR"
   done
 }
+
+
+@test "router-routed dry-run removes the app and its VirtualPortGroup, no VLAN lines" {
+  MANAGEMENT_TYPE=router-routed VPG_NUMBER=0 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"no app-hosting appid iris"* ]] && \
+  [[ "$output" == *"no interface VirtualPortGroup0"* ]] && \
+  [[ "$output" == *"VirtualPortGroup 0"* ]] && \
+  [[ "$output" != *"no vlan"* ]] && \
+  [[ "$output" != *"no interface Vlan"* ]]
+}
+
+@test "router-nat dry-run un-marks the NAT outside interface only when IRIS marked it" {
+  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=0 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"no ip access-list standard IRIS-NAT-2"* ]] && \
+  [[ "$output" != *"no ip nat outside"* ]]
+  MANAGEMENT_TYPE=router-nat VPG_NUMBER=2 NAT_INTERFACE=GigabitEthernet1 NAT_OUTSIDE_OWNED=1 run bash "$UNINSTALL" --dry-run
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"no ip nat outside"* ]]
+}
