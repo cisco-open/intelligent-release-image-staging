@@ -2342,6 +2342,7 @@ class OnboardService:
                                 device_id, callback_dev, prior_family)
                             preflight_diagnostic[0] = (
                                 "preflight failed: %s" % exc)
+                            self._append(job_id, "ERROR: " + preflight_diagnostic[0])
                             raise ValueError("IOx preflight rejected") from None
                     try:
                         if self._iox_preflight_is_default:
@@ -2371,6 +2372,7 @@ class OnboardService:
                             "the xr-appmgr platform and xr-host management type"
                             if callback_dev.get("os_family") == "xr" else
                             "preflight failed")
+                        self._append(job_id, "ERROR: " + preflight_diagnostic[0])
                         raise ValueError("IOx preflight rejected") from None
                     self._persist_os_family(
                         device_id, callback_dev, prior_family)
@@ -2381,6 +2383,7 @@ class OnboardService:
                             preflight_diagnostic[0] = (
                                 "preflight failed: router and IOx preflights "
                                 "saw different devices")
+                            self._append(job_id, "ERROR: " + preflight_diagnostic[0])
                             raise ValueError("IOx preflight rejected")
                         merged = dict(router_evidence)
                         merged.update({key: value for key, value in evidence.items()
