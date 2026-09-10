@@ -4895,7 +4895,18 @@ class IoxController(object):
         if not argv:
             raise _ControllerFailure("rejected", "IOx recipe is not configured", 4)
         parent, child = socket.socketpair()
-        env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8",
+        # /usr/local/bin is on this PATH because the recipe's entire control
+        # channel is a python3 heredoc (device/iox/install.sh's iox_request),
+        # and the server image installs python under /usr/local -- there is no
+        # /usr/bin/python3 at all. Without it every IOx install and uninstall
+        # died with "python3: command not found" followed by "invalid private
+        # recipe protocol", because the recipe cannot speak to the controller
+        # before it can run python. The other platforms' recipes never hit
+        # this: they are spawned inheriting the full environment, so only this
+        # deliberately minimal PATH has to name the interpreter's location.
+        env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+                       ":/sbin:/bin",
+               "LANG": "C.UTF-8",
                "LC_ALL": "C.UTF-8", "IRIS_IOX_CONTROL_FD": str(child.fileno())}
         if attempt.supervisor is None:
             raise _ControllerFailure(
