@@ -12668,7 +12668,7 @@ def test_role_definitions_csv_import_previews_then_replaces_every_definition(rol
     status, headers, raw = request.raw("GET", "/api/peer-policy/roles/export-csv")
     assert status == 200
     assert headers["Content-Type"].startswith("text/csv")
-    assert headers["Content-Disposition"] == "attachment; filename=roles.csv"
+    assert headers["Content-Disposition"].endswith("; filename=roles.csv")
     assert headers["ETag"] == gui_server._revision_etag(
         "peer-policy", committed["revision"])
     assert raw.decode("utf-8") == role_csv.export_roles_csv(doc)

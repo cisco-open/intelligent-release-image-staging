@@ -869,11 +869,10 @@ button.attention-card:focus-visible { outline:none; box-shadow:var(--focus-ring)
   .selbar-actions { margin-left:0; width:100%; }
 }
 
-/* Role definitions: the editable table inside the Peer policy panel and its
-   editor modal. The table scrolls inside its own wrapper so a role with many
-   QoS overrides never widens the page. */
+/* Role definitions: the editable table inside the Peer policy panel (in the
+   shared .table-scroll wrapper like every other console table) and its
+   editor modal. */
 .role-def-actions { display:flex; flex-wrap:wrap; gap:var(--sp-sm); margin:var(--sp-sm) 0; }
-.role-def-wrap { overflow-x:auto; margin-bottom:var(--sp-sm); }
 .role-def-table th, .role-def-table td { white-space:nowrap; }
 .role-def-table td.qos { white-space:normal; min-width:200px; }
 .role-def-table td:last-child { white-space:nowrap; }
