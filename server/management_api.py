@@ -931,6 +931,27 @@ class ScheduleTargetError(RuntimeError):
         super().__init__(message)
 
 
+def _resolved_with_resources(resolved, resources):
+    """The bound plan a job hands the platform, carrying the record's own
+    ownership claim.
+
+    Only the record used to hold `resources`; the resolved plan a job builds
+    its install request from did not. For IOx that request is validated
+    against a closed field set that REQUIRES the claim, so every install was
+    refused as an incomplete target plan. Copied, never aliased: the record
+    keeps its own list.
+    """
+    # IOx only. The bound plan is also what _bind_evidence rebuilds the
+    # installer environment from, so every other platform keeps the exact
+    # plan it always got; the IOx controller is the one consumer that
+    # requires the claim inside its target.
+    if resolved.get("platform") != "iox":
+        return resolved
+    bound = dict(resolved)
+    bound["resources"] = copy.deepcopy(resources)
+    return bound
+
+
 @contextlib.contextmanager
 def _runner_schedule_role_guard(guard, schedule):
     """Translate expected role-authority refusals into runner-safe reasons."""
@@ -1836,12 +1857,19 @@ class _OnboardSubmissionAdapter(object):
                     record_id = record_ref.get("id")
                     if not record_id:
                         raise ValueError("planned record is unavailable")
+                    resources = self._owned_resources(final_plan["resolved"])
                     self.record_store.update_planned(
                         record_id, plan_hash=final_plan["plan_hash"],
                         resolved=final_plan["resolved"], preflight=evidence,
-                        resources=self._owned_resources(
-                            final_plan["resolved"]))
-                    return final_plan["resolved"]
+                        resources=resources)
+                    # The IOx controller admits an install target only with the
+                    # ownership claim its record holds, and the bound plan is
+                    # what the request is built from -- so it has to carry the
+                    # resources, not just the record. Without this the install
+                    # request went out with no resources at all and the
+                    # controller refused it as an incomplete target plan.
+                    return _resolved_with_resources(
+                        final_plan["resolved"], resources)
             else:
                 try:
                     degraded_plan = self._plan(device_id, device)
@@ -2624,17 +2652,19 @@ class _ScheduledExecutor(object):
             update = (self.record_store.update_scheduled_recovery
                       if record_ref.get("recovered_applying") else
                       self.record_store.update_planned)
+            resources = self.submission._owned_resources(
+                final_plan["resolved"])
             kwargs = {
                 "plan_hash": final_plan["plan_hash"],
                 "resolved": final_plan["resolved"],
                 "preflight": evidence,
-                "resources": self.submission._owned_resources(
-                    final_plan["resolved"]),
+                "resources": resources,
             }
             if record_ref.get("recovered_applying"):
                 kwargs["provenance"] = provenance
             update(record_id, **kwargs)
-            return final_plan["resolved"]
+            return _resolved_with_resources(
+                final_plan["resolved"], resources)
 
         return authority_guard, authority_check, prepare, pre_apply, record_ref
 
