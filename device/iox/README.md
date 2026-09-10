@@ -121,11 +121,14 @@ itself remains unchanged and does not need rebuilding.
 3. **Make the package and certificate available**: place the
    architecture-matched tar in the server's `artifacts/` directory; server
    bring-up already stages the current public certificate there as
-   `iris-catalog.pem`. `install.sh` validates and reads both locally, then
-   pushes them over its authenticated, host-key-checked SCP session to the
-   selected package filesystem. The credential is supplied to `sshpass`
-   through the environment, never a URL, argument, or log. If you are not
-   using the one-shot installer, copy both files to the device manually.
+   `iris-catalog.pem`. `install.sh` validates both locally, installs the
+   catalog trustpoint over its authenticated, host-key-checked SSH session,
+   and has the device fetch them (and its sealed instruction envelope) from
+   the artifact server with `copy https:`, authenticated with the device's
+   own enrollment credential (`ip http client username` / `password`, set
+   for each copy and removed after it). Nothing is pushed over SCP. If you
+   are not using the one-shot installer, copy both files to the device
+   manually.
 
    These are also the artifact prerequisites for **Console one-click
    onboarding**: once `iris-arm64.tar` and the public certificate are staged,

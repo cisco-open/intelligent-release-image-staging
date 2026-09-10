@@ -169,7 +169,8 @@ ROUTES = tuple(
           "artifactBasic", "Download device artifact"),
     Route("artifact", "HEAD", "/v1/devices/{device_id}/artifacts/{artifact_path}",
           "artifactBasic", "Inspect device artifact"),
-    # Guest Shell uses IOS ``copy https:`` and cannot attach Basic headers.
+    # Guest Shell's installers run IOS ``copy https:`` without the IOS HTTP
+    # client credential that would attach the Basic header (IOx sets it).
     # Static entries contain no credentials; staging names carry a 128-bit
     # capability and are swept.  Keep these explicit so the compatibility
     # exception cannot silently grow into arbitrary anonymous file serving.

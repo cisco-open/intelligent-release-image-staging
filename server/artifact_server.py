@@ -58,7 +58,9 @@ def _legacy_guest_shell_target(request_path):
     """Return a safe legacy relative path, or ``None``.
 
     These paths are an explicit compatibility exception for IOS Guest Shell,
-    whose ``copy https:`` client cannot attach the resource-bound Basic header.
+    whose installers run ``copy https:`` without configuring the IOS HTTP
+    client credential the resource-bound Basic route expects (IOx onboarding
+    does configure it, for the span of each copy).
     Enrollment files authenticate through an unguessable 128-bit filename and
     are time-swept; static bootstrap/bundle/CA files contain no credential.
     Decode exactly once and reject residual escapes so the stock handler's

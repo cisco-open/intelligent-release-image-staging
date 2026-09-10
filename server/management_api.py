@@ -7739,6 +7739,16 @@ def main():
         catalog_host = os.environ.get("IRIS_HOST_IP", "")
         catalog_url = os.environ.get("IRIS_CATALOG_URL") or (
             "https://%s:8443" % catalog_host if catalog_host else "")
+        # The device-facing artifact server an IOx device fetches its
+        # package, certificate and instruction envelope from with
+        # `copy https:` (server/artifact_server.py, port IRIS_ARTIFACTS_PORT
+        # on the same address devices reach the catalog on), and the
+        # directory it serves, where the controller publishes the per-device
+        # envelope under staging/<device-id>/ for the span of that fetch.
+        artifacts_dir = os.environ.get("IRIS_ARTIFACTS_DIR", "/srv/artifacts")
+        artifact_url = ("https://%s:%s" % (
+            catalog_host, os.environ.get("IRIS_ARTIFACTS_PORT", "8000"))
+            if catalog_host else "")
         iox_controller = iox_verification.IoxController(
             record_store,
             {
@@ -7755,6 +7765,8 @@ def main():
                     instruction_catalog.materialize_bootstrap_instruction,
                 "catalog_url": catalog_url,
                 "catalog_certificate_path": catalog_certificate,
+                "artifact_url": artifact_url,
+                "artifacts_dir": artifacts_dir,
                 "recipe_argv_by_action": {
                     "install": [
                         "/bin/bash",

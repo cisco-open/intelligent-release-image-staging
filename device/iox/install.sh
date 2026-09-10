@@ -7,9 +7,14 @@
 # Repeatable IRIS installer for Catalyst devices with IOx app hosting. It
 # deploys the agent as an architecture-matched IOx Docker app (iris-arm64.tar) instead
 # of into Guest Shell, but uses the SAME transport as
-# device/device-install.sh: the onboarding host pushes the package over the
-# already-authenticated IOS SCP service. The enrollment token therefore never
-# enters a URL, an IOS HTTP-client configuration, or a process argument. The
+# device/device-install.sh: the catalog trustpoint is pasted over the
+# already-authenticated SSH session FIRST, then the DEVICE fetches the
+# package, the public catalog certificate and its sealed instruction
+# envelope with `copy https:` from the artifact server, authenticating with
+# its own enrollment credential (`ip http client username` / `password`,
+# configured for the span of each copy and removed right after it). Nothing
+# is pushed to the device and no service is enabled on it for onboarding's
+# sake; the enrollment token never enters a URL or a process argument. The
 # agent then pulls its assigned image over
 # the swarm and copies it to an IOS-visible disk via a plain `copy`, such as
 # sdflash: on IE-3x00 or usbflash1: on C9300. Distribute/stage
@@ -840,7 +845,65 @@ if [ -n "${EXPECTED_DEVICE_IDENTITY:-}" ]; then
   _safe_word EXPECTED_DEVICE_IDENTITY "$EXPECTED_DEVICE_IDENTITY"
 fi
 APPID=iris
-CATALOG_CA_REMOTE="iris-catalog.pem"
+# The artifact server's device-bound route (server/api_routes.py
+# artifactBasic): HTTP Basic, username = device id, password = the enrollment
+# token, which IOS attaches from its global HTTP client credentials.
+ARTIFACT_BASE="https://$STAGE_HOST:8000/v1/devices/$DEVICE_ID/artifacts"
+
+# The same trust block device/device-install.sh pastes, before any copy:
+# non-circular (trust arrives over the SSH we already have; the bulk transfer
+# rides the HTTPS it validates). The controller answers the device's two
+# PKI confirmations only when they are actually asked.
+trustpoint_block() {
+  echo "configure terminal"
+  echo "no crypto pki trustpoint IRIS"
+  echo "! yes -- if the device asks to confirm the removal [yes/no]"
+  echo "crypto pki trustpoint IRIS"
+  echo " enrollment terminal"
+  echo " revocation-check none"
+  echo "exit"
+  echo "crypto pki authenticate IRIS"
+  if [ -n "${IRIS_CRT_FILE:-}" ] && [ -r "$IRIS_CRT_FILE" ]; then
+    cat "$IRIS_CRT_FILE"
+  else
+    echo "! <contents of \$IRIS_CRT_FILE (the public catalog certificate) inserted here at apply time>"
+  fi
+  echo "quit"
+  echo "! yes -- at the device's \"accept this certificate? [yes/no]\" question"
+  echo "ip http client secure-trustpoint IRIS"
+  echo "end"
+}
+
+http_client_credentials() {
+  echo "configure terminal"
+  echo "ip http client username $DEVICE_ID"
+  echo "ip http client password 0 <redacted>"
+  echo "end"
+}
+
+clear_http_client() {
+  echo "configure terminal"
+  echo "no ip http client username"
+  echo "no ip http client password"
+  echo "end"
+}
+
+fetch_block() {
+  http_client_credentials
+  printf 'copy %s/%s %siris-<transaction>.tar\n' "$ARTIFACT_BASE" "$PKG" "$PKG_FS"
+  printf 'dir %s | include iris-<transaction>\\.tar\n' "$PKG_FS"
+  clear_http_client
+  http_client_credentials
+  printf 'copy %s/iris-catalog.pem %siris-ca.pem\n' "$ARTIFACT_BASE" "$PKG_FS"
+  printf 'dir %s | include iris-ca\\.pem\n' "$PKG_FS"
+  clear_http_client
+  echo "! after activation, the sealed instruction envelope the same way:"
+  http_client_credentials
+  printf 'copy %s/staging/%s/iris-instructions-<transaction>.envelope %siris-instructions-<transaction>.envelope\n' \
+    "$ARTIFACT_BASE" "$DEVICE_ID" "$PKG_FS"
+  printf 'dir %s | include iris-instructions-<transaction>\\.envelope\n' "$PKG_FS"
+  clear_http_client
+}
 
 ios_net() {           # networking + IOx enable (idempotent)
 if [ "$APP_VNIC" = "vpg" ]; then
@@ -885,6 +948,9 @@ fi
 cat <<EOF
 file prompt quiet
 !
+! SCP server: not for onboarding (the router fetches the package itself);
+! the agent's runtime image hand-off scp-pushes the downloaded image to
+! bootflash:guest-share/iris through it, then the plain copy places it.
 ip scp server enable
 !
 end
@@ -1000,9 +1066,10 @@ if [ -n "$SHARE_IOS_PATH" ]; then
   echo "create shared directory"
   echo "mkdir $SHARE_IOS_PATH"
 fi
-echo "upload package and certificate"
-printf 'scp -O <artifacts>/%s %s@%s:%s%s\n' "$PKG" '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$PKG"
-printf 'scp -O <public-certificate> %s@%s:%s%s\n' '${DEVICE_USER}' "$DEVICE_IP" "$PKG_FS" "$CATALOG_CA_REMOTE"
+echo "catalog trustpoint (pasted over SSH before any copy)"
+trustpoint_block
+echo "device-side fetch over verified https (credentials set for each copy, then removed)"
+fetch_block
 echo "signature policy: package.sign/package.cert marker presence does not establish cryptographic validity; controller admission decides verification handling"
 echo "install, activate, copy certificate, start and save: $APPID"
 exit 0

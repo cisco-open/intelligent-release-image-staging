@@ -917,11 +917,11 @@ variable controls which path.
 Authenticated static-file GET/HEAD under
 `/v1/devices/<device-id>/artifacts/<path>` over `IRIS_ARTIFACTS_DIR`. HTTP Basic
 uses the device id as username and that device's current/overlap catalog token
-as password. This API is available to explicit HTTPS clients; shipped device
-onboarding does not call it because IOS-XE has no safe per-copy channel for
-supplying HTTP Basic credentials. The server-side installer instead pushes its
-locally generated enrollment files and package over the already authenticated,
-host-key-checked device SCP session. The server authenticates and binds an
+as password. IOx onboarding calls it from the device: IOS attaches the
+credential from `ip http client username` / `ip http client password`, which
+the controller configures for the span of each `copy https:` and removes
+afterwards, and the device's sealed instruction envelope is published under
+`staging/<device-id>/` for that one fetch. The server authenticates and binds an
 artifact API credential to `<device-id>` before
 decoding/translating the path or testing existence. Directory listing is
 disabled, and a resolved path escaping the root through traversal or symlink is
@@ -932,7 +932,8 @@ bootstrap flow. Its static bootstrap, bundle, certificate, and
 `staging/<128-bit-capability>` paths therefore remain available over verified
 HTTPS without HTTP Basic. The secret-bearing names are generated per install,
 written mode `0600`, redacted from access logs, and swept after one hour. This
-is the Guest Shell enrollment path; IOx and XR use server-initiated SCP.
+is the Guest Shell enrollment path; IOx uses the authenticated API above and
+XR uses server-initiated SCP.
 
 `GET` additionally enforces the `staging/` permission contract: a file under
 `staging/` must be mode `0600`-or-tighter before it is served — the server

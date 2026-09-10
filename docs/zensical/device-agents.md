@@ -102,13 +102,19 @@ so a re-onboard never leaves the guest running on stale networking from a
 previous install — see
 [Router routed and router NAT](management-type.md#router-routed-and-router-nat-iris-managed-virtualportgroup).
 
-### IOx: what the installer pushes
+### IOx: what the installer delivers
 
-`device/iox/install.sh` never touches Guest Shell. It pushes the built package
-(`iris-arm64.tar` or `iris-amd64.tar`) and current public catalog certificate
-from the server host to the target IOS filesystem over the same authenticated,
-host-key-checked SCP transport. After the app reaches `ACTIVATED`, the installer
-copies the certificate into app-hosting application data, then starts the app.
+`device/iox/install.sh` never touches Guest Shell. Over its authenticated,
+host-key-checked SSH session it installs the catalog trustpoint, then has the
+device itself `copy https:` the built package (`iris-arm64.tar` or
+`iris-amd64.tar`) and the current public catalog certificate from the artifact
+server to the target IOS filesystem, authenticating with its own enrollment
+credential (`ip http client username` / `password`, configured for each copy
+and removed after it). After the app reaches `ACTIVATED`, the device fetches
+its sealed instruction envelope the same way, the installer copies both into
+app-hosting application data, then starts the app. Nothing is pushed over
+SCP; the `ip scp server enable` the installer still configures serves the
+agent's runtime image hand-off, not onboarding.
 The package contains no server certificate; the container reads the copy from
 CAF's app-data directory. Deployment-specific values — the enrollment
 token, device id, and SSH-to-self credentials — are passed as numbered

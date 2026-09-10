@@ -1292,10 +1292,11 @@ manifest as evidence in either outcome.
    Do not publish that port for devices or browsers.
 4. From the device's agent network, check the catalog on HTTPS TCP 8443 and
    tracker on HTTPS TCP 6969. Check BitTorrent TCP 6881 to the server seeder
-   and TCP 6881–6999 between device peers. Guest Shell onboarding also needs
-   the artifact server on HTTPS TCP
-   8000; server-to-device onboarding uses SSH/SCP on TCP 22. IOx additionally
-   needs SSH/SCP from the app to IOS. See [Network ports](network-ports.md).
+   and TCP 6881–6999 between device peers. Guest Shell and IOx onboarding
+   also need the artifact server on HTTPS TCP 8000 from the device;
+   server-to-device onboarding uses SSH on TCP 22 (SCP only for the IOS-XR
+   package). IOx additionally needs SSH/SCP from the app to IOS. See
+   [Network ports](network-ports.md).
 5. Confirm the published image still exists in its recorded source directory
    under the import root or uploads volume, and uid 10001 can read it.
 6. Confirm the server can read its age key, state, and artifacts. Check the

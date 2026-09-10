@@ -21,10 +21,25 @@ normally selects `sdflash:`, while Catalyst 9300 normally selects `flash:`
 (bootflash, like Guest Shell) and uses the SSD share to carry the transfer. The table in
 [Device Agents](device-agents.md#platform-targets) reflects the same rule.
 
-The installer reads the selected package from the server's local
-`artifacts/` directory and pushes it to IOS over its authenticated,
-host-key-checked SCP session before driving app hosting. It does not put a
-credential in an artifact URL.
+The installer first pastes the catalog trustpoint over its authenticated,
+host-key-checked SSH session — the same block the Guest Shell installers
+use — and then has the **device** fetch the package, the public catalog
+certificate and its sealed instruction envelope from the artifact server with
+`copy https:`, validated against that trustpoint. Each copy authenticates
+with the device's own enrollment credential (HTTP Basic: the device id and
+its enrollment token, the artifact API's resource-bound form), which the
+controller configures as `ip http client username` / `ip http client
+password` for the span of that copy and removes right after it. The token
+never enters a URL or a job log (it is redacted from every capture and
+transcript), and the envelope is published under `staging/<device-id>/` for
+that one fetch. Nothing is pushed to the device and no service is enabled on
+it for onboarding's sake; a device whose running-config already carries an
+operator's `ip http client username` or `password` is refused at preflight
+rather than having them overwritten. `ip scp server enable` is still
+configured, for the agent, not the installer: the runtime image hand-off
+described below pushes the downloaded image to `guest-share` through the
+device's SCP server on IE-3400 and Catalyst 8000, and as the Catalyst 9300
+share fallback.
 
 ## Catalyst 8000 routers
 

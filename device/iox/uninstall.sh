@@ -22,9 +22,13 @@
 #     deployments, the IRIS iris/ subdir of the CAF share (transient transfer
 #     copies; the share root itself is operator space and never touched)
 # Deliberately LEFT IN PLACE (the installer re-applies the first three
-# idempotently; the last two are generic + a delivered artifact):
-#   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable,
-#   the staged OS image on the selected IOS disk. Successful cleanup is
+# idempotently; the rest are generic + a delivered artifact):
+#   iox, file prompt quiet, the AppGigabitEthernet trunk, ip scp server enable
+#   (onboarding no longer pushes anything over SCP -- the device fetches its
+#   package over HTTPS -- but the agent's runtime guest-share hand-off used
+#   the device's SCP server, and whether IRIS or the operator enabled it is
+#   not recorded; see issue #228), the staged OS image on the selected IOS
+#   disk. Successful cleanup is
 #   persisted to startup-config so a reload cannot restore IRIS configuration.
 # In a real run, recorded versus force-agent-only authority comes exclusively
 # from the controller ready frame. IRIS_FORCE_AGENT_ONLY affects dry-run text

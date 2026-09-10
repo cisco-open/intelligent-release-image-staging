@@ -55,6 +55,31 @@ _MAX_INTEGER = (1 << 63) - 1
 _REDACTION = b"<redacted>"
 _PROCESS_TERM_SECONDS = 0.02
 _PROCESS_CLEANUP_RESERVE_SECONDS = 0.05
+# A device-side `copy https:` prints a progress mark per transferred chunk, so
+# the wrapper fetch is the one ordinary command whose output can pass the
+# 32 KiB capture. The recipe still receives at most 32 KiB (the controller
+# bounds what it forwards); this only keeps a long progress line from reading
+# as a truncated, and therefore unknown, readback.
+_FETCH_CAPTURE_BYTES = 256 * 1024
+_FETCH_PURPOSES = frozenset(
+    ("fetch_wrapper", "fetch_certificate", "fetch_instructions"))
+# The catalog trustpoint step (the block device/device-install.sh pastes, now
+# rendered by the controller for IOx). Its two PKI confirmations are not file
+# prompts, so `file prompt quiet` does not suppress them, and the CA paste
+# after `crypto pki authenticate` is the one place IOS reads lines with no
+# prompt between them. Both are matched by shape rather than exact wording:
+# a confirmation is whatever question ends in "[yes/no]:", the paste request
+# is the banner naming the "quit" terminator.
+_TRUSTPOINT_PURPOSE = "configure_trustpoint"
+_TRUSTPOINT_REMOVE = b"no crypto pki trustpoint IRIS"
+_TRUSTPOINT_AUTHENTICATE = b"crypto pki authenticate IRIS"
+_TRUSTPOINT_PASTE_TERMINATOR = b"quit"
+_YES_NO_QUESTION_RE = re.compile(br"(?s).*\[yes/no\]:\s?$")
+_TRUSTPOINT_BANNER_RE = re.compile(br"(?s).*\bquit\b.*\n$")
+# IOS's own verdict after the paste: "Trustpoint CA certificate accepted."
+# and "% Certificate successfully imported".
+_TRUSTPOINT_ACCEPTED_RE = re.compile(
+    br"(?i)certificate successfully imported|ca certificate accepted")
 
 _HEX32_RE = re.compile(r"^[0-9a-f]{32}$")
 _RECORD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -96,6 +121,10 @@ _PURPOSES = frozenset((
     "remove_instructions", "identity_discovery", "identity_revalidation",
     "preflight", "verification_read", "verification_disable",
     "verification_enable", "recipe_output",
+    # Device-side artifact fetch over authenticated HTTPS (the transfer that
+    # replaced the SCP push; upload_* stays accepted for older transcripts).
+    "configure_trustpoint", "http_client_credentials", "clear_http_client",
+    "fetch_wrapper", "fetch_certificate", "fetch_instructions",
 ))
 
 
@@ -1803,6 +1832,14 @@ def _dir_absent(purpose, line, payload):
     return bool(lines) and all(_DIR_ABSENT_RE.match(l.strip()) for l in lines)
 
 
+def _trustpoint_removal(purpose, line):
+    """`no crypto pki trustpoint IRIS` is IRIS-generated and fixed, and its
+    goal -- the trustpoint is absent -- is met whatever the device answers:
+    an advisory about destroyed certificates when it existed, a refusal when
+    it did not. The re-add and CA paste that follow are the real gate."""
+    return purpose == _TRUSTPOINT_PURPOSE and line.strip() == _TRUSTPOINT_REMOVE
+
+
 def _classify_ios_error(payload):
     for line in _lines(payload):
         lower = line.lower()
@@ -2005,6 +2042,47 @@ class _Dialogue(object):
         expected_echo = self.transport._redact_literal(command)
         echo_end = self.wait_until(
             lambda data: self._echo_end(data, expected_echo))
+        return self._finish_step(echo_end, expected, question, answer)
+
+    def paste_step(self, command, lines, terminator, question, answer):
+        """A command that makes IOS read a block of lines (the terminal CA
+        paste of `crypto pki authenticate`) instead of prompting: the block
+        and its terminator are echoed with no prompt between them, then the
+        device asks its confirmation and only then prompts again. Returns
+        command_step's (payload, span, prompt_kind); the payload is what the
+        device printed after the terminator's echo, minus the answer echo.
+        A device that prompts instead of asking for the certificate hands
+        back whatever it printed, so the caller's acceptance check fails on
+        the device's own words."""
+        self.send(command + b"\n")
+        expected_echo = self.transport._redact_literal(command)
+        echo_end = self.wait_until(
+            lambda data: self._echo_end(data, expected_echo))
+        prompted = []
+
+        def banner_seen(data):
+            tail = data[echo_end:]
+            if _TRUSTPOINT_BANNER_RE.fullmatch(tail) is not None:
+                return len(data)
+            if self._suffix_prompt(data, echo_end) is not None:
+                prompted.append(True)
+                return len(data)
+            return None
+        self.cursor = self.wait_until(banner_seen)
+        if prompted:
+            position, unused_match, prompt_kind = self._suffix_prompt(
+                self._data(), echo_end)
+            payload = self._data()[echo_end:position]
+            self.cursor = len(self._data())
+            return payload, (echo_end, len(payload)), prompt_kind
+        for line in list(lines) + [terminator]:
+            self.send(line + b"\n")
+            line_echo = self.transport._redact_literal(line)
+            self.cursor = self.wait_until(
+                lambda data, expected=line_echo: self._echo_end(data, expected))
+        return self._finish_step(self.cursor, "config", question, answer)
+
+    def _finish_step(self, echo_end, expected, question, answer):
         payload_start = echo_end
         # Whether the device actually ASKED the confirmation. It is
         # conditional: `file prompt quiet` suppresses it, and IRIS sets that
@@ -2017,14 +2095,18 @@ class _Dialogue(object):
         question_asked = False
         if question is not None:
             asked = []
+            # An exact question is the device's known literal; a compiled
+            # pattern is a confirmation matched by shape ("... [yes/no]:").
+            exact = isinstance(question, bytes)
             def question_seen(data):
                 tail = data[echo_end:]
-                if tail == question:
+                if (tail == question if exact else
+                        question.fullmatch(tail) is not None):
                     asked.append(True)
                     return len(data)
                 if self._suffix_prompt(data, echo_end) is not None:
                     return len(data)
-                if len(tail) >= len(question) and not question.startswith(tail):
+                if exact and len(tail) >= len(question) and not question.startswith(tail):
                     raise IoxTransportError("unsupported_response", "interactive question mismatch")
                 return None
             question_end = self.wait_until(question_seen)
@@ -2057,6 +2139,10 @@ class _Dialogue(object):
         prompt_start, prompt_end, prompt_kind = self.wait_until(final)
         payload = self._data()[payload_start:prompt_start]
         if question_asked:
+            if not isinstance(question, bytes):
+                # A shape-matched confirmation may end in a space the device
+                # wrote after the match was already seen.
+                payload = payload.lstrip(b" ")
             if answer:
                 if not payload.startswith(answer + b"\n"):
                     raise IoxTransportError("unsupported_response", "interactive answer echo mismatch")
@@ -2417,7 +2503,9 @@ class IoxTransport(object):
         purpose = context["purpose"]
         restoration = purpose == "verification_enable" or context.get("phase") in (
             "ownership_probe", "restore_intent")
-        capture_limit = _VERIFY_CAPTURE_BYTES if purpose.startswith("verification_") else _CAPTURE_BYTES
+        capture_limit = (_VERIFY_CAPTURE_BYTES if purpose.startswith("verification_")
+                         else _FETCH_CAPTURE_BYTES if purpose in _FETCH_PURPOSES
+                         else _CAPTURE_BYTES)
         stdout = _NormalizedCapture(self._secret_values, capture_limit)
         stderr = _NormalizedCapture(self._secret_values, capture_limit)
         child = None
@@ -2453,7 +2541,10 @@ class IoxTransport(object):
                     if payload:
                         raise IoxTransportError("unsupported_response", "terminal setup returned payload")
                 in_config = False
-                for line in executable:
+                index = 0
+                while index < len(executable):
+                    line = executable[index]
+                    index += 1
                     question = answer = None
                     expected = "config" if in_config else "exec"
                     if line == b"configure terminal":
@@ -2471,6 +2562,31 @@ class IoxTransport(object):
                     elif purpose == "cleanup_config" and line.startswith(b"no app-hosting appid"):
                         question = b"Are you sure you want to do this? [yes/no]:"
                         answer = b"yes"
+                    elif (purpose == _TRUSTPOINT_PURPOSE and in_config and
+                          line == _TRUSTPOINT_REMOVE):
+                        question = _YES_NO_QUESTION_RE
+                        answer = b"yes"
+                    if (purpose == _TRUSTPOINT_PURPOSE and in_config and
+                            line == _TRUSTPOINT_AUTHENTICATE):
+                        try:
+                            stop = executable.index(_TRUSTPOINT_PASTE_TERMINATOR, index)
+                        except ValueError:
+                            raise IoxTransportError(
+                                "unsupported_syntax", "trustpoint paste lacks its terminator")
+                        paste = executable[index:stop]
+                        index = stop + 1
+                        payload, span, prompt_kind = dialogue.paste_step(
+                            line, paste, _TRUSTPOINT_PASTE_TERMINATOR,
+                            _YES_NO_QUESTION_RE, b"yes")
+                        framed_payloads.append(payload)
+                        payload_spans.append({"offset": span[0], "length": span[1]})
+                        # The device's verdict on the pasted certificate is
+                        # the proof; its '%'-prefixed acceptance notice is
+                        # not an error, and anything else is a refusal.
+                        if (_TRUSTPOINT_ACCEPTED_RE.search(payload) is None and
+                                semantic_error is None):
+                            semantic_error = "rejected"
+                        continue
                     payload, span, prompt_kind = dialogue.command_step(
                         line, expected, question=question, answer=answer)
                     framed_payloads.append(payload)
@@ -2480,7 +2596,8 @@ class IoxTransport(object):
                             _cleanup_absent(purpose, payload) or
                             _vlan_already_absent(purpose, line, payload) or
                             _delete_absent(purpose, payload) or
-                            _dir_absent(purpose, line, payload)):
+                            _dir_absent(purpose, line, payload) or
+                            _trustpoint_removal(purpose, line)):
                         payload_error = None
                     if payload_error is not None and semantic_error is None:
                         semantic_error = payload_error
@@ -2506,6 +2623,13 @@ class IoxTransport(object):
                             payload_error is None):
                         raise IoxTransportError("unsupported_response", "save response was not exact")
                 dialogue.finish_process()
+                if purpose in _FETCH_PURPOSES:
+                    # `copy https:` then the closing `dir` probe. IOS reports
+                    # a completed transfer with its byte count; the controller
+                    # compares that count and the probe's size to the source.
+                    if (len(executable) != 2 or len(framed_payloads) != 2 or
+                            b"bytes copied" not in framed_payloads[0]):
+                        semantic_error = semantic_error or "rejected"
                 if purpose in ("remove_wrapper", "remove_certificate",
                                "remove_instructions"):
                     if (len(executable) != 2 or len(framed_payloads) != 2 or

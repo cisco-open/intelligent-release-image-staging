@@ -61,9 +61,13 @@ setup() {
 }
 
 @test "dry-run leaves generic config and the sdflash image in place" {
+  # ip scp server enable stays: onboarding no longer needs it (the device
+  # fetches its package over HTTPS), but the agent's runtime hand-off used
+  # it and whether IRIS or the operator enabled it is not recorded (#228).
   run bash "$UNINSTALL" --dry-run
   [[ "$output" != *"no iox"* ]] && \
   [[ "$output" != *"no ip scp server"* ]] && \
+  [[ "$output" != *"no ip http client username"* ]] && \
   [[ "$output" != *"delete /force sdflash:"* ]]
 }
 

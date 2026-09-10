@@ -1101,6 +1101,31 @@ for index, expected in enumerate(commands):
         echo(command, prompt)
     if scenario.get("duplicate_echo"):
         echo(command, prompt)
+    paste = scenario.get("paste")
+    if paste and command == paste["command"]:
+        # A terminal CA paste: the device asks for the certificate, echoes
+        # every pasted line with no prompt between them, and only after the
+        # terminator prints the fingerprints, asks its confirmation, and
+        # prompts again.
+        write(paste.get("banner", "\nEnter the base 64 encoded CA certificate.\nEnd with a blank line or the word \"quit\" on a line by itself\n\n"))
+        pasted = []
+        while True:
+            line = receive()
+            echo(line, prompt)
+            if line == paste.get("terminator", "quit"):
+                break
+            pasted.append(line)
+        trace("pasted", lines=pasted)
+        write(paste.get("fingerprint", "Certificate has the following attributes:\n       Fingerprint MD5: 00112233 44556677 8899AABB CCDDEEFF\n      Fingerprint SHA1: 00112233 44556677 8899AABB CCDDEEFF 00112233\n\n"))
+        confirmation = paste.get("question", "% Do you accept this certificate? [yes/no]: ")
+        if confirmation:
+            write(confirmation)
+            if receive() != "yes":
+                sys.exit(105)
+            write("yes\n")
+        write(paste.get("accepted", "Trustpoint CA certificate accepted.\n% Certificate successfully imported\n"))
+        write(prompt)
+        continue
     question = scenario.get("question")
     if question and index == scenario.get("question_index", 0):
         write(question)
@@ -1127,6 +1152,8 @@ for index, expected in enumerate(commands):
         prompt = host + "#"
     elif command.startswith("app-hosting appid"):
         prompt = host + "(config-app-hosting)#"
+    if command in scenario.get("prompt_after", {}):
+        prompt = scenario["prompt_after"][command]
     if scenario.get("final_prompt"):
         prompt = scenario["final_prompt"]
     write(prompt)
@@ -3066,4 +3093,173 @@ def test_hardware_scp_upload_forces_the_legacy_protocol_and_tolerates_the_close_
     spawns = [event for event in peer.events()
               if event["event"] == "spawn" and event["binary"] == "scp"]
     assert spawns and all("-O" in event["argv"] for event in spawns)
+
+
+# --- device-side artifact fetch (the transfer that replaced the SCP push) ---
+
+_PEM_LINES = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIIBszCCAVmgAwIBAgIUfixture0000000000000000000000000wCgYIKoZIzj0EAwIw",
+    "FTETMBEGA1UEAwwKaXJpcy1sYWItY2EwHhcNMjYwOTEwMDAwMDAwWhcNMjcwOTEwMDAw",
+    "-----END CERTIFICATE-----",
+]
+_TRUSTPOINT_COMMANDS = [
+    "configure terminal", "no crypto pki trustpoint IRIS",
+    "crypto pki trustpoint IRIS", " enrollment terminal",
+    " revocation-check none", "exit", "crypto pki authenticate IRIS",
+    "ip http client secure-trustpoint IRIS", "end",
+]
+_TRUSTPOINT_PROMPTS = {
+    "crypto pki trustpoint IRIS": "edge-1(config-ca-trustpoint)#",
+    "exit": "edge-1(config)#",
+}
+
+
+def _trustpoint_body():
+    lines = list(_TRUSTPOINT_COMMANDS[:7]) + _PEM_LINES + ["quit"] + _TRUSTPOINT_COMMANDS[7:]
+    return "\n".join(lines).encode("ascii")
+
+
+def test_trustpoint_step_pastes_the_certificate_and_answers_both_confirmations(
+        tmp_path, peer_factory):
+    """The block device/device-install.sh pastes, driven line by line: the
+    removal's confirmation and the paste's acceptance are answered only when
+    the device asks them (they are PKI questions, so `file prompt quiet`
+    does not silence them), the certificate lines go out with no prompt
+    between them, and the device's acceptance notice is the proof."""
+    peer = peer_factory(
+        commands=_TRUSTPOINT_COMMANDS, question_index=1,
+        question=("% Removing an enrolled trustpoint will destroy all "
+                  "certificates received from the related Certificate "
+                  "Authority.\n\nAre you sure you want to do this? [yes/no]: "),
+        payload=["Enter configuration commands, one per line.  End with CNTL/Z.\n",
+                 "% Be sure to ask the CA administrator to revoke your certificates.\n",
+                 "", "", "", "", "", "", ""],
+        paste={"command": "crypto pki authenticate IRIS"},
+        prompt_after=_TRUSTPOINT_PROMPTS)
+    transport, unused = _transport(tmp_path, peer, purpose="configure_trustpoint")
+    result = _command(transport, _trustpoint_body(), timeout=2.5)
+    assert _value(result, "error_category") is None
+    assert _value(result, "framing_complete") is True
+    assert peer.received() == (
+        ["terminal length 0", "terminal width 512"] + _TRUSTPOINT_COMMANDS[:2] +
+        ["yes"] + _TRUSTPOINT_COMMANDS[2:7] + _PEM_LINES + ["quit", "yes"] +
+        _TRUSTPOINT_COMMANDS[7:] + ["exit"])
+    pasted = [event for event in peer.events() if event["event"] == "pasted"]
+    assert [event["lines"] for event in pasted] == [_PEM_LINES]
+    peer.assert_reaped()
+
+
+def test_trustpoint_removal_is_tolerated_when_the_device_does_not_ask(
+        tmp_path, peer_factory):
+    """A first install has no IRIS trustpoint to remove: the device answers
+    the fixed removal line with a refusal and no confirmation. That is the
+    goal state, not an error -- the re-add and paste that follow decide."""
+    peer = peer_factory(
+        commands=_TRUSTPOINT_COMMANDS,
+        payload=["Enter configuration commands, one per line.  End with CNTL/Z.\n",
+                 "% Invalid input detected at '^' marker.\n",
+                 "", "", "", "", "", "", ""],
+        paste={"command": "crypto pki authenticate IRIS"},
+        prompt_after=_TRUSTPOINT_PROMPTS)
+    transport, unused = _transport(tmp_path, peer, purpose="configure_trustpoint")
+    result = _command(transport, _trustpoint_body(), timeout=2.5)
+    assert _value(result, "error_category") is None
+    assert _value(result, "framing_complete") is True
+    assert "yes" not in peer.received()[:5]
+    peer.assert_reaped()
+
+
+@pytest.mark.parametrize("accepted", [
+    "% Error in saving certificate\n",
+    "",
+])
+def test_trustpoint_step_without_the_device_acceptance_is_rejected(
+        tmp_path, peer_factory, accepted):
+    peer = peer_factory(
+        commands=_TRUSTPOINT_COMMANDS,
+        payload=["Enter configuration commands, one per line.  End with CNTL/Z.\n",
+                 "", "", "", "", "", "", "", ""],
+        paste={"command": "crypto pki authenticate IRIS", "accepted": accepted,
+               "question": ""},
+        prompt_after=_TRUSTPOINT_PROMPTS)
+    transport, unused = _transport(tmp_path, peer, purpose="configure_trustpoint")
+    result = _command(transport, _trustpoint_body(), timeout=2.5)
+    assert _value(result, "error_category") == "rejected"
+    assert _value(result, "framing_complete") is False
+    peer.assert_reaped()
+
+
+def test_trustpoint_paste_outside_its_purpose_is_an_ordinary_command(
+        tmp_path, peer_factory):
+    """Only configure_trustpoint may drive a paste or answer a shape-matched
+    confirmation; the same lines under another purpose get no answer."""
+    peer = peer_factory(commands=["configure terminal", "no crypto pki trustpoint IRIS"],
+                        question_index=1, question="Are you sure you want to do this? [yes/no]: ",
+                        payload=["Enter configuration commands, one per line.  End with CNTL/Z.\n", ""])
+    transport, unused = _transport(tmp_path, peer, purpose="configure_network")
+    result = _command(transport, b"configure terminal\nno crypto pki trustpoint IRIS", timeout=0.5)
+    assert _value(result, "framing_complete") is False
+    assert "yes" not in peer.received()
+    peer.assert_reaped()
+
+
+_FETCH_COPY = ("copy https://192.0.2.2:8000/v1/devices/edge-01/artifacts/iris-arm64.tar "
+               "flash:iris-%s.tar" % ("d" * 32))
+_FETCH_DIR = "dir flash: | include iris-%s\\.tar" % ("d" * 32)
+_FETCH_OK = ("Accessing https://192.0.2.2:8000/v1/devices/edge-01/artifacts/iris-arm64.tar...\n"
+             "Loading https://192.0.2.2:8000/v1/devices/edge-01/artifacts/iris-arm64.tar !!!!!!!!\n"
+             "[OK - 65536 bytes]\n\n65536 bytes copied in 0.912 secs (71860 bytes/sec)\n")
+_FETCH_ROW = ("   19  -rw-           65536  Sep 10 2026 12:00:00 +00:00  iris-%s.tar\n"
+              % ("d" * 32))
+
+
+@pytest.mark.parametrize("payloads,expected_category", [
+    ([_FETCH_OK, _FETCH_ROW], None),
+    (["%Error opening https://192.0.2.2:8000/v1/devices/edge-01/artifacts/"
+      "iris-arm64.tar (I/O error)\n", ""], "rejected"),
+    (["Accessing https://192.0.2.2:8000/...\n", _FETCH_ROW], "rejected"),
+])
+def test_fetch_step_requires_the_copy_report_before_the_dir_probe(
+        tmp_path, peer_factory, payloads, expected_category):
+    peer = peer_factory(commands=[_FETCH_COPY, _FETCH_DIR], payload=payloads)
+    transport, unused = _transport(tmp_path, peer, purpose="fetch_wrapper")
+    result = _command(transport, "\n".join([_FETCH_COPY, _FETCH_DIR]).encode("ascii"))
+    assert _value(result, "error_category") == expected_category
+    assert _value(result, "framing_complete") is (expected_category is None)
+    if expected_category is None:
+        assert _FETCH_ROW.encode("ascii") in _value(result, "stdout")
+    peer.assert_reaped()
+
+
+def test_fetch_capture_admits_a_long_progress_line_that_would_truncate_elsewhere(
+        tmp_path, peer_factory):
+    """`copy https:` prints one progress mark per chunk; a package-sized
+    transfer must not read as a truncated, unknown readback."""
+    peer = peer_factory(commands=[_FETCH_COPY, _FETCH_DIR],
+                        payload=[_FETCH_OK, _FETCH_ROW], stdout_bytes=40000)
+    transport, unused = _transport(tmp_path, peer, purpose="fetch_wrapper")
+    result = _command(transport, "\n".join([_FETCH_COPY, _FETCH_DIR]).encode("ascii"), timeout=3)
+    assert _value(result, "error_category") is None
+    assert _value(result, "stdout_truncated") is False
+    peer.assert_reaped()
+
+
+def test_http_client_credentials_are_redacted_from_every_capture_and_transcript(
+        tmp_path, peer_factory):
+    commands = ["configure terminal", "ip http client username edge-01",
+                "ip http client password 0 unit-token-SECRET", "end"]
+    peer = peer_factory(commands=commands, payload=[
+        "Enter configuration commands, one per line.  End with CNTL/Z.\n", "", "", ""])
+    transport, unused = _transport(tmp_path, peer, purpose="http_client_credentials")
+    result = _command(transport, "\n".join(commands).encode("ascii"))
+    assert _value(result, "error_category") is None
+    assert _value(result, "framing_complete") is True
+    assert peer.received() == ["terminal length 0", "terminal width 512"] + commands + ["exit"]
+    persisted = _transcript_path(tmp_path / "state").read_bytes()
+    decoded = b"".join(base64.b64decode(record["data_b64"]) for record in _records(persisted)
+                       if record["type"] == "stream")
+    assert b"unit-token-SECRET" not in _value(result, "stdout") + _value(result, "stderr")
+    assert b"unit-token-SECRET" not in persisted + decoded
+    assert b"ip http client password 0 <redacted>" in _value(result, "stdout")
     peer.assert_reaped()

@@ -104,7 +104,18 @@ _COMMANDS = frozenset((
     "app_install", "app_activate", "copy_instructions", "remove_instructions",
     "copy_certificate", "app_start", "save", "remove_wrapper",
     "remove_certificate", "cleanup_config", "cleanup_files",
-    "cleanup_config_probe", "cleanup_stage_probe"))
+    "cleanup_config_probe", "cleanup_stage_probe",
+    # Controller-internal steps of the device-side artifact fetch: the recipe
+    # never names them, the controller runs them under upload_wrapper,
+    # upload_certificate and stage_instructions.
+    "configure_trustpoint", "http_client_credentials", "clear_http_client",
+    "fetch_wrapper", "fetch_certificate", "fetch_instructions"))
+
+# The artifact server's device-facing resource paths (server/api_routes.py
+# artifactBasic): HTTP Basic with username = device id and password = that
+# device's catalog enrollment token, which IOS attaches to `copy https:` from
+# `ip http client username` / `ip http client password`.
+_ARTIFACT_ROUTE = "/v1/devices/%s/artifacts/%s"
 
 _TARGET_KEYS = frozenset((
     "host", "port", "platform", "model", "os_family",
@@ -362,6 +373,17 @@ def _unexpected_detail(label, exc):
 
 
 _IOS_REFUSAL_RE = re.compile(rb"^%[^\r\n]+", re.M)
+
+
+def _http_client_credentials_collision(running, device_id):
+    """True when running-config carries an IOS HTTP client credential that
+    is not IRIS's own (username = this device id): the fetch would
+    overwrite and then delete an operator's pair."""
+    own = re.search(
+        r"(?m)^ip http client username %s\s*$" % re.escape(device_id),
+        running)
+    return own is None and re.search(
+        r"(?m)^ip http client (?:username|password)(?:\s|$)", running) is not None
 
 
 def _command_failure_detail(purpose, result):
@@ -2128,6 +2150,25 @@ class IoxController(object):
         catalog_url = self.config.get("catalog_url")
         if catalog_url is not None:
             self.config["catalog_url"] = _https_url(catalog_url)
+        # The device-facing artifact server the IOx device fetches from, and
+        # the directory it serves (where the per-device instruction envelope
+        # is published for the span of its fetch).
+        artifact_url = self.config.get("artifact_url")
+        if artifact_url is not None:
+            try:
+                self.config["artifact_url"] = _https_url(artifact_url)
+            except ValueError:
+                raise ValueError("invalid IOx artifact URL")
+        elif self._strict_target:
+            raise ValueError("IOx artifact URL is required")
+        artifacts_dir = self.config.get("artifacts_dir")
+        if artifacts_dir is not None:
+            if (not isinstance(artifacts_dir, str) or
+                    not os.path.isabs(artifacts_dir) or
+                    any(ord(character) < 32 for character in artifacts_dir)):
+                raise ValueError("IOx artifacts_dir must be an absolute path")
+        elif self._strict_target:
+            raise ValueError("IOx artifacts directory is required")
         certificate_path = self.config.get("catalog_certificate_path")
         if self._strict_target and certificate_path is None:
             raise ValueError("IOx catalog certificate is required")
@@ -2617,7 +2658,7 @@ class IoxController(object):
             attempt.lock_fd = None
 
     def _command(self, attempt, purpose, body, seconds=45, ordinary=False,
-                 record=True, transport=None):
+                 record=True, transport=None, deadline=None):
         if attempt.durability_uncertain:
             raise _ControllerFailure(
                 "journal_durability",
@@ -2633,7 +2674,8 @@ class IoxController(object):
         try:
             result = active.command(
                 context["command_id"], body,
-                attempt.deadline(seconds, ordinary=ordinary))
+                attempt.deadline(seconds, ordinary=ordinary)
+                if deadline is None else deadline)
         except Exception as exc:
             import iox_transport
             if (transport is None and purpose == "verification_read" and
@@ -3636,6 +3678,16 @@ class IoxController(object):
             if re.search(pattern, running):
                 raise _ControllerFailure(
                     "rejected", "%s already exists" % description, 2)
+        # The fetch sets `ip http client username/password` for the span of
+        # each copy and removes them afterwards, so an operator's own pair
+        # would be overwritten and then deleted: refuse it. IRIS's own pair
+        # (username = this device id, left only when a clear could not run)
+        # is walked over; the next fetch replaces and clears it.
+        if _http_client_credentials_collision(
+                running, str(_get(attempt.request, "device_id", ""))):
+            raise _ControllerFailure(
+                "rejected",
+                "the IOS HTTP client credentials already exist", 2)
         attempt.identity["status"] = "passed"
         if resumable:
             attempt.identity["resumable_app_state"] = app_state
@@ -4474,8 +4526,65 @@ class IoxController(object):
         elif name == "clock":
             lines = ["show clock"]
         elif name == "prepare_iox_scp":
+            # `file prompt quiet` lets the device-side `copy https:` below
+            # run without a destination prompt. `ip scp server enable` is no
+            # longer for the package (nothing is pushed to the device any
+            # more): the agent's runtime image hand-off on IE-3x00 and on a
+            # Catalyst 8000 -- and the Catalyst 9300 share fallback -- SCP-
+            # pushes the downloaded image to guest-share through the device's
+            # SCP server (device/agent/iris_agent.py, _push_scratch).
             lines = ["configure terminal", "iox", "file prompt quiet",
                      "ip scp server enable", "end"]
+        elif name == "configure_trustpoint":
+            # The block device/device-install.sh pastes: drop any earlier
+            # IRIS trustpoint, re-add it, paste the public catalog
+            # certificate, bind the HTTP client to it. The transport answers
+            # the two PKI confirmations and drives the paste.
+            lines = (["configure terminal", "no crypto pki trustpoint IRIS",
+                      "crypto pki trustpoint IRIS", " enrollment terminal",
+                      " revocation-check none", "exit",
+                      "crypto pki authenticate IRIS"] +
+                     self._catalog_certificate_lines() +
+                     ["quit", "ip http client secure-trustpoint IRIS", "end"])
+        elif name == "http_client_credentials":
+            device_id = _get(attempt.request, "device_id")
+            token = attempt.credentials.get("catalog_token", "")
+            if (not isinstance(device_id, str) or
+                    _BOARD_ID.fullmatch(device_id) is None or not token or
+                    re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is None):
+                raise _ControllerFailure(
+                    "unsupported_syntax_local",
+                    "IOx artifact fetch credentials are invalid", 2)
+            # The transport redacts the token from every capture and
+            # transcript the same way it does for the app block's run-opts.
+            lines = ["configure terminal",
+                     "ip http client username %s" % device_id,
+                     "ip http client password 0 %s" % token, "end"]
+        elif name == "clear_http_client":
+            lines = ["configure terminal", "no ip http client username",
+                     "no ip http client password", "end"]
+        elif name in ("fetch_wrapper", "fetch_certificate",
+                      "fetch_instructions"):
+            if name == "fetch_wrapper":
+                if transaction is None:
+                    raise _ControllerFailure(
+                        "unsupported_syntax", "missing wrapper transaction", 2)
+                source = target.get("pkg", "iris-arm64.tar")
+                destination, probe = wrapper, wrapper_pattern
+            elif name == "fetch_certificate":
+                source = "iris-catalog.pem"
+                destination, probe = certificate, "iris-ca\\.pem"
+            else:
+                if instruction_source is None:
+                    raise _ControllerFailure(
+                        "unsupported_syntax", "missing instruction transaction", 2)
+                source = "staging/%s/%s" % (
+                    self._fetch_device_id(attempt), instruction_name)
+                destination, probe = instruction_source, re.escape(
+                    instruction_name)
+            lines = ["copy %s %s" % (self._artifact_url(attempt, source),
+                                     destination),
+                     "dir %s | include %s" % (package_fs, probe)]
         elif name == "configure_network":
             lines = ["configure terminal", "iox"]
             if mode == "routed":
@@ -4705,34 +4814,228 @@ class IoxController(object):
                 "unsupported_syntax", "unrendered IOx command", 2)
         return _command_bytes(lines)
 
-    def _upload(self, attempt, descriptor, purpose, remote):
-        if attempt.durability_uncertain:
+    def _fetch_device_id(self, attempt):
+        device_id = _get(attempt.request, "device_id")
+        if (not isinstance(device_id, str) or
+                _BOARD_ID.fullmatch(device_id) is None or
+                device_id in (".", "..")):
             raise _ControllerFailure(
-                "journal_durability",
-                "upload blocked after durability failure", 5)
-        context = attempt.next_context(purpose, kind="scp")
-        config = getattr(attempt.transport, "_iris_config", None) or getattr(attempt.transport, "config", None)
-        if config is not None:
-            config["command_contexts"][context["command_id"]] = context
-        if purpose == "upload_instructions":
+                "unsupported_syntax_local", "invalid IOx device id", 2)
+        return device_id
+
+    def _artifact_url(self, attempt, relative):
+        base = self.config.get("artifact_url")
+        if base is None:
+            if self._strict_target:
+                raise _ControllerFailure(
+                    "unsupported_syntax_local",
+                    "trusted IOx artifact URL is not configured", 2)
+            # Compatibility for injected, non-production transport doubles,
+            # as for the catalog URL in configure_app.
+            base = "https://iris.invalid:8000"
+        return base.rstrip("/") + _ARTIFACT_ROUTE % (
+            self._fetch_device_id(attempt), relative)
+
+    def _catalog_certificate_lines(self):
+        """The public catalog certificate as the lines the trustpoint paste
+        sends: PEM text, stripped, without the blank line that would end the
+        paste early."""
+        path = self.config.get("catalog_certificate_path")
+        if path is None:
+            raise _ControllerFailure(
+                "unsupported_syntax_local",
+                "trusted IOx catalog certificate is not configured", 2)
+        try:
+            descriptor = _open_public_certificate(path, self._strict_target)
+        except Exception:
+            raise _ControllerFailure(
+                "rejected", "IOx catalog certificate is unreadable", 2)
+        try:
+            chunks = []
+            remaining = 65537
+            while remaining:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(descriptor)
+        lines = [line.strip() for line in
+                 b"".join(chunks).decode("ascii", "replace").splitlines()]
+        lines = [line for line in lines if line and not line.startswith("!")]
+        if not lines:
+            raise _ControllerFailure(
+                "rejected", "IOx catalog certificate is empty", 2)
+        return lines
+
+    def _fetch_deadline(self, attempt, purpose):
+        # The budgets the SCP uploads had: one shared ordinary window for the
+        # wrapper and certificate, started by whichever fetches first, and a
+        # shorter one for the instruction envelope.
+        if purpose == "fetch_instructions":
             if attempt.instruction_upload_deadline is None:
                 attempt.instruction_upload_deadline = attempt.deadline(
                     _INSTRUCTION_UPLOAD_SECONDS, ordinary=True)
-            upload_deadline = attempt.instruction_upload_deadline
-        else:
-            if attempt.upload_deadline is None:
-                attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
-            upload_deadline = attempt.upload_deadline
-        result = attempt.transport.upload(descriptor, remote,
-                                          upload_deadline)
-        self._validate_transport_result(result)
-        self._adopt_synthetic_result(
-            attempt, result, context, attempt.transport)
-        self._fence_barrier(attempt)
-        if not self._transport_ok(result):
-            raise _ControllerFailure(_get(result, "error_category") or "transport",
-                                     "%s failed" % purpose)
+            return attempt.instruction_upload_deadline
+        if attempt.upload_deadline is None:
+            attempt.upload_deadline = attempt.deadline(1800, ordinary=True)
+        return attempt.upload_deadline
+
+    def _ensure_trustpoint(self, attempt, protocol):
+        """Install the catalog trustpoint once per attempt, before the first
+        device-side `copy https:` has to validate the artifact server."""
+        if protocol.get("trust_configured"):
+            return
+        result, unused = self._command(
+            attempt, "configure_trustpoint",
+            self._render_command(attempt, "configure_trustpoint"),
+            180, ordinary=True)
+        if (not self._transport_ok(result) or
+                _get(result, "error_category")):
+            raise _ControllerFailure(
+                _get(result, "error_category") or "rejected",
+                _command_failure_detail("configure_trustpoint", result), 4)
+        protocol["trust_configured"] = True
+
+    @staticmethod
+    def _verify_fetched(purpose, result, basename, expected_size):
+        """IOS's own transfer report and the closing `dir` probe must both
+        name the source's exact byte count."""
+        stdout = bytes(_get(result, "stdout", b""))
+        copied = re.search(br"(?m)^\s*(\d{1,20}) bytes copied\b", stdout)
+        listed = re.search(
+            br"(?m)^\s*\d+\s+-[rwx-]{3}\s+(\d{1,20})\s+.*\s" +
+            re.escape(basename.encode("ascii")) + br"\s*$", stdout)
+        if copied is None or listed is None:
+            raise _ControllerFailure(
+                "readback_unknown",
+                "IOx artifact fetch was not confirmed: %s" % purpose, 4)
+        if (int(copied.group(1)) != expected_size or
+                int(listed.group(1)) != expected_size):
+            raise _ControllerFailure(
+                "readback_mismatch",
+                "IOx artifact size mismatch: %s" % purpose, 4)
+
+    def _fetch(self, attempt, purpose, expected_size):
+        """Have the device copy one artifact from the artifact server.
+
+        The copy rides the catalog trustpoint installed by _ensure_trustpoint
+        and authenticates with the device's own enrollment credential, which
+        is configured as the IOS HTTP client username/password for exactly
+        the span of the copy and removed afterwards -- also after a failure
+        or a cancellation, as bounded safety work. This replaced the SCP push
+        so onboarding needs no service enabled on the device for its sake.
+        """
+        if attempt.durability_uncertain:
+            raise _ControllerFailure(
+                "journal_durability",
+                "artifact fetch blocked after durability failure", 5)
+        transaction = attempt.journal.get("transaction_id") if attempt.journal else None
+        basename = {
+            "fetch_wrapper": "iris-%s.tar" % transaction,
+            "fetch_certificate": "iris-ca.pem",
+            "fetch_instructions": "iris-instructions-%s.envelope" % transaction,
+        }[purpose]
+        deadline = self._fetch_deadline(attempt, purpose)
+        primary = None
+        result = None
+        try:
+            configured, unused = self._command(
+                attempt, "http_client_credentials",
+                self._render_command(attempt, "http_client_credentials"),
+                45, ordinary=True)
+            if (not self._transport_ok(configured) or
+                    _get(configured, "error_category")):
+                raise _ControllerFailure(
+                    _get(configured, "error_category") or "rejected",
+                    "IOx HTTP client credentials could not be configured", 4)
+            result, unused = self._command(
+                attempt, purpose, self._render_command(attempt, purpose),
+                deadline=deadline)
+            if (not self._transport_ok(result) or
+                    _get(result, "error_category")):
+                raise _ControllerFailure(
+                    _get(result, "error_category") or "rejected",
+                    _command_failure_detail(purpose, result), 4)
+            import iox_transport
+            if isinstance(attempt.transport, iox_transport.IoxTransport):
+                # Injected doubles answer with no device output; the size
+                # proof is a property of the real device dialogue.
+                self._verify_fetched(purpose, result, basename, expected_size)
+        except _ControllerFailure as exc:
+            primary = exc
+        cleanup_failure = None
+        previous = attempt.safety_recovery
+        attempt.safety_recovery = True
+        try:
+            cleared, unused = self._command(
+                attempt, "clear_http_client",
+                self._render_command(attempt, "clear_http_client"), 45)
+            if (not self._transport_ok(cleared) or
+                    _get(cleared, "error_category")):
+                cleanup_failure = _ControllerFailure(
+                    _get(cleared, "error_category") or "rejected",
+                    "IOx HTTP client credentials could not be removed", 4)
+        except _ControllerFailure as exc:
+            cleanup_failure = exc
+        finally:
+            attempt.safety_recovery = previous
+        if primary is not None:
+            raise primary
+        if cleanup_failure is not None:
+            raise cleanup_failure
         return result
+
+    def _publish_instruction_source(self, attempt, snapshot):
+        """Place the sealed envelope where the artifact server serves it to
+        this device alone (staging/<device-id>/, HTTP Basic bound to that
+        id, mode 0600, swept by the server if a crash leaves it behind).
+        Returns the path to remove once the device has its copy."""
+        artifacts_dir = self.config.get("artifacts_dir")
+        if artifacts_dir is None:
+            if self._strict_target:
+                raise _ControllerFailure(
+                    "unsupported_syntax_local",
+                    "IOx artifacts directory is not configured", 2)
+            return None
+        device_id = self._fetch_device_id(attempt)
+        directory = os.path.join(artifacts_dir, "staging", device_id)
+        path = os.path.join(directory, "iris-instructions-%s.envelope" %
+                            attempt.journal["transaction_id"])
+        temporary = None
+        try:
+            chunks = []
+            offset = 0
+            while offset <= _INSTRUCTION_MAX_BYTES:
+                chunk = os.pread(snapshot.fd, 65536, offset)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                offset += len(chunk)
+            body = b"".join(chunks)
+            if not 1 <= len(body) <= _INSTRUCTION_MAX_BYTES:
+                raise ValueError("size")
+            os.makedirs(directory, 0o700, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                dir=directory, prefix=".iris-instructions-", suffix=".tmp")
+            try:
+                os.fchmod(descriptor, 0o600)
+                os.write(descriptor, body)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, path)
+            temporary = None
+            return path
+        except Exception:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+            raise _ControllerFailure(
+                "rejected", "IOx instruction source could not be published", 4)
 
     def _begin_install(self, attempt):
         journal = attempt.journal
@@ -5100,16 +5403,15 @@ class IoxController(object):
         if snapshot is None:
             raise _ControllerFailure(
                 "authority_mismatch", "instruction snapshot custody missing", 5)
-        package_fs = attempt.target.get("package_fs", "flash:")
-        remote = (package_fs + "iris-instructions-" +
-                  attempt.journal["transaction_id"] + ".envelope")
         self._instruction_cleanup_update(attempt, True)
         protocol["instruction_source_attempted"] = True
         primary = None
         cleanup_failure = None
+        published = None
         try:
-            self._upload(
-                attempt, snapshot.fd, "upload_instructions", remote)
+            published = self._publish_instruction_source(attempt, snapshot)
+            self._fetch(attempt, "fetch_instructions",
+                        os.fstat(snapshot.fd).st_size)
             result, unused = self._command(
                 attempt, "copy_instructions",
                 self._render_command(attempt, "copy_instructions"),
@@ -5121,6 +5423,12 @@ class IoxController(object):
                     "IOx instruction copy failed", 4)
         except _ControllerFailure as exc:
             primary = exc
+        finally:
+            if published is not None:
+                try:
+                    os.unlink(published)
+                except OSError:
+                    pass
         previous = attempt.safety_recovery
         attempt.safety_recovery = True
         try:
@@ -5215,6 +5523,7 @@ class IoxController(object):
                     "iox_polls": 0, "polls": {}, "cleanup": False,
                     "finished": False, "terminal_ready": False,
                     "phase_deadlines": {}, "scp_prepared": False,
+                    "trust_configured": False,
                     "instruction_source_attempted": False,
                     "instruction_source_removed": False}
         try:
@@ -5272,24 +5581,23 @@ class IoxController(object):
                                 raise _ControllerFailure(
                                     _get(prepared, "error_category") or
                                     "rejected",
-                                    "IOx SCP preparation failed", 4)
+                                    "IOx preparation failed", 4)
                             protocol["scp_prepared"] = True
-                        package_fs = str(_get(attempt.target, "package_fs", "flash:"))
-                        if not package_fs.endswith((":", "/")): package_fs += "/"
-                        remote = package_fs + "iris-" + attempt.journal["transaction_id"] + ".tar"
-                        transport_result = self._upload(attempt, attempt.snapshot.fd,
-                                                        "upload_wrapper", remote)
+                        self._ensure_trustpoint(attempt, protocol)
+                        transport_result = self._fetch(
+                            attempt, "fetch_wrapper",
+                            os.fstat(attempt.snapshot.fd).st_size)
                     elif operation == "upload_certificate" and arguments == {} and action == "install":
                         certificate = self.config.get("catalog_certificate_path")
                         fd = _open_public_certificate(
                             certificate, self._strict_target)
                         try:
-                            package_fs = attempt.target.get(
-                                "package_fs", "flash:")
-                            transport_result = self._upload(attempt, fd, "upload_certificate",
-                                                            package_fs + "iris-ca.pem")
+                            certificate_size = os.fstat(fd).st_size
                         finally:
                             os.close(fd)
+                        self._ensure_trustpoint(attempt, protocol)
+                        transport_result = self._fetch(
+                            attempt, "fetch_certificate", certificate_size)
                     elif operation == "begin_install" and arguments == {} and action == "install":
                         self._begin_install(attempt)
                     elif operation == "deployed" and arguments == {} and action == "install":

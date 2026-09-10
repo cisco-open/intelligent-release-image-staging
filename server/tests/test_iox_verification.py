@@ -167,6 +167,19 @@ class _StatefulTransport(object):
                       self.scenario.clock is not None else None)
         self.calls.append(("command", command_id, command_bytes,
                            phase_deadline, purpose, started_at))
+        if (purpose == "fetch_instructions" and self.scenario is not None and
+                self.scenario.artifacts_dir):
+            # What the artifact server could serve at the moment the device
+            # is told to fetch its envelope.
+            staging = os.path.join(self.scenario.artifacts_dir, "staging")
+            listing = []
+            for root, unused_dirs, files in os.walk(staging):
+                for name in files:
+                    path = os.path.join(root, name)
+                    info = os.stat(path)
+                    listing.append((os.path.relpath(path, staging),
+                                    info.st_size, stat.S_IMODE(info.st_mode)))
+            self.calls.append(("staged", sorted(listing)))
         if (self.scenario is not None and self.scenario.clock is not None and
                 purpose in self.scenario.advances):
             self.scenario.clock.advance(self.scenario.advances[purpose])
@@ -309,7 +322,8 @@ class _TransportFactory(object):
     def __init__(self, board=_BOARD, verification="enabled", boards=None,
                  calls=None, read_states=None, command_outcomes=None,
                  clock=None, advances=None, identity_results=None,
-                 recipe_compatible=False):
+                 recipe_compatible=False, artifacts_dir=None):
+        self.artifacts_dir = artifacts_dir
         self.calls = calls if calls is not None else []
         self.created = []
         self.board = board
@@ -1331,6 +1345,8 @@ def test_invalid_wrapper_is_refused_before_prepare_record_or_upload(tmp_path):
     assert not [call for call in calls if call[0] == "prepare"]
     assert not [call for call in store.calls if call[0] == "iox_begin"]
     assert not [call for call in factory.calls if call[0] == "upload"]
+    assert _command_calls(factory, "configure_trustpoint",
+                          "http_client_credentials", "fetch_wrapper") == []
     assert not [call for call in factory.calls if call[0] == "command" and
                 b"verification" in call[2].lower()]
     assert not [call for call in factory.calls if call[0] == "command" and
@@ -1583,7 +1599,10 @@ def test_install_orders_upload_ownership_and_restoration_before_activation(tmp_p
 
     preflight_at = position(lambda call: call[0] == "preflight")
     prepare_at = position(lambda call: call[0] == "prepare")
-    upload_at = position(lambda call: call[0] == "upload")
+    upload_at = position(lambda call: call[0] == "command" and
+                         call[4] == "fetch_wrapper")
+    trust_at = position(lambda call: call[0] == "command" and
+                        call[4] == "configure_trustpoint")
     begin_at = position(lambda call: call[0] == "iox_begin")
     intent_at = position(lambda call: call[:2] == ("iox_event", "disable_intent"))
     confirmed_at = position(
@@ -1600,8 +1619,8 @@ def test_install_orders_upload_ownership_and_restoration_before_activation(tmp_p
     restored_at = position(lambda call: call[:2] == ("iox_event", "restored"))
     activate_at = position(lambda call: call[0] == "command" and
                            b"app-hosting activate" in call[2].lower())
-    assert (preflight_at < prepare_at < begin_at < upload_at < intent_at <
-            confirmed_at < stop_at < install_at < probe_at <
+    assert (preflight_at < prepare_at < begin_at < trust_at < upload_at <
+            intent_at < confirmed_at < stop_at < install_at < probe_at <
             restore_intent_at < enable_at < restored_at < activate_at)
 
 
@@ -1610,7 +1629,9 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
     timeline = []
     payload = b"ciphertext-fixture-that-must-not-leak"
     store = _StatefulStore(tmp_path, calls=timeline)
-    factory = _TransportFactory(calls=timeline)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    factory = _TransportFactory(calls=timeline, artifacts_dir=str(artifacts))
     wrapper_path = _write_unsigned_wrapper(tmp_path)
     recipe = _write_recipe_peer(
         tmp_path, operations=_install_operations(), cleanup_on_error=True)
@@ -1636,6 +1657,7 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
     controller = _controller(
         tmp_path, store, factory, enrollment_token_minter=minter,
         instruction_bootstrap_materializer=materializer,
+        artifacts_dir=str(artifacts),
         recipe_argv_by_action={"install": ["/bin/bash", recipe]})
     try:
         result = controller.run_install(
@@ -1649,23 +1671,31 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
     assert names.index("enrollment_token_minter") < \
         names.index("instruction_bootstrap_materializer") < \
         names.index("prepare") < names.index("iox_begin")
-    uploads = [call for call in timeline if call[0] == "upload"]
-    wrapper_upload = next(call for call in uploads if call[4] == "upload_wrapper")
-    instruction_upload = next(
-        call for call in uploads if call[4] == "upload_instructions")
-    assert instruction_upload[1] == (
-        "flash:iris-instructions-%s.envelope" %
-        store.records["new-r1"]["iox_verification"]["transaction_id"])
-    assert instruction_upload[2] == payload
-    assert instruction_upload[3] != wrapper_upload[3]
+    assert not [call for call in timeline if call[0] == "upload"]
+    transaction = store.records["new-r1"]["iox_verification"]["transaction_id"]
+    fetches = _command_calls(factory, "fetch_wrapper", "fetch_certificate",
+                             "fetch_instructions")
+    assert [call[4] for call in fetches] == [
+        "fetch_wrapper", "fetch_certificate", "fetch_instructions"]
+    envelope = "iris-instructions-%s.envelope" % transaction
+    assert fetches[2][2] == (
+        "copy https://iris.invalid:8000/v1/devices/edge-01/artifacts/"
+        "staging/edge-01/%s flash:%s\ndir flash: | include %s"
+        % (envelope, envelope, re.escape(envelope))).encode("ascii")
+    assert fetches[2][3] != fetches[0][3]
+    # The envelope was published for the device alone (mode 0600, under its
+    # own staging directory) exactly while it was told to fetch it, and is
+    # gone afterwards.
+    assert [call for call in timeline if call[0] == "staged"] == [
+        ("staged", [("edge-01/" + envelope, len(payload), 0o600)])]
+    assert not (artifacts / "staging" / "edge-01" / envelope).exists()
 
     def command_position(purpose):
         return next(index for index, call in enumerate(timeline)
                     if call[0] == "command" and call[4] == purpose)
 
     assert (command_position("app_activate") <
-            next(index for index, call in enumerate(timeline)
-                 if call[0] == "upload" and call[4] == "upload_instructions") <
+            command_position("fetch_instructions") <
             command_position("copy_instructions") <
             command_position("remove_instructions") <
             command_position("app_start"))
@@ -1675,7 +1705,7 @@ def test_instruction_bootstrap_is_private_bound_and_staged_after_activation(
         "records": store.records,
     }, sort_keys=True, default=str).encode("utf-8")
     assert payload not in public
-    remote_name = instruction_upload[1].encode("ascii")
+    remote_name = ("flash:" + envelope).encode("ascii")
     for path in tmp_path.rglob("*"):
         if path.is_file():
             persisted = path.read_bytes()
@@ -1738,11 +1768,13 @@ def test_instruction_materialization_failure_precedes_prepare_journal_and_mutati
     assert not [call for call in timeline if call[0] in ("prepare", "iox_begin")]
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
     assert not [call for call in timeline if call[0] == "upload"]
+    assert _command_calls(factory, "fetch_wrapper", "fetch_certificate",
+                          "fetch_instructions") == []
     assert list((tmp_path / "iox" / "snapshots").iterdir()) == []
 
 
 @pytest.mark.parametrize("failure_purpose", [
-    "upload_instructions", "copy_instructions", "remove_instructions",
+    "fetch_instructions", "copy_instructions", "remove_instructions",
 ])
 def test_instruction_stage_failure_removes_only_transaction_source_and_never_starts(
         tmp_path, failure_purpose):
@@ -1759,8 +1791,12 @@ def test_instruction_stage_failure_removes_only_transaction_source_and_never_sta
     assert _command_calls(factory, "app_start") == []
     rendered = b"\n".join(call[2] for call in timeline
                            if call[0] == "command")
-    if failure_purpose != "upload_instructions":
+    if failure_purpose != "fetch_instructions":
         assert b"iris-instructions.bootstrap" in rendered
+    # The device's fetch credentials are removed after a failure as well.
+    names = [call[4] for call in timeline if call[0] == "command"]
+    assert names.index("clear_http_client", names.index("fetch_instructions")) > \
+        names.index("fetch_instructions")
     assert b"delete /force flash:iris-instructions-" in rendered
     assert b"delete /force iris-instructions.bootstrap" not in rendered
     assert store.records["new-r1"]["iox_verification"]["unresolved"] is False
@@ -1769,13 +1805,19 @@ def test_instruction_stage_failure_removes_only_transaction_source_and_never_sta
 def test_wrapper_upload_failure_is_primary_and_never_reaches_disable_or_teardown(
         tmp_path):
     factory = _TransportFactory(
-        command_outcomes={"upload_wrapper": ["connection"]})
+        command_outcomes={"fetch_wrapper": ["connection"]})
     result, store, timeline, _wrapper = _run_scripted_install(
         tmp_path, factory)
 
     assert result["result_code"] == 4
     assert result["error_category"] == "connection"
     assert result["recovery_code"] is None
+    # Credentials were configured only for the copy and cleared after it
+    # failed, before anything else happened on the device.
+    names = [call[4] for call in timeline if call[0] == "command"]
+    fetch_at = names.index("fetch_wrapper")
+    assert names[fetch_at - 1] == "http_client_credentials"
+    assert names[fetch_at + 1] == "clear_http_client"
     assert _command_calls(factory, "verification_disable") == []
     assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
     journal = store.records["new-r1"]["iox_verification"]
@@ -1876,7 +1918,8 @@ def test_exact_caf_retries_require_fresh_enabled_reads_and_new_durable_intents(
         if call[4] in ("verification_read", "verification_disable",
                        "verification_enable"):
             assert call[3] <= call[5] + 45.05
-    uploads = [call for call in timeline if call[0] == "upload"]
+    uploads = _command_calls(factory, "fetch_wrapper", "fetch_certificate",
+                             "fetch_instructions")
     assert uploads and all(call[3] <= ordinary_deadline for call in uploads)
     polls = _command_calls(factory, "app_list")
     assert polls and all(call[3] <= ordinary_deadline and
@@ -1935,7 +1978,7 @@ def test_failed_enable_response_consumes_the_only_send_and_stays_unresolved(
 def test_elapsed_session_is_not_reset_after_a_successful_wrapper_upload(tmp_path):
     clock = _Clock()
     factory = _TransportFactory(
-        clock=clock, advances={"upload_wrapper": 601})
+        clock=clock, advances={"fetch_wrapper": 601})
     result, store, _timeline, _wrapper = _run_scripted_install(
         tmp_path, factory, clock=clock,
         authority={"session_seconds": 600,
@@ -1975,8 +2018,8 @@ def test_controller_uses_exact_identity_upload_and_application_deadlines(
     clock = _ExactClock()
     factory = _TransportFactory(
         clock=clock,
-        advances={"upload_wrapper": 400, "app_install": 250,
-                  "app_activate": 250, "upload_certificate": 890})
+        advances={"fetch_wrapper": 400, "app_install": 250,
+                  "app_activate": 250, "fetch_certificate": 890})
     result, _store, _timeline, _wrapper = _run_scripted_install(
         tmp_path, factory, clock=clock,
         authority={"session_seconds": 2200,
@@ -2002,9 +2045,10 @@ def test_controller_uses_exact_identity_upload_and_application_deadlines(
     assert commands["app_install"][3] < ordinary_deadline
     assert commands["app_start"][3] == ordinary_deadline
 
-    uploads = [call for call in factory.calls if call[0] == "upload"]
+    uploads = _command_calls(factory, "fetch_wrapper", "fetch_certificate",
+                             "fetch_instructions")
     assert [call[4] for call in uploads] == [
-        "upload_wrapper", "upload_certificate", "upload_instructions"]
+        "fetch_wrapper", "fetch_certificate", "fetch_instructions"]
     combined_upload_deadline = min(
         uploads[0][5] + 1800, ordinary_deadline)
     assert combined_upload_deadline < ordinary_deadline
@@ -4509,3 +4553,140 @@ def test_production_bash_recipe_job_log_is_step_level(tmp_path):
     for session_text in ("Gateway of last resort", "IOx Partition Exists",
                          "IOx service (CAF)", "iris DEPLOYED", "iris RUNNING"):
         assert session_text in rendered, session_text
+
+
+# --- device-side artifact fetch (replaced the server-side SCP push) ---
+
+def test_fetch_sequence_installs_trust_once_and_brackets_each_copy_with_credentials(
+        tmp_path):
+    """Every artifact the device needs -- the wrapper, the public catalog
+    certificate, the sealed instruction envelope -- is fetched by the DEVICE
+    over the catalog trustpoint the controller installed first, and the IOS
+    HTTP client credentials exist only between the copy's own set and
+    clear. Nothing is pushed over SCP any more."""
+    factory = _TransportFactory()
+    result, store, timeline, _wrapper = _run_scripted_install(tmp_path, factory)
+    assert result["result_code"] == 0
+    assert not [call for call in timeline if call[0] == "upload"]
+    names = [call[4] for call in timeline if call[0] == "command"]
+    assert names.count("configure_trustpoint") == 1
+    assert names.index("configure_trustpoint") < names.index("fetch_wrapper")
+    for purpose in ("fetch_wrapper", "fetch_certificate", "fetch_instructions"):
+        at = names.index(purpose)
+        assert names[at - 1] == "http_client_credentials"
+        assert names[at + 1] == "clear_http_client"
+    assert names.count("http_client_credentials") == names.count("clear_http_client") == 3
+    rendered = dict((call[4], call[2]) for call in timeline if call[0] == "command")
+    transaction = store.records["new-r1"]["iox_verification"]["transaction_id"]
+    assert rendered["fetch_wrapper"] == (
+        "copy https://iris.invalid:8000/v1/devices/edge-01/artifacts/iris-arm64.tar "
+        "flash:iris-%s.tar\ndir flash: | include %s" % (
+            transaction, re.escape("iris-%s.tar" % transaction))).encode("ascii")
+    assert rendered["fetch_certificate"] == (
+        b"copy https://iris.invalid:8000/v1/devices/edge-01/artifacts/iris-catalog.pem "
+        b"flash:iris-ca.pem\ndir flash: | include iris-ca\\.pem")
+    assert rendered["http_client_credentials"] == (
+        b"configure terminal\nip http client username edge-01\n"
+        b"ip http client password 0 fixture-catalog-token-SECRET\nend")
+    assert rendered["clear_http_client"] == (
+        b"configure terminal\nno ip http client username\n"
+        b"no ip http client password\nend")
+    trust = rendered["configure_trustpoint"].split(b"\n")
+    assert trust[:7] == [
+        b"configure terminal", b"no crypto pki trustpoint IRIS",
+        b"crypto pki trustpoint IRIS", b" enrollment terminal",
+        b" revocation-check none", b"exit", b"crypto pki authenticate IRIS"]
+    assert trust[7:] == [b"fixture catalog certificate", b"quit",
+                         b"ip http client secure-trustpoint IRIS", b"end"]
+    assert not [call for call in timeline if call[0] == "command" and
+                b"ip scp server" in call[2] and call[4] != "prepare_iox_scp"]
+
+
+def test_trustpoint_failure_stops_before_credentials_or_any_fetch(tmp_path):
+    factory = _TransportFactory(
+        command_outcomes={"configure_trustpoint": ["rejected"]})
+    result, store, timeline, _wrapper = _run_scripted_install(tmp_path, factory)
+    assert result["result_code"] == 4
+    assert result["error_category"] == "rejected"
+    assert _command_calls(factory, "http_client_credentials", "fetch_wrapper",
+                          "fetch_certificate", "fetch_instructions") == []
+    assert _command_calls(factory, "verification_disable") == []
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+def test_credentials_are_cleared_even_when_the_clear_itself_is_the_failure(tmp_path):
+    factory = _TransportFactory(
+        command_outcomes={"clear_http_client": ["connection"]})
+    result, store, timeline, _wrapper = _run_scripted_install(tmp_path, factory)
+    assert result["result_code"] == 4
+    assert result["error_category"] == "connection"
+    names = [call[4] for call in timeline if call[0] == "command"]
+    assert names[names.index("fetch_wrapper") + 1] == "clear_http_client"
+    assert _command_calls(factory, "fetch_certificate") == []
+    assert _command_calls(factory, *_APPLICATION_MUTATIONS) == []
+
+
+@pytest.mark.parametrize("stdout,category", [
+    (b"Accessing https://s/x...\n65536 bytes copied in 1.0 secs (65536 bytes/sec)\n"
+     b"   19  -rw-           65536  Sep 10 2026 12:00:00 +00:00  iris-x.tar\n", None),
+    (b"Accessing https://s/x...\n65535 bytes copied in 1.0 secs (65536 bytes/sec)\n"
+     b"   19  -rw-           65536  Sep 10 2026 12:00:00 +00:00  iris-x.tar\n",
+     "readback_mismatch"),
+    (b"Accessing https://s/x...\n65536 bytes copied in 1.0 secs (65536 bytes/sec)\n"
+     b"   19  -rw-           65537  Sep 10 2026 12:00:00 +00:00  iris-x.tar\n",
+     "readback_mismatch"),
+    (b"Accessing https://s/x...\n65536 bytes copied in 1.0 secs (65536 bytes/sec)\n",
+     "readback_unknown"),
+    (b"   19  -rw-           65536  Sep 10 2026 12:00:00 +00:00  iris-x.tar\n",
+     "readback_unknown"),
+    (b"65536 bytes copied in 1.0 secs\n"
+     b"   19  -rw-           65536  Sep 10 2026 12:00:00 +00:00  iris-x.tar.bak\n",
+     "readback_unknown"),
+])
+def test_fetch_proof_needs_the_copy_report_and_the_dir_row_at_the_source_size(
+        stdout, category):
+    module = _module()
+    result = {"stdout": stdout}
+    if category is None:
+        module.IoxController._verify_fetched("fetch_wrapper", result, "iris-x.tar", 65536)
+        return
+    with pytest.raises(module._ControllerFailure) as failure:
+        module.IoxController._verify_fetched("fetch_wrapper", result, "iris-x.tar", 65536)
+    assert failure.value.category == category
+
+
+@pytest.mark.parametrize("running,collision", [
+    ("hostname edge\nip http client secure-trustpoint IRIS\n", False),
+    ("ip http client username edge-01\nip http client password 7 0512\n", False),
+    ("ip http client username operator\n", True),
+    ("ip http client password 7 0512\n", True),
+    ("ip http client username edge-011\n", True),
+    ("ip http client username edge-01\nip http client username-x\n", False),
+])
+def test_operator_http_client_credentials_are_a_collision_but_iris_own_are_not(
+        running, collision):
+    module = _module()
+    assert module._http_client_credentials_collision(running, "edge-01") is collision
+
+
+def test_strict_controller_requires_the_artifact_url_and_directory(tmp_path):
+    module = _module()
+    import iox_transport
+    store = _StatefulStore(tmp_path)
+    base = dict(_authority(tmp_path, catalog_url="https://192.0.2.2:8443"))
+    base["record_store"] = os.path.realpath(store.path)
+    for missing, message in (("artifact_url", "artifact URL"),
+                             ("artifacts_dir", "artifacts directory")):
+        config = dict(base, artifact_url="https://192.0.2.2:8000",
+                      artifacts_dir=str(tmp_path / "artifacts"))
+        del config[missing]
+        with pytest.raises(ValueError) as failure:
+            module.IoxController(store, _Bag(**config),
+                                 iox_transport.IoxTransport, lambda: 100,
+                                 lambda: 100.0)
+        assert message in str(failure.value)
+    with pytest.raises(ValueError):
+        module.IoxController(
+            store, _Bag(**dict(base, artifact_url="http://192.0.2.2:8000",
+                               artifacts_dir=str(tmp_path / "artifacts"))),
+            iox_transport.IoxTransport, lambda: 100, lambda: 100.0)

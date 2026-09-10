@@ -532,6 +532,11 @@ class _FakeTransport(object):
             return "read"
         if "show app-hosting list" in text:
             return "app_list"
+        if ("crypto pki authenticate" in text or "ip http client username" in text
+                or "copy https://" in text):
+            # The pre-admission transfer phase: trust, fetch credentials and
+            # the device-side artifact copies. Not an application mutation.
+            return "fetch"
         return "application"
 
     def command(self, command_id, command_bytes, phase_deadline):
@@ -547,6 +552,13 @@ class _FakeTransport(object):
         if instruction_cleanup and hasattr(
                 self.device, "instruction_source"):
             self.device.instruction_source = False
+        instruction_fetch = (
+            b"copy https://" in command_bytes and
+            b"iris-instructions-" in command_bytes)
+        if instruction_fetch and hasattr(self.device, "instruction_source"):
+            # The device now holds the transaction-derived envelope.
+            self.device.instruction_source = True
+            self.trace.append(("fetch", "instructions"))
         if purpose == "disable":
             self.device.state = "disabled"
             self.device.mutations.append("disable")
@@ -562,7 +574,7 @@ class _FakeTransport(object):
                 b"Processor board ID " + _BOARD.encode("ascii") + b"\n")
         elif purpose == "app_list":
             stdout = b"App id State\niris DEPLOYED\n"
-        elif purpose == "application":
+        elif purpose in ("application", "fetch"):
             stdout = b""
         elif self.device.state == "unknown":
             stdout = b"verification state unavailable\n"
@@ -677,6 +689,10 @@ def _controller(tmp_path, store, transport, test_limits=None, **overrides):
         "instruction_bootstrap_materializer": lambda _device_id:
             b"fixture-instruction-envelope",
         "catalog_certificate_path": certificate,
+        # The device-side artifact fetch authenticates with the enrollment
+        # token, so an install needs one bound before its first fetch.
+        "enrollment_token_minter": lambda _device_id:
+            "fixture-catalog-token-SECRET",
     })
     config.update(overrides)
     if test_limits is not None:
@@ -1918,8 +1934,7 @@ def _crash_worker(root, barrier):
                 die("after_disable_effect")
             if item == ("command_end", "read") and store.journal["phase"] == "ownership_probe":
                 die("after_probe_read")
-            if (item[0] == "upload" and
-                    "iris-instructions-" in item[1]):
+            if item == ("fetch", "instructions"):
                 die("after_instruction_upload")
 
     transport = _FakeTransport(_FileDevice(str(root / "device.json")), Trace())

@@ -1248,3 +1248,70 @@ _assert_signal_finalization() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"VPG_NUMBER must be between 0 and 31"* ]]
 }
+
+
+@test "dry-run installs the catalog trustpoint before any copy, as device-install.sh does" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'no crypto pki trustpoint IRIS\n'* ]]
+  [[ "$output" == *$'crypto pki trustpoint IRIS\n enrollment terminal\n revocation-check none\nexit\ncrypto pki authenticate IRIS\n'* ]]
+  [[ "$output" == *$'quit\n'* ]]
+  [[ "$output" == *"ip http client secure-trustpoint IRIS"* ]]
+  trust="$(printf '%s\n' "$output" | grep -n 'crypto pki authenticate IRIS' | head -1 | cut -d: -f1)"
+  first_copy="$(printf '%s\n' "$output" | grep -n '^copy https://' | head -1 | cut -d: -f1)"
+  [ "$trust" -lt "$first_copy" ]
+}
+
+@test "dry-run pastes the real certificate when IRIS_CRT_FILE is readable" {
+  printf -- '-----BEGIN CERTIFICATE-----\nZml4dHVyZQ==\n-----END CERTIFICATE-----\n' > "$BATS_TEST_TMPDIR/crt.pem"
+  IRIS_CRT_FILE="$BATS_TEST_TMPDIR/crt.pem" \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'crypto pki authenticate IRIS\n-----BEGIN CERTIFICATE-----\nZml4dHVyZQ==\n-----END CERTIFICATE-----\nquit\n'* ]]
+}
+
+@test "dry-run has the DEVICE fetch the package, certificate and envelope over verified https" {
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/iris-arm64.tar flash:iris-<transaction>.tar"* ]]
+  [[ "$output" == *'dir flash: | include iris-<transaction>\.tar'* ]]
+  [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/iris-catalog.pem flash:iris-ca.pem"* ]]
+  [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/staging/e1/iris-instructions-<transaction>.envelope flash:iris-instructions-<transaction>.envelope"* ]]
+  [[ "$output" != *"scp -O"* ]]
+  [[ "$output" != *'${DEVICE_USER}'* ]]
+}
+
+@test "dry-run brackets every copy with the device's own fetch credentials and never prints the token" {
+  CATALOG_TOKEN=literal-catalog-secret \
+    VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"literal-catalog-secret"* ]]
+  [ "$(printf '%s\n' "$output" | grep -c '^ip http client username e1$')" -eq 3 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^ip http client password 0 <redacted>$')" -eq 3 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^no ip http client username$')" -eq 3 ]
+  [ "$(printf '%s\n' "$output" | grep -c '^no ip http client password$')" -eq 3 ]
+  # set -> copy -> clear, in that order, for the package copy
+  set_at="$(printf '%s\n' "$output" | grep -n '^ip http client password 0 <redacted>$' | head -1 | cut -d: -f1)"
+  copy_at="$(printf '%s\n' "$output" | grep -n '^copy https://' | head -1 | cut -d: -f1)"
+  clear_at="$(printf '%s\n' "$output" | grep -n '^no ip http client password$' | head -1 | cut -d: -f1)"
+  [ "$set_at" -lt "$copy_at" ] && [ "$copy_at" -lt "$clear_at" ]
+}
+
+@test "dry-run keeps the SCP server line for the agent's runtime hand-off, not for onboarding" {
+  # Onboarding pushes nothing over SCP any more; the device's SCP server is
+  # what the agent's guest-share image hand-off uses at runtime (IE-3x00,
+  # Catalyst 8000, and the Catalyst 9300 share fallback).
+  VLAN=666 SVI_IP=192.0.2.9 SVI_MASK=255.255.255.252 GUEST_IP=192.0.2.10 \
+    run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ip scp server enable"* ]]
+  MANAGEMENT_TYPE=router-routed VPG_NUMBER=0 APP_IP=192.0.2.21 APP_MASK=255.255.255.0 \
+    APP_GATEWAY=192.0.2.1 run bash "$INSTALL" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ip scp server enable"* ]]
+  [[ "$output" == *"copy https://192.0.2.2:8000/v1/devices/e1/artifacts/iris-amd64.tar bootflash:iris-<transaction>.tar"* ]]
+}
