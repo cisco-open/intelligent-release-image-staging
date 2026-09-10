@@ -798,6 +798,25 @@ def _private(path, data):
         stream.write(data)
 
 
+# ssh-keygen(1) complaints about its own argument list.  OpenSSH before 8.0
+# (the 7.4p1 shipped in a CentOS Guest Shell) has no ``-Y`` at all and exits 1
+# with "unknown option -- Y" (glibc getopt: "invalid option -- 'Y'") followed by
+# its usage text; a ``-Y verify`` that predates ``-O verify-time`` reports
+# ``Invalid option "verify-time=..."``.  A signature that genuinely fails says
+# none of these, so the match is confined to those three shapes.
+_VERIFIER_UNSUPPORTED = re.compile(
+    rb"(?im)^(?:[^\r\n]*:[ \t]*)?(?:unknown|invalid|illegal) option -- '?-?[A-Za-z0-9]'?[ \t]*$"
+    rb"|^invalid option \""
+    rb"|^usage: ssh-keygen\b")
+
+
+def _verifier_unsupported(stderr):
+    """True when ssh-keygen refused its argv rather than the signature."""
+    if not isinstance(stderr, (bytes, bytearray)):
+        return False
+    return _VERIFIER_UNSUPPORTED.search(bytes(stderr[:8192])) is not None
+
+
 class SSHVerifier:
     """Stateless OpenSSH adapter; durable retry policy belongs to the caller."""
 
@@ -840,13 +859,20 @@ class SSHVerifier:
             raise InstructionError("verifier_missing")
         try:
             result = self.runner([self.executable] + argv, input=data,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                  timeout=5)
-            return result.returncode == 0
         except subprocess.TimeoutExpired:
             raise InstructionError("verifier_missing", "verifier_timeout") from None
         except OSError:
             raise InstructionError("verifier_missing") from None
+        if result.returncode == 0:
+            return True
+        if _verifier_unsupported(getattr(result, "stderr", None)):
+            # The executable exists but cannot run this verification at all
+            # (no ``-Y``, or no ``-O verify-time``).  That is an unavailable
+            # verifier, never evidence that the artifact was tampered with.
+            raise InstructionError("verifier_missing", "unsupported")
+        return False
 
     def verify(self, body, signature, namespace, identity, verify_time,
                krl=None, artifact_digest=None, boot_id=None):

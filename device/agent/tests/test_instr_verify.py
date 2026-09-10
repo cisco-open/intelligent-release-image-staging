@@ -475,7 +475,7 @@ def test_real_sshsig_exact_body_namespace_time_krl_and_cleanup(instr, signing):
         calls.append((list(argv), dict(kwargs)))
         assert os.path.isabs(argv[0])
         assert kwargs["stdout"] == subprocess.DEVNULL
-        assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.PIPE
         assert 4 <= kwargs["timeout"] <= 6
         signature_path = argv[argv.index("-s") + 1]
         assert open(signature_path, "rb").read() == signature
@@ -598,6 +598,81 @@ def test_verifier_timeout_digest_latch_boot_reset_and_nonzero_exit(instr, signin
         state = json.loads(json.dumps(state))
     assert len(calls) == before + 4
     assert state["instructions"].get("verifier_timeout_count", 0) == 0
+
+
+# What the C9300 Guest Shell (CentOS Stream 8, openssh-7.4p1) prints for -Y.
+LEGACY_USAGE = (b"unknown option -- Y\n"
+                b"usage: ssh-keygen [-q] [-b bits] [-t dsa | ecdsa | ed25519 | rsa | rsa1]\n"
+                b"                  [-N new_passphrase] [-C comment] [-f output_keyfile]\n")
+
+
+@pytest.mark.parametrize("stderr", [
+    LEGACY_USAGE,
+    b"ssh-keygen: invalid option -- 'Y'\nusage: ssh-keygen [-q] [-a rounds]\n",
+    b'Invalid option "verify-time=20260907120000Z"\nCould not verify signature.\n',
+])
+def test_verifier_without_sshsig_support_is_missing_not_tamper(instr, signing, stderr):
+    """An ssh-keygen that cannot run ``-Y verify`` is an absent verifier.
+
+    OpenSSH 7.4 (the CentOS Guest Shell on a Catalyst 9300) has no ``-Y`` and
+    exits 1 with its usage text.  That exit must surface as verifier_missing
+    with tracker-only peers, never as a tamper claim against a valid artifact,
+    and it must retain the bootstrap candidate instead of deleting it as a
+    definitive rejection.
+    """
+    calls = []
+
+    def legacy(argv, **kwargs):
+        if "-Y" not in argv:
+            return subprocess.run(argv, **kwargs)
+        calls.append(argv)
+        assert kwargs["stderr"] == subprocess.PIPE
+        return subprocess.CompletedProcess(argv, 1, stdout=None, stderr=stderr)
+
+    verifier = ssh_verifier(instr, signing, legacy)
+    with pytest.raises(instr.InstructionError) as caught:
+        verifier.verify(b"body", SIGNATURE, "iris-instructions-v1", "iris-server", NOW)
+    assert caught.value.state == "verifier_missing"
+    assert caught.value.reason == "unsupported"
+    assert len(calls) == 1
+
+    catalog = RouteCatalog()
+    state = {}
+    raw = make_envelope()
+    candidate = signing["work"] / "iris-instructions.bootstrap"
+    candidate.write_bytes(raw)
+    catalog.response = (200, raw, {"Date": "Mon, 07 Sep 2026 12:00:00 GMT"})
+    result = instr.run_instruction_step(
+        cfg=config(), state=state, catalog=catalog,
+        hints={"instr_rev": {"epoch": NOW - 1, "instr_serial": 7}},
+        catalog_date=NOW, platform="guestshell", work_dir=str(signing["work"]),
+        boot_id=BOOT, monotonic_now=10, verifier=verifier,
+        persist_config=lambda updated: None, emit=lambda *args: None,
+        checkpoint=lambda updated: None)
+    assert result["attestation"]["instr_state"] == "verifier_missing"
+    assert result["attestation"]["verify_level"] == "sig"
+    assert "instr_serial" not in result["attestation"]
+    assert result["effective_peers"] == {"mode": "tracker-only", "include_origin": False}
+    assert result["instruction"] is None
+    assert candidate.read_bytes() == raw
+    assert not (signing["work"] / "iris-instructions.lkg").exists()
+    assert state["instructions"].get("verifier_timeout_count", 0) == 0
+    assert len(calls) == 3
+
+
+def test_genuine_verification_failure_stays_a_rejection(instr, signing):
+    """A real ``-Y verify`` refusal is still False, so tamper stays tamper."""
+    def refused(argv, **kwargs):
+        if "-Y" not in argv:
+            return subprocess.run(argv, **kwargs)
+        return subprocess.CompletedProcess(
+            argv, 255, stdout=None,
+            stderr=b"Signature verification failed: incorrect signature\n"
+                   b"Could not verify signature.\n")
+
+    verifier = ssh_verifier(instr, signing, refused)
+    assert not verifier.verify(b"body", SIGNATURE, "iris-instructions-v1", "iris-server", NOW)
+    reject(instr, make_envelope(), "tamper_rejected", verifier=verifier)
 
 
 def test_missing_verifier_is_immediate_and_cleans_temporary_files(instr, signing):
