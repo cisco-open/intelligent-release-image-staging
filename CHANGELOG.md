@@ -12,6 +12,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 ## [Unreleased]
 
 ### Added
+- Splunk view: a *Peer-to-peer evidence* row shows bytes received stacked by
+  source (origin, peer device, unknown), the share of bytes served by peer
+  devices, and the individual device-to-device transfers, read from the
+  device-measured `iris.device.peer_transfer_record` rather than derived
+  from origin-side totals.
 - The catalog logs one bounded, token-free line for every refused device
   bearer on any route (method, route template, device id, source IP, reason
   such as `unknown_token`, `expired`, `revoked`, `wrong_principal`),
