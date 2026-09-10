@@ -13870,3 +13870,28 @@ def test_schedule_next_run_never_renders_an_unreadable_row_as_undefined():
     assert out["empty"] == "no further run"
     assert out["missing"] == "no further run"
     assert out["done"] == "completed"
+
+
+def test_agent_install_dropdown_offers_only_what_the_row_can_take():
+    """An operator picked IOx for a C8000V on a router management type and
+    watched the dropdown snap back: the fleet store refused it with a 400 and
+    the next refresh re-rendered the stored value, with the reason parked in
+    the status line. The row now carries the server's own answer
+    (install_options) and refuses the choice up front, with the reason on the
+    option itself. The stored value stays selectable so the inventory is never
+    hidden, and the server-side refusal is untouched -- this is presentation
+    of the same rule, not a second one."""
+    js = _webroot("app.js")
+    render = js.split("var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr']", 1)[1].split(".join('')", 1)[0]
+    assert "d.install_options" in js
+    assert "allowed.indexOf(key) === -1" in render
+    assert "key !== platVal" in render          # the stored value is never disabled
+    assert "disabled title=" in render
+    assert "installRefusal(d, key)" in render
+    refusal = js.split("function installRefusal(d, platform) {", 1)[1].split("\n  }", 1)[0]
+    assert "router-routed" in refusal and "router-nat" in refusal and "xr-host" in refusal
+    # the failure path keeps surfacing the server's reason and reverting
+    handler = js.split("querySelectorAll('#dev-rows .platform')", 1)[1].split("\n    });", 1)[0]
+    assert "Agent install update failed" in handler and "refreshDevices()" in handler
+    source = inspect.getsource(gui_server.make_server)
+    assert 'row["install_options"] = gui_fleet.install_options_for_record(d)' in source

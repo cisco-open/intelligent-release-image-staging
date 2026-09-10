@@ -297,6 +297,35 @@ def _static_network(ip, mask, gateway, prefix):
     return ip, mask, gateway
 
 
+_ALL_PLATFORMS = ("guestshell", "iox", "router", "xr-appmgr")
+
+
+def install_options_for_record(record):
+    """The platform values validate_record would ACCEPT for this stored row.
+
+    validate_record refuses; this answers the same rules the other way round,
+    so a Console can offer only what the row can take instead of letting the
+    operator pick a choice the server then refuses. It is deliberately a
+    projection of validate_record's rules, not a second policy: router
+    management types run the router recipe and nothing else, xr-host runs the
+    appmgr container and nothing else, the two IOS-XE switch types run neither,
+    and within that the model table narrows further. An inventory-only row
+    (no management type yet) is narrowed by its model alone.
+    """
+    management_type = record.get("management_type") or ""
+    model = gui_onboard.normalize_model(record.get("model") or "")
+    by_model = gui_onboard.install_options_for(model, record.get("os_family") or "")
+    options = list(_ALL_PLATFORMS) if by_model is None else list(by_model)
+    if management_type in _ROUTER_TYPES:
+        options = [p for p in options if p == "router"] or (
+            ["router"] if _C8K_RE.match(model or "") or not model else [])
+    elif management_type == "xr-host":
+        options = [p for p in options if p == "xr-appmgr"]
+    elif management_type in ("routed", "inband"):
+        options = [p for p in options if p not in ("router", "xr-appmgr")]
+    return options
+
+
 def validate_record(record, allow_legacy=False):
     """Normalize a safe v2 record. Legacy data is only accepted when explicit."""
     _validate_stored_fields(record)

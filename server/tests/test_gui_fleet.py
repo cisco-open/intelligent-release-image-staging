@@ -1454,3 +1454,37 @@ def test_malformed_fleet_revision_counter_fails_closed_before_mutating(tmp_path)
     # the mutation never touched storage, and an unrelated device is unaffected
     assert fs.get_device("new1") is None
     assert fs.get_device("d1")["device_id"] == "d1"
+
+
+@pytest.mark.parametrize("record, expected", [
+    # A Catalyst 8000V on a router management type runs the router recipe and
+    # nothing else -- the case an operator hit by picking IOx and watching the
+    # dropdown snap back.
+    ({"management_type": "router-routed", "model": "C8000V"}, ["router"]),
+    ({"management_type": "router-nat", "model": ""}, ["router"]),
+    ({"management_type": "xr-host", "model": "8201"}, ["xr-appmgr"]),
+    ({"management_type": "inband", "model": "C9300-48UXM"}, ["guestshell", "iox"]),
+    ({"management_type": "inband", "model": "IE-3400-8T2S"}, ["iox"]),
+    ({"management_type": "routed", "model": ""}, ["guestshell", "iox"]),
+    # inventory-only rows are narrowed by the model alone
+    ({"management_type": "legacy_routed", "model": ""},
+     ["guestshell", "iox", "router", "xr-appmgr"]),
+    ({"management_type": "legacy_routed", "model": "C8000V"}, ["router"]),
+])
+def test_install_options_for_record_offers_only_what_validate_record_accepts(record, expected):
+    assert gui_fleet.install_options_for_record(record) == expected
+
+
+def test_install_options_for_record_agrees_with_validate_record(tmp_path):
+    """Every offered option validates; every refused one is refused."""
+    for base in (dict(_ROUTER, model="C8000V"),
+                 dict(_ROUTED, model="C9300-48UXM"),
+                 dict(_ROUTED, model="IE-3400")):
+        offered = gui_fleet.install_options_for_record(base)
+        for platform in ("guestshell", "iox", "router", "xr-appmgr"):
+            try:
+                gui_fleet.validate_record(dict(base, platform=platform))
+                accepted = True
+            except ValueError:
+                accepted = False
+            assert accepted == (platform in offered), (base["model"], platform)

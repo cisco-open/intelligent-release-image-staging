@@ -5014,6 +5014,10 @@ def make_server(host, port, app, images=None, fleet=None, creds=None, catalog=No
             h = hb.get(did, {})
             row = dict(d)
             row.update(trusted_target_projection(d, deployment_type))
+            # The installs this row can take, from the same rules the fleet
+            # store enforces, so the Console offers only those instead of a
+            # choice the server refuses and the table then snaps back from.
+            row["install_options"] = gui_fleet.install_options_for_record(d)
             row["assigned_image_id"] = pol.get("approved_image_id")
             row["assigned_image_ids"] = pol.get("approved_image_ids")
             row["last_seen"] = h.get("last_seen")

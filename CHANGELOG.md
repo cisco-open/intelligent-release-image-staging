@@ -22,6 +22,12 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   creates roots; those come from the custody ceremony (issue #204).
 
 ### Fixed
+- Offer only the agent installs a device row can take. Picking IOx for a
+  Catalyst 8000V on a router management type was refused by the fleet store
+  and the dropdown snapped back on the next refresh, with the reason parked in
+  the status line. Each row now carries the server's own answer
+  (`install_options`) and a refused choice is unselectable with the reason on
+  it; the stored value stays visible and the server-side rule is unchanged.
 - Grant the runtime uid the `artifacts/` directory during the Compose bring-up,
   or refuse with the exact `chown`. An artifacts directory the server cannot
   write let it start, report healthy, and then silently never stage

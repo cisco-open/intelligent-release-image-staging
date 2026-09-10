@@ -322,6 +322,16 @@
   function agentInstallLabel(platform) {
     return AGENT_INSTALL_LABELS[platform] || platform || '—';
   }
+  // Why a row cannot take an agent install: the same rules gui_fleet
+  // enforces, said in the operator's terms rather than as a 400 after the fact.
+  function installRefusal(d, platform) {
+    var mt = d.management_type || '';
+    if (mt === 'router-routed' || mt === 'router-nat') return 'Router management types run Guest Shell on the router (platform router) only.';
+    if (mt === 'xr-host') return 'XR host runs the XR appmgr container only.';
+    if (platform === 'router') return 'Platform router needs management type router-routed or router-nat.';
+    if (platform === 'xr-appmgr') return 'The XR appmgr container needs management type xr-host.';
+    return 'Model ' + (d.model || d.heartbeat_model || '') + ' cannot run ' + agentInstallLabel(platform) + '.';
+  }
   // Whether *d*'s device has staged image *iid*: membership in the
   // heartbeat's staged_image_ids when the agent reports it directly (Task
   // 3), else the legacy current_image_id/stage_state=='ready' pair for an
@@ -1561,9 +1571,21 @@
       var credAttrs = credListOk ? '' :
         ' disabled title="Credential list unavailable; showing the assignment as recorded in the inventory"';
       var platVal = d.platform || '';
+      // Offer only the installs this row can actually take. The server's
+      // fleet store refuses the rest (a router management type runs the
+      // router recipe and nothing else, xr-host only the appmgr container),
+      // and an operator who picked one used to watch the dropdown silently
+      // snap back on the next refresh with the reason parked in the status
+      // line. A refused choice is now unselectable and says why; the stored
+      // value stays selectable even when it is one the row could no longer
+      // take, so what the inventory actually holds is never hidden.
+      var allowed = Array.isArray(d.install_options) ? d.install_options : null;
       var platSel = ['', 'guestshell', 'iox', 'router', 'xr-appmgr'].map(function (key) {
         var label = key ? agentInstallLabel(key) : '— auto —';
-        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') + '>' + esc(label) + '</option>';
+        var refused = allowed && key && key !== platVal && allowed.indexOf(key) === -1;
+        return '<option value="' + esc(key) + '"' + (key === platVal ? ' selected' : '') +
+          (refused ? ' disabled title="' + esc(installRefusal(d, key)) + '"' : '') +
+          '>' + esc(label) + '</option>';
       }).join('');
       var status = deviceStatusHtml(d, devNow);
       var scheduled = pendingScheduleText(d.device_id, SCHEDULES);
