@@ -567,3 +567,92 @@ class TestMutualOriginPreflight:
         assert result.prospective_denied_ips == []
         assert result.prospective_conflicts == []
         assert result.newly_denied_device_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #153: the APPLIED set self-evaluates the device ACL. The pair result
+# is computed (prospective_denied_ips) but stays preflight-only until the
+# documented, separately authorized activation release.
+# ---------------------------------------------------------------------------
+
+# (shape, seq the device's own ACL permits the DEVICE at,
+#  owner whose ACL denies the seeder<->device pair, seq it denies at)
+_ORIGIN_DENIED_SHAPES = [
+    ("device_acl_denies_seeder", 20, "device", 10),
+    ("permit_self_deny_any", 10, "device", 30),
+    ("role_origin_false", 10, "device", 40),
+    ("seeder_assignment_denies_device", None, "service", 10),
+]
+
+
+def _origin_denied_doc(shape):
+    """Device d1 whose pair with the origin is denied while d1's own ACL still
+    permits d1 itself -- every shape the applied set cannot see."""
+    doc = peer_policy.base_document()
+    if shape == "device_acl_denies_seeder":
+        doc["acls"]["dev-deny"] = {"rules": [
+            {"seq": 10, "action": "deny",
+             "match": {"type": "service", "value": "seeder"}},
+            {"seq": 20, "action": "permit", "match": {"type": "any"}}]}
+        doc["assignments"]["d1"] = "dev-deny"
+    elif shape == "permit_self_deny_any":
+        doc["acls"]["self-only"] = {"rules": [
+            {"seq": 10, "action": "permit",
+             "match": {"type": "device", "value": "d1"}},
+            {"seq": 30, "action": "deny", "match": {"type": "any"}}]}
+        doc["assignments"]["d1"] = "self-only"
+    elif shape == "role_origin_false":
+        doc["roles"] = {
+            "defs": {"access": {"restricted": True, "peers": ["access"],
+                                "origin": False}},
+            "role_of": {"d1": "access"}, "qos_default": {}, "qos_device": {}}
+    elif shape == "seeder_assignment_denies_device":
+        doc["acls"]["origin-deny"] = {"rules": [
+            {"seq": 10, "action": "deny",
+             "match": {"type": "device", "value": "d1"}},
+            {"seq": 20, "action": "permit", "match": {"type": "any"}}]}
+        doc["seeder_assignment"] = "origin-deny"
+    peer_policy.validate_document(doc)
+    return doc
+
+
+class TestIssue153AppliedSetSelfEvaluates:
+    @pytest.mark.parametrize(
+        "shape, self_seq, denying_owner, deny_seq", _ORIGIN_DENIED_SHAPES)
+    def test_applied_set_asks_the_device_acl_about_the_device_itself(
+            self, shape, self_seq, denying_owner, deny_seq):
+        doc = _origin_denied_doc(shape)
+        d1 = Principal("device", "d1")
+        # What the applied set evaluates: d1's own ACL with d1 as the subject.
+        # A ``deny service:seeder`` rule, the trailing ``deny any`` behind a
+        # ``permit device:<self>`` / ``permit role:<own>`` rule, and every rule
+        # of the seeder_assignment ACL can never match that subject.
+        assert peer_policy.evaluate(doc, d1, "10.0.0.3") == ("permit", self_seq)
+        # What the origin question actually is: the seeder<->device pair.
+        if denying_owner == "device":
+            assert peer_policy.evaluate_for(
+                doc, d1, SEEDER, SEEDER_IP) == ("deny", deny_seq)
+        else:
+            assert peer_policy.evaluate_for(
+                doc, SEEDER, d1, "10.0.0.3") == ("deny", deny_seq)
+        assert peer_policy.mutual_permit(
+            doc, SEEDER, SEEDER_IP, d1, "10.0.0.3") is False
+        result = br.derive_denied_set(
+            _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.3")),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == []                  # handed to aria2
+        assert result.prospective_denied_ips == ["10.0.0.3"]  # pair result
+
+    @pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="issue #153: applied denied_ips self-evaluate the device ACL; "
+               "the mutual-origin union is preflight-only until the "
+               "separately authorized activation release (security.md)")
+    @pytest.mark.parametrize(
+        "shape", [row[0] for row in _ORIGIN_DENIED_SHAPES])
+    def test_origin_denied_device_lands_in_applied_set(self, shape):
+        doc = _origin_denied_doc(shape)
+        result = br.derive_denied_set(
+            _pr(doc), _endpoints(("device:d1", "device", "d1", "10.0.0.3")),
+            {}, [], set(), SEEDER_IP)
+        assert result.denied_ips == ["10.0.0.3"]
