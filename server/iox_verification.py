@@ -2607,7 +2607,15 @@ class IoxController(object):
         models = re.findall(r"^Model Number\s*:\s*([A-Za-z0-9._-]{1,128})\s*$",
                             text, re.I | re.M)
         if not models:
-            models = re.findall(r"^cisco\s+([A-Za-z0-9._-]{1,128})\s+\([^\n]+\)\s+processor\s*$",
+            # A Catalyst 8000V has no "Model Number:" line and reports
+            #   cisco C8000V (VXE) processor (revision VXE) with ... memory.
+            # The old anchor required the line to END at "processor", which an
+            # IE-3400 satisfied via its Model Number line but a C8000V, falling
+            # to this branch, never did -- so every C8000V IOx onboard failed
+            # at identity discovery with "unable to establish exact IOx
+            # identity". Match "processor" as a word; the trailing
+            # revision/memory text is expected.
+            models = re.findall(r"^cisco\s+([A-Za-z0-9._-]{1,128})\s+\([^\n]+\)\s+processor\b",
                                 text, re.I | re.M)
         family = "xe" if re.search(r"IOS XE Software", text, re.I) else (
             "xr" if re.search(r"IOS XR Software", text, re.I) else None)

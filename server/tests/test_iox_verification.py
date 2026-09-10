@@ -969,6 +969,46 @@ def _controller(tmp_path, store, factory, clock=None, **config):
                                 lambda: 100, clock or monotonic)
 
 
+def _ok_result(stdout):
+    return {"returncode": 0, "timed_out": False, "stdout_truncated": False,
+            "stderr_truncated": False, "framing_complete": True,
+            "stdout": stdout, "error_category": None}
+
+
+def test_identity_from_result_reads_both_ie3400_and_c8000v(tmp_path):
+    """The controller establishes device identity from `show version`. An
+    IE-3400 carries a 'Model Number:' line; a Catalyst 8000V does not and
+    reports 'cisco C8000V (VXE) processor (revision VXE) with ... memory.'
+    -- the model text continues past 'processor'. Both must resolve, or a
+    C8000V IOx onboard fails at discovery with 'unable to establish exact
+    IOx identity' (live-reproduced 2026-09-10 on 100.90.170.101)."""
+    module = _module()
+    controller = _controller(tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    try:
+        ie = controller._identity_from_result(_ok_result(
+            b"Cisco IOS XE Software, Version 17.15.4\n"
+            b"cisco IE-3400-8T2S (ARM) processor (revision V06) with 649067K bytes\n"
+            b"Processor board ID FCW2716Y9J4\n"
+            b"Model Number : IE-3400-8T2S\n"))
+        assert ie["model"] == "IE-3400-8T2S" and ie["board_identity"] == "FCW2716Y9J4"
+        assert ie["os_family"] == "xe"
+
+        c8k = controller._identity_from_result(_ok_result(
+            b"Cisco IOS XE Software, Version 17.15.05\n"
+            b"cisco C8000V (VXE) processor (revision VXE) with 1890892K/3075K bytes of memory.\n"
+            b"Processor board ID 97XHUO6BK8W\n"))
+        assert c8k["model"] == "C8000V" and c8k["board_identity"] == "97XHUO6BK8W"
+        assert c8k["os_family"] == "xe"
+
+        # No recognisable model line still fails closed.
+        import pytest
+        with pytest.raises(module._ControllerFailure):
+            controller._identity_from_result(_ok_result(
+                b"Cisco IOS XE Software\nProcessor board ID ABC123\n"))
+    finally:
+        controller.close()
+
+
 def _install_operations():
     return [
         ("upload_wrapper", {}),
