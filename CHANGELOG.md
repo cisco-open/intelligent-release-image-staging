@@ -60,6 +60,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- QoS documentation matches the available write APIs and minimum nonzero
+  rate; IOx share-failure guidance distinguishes preserved IOS images from
+  reserved temporary-file cleanup (#283, #284, #285).
 - Documentation explains uncertain schedule writes, the limits of encrypted
   instructions when an offline copy contains device keys, and the replay
   attribution consequences of losing derived pins (#280, #281, #282).

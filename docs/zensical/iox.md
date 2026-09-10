@@ -175,8 +175,9 @@ agents need it. Where a share is configured, an unusable share (not mounted,
 unreadable from IOS, or a failed local copy into
 it) fails the placement with a `ROOTCOPY-FAIL` naming what the share probe
 found, rather than pushing the same bytes over a control plane the device is
-not even listening on. Nothing is deleted and no placement command runs in
-that case; the agent retries on later ticks.
+not even listening on. IOS images remain untouched and no IOS placement
+command runs in that case; the agent may still clean its reserved `iris-`
+temporary files from the share and retries placement on later ticks.
 
 Both hand-off paths drive IOS over the app's SSH-to-self CLI for placement and
 reclaim commands at the target-FS root. That connection can optionally be

@@ -565,7 +565,7 @@ device cooperation.
 | Key | Default | Range | Allowed scope | Current behavior |
 | --- | ---: | ---: | --- | --- |
 | `max_peers` | 10 | 1–1,000 | global, role, device | Verified/default hard per-torrent peer cap, including pending outbound peers. |
-| `per_peer_bps` | 12,500,000 | 0–10,000,000,000 | global, role, device | A modelling input only. The builtin does not create a cap; when explicitly set it derives absent per-torrent rates as `per_peer_bps × fanout`. |
+| `per_peer_bps` | 12,500,000 | 0 or 8,192–10,000,000,000 | global, role, device | A modelling input only. The builtin does not create a cap; when explicitly set it derives absent per-torrent rates as `per_peer_bps × fanout`. |
 | `fanout` | 1 | 1–1,000 and no greater than `max_peers` | global, role, device | Modelling input for derived per-torrent rates. |
 | `seed_up_bps`, `seed_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |
 | `leech_up_bps`, `leech_down_bps` | 0 | 0 or 8,192–10,000,000,000 | global, role, device | Verified/default device rate; unlimited by default. |

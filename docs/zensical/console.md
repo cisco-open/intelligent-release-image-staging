@@ -336,10 +336,11 @@ and vice versa. All three controls, like Set role, are disabled while the
 capability banner shows or the policy is degraded.
 
 The Console still has no role-policy JSON editor: definitions are edited as
-typed fields, and global QoS defaults, per-device QoS, and tracker `qos_state`
-stay API-only. Configure, preserve, or remove `qos_state` through the
-documented management API; the Console never edits the nested tracker state
-map. Role pair explanations are available only through the documented API.
+typed fields, and global QoS defaults and tracker `qos_state` stay API-only.
+There is no public per-device QoS write API. Configure, preserve, or remove
+`qos_state` through the documented management API; the Console never edits the
+nested tracker state map. Role pair explanations are available only through
+the documented API.
 
 Tracker/quarantine discovery alone does not sever existing connections or
 remove retained peers. Applied verified device deny lists may cooperatively
