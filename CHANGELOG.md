@@ -60,7 +60,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   prefix the journal references, so concurrent attempts and the owning
   attempt's own appends are no longer mistaken for tampering. Two
   attempts creating the transcript directory in the same instant no longer
-  fail on the second mkdir.
+  fail on the second mkdir. Because a transcript append and a session fence
+  update are atomic renames, a sibling that opened the old inode a moment
+  earlier now re-reads a bounded number of times instead of failing the
+  store ("transcript metadata changed") or the admission ("session fence
+  admission failed"); type, owner and mode refusals are never retried.
 - Make IOx onboarding work against real IOS-XE. The IOx transport had been
   written against an idealised IOS that answers config commands silently,
   uses one spelling per error, and always asks for confirmation. An IE-3400

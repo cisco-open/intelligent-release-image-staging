@@ -2263,6 +2263,33 @@ class IoxController(object):
             os.close(directory_fd)
         return result
 
+    @staticmethod
+    def _read_sibling_fence(path):
+        """Read another attempt's fence, tolerating that attempt's own writes.
+
+        Fences are replaced atomically (temporary file + rename), so a
+        sibling attempt updating its fence while this one is admitted gives
+        the strict reader a file whose inode or size changed between its
+        looks -- legitimate churn, not tampering, and the next read sees a
+        whole new file. Four devices onboarded in the same second failed
+        one of them with 'session fence admission failed' (2026-09-10). A
+        fence that disappears was reaped and no longer counts.
+        """
+        last = None
+        for _ in range(4):
+            try:
+                return _read_json_strict(path, _SESSION_FILE_BYTES)
+            except FileNotFoundError:
+                return None
+            except ValueError as exc:
+                text = str(exc)
+                if ("unsafe authority file" not in text and
+                        "changed during read" not in text):
+                    raise
+                last = exc
+                time.sleep(0.05)
+        raise last
+
     def _validate_fence(self, fence, path=None):
         keys = set("schema_version controller_id board_identity attempt_id device_id job_id operation teardown_mode record_id boot_id supervisor_pid supervisor_start_ticks transcript_ref state created_at updated_at".split())
         if not isinstance(fence, dict) or set(fence) != keys:
@@ -2852,8 +2879,9 @@ class IoxController(object):
                             "active same-boot IOx session fence", 5)
                 active = 0
                 for session_path in sessions:
-                    existing = _read_json_strict(
-                        session_path, _SESSION_FILE_BYTES)
+                    existing = self._read_sibling_fence(session_path)
+                    if existing is None:
+                        continue
                     self._validate_fence(existing, session_path)
                     active += existing["state"] == "active"
                 projected_total = len(sessions) + (old is None)
@@ -4250,7 +4278,10 @@ class IoxController(object):
                 vnic = (" no app-vnic gateway0 virtualportgroup %s "
                         "guest-interface 0" % vpg_plan())
             else:
-                vnic = " no app-vnic %s trunk" % app_intf
+                # The vnic keyword is the bare AppGigabitEthernet, exactly as
+                # configure_app writes it; the slot/port form is the physical
+                # trunk interface and IOS rejects it here (IE-3400, 17.15.4).
+                vnic = " no app-vnic AppGigabitEthernet trunk"
             return ["app-hosting appid %s" % appid,
                     " no app-resource docker",
                     " no app-resource profile custom",

@@ -686,20 +686,67 @@ def test_load_transcript_prefix_tolerates_sibling_attempts_writing_alongside(mon
     assert command["end"]["stdout_observed_bytes"] == len(b"App signature verification: enabled\n")
 
 
-def test_load_transcript_prefix_still_refuses_a_transcript_swapped_during_read(monkeypatch, tmp_path):
+def test_load_transcript_prefix_retries_when_the_owner_replaces_its_transcript(monkeypatch, tmp_path):
+    """The writer appends by rename, so every append is a new inode. A
+    sibling attempt that opened the old inode a moment before sees it
+    unlinked, or sees the name point elsewhere after the read; both are the
+    owner writing. The read is retried and the next attempt sees the whole
+    new file (issue #230 follow-up: 'invalid authority (transcript metadata
+    changed)' on a concurrent undeploy)."""
     writer = _complete_transcript(tmp_path)
     reference = writer.reference()
-    transcripts = tmp_path / "iox" / "transcripts"
+    payload = b"more\n"
 
-    def swap():
-        replacement = transcripts / "replacement.tmp"
-        replacement.write_bytes(open(writer.path, "rb").read())
-        os.chmod(replacement, 0o600)
-        os.replace(replacement, writer.path)
-    _churn_on_first_read(monkeypatch, [swap])
+    # Race 1: the owner appends between the open and the first fstat.
+    real_open = os.open
+    fired = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if isinstance(path, str) and path.endswith(".transcript") and not fired:
+            fired.append(True)
+            writer.append(_start(command_id=2))
+            writer.append(_stream(payload, command_id=2))
+            writer.append(_end(stdout=len(payload), command_id=2))
+        return descriptor
+    monkeypatch.setattr(os, "open", racing_open)
+    loaded = _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    assert fired and loaded["commands"][1]["end"] is not None
+    monkeypatch.setattr(os, "open", real_open)
+
+    # Race 2: the owner appends between the first read and the after-check.
+    reference = writer.reference()
+
+    def append_again():
+        writer.append(_start(command_id=3))
+        writer.append(_stream(payload, command_id=3))
+        writer.append(_end(stdout=len(payload), command_id=3))
+    _churn_on_first_read(monkeypatch, [append_again])
+    loaded = _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
+    assert loaded["commands"][2]["end"] is not None
+
+
+def test_load_transcript_prefix_gives_up_on_a_transcript_that_never_settles(monkeypatch, tmp_path):
+    writer = _complete_transcript(tmp_path)
+    reference = writer.reference()
+    real_open = os.open
+
+    def always_racing_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if isinstance(path, str) and path.endswith(".transcript"):
+            # Same bytes, new inode, every time: the opened inode is always
+            # the one just unlinked.
+            replacement = writer.path + ".next"
+            with open(replacement, "wb") as stream:
+                stream.write(open(writer.path, "rb").read())
+            os.chmod(replacement, 0o600)
+            os.replace(replacement, writer.path)
+        return descriptor
+    monkeypatch.setattr(os, "open", always_racing_open)
     with pytest.raises(_module().IoxTransportError) as raised:
         _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
-    assert "pathname changed during read" in str(raised.value)
+    assert str(raised.value) in ("transcript metadata changed",
+                                 "transcript pathname changed during read")
 
 
 def test_load_transcript_prefix_still_refuses_a_transcript_shrunk_during_read(monkeypatch, tmp_path):
@@ -712,8 +759,10 @@ def test_load_transcript_prefix_still_refuses_a_transcript_shrunk_during_read(mo
     _churn_on_first_read(monkeypatch, [truncate])
     with pytest.raises(_module().IoxTransportError) as raised:
         _module()._load_transcript_prefix(str(tmp_path), reference, CONTROLLER)
-    # Either guard is a correct refusal: the short read, or the size bound.
+    # Whichever guard fired on the last retry is the report; all three are
+    # correct refusals of a file that never carried the referenced prefix.
     assert str(raised.value) in ("incomplete transcript prefix",
+                                 "transcript metadata changed",
                                  "transcript pathname changed during read")
 
 

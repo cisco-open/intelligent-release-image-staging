@@ -1256,13 +1256,41 @@ def _scanner_main(argv):
     return status
 
 
+class _TranscriptReplaced(Exception):
+    """The owning attempt atomically replaced its transcript during a read."""
+
+
+_TRANSCRIPT_READ_ATTEMPTS = 6
+
+
 def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
     """Strictly validate and index one journal-referenced transcript prefix.
 
     The return value is intentionally only evidence structure.  Journal state
     transition and continuation policy remains with the deployment record
     store.
+
+    The writer appends by writing a temporary file and renaming it over the
+    transcript, so every append is a new inode. Another attempt validating
+    the store can open the old inode a moment before that rename and then
+    see it unlinked (link count 0), or see the name point at a different
+    inode after the read. That is the owner writing, not tampering; the
+    read is retried a bounded number of times and the next attempt sees the
+    whole new file. Type, owner and mode refusals are never retried.
     """
+    last = None
+    for _ in range(_TRANSCRIPT_READ_ATTEMPTS):
+        try:
+            return _load_transcript_prefix_once(
+                state_dir, transcript_ref, expected_controller_id)
+        except _TranscriptReplaced as exc:
+            last = exc
+            time.sleep(0.02)
+    raise IoxTransportError("journal_unreadable", str(last))
+
+
+def _load_transcript_prefix_once(state_dir, transcript_ref,
+                                 expected_controller_id):
     reference_keys = {
         "id", "attempt_id", "stored_bytes", "observed_bytes",
         "dropped_bytes", "truncated",
@@ -1337,16 +1365,17 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
         if (not stat.S_ISREG(opened.st_mode)
                 or opened.st_uid != os.geteuid()
                 or stat.S_IMODE(opened.st_mode) != 0o600
-                or opened.st_nlink != 1
-                or opened.st_size < transcript_ref["stored_bytes"]
                 or opened.st_size > 1048576):
             raise IoxTransportError("journal_unreadable", "transcript metadata changed")
+        if (opened.st_nlink != 1
+                or opened.st_size < transcript_ref["stored_bytes"]):
+            raise _TranscriptReplaced("transcript metadata changed")
         remaining = transcript_ref["stored_bytes"]
         chunks = []
         while remaining:
             chunk = os.read(descriptor, min(65536, remaining))
             if not chunk:
-                raise IoxTransportError("journal_unreadable", "incomplete transcript prefix")
+                raise _TranscriptReplaced("incomplete transcript prefix")
             chunks.append(chunk)
             remaining -= len(chunk)
         current = os.stat(
@@ -1359,8 +1388,10 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
                 current.st_uid != os.geteuid() or
                 after.st_uid != os.geteuid() or
                 stat.S_IMODE(current.st_mode) != 0o600 or
-                stat.S_IMODE(after.st_mode) != 0o600 or
-                current.st_nlink != 1 or after.st_nlink != 1 or
+                stat.S_IMODE(after.st_mode) != 0o600):
+            raise IoxTransportError(
+                "journal_unreadable", "transcript pathname changed during read")
+        if (current.st_nlink != 1 or after.st_nlink != 1 or
                 (current.st_dev, current.st_ino) !=
                 (opened.st_dev, opened.st_ino) or
                 (after.st_dev, after.st_ino) !=
@@ -1371,8 +1402,7 @@ def _load_transcript_prefix(state_dir, transcript_ref, expected_controller_id):
                 # file is evidence against the bytes just read.
                 after.st_size < transcript_ref["stored_bytes"] or
                 current.st_size < transcript_ref["stored_bytes"]):
-            raise IoxTransportError(
-                "journal_unreadable", "transcript pathname changed during read")
+            raise _TranscriptReplaced("transcript pathname changed during read")
         after_state = os.fstat(state_descriptor)
         after_iox = os.fstat(iox_descriptor)
         after_transcripts = os.fstat(transcripts_descriptor)

@@ -2486,7 +2486,7 @@ def test_app_block_is_emptied_before_it_is_removed(tmp_path, name, action,
         controller.close()
     lines = rendered.splitlines()
     vnic = (" no app-vnic gateway0 virtualportgroup 1 guest-interface 0"
-            if router else " no app-vnic AppGigabitEthernet1/1 trunk")
+            if router else " no app-vnic AppGigabitEthernet trunk")
     gateway = "100.90.171.1" if router else "10.66.6.1"
     emptied = ["app-hosting appid iris", " no app-resource docker",
                " no app-resource profile custom",

@@ -62,7 +62,7 @@ APP_GATEWAY="${APP_GATEWAY:-${SVI_IP:-<app-gateway>}}"
 case "$MANAGEMENT_TYPE" in
   router-routed|router-nat)
     VNIC_REMOVAL="gateway0 virtualportgroup ${VPG_NUMBER:-<vpg>} guest-interface 0" ;;
-  *) VNIC_REMOVAL="${APP_INTF:-AppGigabitEthernet1/1} trunk" ;;
+  *) VNIC_REMOVAL="AppGigabitEthernet trunk" ;;
 esac
 VLAN_IN="${VLAN:-${INBAND_VLAN:-}}"
 VLAN="${VLAN_IN:-666}"
