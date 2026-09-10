@@ -65,7 +65,7 @@ SHIP=(
   # the notice without them would make the notice false.
   tools/get-aria2c.sh tools/aria2c.sha256 tools/make-torrent.sh
   tools/make-agent-bundle.sh tools/gen-device-installers.sh
-  tools/apply-assignments.sh tools/get-ioxclient.sh
+  tools/apply-assignments.sh tools/get-ioxclient.sh tools/ioxclient.sha256
   tools/stage-iox-package.sh tools/provision-iox-packages.sh
   tools/build-device-image.sh tools/build-xr-package.sh
   tools/check-package-freshness.sh
@@ -83,6 +83,9 @@ SHIP=(
 
 # Copy every tracked file under the allowlist, preserving the relative path.
 # `git ls-files` lists index entries; the working-tree content is copied.
+# Collect in the foreground: a process substitution hides git's failure exit
+# status and would otherwise publish an incomplete release on a missing input.
+git -C "$REPO" ls-files -z --error-unmatch -- "${SHIP[@]}" > "$WORK/tracked-files"
 copied=0
 while IFS= read -r -d '' rel; do
   case "$rel" in
@@ -93,7 +96,7 @@ while IFS= read -r -d '' rel; do
   mkdir -p "$STAGE/$(dirname "$rel")"
   cp -p "$src" "$STAGE/$rel"
   copied=$((copied + 1))
-done < <(git -C "$REPO" ls-files -z --error-unmatch -- "${SHIP[@]}")
+done < "$WORK/tracked-files"
 [ "$copied" -gt 0 ] || { echo "ERROR: nothing to ship" >&2; exit 1; }
 
 # bin placeholder -- aria2c is fetched by tools/get-aria2c.sh for the DEVICE

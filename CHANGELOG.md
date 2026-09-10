@@ -60,6 +60,8 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- Release archives include the IOx client checksum manifest and abort before
+  publication if an allowlisted tracked input is missing (#260, #261).
 - VLAN cleanup accepts only the complete recorded absent-interface response;
   an additional refusal or unexpected output now fails the step (#259).
 - IOx failure details quote the rejected command response instead of an
