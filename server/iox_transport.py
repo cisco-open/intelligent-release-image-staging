@@ -1681,7 +1681,12 @@ if [ "$mode" = ssh ]; then
 else
   source_fd=$8
   destination=$9
-  "$sshpass_binary" -e "$binary" -P "$port" -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" "/proc/self/fd/$source_fd" "$user@$peer:$destination"
+  # -O forces the legacy SCP protocol. OpenSSH 9 defaults to SFTP, which
+  # IOS-XE's scp server does not implement -- every wrapper upload failed
+  # with "scp: Connection closed" (rc 255) before the file left the server.
+  # Proven on an IE-3400: identical command, same credentials, fails without
+  # -O and succeeds with it.
+  "$sshpass_binary" -e "$binary" -O -P "$port" -o ConnectTimeout=15 "${IRIS_SSH_OPTS[@]}" "/proc/self/fd/$source_fd" "$user@$peer:$destination"
 fi
 rc=$?
 iris_ssh_cleanup
