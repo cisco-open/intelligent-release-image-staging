@@ -1687,20 +1687,62 @@ def test_phase_timeout_covers_dialogue_and_reaps_before_return(tmp_path, peer_fa
 def test_cancellation_stops_work_and_cancel_and_reap_does_not_extend_deadline(tmp_path, peer_factory):
     peer = peer_factory(hang="command")
     cancel = threading.Event()
-    transport, unused = _transport(tmp_path, peer, cancel=cancel)
-    timer = threading.Timer(0.1, cancel.set)
-    timer.start()
+    command_deadline = time.monotonic() + 5
+    transport, unused = _transport(
+        tmp_path, peer, cancel=cancel,
+        overrides={"session_deadline": command_deadline})
+    results, errors = [], []
+    def command():
+        try:
+            results.append(transport.command(1, VERIFY, command_deadline))
+        except BaseException as error:
+            errors.append(error)
+    worker = threading.Thread(target=command, daemon=True)
+    worker.start()
     try:
-        result = _command(transport, timeout=0.5)
+        # Cancel work already received by the peer. A timer started before
+        # process launch could expire during startup on a busy test host.
+        ready_deadline = time.monotonic() + 2
+        while True:
+            try:
+                received = peer.received()
+            except json.JSONDecodeError:
+                # The peer may be in the middle of appending a trace line.
+                received = []
+            if VERIFY.decode("ascii") in received:
+                break
+            assert worker.is_alive(), "command exited before cancellation barrier"
+            assert time.monotonic() < ready_deadline, "peer never reached cancellation barrier"
+            cancel.wait(0.002)
+        cancel.set()
+        worker.join(2)
+        assert not worker.is_alive(), "cancelled command did not finish"
+        assert not errors and len(results) == 1
+        assert _value(results[0], "error_category") == "cancelled"
+        assert _value(results[0], "framing_complete") is False
+        deadline = time.monotonic() + 0.5
+        transport.cancel_and_reap(deadline)
+        assert time.monotonic() < deadline + 0.1
+        # Keep process disappearance separate from the method's deadline:
+        # scheduling/reaping can lag the return without extending that call.
+        gone_deadline = time.monotonic() + 1
+        while time.monotonic() < gone_deadline:
+            try:
+                pids = [event["pid"] for event in peer.events()
+                        if event["event"] == "spawn"]
+            except json.JSONDecodeError:
+                pids = []
+            if pids and all(not Path("/proc/%d" % pid).exists() for pid in pids):
+                break
+            threading.Event().wait(0.005)
+        peer.assert_reaped()
     finally:
-        timer.cancel()
-        timer.join(1)
-    assert _value(result, "error_category") == "cancelled"
-    assert _value(result, "framing_complete") is False
-    deadline = time.monotonic() + 0.1
-    transport.cancel_and_reap(deadline)
-    assert time.monotonic() < deadline + 0.1
-    peer.assert_reaped()
+        cancel.set()
+        try:
+            peer.cleanup()
+        finally:
+            worker.join(2)
+            assert not worker.is_alive(), "transport worker survived fixture cleanup"
 
 
 def test_cancel_and_reap_enforces_separate_term_and_kill_reap_ceilings(
