@@ -3280,8 +3280,7 @@
     var verb = quarantined ? 'Quarantine' : 'Release';
     if (!confirm(verb + ' ' + ids.length + ' device' + (ids.length === 1 ? '' : 's') +
         '?\n\nThis changes peer discovery and the server seeder across all torrents. ' +
-        'It may not terminate existing device-to-device sessions immediately. ' +
-        'It never installs or reloads a device.')) return;
+        'It may not terminate existing device-to-device sessions immediately. ')) return;
     setBulkBusy(true);
     var ok = 0, failed = [];
     try {

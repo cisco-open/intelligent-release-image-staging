@@ -735,7 +735,7 @@
               <button class="btn ghost icon-only" type="button" id="role-modal-x" aria-label="Close">&#10005;</button>
             </div>
             <div class="modal-body">
-              <p id="role-modal-help">Set one declared role for the selected devices, including selections on other pages. Preview the effect before saving. This changes image staging peer policy; it never installs or reloads a device.</p>
+              <p id="role-modal-help">Set one declared role for the selected devices, including selections on other pages. Preview the effect before saving; this changes peer policy only.</p>
               <label class="field" for="role-selected"><span class="field-label">Role</span>
                 <select id="role-selected"><option value="" disabled selected>— choose a role —</option></select>
               </label>
@@ -755,7 +755,7 @@
               <button class="btn ghost icon-only" type="button" id="sched-modal-x" aria-label="Close">&#10005;</button>
             </div>
             <div class="modal-body">
-              <p id="sched-modal-help">Run one stage-only action inside a maintenance window. IRIS stages and verifies images; it never installs, activates, changes boot variables or reloads a device, on a schedule or otherwise.</p>
+              <p id="sched-modal-help">Run one action inside a maintenance window: assign images to stage, or onboard new devices.</p>
               <label class="field" for="sched-modal-id"><span class="field-label">Schedule id</span><input id="sched-modal-id" placeholder="e.g. core-wave"></label>
               <label class="field" for="sched-modal-scope"><span class="field-label">Target</span>
                 <select id="sched-modal-scope">
