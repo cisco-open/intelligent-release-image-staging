@@ -375,15 +375,99 @@ def _unexpected_detail(label, exc):
 _IOS_REFUSAL_RE = re.compile(rb"^%[^\r\n]+", re.M)
 
 
-def _http_client_credentials_collision(running, device_id):
-    """True when running-config carries an IOS HTTP client credential that
-    is not IRIS's own (username = this device id): the fetch would
-    overwrite and then delete an operator's pair."""
-    own = re.search(
-        r"(?m)^ip http client username %s\s*$" % re.escape(device_id),
-        running)
-    return own is None and re.search(
-        r"(?m)^ip http client (?:username|password)(?:\s|$)", running) is not None
+def _preflight_commands(appid, device_id):
+    """Read collision evidence without requesting stored device credentials."""
+    if (not isinstance(appid, str) or
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", appid) is None):
+        raise _ControllerFailure(
+            "unsupported_syntax_local", "invalid IOx application id", 2)
+    if not isinstance(device_id, str) or _BOARD_ID.fullmatch(device_id) is None:
+        raise _ControllerFailure(
+            "unsupported_syntax_local", "invalid IOx device id", 2)
+    # Of the admitted ID alphabet (alphanumerics and ._:-), only the period
+    # is an IOS ERE metacharacter outside a character class.
+    own_username = device_id.replace(".", r"\.")
+    return (
+        b"show app-hosting list",
+        b"show running-config | include ^app-hosting appid |"
+        b"^event manager applet IRIS-(AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)( |$)|"
+        b"^logging discriminator IRISQ( |$)|"
+        b"^logging (buffered|console|monitor) discriminator IRISQ$",
+        b"show running-config | count ^ip http client username( |$)",
+        b"show running-config | count ^ip http client password( |$)",
+        ("show running-config | count ^ip http client username %s$" %
+         own_username).encode("ascii"),
+    )
+
+
+def _preflight_payloads(state_dir, controller_id, attempt_id, result, context):
+    """Read the five ordered responses from this command's durable capture.
+
+    The transport's generic transcript grammar intentionally permits older
+    preflight captures. This reader enforces the current five-read contract
+    locally, without changing how historical evidence is loaded.
+    """
+    import iox_transport
+    reference = _get(result, "transcript_ref")
+    if (not isinstance(reference, dict) or
+            reference.get("attempt_id") != attempt_id):
+        raise _ControllerFailure(
+            "authority_mismatch", "IOx preflight transcript binding changed", 5)
+    try:
+        prefix = iox_transport._load_transcript_prefix(
+            state_dir, reference, controller_id)
+    except iox_transport.IoxTransportError:
+        raise _ControllerFailure(
+            "journal_unreadable", "IOx preflight evidence is unreadable", 5)
+    try:
+        if (prefix["attempt_id"] != attempt_id or
+                not isinstance(context, dict) or
+                context.get("kind") != "ssh" or
+                context.get("purpose") != "preflight"):
+            raise ValueError("invalid command binding")
+        command = prefix["commands"][context["command_id"]]
+        if command["start"] != context:
+            raise ValueError("invalid command binding")
+        end = command["end"]
+        if (not IoxController._transport_ok(end) or
+                end.get("error_category") is not None):
+            raise ValueError("incomplete command")
+        stdout = command["stdout"]
+        spans = end["payload_spans"]
+        if not isinstance(stdout, bytes) or not isinstance(spans, list) or len(spans) != 5:
+            raise ValueError("invalid payload count")
+        payloads = []
+        previous_end = 0
+        for span in spans:
+            offset, length = span["offset"], span["length"]
+            if (type(offset) is not int or type(length) is not int or
+                    offset < previous_end or length < 0 or
+                    offset + length > len(stdout)):
+                raise ValueError("invalid payload bounds")
+            previous_end = offset + length
+            payloads.append(stdout[offset:previous_end])
+        return tuple(payloads)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise _ControllerFailure(
+            "journal_unreadable", "IOx preflight evidence is incomplete or ambiguous", 5)
+
+
+def _http_client_credentials_collision(username_count, password_count, own_username_count):
+    """Refuse another owner's HTTP client pair using count-only evidence."""
+    counts = []
+    for payload in (username_count, password_count, own_username_count):
+        match = re.fullmatch(
+            rb"[ \t\r\n]*Number of lines which match regexp = ([01])[ \t\r\n]*",
+            payload) if isinstance(payload, bytes) else None
+        if match is None:
+            raise _ControllerFailure(
+                "unsupported_response", "IOx preflight HTTP client count is unreadable", 4)
+        counts.append(int(match.group(1)))
+    username, password, own = counts
+    if own > username:
+        raise _ControllerFailure(
+            "unsupported_response", "IOx preflight HTTP client counts disagree", 4)
+    return own == 0 and bool(username or password)
 
 
 def _command_failure_detail(purpose, result):
@@ -3648,25 +3732,26 @@ class IoxController(object):
 
     def _ordinary_install_preflight(self, attempt):
         """Run collision checks through the already-custodied transport."""
-        result, unused = self._command(
+        appid = _get(attempt.target, "iox_appid",
+                     self.config.get("application_id", "iris"))
+        commands = _preflight_commands(appid, _get(attempt.request, "device_id"))
+        result, context = self._command(
             attempt, "preflight",
-            b"show app-hosting list\nshow running-config",
+            _command_bytes(b"\n".join(commands)),
             90, ordinary=True, record=False)
         if (not self._transport_ok(result) or
                 _get(result, "error_category")):
             raise _ControllerFailure(
                 _get(result, "error_category") or "rejected",
                 "IOx preflight could not read collision state", 4)
-        # Both read-only command bodies share one bounded, supervised session.
-        # Collision and app-state patterns are anchored, so they remain
-        # unambiguous in the combined normalized output.
-        running = _get(result, "stdout", b"").decode("utf-8", "replace")
-        apps = running
-        appid = str(_get(attempt.target, "iox_appid",
-                         self.config.get("application_id", "iris")))
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", appid):
+        payloads = _preflight_payloads(
+            self.state_dir, self.controller_id, attempt.attempt_id, result, context)
+        try:
+            apps, running = (payload.decode("utf-8") for payload in payloads[:2])
+        except UnicodeError:
             raise _ControllerFailure(
-                "unsupported_syntax_local", "invalid IOx application id", 2)
+                "unsupported_response", "IOx preflight collision state is unreadable", 4)
+        credentials_collision = _http_client_credentials_collision(*payloads[2:])
         match = re.search(
             r"(?im)^[ \t]*%s[ \t]+(\S+)" % re.escape(appid), apps)
         app_state = match.group(1).upper() if match else ""
@@ -3688,8 +3773,7 @@ class IoxController(object):
         # would be overwritten and then deleted: refuse it. IRIS's own pair
         # (username = this device id, left only when a clear could not run)
         # is walked over; the next fetch replaces and clears it.
-        if _http_client_credentials_collision(
-                running, str(_get(attempt.request, "device_id", ""))):
+        if credentials_collision:
             raise _ControllerFailure(
                 "rejected",
                 "the IOS HTTP client credentials already exist", 2)

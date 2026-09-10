@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- IOx install preflight reads only named collision lines and HTTP credential
+  presence counts, keeping unrelated running configuration and stored
+  credential hashes out of new preflight transcripts (#243).
 - Mutual-origin preflight reports an unavailable count when the protected
   seeder IPv4 address is unknown. Console, API and telemetry distinguish
   unavailable evidence from a completed zero-count result (#240).

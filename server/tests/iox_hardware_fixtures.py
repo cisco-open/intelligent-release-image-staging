@@ -229,9 +229,10 @@ APP_LIST = {
 # Install preflight (a66eb0d1 cmd 3; ad6e0e07 cmd 3)
 # ---------------------------------------------------------------------------
 
-# The preflight sends `show app-hosting list` and `show running-config` in
-# one session and parses the WHOLE capture, echoes included. These are the
-# recorded frame of a66eb0d1 cmd 3 and the two IRIS stanzas its running
+# The historical preflight sent `show app-hosting list` and unfiltered
+# `show running-config` in one session. Issue #243 replaced that read with
+# filtered collision lines and HTTP client counts. These are the recorded
+# frame of a66eb0d1 cmd 3 and the two IRIS stanzas its running
 # configuration carried, so a test can compose the three app-list states
 # around the recorded configuration. Elided: everything in the
 # configuration that is not IRIS's, and the two run-opts lines that carry

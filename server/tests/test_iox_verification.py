@@ -4744,18 +4744,252 @@ def test_fetch_proof_needs_the_copy_report_and_the_dir_row_at_the_source_size(
     assert failure.value.category == category
 
 
-@pytest.mark.parametrize("running,collision", [
-    ("hostname edge\nip http client secure-trustpoint IRIS\n", False),
-    ("ip http client username edge-01\nip http client password 7 0512\n", False),
-    ("ip http client username operator\n", True),
-    ("ip http client password 7 0512\n", True),
-    ("ip http client username edge-011\n", True),
-    ("ip http client username edge-01\nip http client username-x\n", False),
+def _http_count(value):
+    return ("Number of lines which match regexp = %s\n" % value).encode("ascii")
+
+
+@pytest.mark.parametrize("username,password,own,collision", [
+    (0, 0, 0, False), (1, 1, 1, False), (1, 0, 1, False),
+    (1, 0, 0, True), (0, 1, 0, True), (1, 1, 0, True),
 ])
 def test_operator_http_client_credentials_are_a_collision_but_iris_own_are_not(
-        running, collision):
+        username, password, own, collision):
     module = _module()
-    assert module._http_client_credentials_collision(running, "edge-01") is collision
+    assert module._http_client_credentials_collision(
+        _http_count(username), _http_count(password), _http_count(own)) is collision
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b"0", _http_count(2), _http_count(-1), _http_count("01"),
+    _http_count(0) + _http_count(0), b"% advisory\n" + _http_count(0),
+    b"hostname edge\n" + _http_count(0),
+    b"ip http client username operator\n", _http_count(0) + b"\x00",
+    _http_count(0).replace(b" = ", b"="), b"\xff" + _http_count(0),
+])
+@pytest.mark.parametrize("slot", range(3))
+def test_preflight_http_count_rejects_incomplete_or_ambiguous_payload(payload, slot):
+    module = _module()
+    counts = [_http_count(0), _http_count(0), _http_count(0)]
+    counts[slot] = payload
+    with pytest.raises(module._ControllerFailure) as failure:
+        module._http_client_credentials_collision(*counts)
+    assert failure.value.category == "unsupported_response"
+
+
+@pytest.mark.parametrize("password", [0, 1])
+def test_preflight_http_count_rejects_own_username_without_username(password):
+    module = _module()
+    with pytest.raises(module._ControllerFailure) as failure:
+        module._http_client_credentials_collision(
+            _http_count(0), _http_count(password), _http_count(1))
+    assert failure.value.category == "unsupported_response"
+
+
+def test_preflight_http_count_accepts_only_surrounding_ascii_whitespace():
+    module = _module()
+    assert module._http_client_credentials_collision(
+        b"\r\n \t" + _http_count(1) + b"\t\r\n",
+        _http_count(1), _http_count(1)) is False
+
+
+@pytest.mark.parametrize("appid,device_id", [
+    ("iris", "100.90.168.99"), ("iris-2", "edge-01:access"),
+    ("iris", "." * 128),
+])
+def test_preflight_reads_only_collision_lines_and_http_counts(appid, device_id):
+    commands = _module()._preflight_commands(appid, device_id)
+    assert len(commands) == 5
+    assert commands[0] == b"show app-hosting list"
+    assert commands[1] == (
+        b"show running-config | include ^app-hosting appid |"
+        b"^event manager applet IRIS-(AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)( |$)|"
+        b"^logging discriminator IRISQ( |$)|"
+        b"^logging (buffered|console|monitor) discriminator IRISQ$")
+    assert commands[2:4] == (
+        b"show running-config | count ^ip http client username( |$)",
+        b"show running-config | count ^ip http client password( |$)")
+    assert commands[4] == (
+        "show running-config | count ^ip http client username %s$" %
+        device_id.replace(".", r"\.")).encode("ascii")
+    assert all(len(command) <= 320 for command in commands)
+    assert all(b"\n" not in command for command in commands)
+
+
+@pytest.mark.parametrize("appid,device_id", [
+    (None, "edge"), (True, "edge"), ("", "edge"), ("x" * 65, "edge"),
+    ("iris|other", "edge"), ("iris", None), ("iris", ""),
+    ("iris", "x" * 129), ("iris", "edge$"), ("iris", "edge\nshow run"),
+    ("iris", "é"),
+])
+def test_preflight_rejects_unadmitted_ids_before_any_read(appid, device_id):
+    module = _module()
+    fake = _Bag(config={"application_id": "iris"})
+    def no_command(*args, **kwargs):
+        raise AssertionError("invalid preflight ID reached transport")
+    fake._command = no_command
+    attempt = _Bag(target={"iox_appid": appid}, identity={},
+                   request={"device_id": device_id})
+    with pytest.raises(module._ControllerFailure) as failure:
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert failure.value.category == "unsupported_syntax_local"
+
+
+def _ordinary_preflight_fixture(monkeypatch, running=b"", app_state=None):
+    module = _module()
+    context, result, unused_prefix, unused_payloads = _preflight_prefix()
+    calls = []
+    fake = _Bag(config={"application_id": "iris"},
+                state_dir="/state", controller_id=_CONTROLLER_ID)
+    fake._transport_ok = module.IoxController._transport_ok
+    def command(*args, **kwargs):
+        calls.append((args, kwargs))
+        return result, context
+    fake._command = command
+    attempt = _Bag(target={}, identity={}, request={"device_id": "edge-01"},
+                   attempt_id="a" * 32)
+    apps = ("iris %s\n" % app_state).encode("ascii") if app_state else b""
+    if app_state:
+        running = b"app-hosting appid iris\n" + running
+    def payloads(state_dir, controller_id, attempt_id, actual_result, actual_context):
+        assert (state_dir, controller_id, attempt_id) == (
+            "/state", _CONTROLLER_ID, "a" * 32)
+        assert actual_result is result and actual_context is context
+        return (apps, running, _http_count(0), _http_count(0), _http_count(0))
+    monkeypatch.setattr(module, "_preflight_payloads", payloads)
+    return module, fake, attempt, calls
+
+
+@pytest.mark.parametrize("app_state", [None, "DEPLOYED", "ACTIVATED"])
+def test_ordinary_preflight_sends_five_validated_reads_in_one_bounded_session(
+        monkeypatch, app_state):
+    module, fake, attempt, calls = _ordinary_preflight_fixture(
+        monkeypatch, app_state=app_state)
+    module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert calls == [((attempt, "preflight", b"\n".join(
+        module._preflight_commands("iris", "edge-01")), 90),
+        {"ordinary": True, "record": False})]
+    expected = {"status": "passed"}
+    if app_state:
+        expected["resumable_app_state"] = app_state
+    assert attempt.identity == expected
+
+
+@pytest.mark.parametrize("running,description", [
+    (b"event manager applet IRIS-AGENT\n", "an IRIS EEM applet"),
+    (b"event manager applet IRIS-COPYROOT\n", "an IRIS EEM applet"),
+    (b"event manager applet IRIS-RECLAIM\n", "an IRIS EEM applet"),
+    (b"event manager applet IRIS-RECLAIM-BUNDLE\n", "an IRIS EEM applet"),
+    (b"logging discriminator IRISQ msg-body drops %IRIS\n", "logging discriminator IRISQ"),
+    (b"logging buffered discriminator IRISQ\n", "an IRISQ logging binding"),
+    (b"logging console discriminator IRISQ\n", "an IRISQ logging binding"),
+    (b"logging monitor discriminator IRISQ\n", "an IRISQ logging binding"),
+])
+@pytest.mark.parametrize("app_state", [None, "DEPLOYED", "ACTIVATED"])
+def test_ordinary_preflight_preserves_each_named_collision_even_when_resumable(
+        monkeypatch, running, description, app_state):
+    module, fake, attempt, unused = _ordinary_preflight_fixture(
+        monkeypatch, running=running, app_state=app_state)
+    with pytest.raises(module._ControllerFailure) as failure:
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert failure.value.category == "rejected"
+    assert failure.value.detail == description + " already exists"
+    assert attempt.identity == {}
+
+
+def test_ordinary_preflight_nearby_names_do_not_become_collisions(monkeypatch):
+    module, fake, attempt, unused = _ordinary_preflight_fixture(
+        monkeypatch, running=(b"event manager applet IRIS-AGENT2\n"
+                             b"logging discriminator IRISQ2\n"
+                             b"logging buffered discriminator IRISQ2\n"))
+    module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert attempt.identity == {"status": "passed"}
+
+
+def _preflight_prefix():
+    context = {"schema_version": 1, "type": "command_start", "command_id": 7,
+               "kind": "ssh", "purpose": "preflight", "board_identity": _BOARD,
+               "record_id": None, "transaction_id": None, "revision": None,
+               "phase": None, "started_at": 100}
+    payloads = [b"No apps found\n", b"", _http_count(0), _http_count(1), _http_count(0)]
+    stdout = b""
+    spans = []
+    for payload in payloads:
+        stdout += b"edge#read command\n"
+        spans.append({"offset": len(stdout), "length": len(payload)})
+        stdout += payload
+    end = {"returncode": 0, "timed_out": False, "stdout_truncated": False,
+           "stderr_truncated": False, "framing_complete": True,
+           "error_category": None, "payload_spans": spans}
+    command = {"start": context, "end": end, "stdout": stdout, "stderr": b""}
+    reference = {"attempt_id": "a" * 32}
+    result = dict(end, stdout=stdout, stderr=b"", transcript_ref=reference)
+    prefix = {"attempt_id": "a" * 32, "commands": {7: command}}
+    return context, result, prefix, payloads
+
+
+def test_preflight_payloads_come_from_bound_durable_spans_not_result_bytes(monkeypatch):
+    module = _module()
+    import iox_transport
+    context, result, prefix, payloads = _preflight_prefix()
+    result["stdout"] = b"untrusted combined output"
+    loaded = []
+    def load(state_dir, reference, controller_id):
+        loaded.append((state_dir, reference, controller_id))
+        return prefix
+    monkeypatch.setattr(iox_transport, "_load_transcript_prefix", load)
+    assert module._preflight_payloads(
+        "/state", _CONTROLLER_ID, "a" * 32, result, context) == tuple(payloads)
+    assert loaded == [("/state", result["transcript_ref"], _CONTROLLER_ID)]
+
+
+@pytest.mark.parametrize("damage", [
+    "foreign_attempt", "foreign_context", "missing_command", "unfinished",
+    "wrong_purpose", "failed_end", "timeout", "stdout_truncated", "stderr_truncated",
+    "framing_incomplete", "error_category", "missing_span", "extra_span",
+    "reordered_span", "overlapping_span", "out_of_bounds", "negative_offset",
+    "bool_offset", "bool_length",
+])
+def test_preflight_payloads_reject_ambiguous_or_unbound_evidence(monkeypatch, damage):
+    module = _module()
+    import iox_transport
+    context, result, prefix, unused = _preflight_prefix()
+    command = prefix["commands"][7]
+    end = command["end"]
+    if damage == "foreign_attempt":
+        result["transcript_ref"]["attempt_id"] = "b" * 32
+    elif damage == "foreign_context":
+        context = dict(context, board_identity="OTHER")
+    elif damage == "missing_command":
+        prefix["commands"].clear()
+    elif damage == "unfinished":
+        command["end"] = None
+    elif damage == "wrong_purpose":
+        context["purpose"] = "app_list"
+    elif damage == "failed_end":
+        end["returncode"] = 1
+    elif damage in ("timeout", "stdout_truncated", "stderr_truncated"):
+        end["timed_out" if damage == "timeout" else damage] = True
+    elif damage == "framing_incomplete":
+        end["framing_complete"] = False
+    elif damage == "error_category":
+        end["error_category"] = "cancelled"
+    elif damage == "missing_span":
+        end["payload_spans"].pop()
+    elif damage == "extra_span":
+        end["payload_spans"].append(dict(end["payload_spans"][-1]))
+    elif damage == "reordered_span":
+        end["payload_spans"].reverse()
+    elif damage == "overlapping_span":
+        end["payload_spans"][3] = dict(end["payload_spans"][2])
+    elif damage == "out_of_bounds":
+        end["payload_spans"][-1]["length"] = len(command["stdout"])
+    elif damage in ("negative_offset", "bool_offset", "bool_length"):
+        key = "length" if damage == "bool_length" else "offset"
+        end["payload_spans"][0][key] = -1 if damage == "negative_offset" else True
+    monkeypatch.setattr(iox_transport, "_load_transcript_prefix", lambda *args: prefix)
+    with pytest.raises(module._ControllerFailure) as failure:
+        module._preflight_payloads("/state", _CONTROLLER_ID, "a" * 32, result, context)
+    assert failure.value.category in ("authority_mismatch", "journal_unreadable")
 
 
 def test_strict_controller_requires_the_artifact_url_and_directory(tmp_path):

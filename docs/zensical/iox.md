@@ -42,6 +42,13 @@ downloaded image to `guest-share` through the device's SCP server there. A
 Catalyst 9300 or Catalyst 8000 job hands the image over through its share
 instead, and onboarding leaves that device's SCP server untouched.
 
+IOx preflight requests the app list, narrowly filtered IRIS collision lines,
+and counts of HTTP client credential settings. It does not request the full
+running configuration or stored password values. Each count is checked against
+its own completed command response; missing or ambiguous evidence stops the
+job. Transcripts retained by older builds may still contain full configuration
+and must be treated as sensitive.
+
 ## Catalyst 8000 routers
 
 A Catalyst 8000 router has no `AppGigabitEthernet`. With platform `iox` on a

@@ -2799,39 +2799,83 @@ def test_hardware_app_list_table_passes_the_transport_intact(tmp_path, peer_fact
     assert _value(result, "error_category") is None
 
 
-def _preflight(stdout):
+def _preflight(tmp_path, peer_factory, apps, config=b"", counts=(0, 0, 0),
+               device_id="iris-c8kv-101", log="off"):
+    """Run the controller's actual read set through a durable SSH replay."""
     module = _verification_module()
-    result = _ok_result(stdout)
+    commands = (
+        b"show app-hosting list",
+        b"show running-config | include ^app-hosting appid |^event manager applet IRIS-(AGENT|COPYROOT|RECLAIM|RECLAIM-BUNDLE)( |$)|^logging discriminator IRISQ( |$)|^logging (buffered|console|monitor) discriminator IRISQ$",
+        b"show running-config | count ^ip http client username( |$)",
+        b"show running-config | count ^ip http client password( |$)",
+        ("show running-config | count ^ip http client username " +
+         device_id.replace(".", r"\.") + "$").encode("ascii"),
+    )
+    payloads = (apps, config) + tuple(
+        ("Number of lines which match regexp = %d\n" % n).encode("ascii")
+        for n in counts)
+    peer = peer_factory(commands=[line.decode("ascii") for line in commands],
+                        payload=[payload.decode("ascii") for payload in payloads],
+                        host=hw.C8000V_HOST)
+    root = tmp_path / ("preflight-%d" % len(list(tmp_path.glob("preflight-*"))))
+    root.mkdir(mode=448)
+    context = _start(purpose="preflight")
+    transport, transport_config = _transport(root, peer, purpose="preflight",
+                                             context=context)
+
+    def command(attempt, purpose, body, seconds, **kwargs):
+        assert purpose == "preflight" and seconds == 90
+        assert kwargs == {"ordinary": True, "record": False}
+        assert body.split(b"\n") == list(commands)
+        result = _command(transport, body, timeout=2.5)
+        peer.assert_reaped()
+        assert peer.received() == ["terminal length 0", "terminal width 512"] + [
+            line.decode("ascii") for line in commands] + ["exit"]
+        # The complete raw running config and HTTP password values were never
+        # requested. Only counts and the named collision lines are retained.
+        assert b"secret 9" not in result["stdout"]
+        assert b"ip http client password 7" not in result["stdout"]
+        loaded = _module()._load_transcript_prefix(
+            transport_config["state_dir"], result["transcript_ref"], CONTROLLER)
+        captured = loaded["commands"][1]
+        spans = captured["end"]["payload_spans"]
+        assert [captured["stdout"][s["offset"]:s["offset"] + s["length"]]
+                for s in spans] == list(payloads)
+        assert b"secret 9" not in captured["stdout"]
+        assert b"ip http client password 7" not in captured["stdout"]
+        return result, context
+
     fake = types.SimpleNamespace(
-        _command=lambda *args, **kwargs: (result, None),
+        _command=command,
         _transport_ok=module.IoxController._transport_ok,
-        config={"application_id": "iris"})
-    # The HTTPS-fetch preflight also reads the request's device id to tell
-    # IRIS's own `ip http client username` pair from an operator's.
-    attempt = types.SimpleNamespace(target={}, identity={},
-                                    request={"device_id": "iris-c8kv-101"})
+        config={"application_id": "iris"},
+        state_dir=transport_config["state_dir"], controller_id=CONTROLLER)
+    attempt = types.SimpleNamespace(target={"log": log}, identity={},
+                                    attempt_id=ATTEMPT,
+                                    request={"device_id": device_id})
     return module, fake, attempt
 
 
-def test_hardware_preflight_reads_the_app_state_column_and_the_iris_stanza():
+def test_hardware_preflight_reads_the_app_state_column_and_the_iris_stanza(
+        tmp_path, peer_factory):
     """The install preflight parses the recorded `show app-hosting list`
-    table and running configuration as one capture: a DEPLOYED app with
+    table and a narrowed configuration capture: a DEPLOYED app with
     its stanza is resumable, a RUNNING one makes the stanza a collision,
     and a clean router passes."""
-    module, fake, attempt = _preflight(hw.c8000v_preflight(
-        hw.APP_LIST["DEPLOYED"], hw.C8000V_VPG_STANZA, hw.C8000V_APP_STANZA))
+    module, fake, attempt = _preflight(
+        tmp_path, peer_factory, hw.APP_LIST["DEPLOYED"], b"app-hosting appid iris\n")
     module.IoxController._ordinary_install_preflight(fake, attempt)
     assert attempt.identity == {"status": "passed", "resumable_app_state": "DEPLOYED"}
 
-    module, fake, attempt = _preflight(hw.c8000v_preflight(
-        hw.APP_LIST["RUNNING"], hw.C8000V_VPG_STANZA, hw.C8000V_APP_STANZA))
+    module, fake, attempt = _preflight(
+        tmp_path, peer_factory, hw.APP_LIST["RUNNING"], b"app-hosting appid iris\n")
     with pytest.raises(module._ControllerFailure) as error:
         module.IoxController._ordinary_install_preflight(fake, attempt)
     assert error.value.category == "rejected"
     assert error.value.detail == "the iris app-hosting config already exists"
     assert attempt.identity == {}
 
-    module, fake, attempt = _preflight(hw.c8000v_preflight(hw.APP_LIST_EMPTY))
+    module, fake, attempt = _preflight(tmp_path, peer_factory, hw.APP_LIST_EMPTY)
     module.IoxController._ordinary_install_preflight(fake, attempt)
     assert attempt.identity == {"status": "passed"}
 
@@ -3297,18 +3341,38 @@ def test_pki_sub_mode_prompt_counts_as_a_configuration_prompt():
     assert suffix(b"3400-1(ca-profile)#", 0) is None
 
 
-def test_hardware_preflight_walks_over_the_recipes_own_trustpoint():
+def test_hardware_preflight_walks_over_the_recipes_own_trustpoint(
+        tmp_path, peer_factory):
     """A timed-out trustpoint paste left `crypto pki trustpoint IRIS` (and
     its HTTP client binding) on iris-c8kv-104 and 3400-1 on 2026-09-10, and
     the next install refused them as collisions. They are the HTTPS fetch's
     own artifacts, removed and re-added by its first lines, so a clean
     device that merely carries them passes preflight."""
-    module, fake, attempt = _preflight(hw.c8000v_preflight(
-        hw.APP_LIST_EMPTY,
-        b"crypto pki trustpoint IRIS\n enrollment terminal\n revocation-check none\n",
-        b"ip http client secure-trustpoint IRIS\n"))
+    # Neither trustpoint nor HTTP trustpoint-binding lines are requested by
+    # the narrowed collision read, even when present on the device.
+    module, fake, attempt = _preflight(tmp_path, peer_factory, hw.APP_LIST_EMPTY)
     module.IoxController._ordinary_install_preflight(fake, attempt)
     assert attempt.identity == {"status": "passed"}
+
+
+@pytest.mark.parametrize("log", ["off", "on"])
+@pytest.mark.parametrize("counts,collision", [
+    ((0, 0, 0), False), ((1, 1, 1), False), ((1, 0, 1), False),
+    ((1, 1, 0), True), ((0, 1, 0), True), ((1, 0, 0), True),
+])
+def test_preflight_retains_only_counts_for_http_client_credentials(
+        tmp_path, peer_factory, log, counts, collision):
+    module, fake, attempt = _preflight(
+        tmp_path, peer_factory, hw.APP_LIST_EMPTY, counts=counts,
+        device_id="100.90.168.99", log=log)
+    if collision:
+        with pytest.raises(module._ControllerFailure) as error:
+            module.IoxController._ordinary_install_preflight(fake, attempt)
+        assert error.value.detail == "the IOS HTTP client credentials already exist"
+        assert attempt.identity == {}
+    else:
+        module.IoxController._ordinary_install_preflight(fake, attempt)
+        assert attempt.identity == {"status": "passed"}
 
 
 def test_cleanup_answers_the_enrolled_trustpoint_removal_question(tmp_path, peer_factory):
