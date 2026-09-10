@@ -359,11 +359,14 @@ trap on_shutdown TERM INT
 
 python3 tracker.py & T=$!
 python3 catalog.py & C=$!
+# The seeder's first announces must wait for the tracker to bind. The gate
+# replaces itself with the recipe, preserving S for shutdown and supervision.
 RPC_PORT="${RPC_PORT:-6800}" IRIS_ROOT=/opt/iris IRIS_LOG="$IRIS_LOG" \
   IMAGES_DIR="${IMAGES_DIR:-/opt/images/iosxe/c9300}" \
   IRIS_IMAGES_DIR="$IRIS_IMAGES_DIR" \
   SEEDER_LOG=- \
-  ARIA2=/opt/iris/bin/aria2c bash seed-launch.sh & S=$!
+  ARIA2=/opt/iris/bin/aria2c \
+  python3 wait_for_tracker.py bash seed-launch.sh & S=$!
 # Artifact server (HTTPS): explicit API consumers authenticate with resource-
 # bound device Basic credentials before path translation/existence. Unchanged
 # Guest Shell onboarding still pulls the explicit static files and time-bounded

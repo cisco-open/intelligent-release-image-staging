@@ -51,6 +51,9 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   pins the new x86_64 and aarch64 binaries (#68).
 
 ### Fixed
+- The origin seeder waits for the local tracker listener before starting,
+  avoiding failed first announces and the resulting gap in swarm membership
+  after a server restart (#244).
 - Bundle-mode reclaim preserves all `.pkg` and `.conf` files when `BOOT`
   points to a provisioning file, protecting the packages needed for the
   operator's next boot. A sweep with nothing safe to delete leaves its
