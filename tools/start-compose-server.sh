@@ -14,6 +14,28 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE=(docker compose -f "$REPO/server/docker-compose.yml")
 
+# server/Dockerfile COPYs bin/aria2c, the handed-in seeder client. That binary
+# is git-ignored on purpose -- only its checksum and provenance live in the
+# repository (tools/aria2c.sha256) -- so a fresh clone has none and the COPY
+# fails inside BuildKit with a cache-key error naming no remedy (issue #203).
+# Name the remedy here, before anything is built. The pin itself is still
+# enforced in the image build; this check is only about the file being present.
+if [ ! -f "$REPO/bin/aria2c" ]; then
+  cat >&2 <<EOF
+!! missing $REPO/bin/aria2c — server/Dockerfile cannot be built without it.
+
+The seeder client is HANDED IN: produced by the aria2-next-static project,
+never downloaded and never built here, and deliberately not committed. Install
+the pinned binary, then start me again:
+
+  tools/get-aria2c.sh amd64
+
+It verifies the binary against tools/aria2c.sha256 and fails closed on a
+mismatch. Set ARIA2C_DELIVERABLE to point at a handed-in binary elsewhere.
+EOF
+  exit 1
+fi
+
 # --pull: server/Dockerfile's base is a floating tag; without it a rebuild
 # silently reuses the host's cached python:3.12-slim-trixie and misses
 # Debian security updates already on the tag (issue #13; measured 2026-09-02).

@@ -11,6 +11,13 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Fixed
+- Refuse the Compose bring-up with a named remedy when the handed-in `aria2c`
+  is missing, instead of letting the image build fail with a BuildKit cache-key
+  error. `tools/get-aria2c.sh` now also tells a wrong-architecture deliverable
+  apart from a stale one; its fail-closed checksum behaviour is unchanged
+  (issue #203).
+
 ## [2026.09.10]
 
 ### Fixed

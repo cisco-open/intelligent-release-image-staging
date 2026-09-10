@@ -77,11 +77,28 @@ if [ "$actual" != "$expected" ]; then
 CHECKSUM MISMATCH for $ARCH — refusing to install.
   expected: $expected   (tools/aria2c.sha256)
   actual:   $actual     ($DELIVERABLE)
-
-This usually means the deliverable is stale, or a newer client was produced and
-tools/aria2c.sha256 has not been updated to adopt it. Do not "fix" this by
-editing the checksum unless you intend to adopt that exact binary.
 EOF
+  # A deliverable that hashes to ANOTHER entry in the manifest is not stale at
+  # all, it is the wrong architecture -- the usual result of collecting from the
+  # producer's other out/ directory. Say which, rather than leaving the operator
+  # to compare two hashes by eye.
+  wrong_arch="$(awk -v h="$actual" '$1 == h { print $2 }' "$SUMS")"
+  if [ -n "$wrong_arch" ]; then
+    cat >&2 <<EOF
+
+That is the $wrong_arch entry in tools/aria2c.sha256: this deliverable is the
+wrong architecture, not a stale build. Point ARIA2C_DELIVERABLE at the $ARCH
+binary instead.
+EOF
+  else
+    cat >&2 <<EOF
+
+The deliverable is stale (produced before the currently pinned build), or a
+newer client was produced and tools/aria2c.sha256 has not been updated to adopt
+it. Do not "fix" this by editing the checksum unless you intend to adopt that
+exact binary.
+EOF
+  fi
   exit 1
 fi
 
