@@ -102,6 +102,20 @@ teardown() { rm -rf "$TMP"; }
   [[ "$output" == *"cert"* ]]
 }
 
+@test "certificate copy failure preserves the prior certificate and reports failure" {
+  run run_prov
+  [ "$status" -eq 0 ]
+  cp "$ART/iris-catalog.pem" "$TMP/prior-catalog.pem"
+  # A real filesystem refusal that also applies when the test runs as root.
+  printf 'ROTATED PUBLIC CERT\n' > "$TMP/config/tls/crt.pem"
+  ln -s .iris-catalog.pem.tmp "$ART/.iris-catalog.pem.tmp"
+  run run_prov
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"staged iris-catalog.pem"* ]]
+  cmp "$TMP/prior-catalog.pem" "$ART/iris-catalog.pem"
+  [ ! -L "$ART/.iris-catalog.pem.tmp" ]
+}
+
 @test "notes when the IOx iris-arm64.tar is absent (the one external build)" {
   run run_prov
   [[ "$output" == *"iris-arm64.tar"* ]]

@@ -237,10 +237,15 @@ if [ -f "$CRT" ]; then
   # can deliver artifacts/iris-catalog.pem even when the container's private
   # umask is 077. The corresponding key remains only
   # in encrypted config/tmpfs and is never copied here.
-  cp "$CRT" "$ART/.iris-catalog.pem.tmp" \
+  if cp "$CRT" "$ART/.iris-catalog.pem.tmp" \
     && chmod 0644 "$ART/.iris-catalog.pem.tmp" \
-    && stage_atomic "$ART/.iris-catalog.pem.tmp" iris-catalog.pem
-  echo "provision-served: staged iris-catalog.pem (server cert)"
+    && stage_atomic "$ART/.iris-catalog.pem.tmp" iris-catalog.pem; then
+    echo "provision-served: staged iris-catalog.pem (server cert)"
+  else
+    FAILED=1
+    rm -f "$ART/.iris-catalog.pem.tmp"
+    echo "provision-served: cannot stage iris-catalog.pem (server cert)" >&2
+  fi
 else
   echo "provision-served: server cert $CRT not found — run iris-bootstrap first" >&2
 fi
