@@ -176,6 +176,12 @@ _IOX_RETRY_REINSTATED = frozenset((
     "the IRIS HTTP client trustpoint binding",
 ))
 
+# What the transcript writer (tempfile.mkstemp) and the fence/record writers
+# (_durable_json) stage beside the file they are about to rename into place.
+_AUTHORITY_TEMPORARY = re.compile(r"^\.(?:transcript-[A-Za-z0-9_]+\.tmp|iox-[0-9a-f]+\.tmp)$")
+_AUTHORITY_ENTRY_ATTEMPTS = 6
+
+
 class _ControllerFailure(Exception):
     def __init__(self, category, detail="", code=None):
         Exception.__init__(self, detail or category)
@@ -2199,6 +2205,47 @@ class IoxController(object):
                 os.close(directory_fd)
         return sessions, transcripts
 
+    @staticmethod
+    def _stable_authority_entry(directory_fd, name, flags, maximum):
+        """Require a private regular file that held still for three looks.
+
+        Returns False for an entry that vanished (a reaped fence, a renamed
+        temporary). An entry whose identity or size moved between the looks
+        is a sibling attempt replacing it atomically; look again a bounded
+        number of times before calling it unsafe. Type, owner and mode are
+        refused at once.
+        """
+        fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_nlink",
+                  "st_size", "st_mtime_ns", "st_ctime_ns")
+        for attempt in range(_AUTHORITY_ENTRY_ATTEMPTS):
+            try:
+                before = os.stat(name, dir_fd=directory_fd,
+                                 follow_symlinks=False)
+                descriptor = os.open(name, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                return False
+            try:
+                metadata = os.fstat(descriptor)
+                try:
+                    after = os.stat(name, dir_fd=directory_fd,
+                                    follow_symlinks=False)
+                except FileNotFoundError:
+                    return False
+            finally:
+                os.close(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or
+                    stat.S_IMODE(metadata.st_mode) != 0o600 or
+                    metadata.st_uid != os.geteuid() or
+                    metadata.st_size > maximum):
+                raise ValueError("unsafe IOx authority entry")
+            if (metadata.st_nlink == 1 and
+                    all(getattr(before, field) == getattr(metadata, field) and
+                        getattr(after, field) == getattr(metadata, field)
+                        for field in fields)):
+                return True
+            time.sleep(0.02)
+        raise ValueError("unsafe IOx authority entry")
+
     def _scan_directory(self, directory, suffix, limit, maximum):
         patterns = {
             ".lock": re.compile(r"^[0-9a-f]{64}\.lock$"),
@@ -2221,32 +2268,19 @@ class IoxController(object):
                     name = entry.name
                     if len(result) >= limit:
                         raise ValueError("IOx authority capacity exceeded")
+                    if (isinstance(name, str) and
+                            _AUTHORITY_TEMPORARY.fullmatch(name)):
+                        # A sibling attempt mid-write: the transcript
+                        # writer and the fence writer both stage a private
+                        # temporary next to the file and rename it into
+                        # place. Not an entry, not foreign.
+                        continue
                     if (not isinstance(name, str) or
                             pattern.fullmatch(name) is None):
                         raise ValueError("unknown IOx authority entry")
-                    before = os.stat(name, dir_fd=directory_fd,
-                                     follow_symlinks=False)
-                    descriptor = os.open(name, flags, dir_fd=directory_fd)
-                    try:
-                        metadata = os.fstat(descriptor)
-                        after = os.stat(name, dir_fd=directory_fd,
-                                        follow_symlinks=False)
-                        fields = ("st_dev", "st_ino", "st_uid", "st_mode",
-                                  "st_nlink", "st_size", "st_mtime_ns",
-                                  "st_ctime_ns")
-                        if (not stat.S_ISREG(metadata.st_mode) or
-                                stat.S_IMODE(metadata.st_mode) != 0o600 or
-                                metadata.st_uid != os.geteuid() or
-                                metadata.st_nlink != 1 or
-                                metadata.st_size > maximum or
-                                any(getattr(before, field) !=
-                                    getattr(metadata, field) or
-                                    getattr(after, field) !=
-                                    getattr(metadata, field)
-                                    for field in fields)):
-                            raise ValueError("unsafe IOx authority entry")
-                    finally:
-                        os.close(descriptor)
+                    if not self._stable_authority_entry(
+                            directory_fd, name, flags, maximum):
+                        continue
                     result.append(os.path.join(directory, name))
             directory_after = os.fstat(directory_fd)
             named_after = os.lstat(directory)

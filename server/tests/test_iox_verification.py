@@ -3296,6 +3296,91 @@ def test_authority_scan_refuses_capacity_without_materializing_directory(
     assert len(consumed) == 2
 
 
+def _scan_fixture(tmp_path):
+    controller = _controller(
+        tmp_path, _StatefulStore(tmp_path), _TransportFactory())
+    directory = tmp_path / "iox" / "transcripts"
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    good = directory / ("a" * 32 + ".transcript")
+    good.write_bytes(b"x")
+    os.chmod(good, 0o600)
+    return controller, directory, good
+
+
+def test_authority_scan_skips_a_sibling_writers_temporary_but_refuses_foreign_names(tmp_path):
+    """The transcript writer stages '.transcript-*.tmp' and the fence writer
+    '.iox-*.tmp' beside the file they rename into place; a scan that lands
+    in that window used to fail the whole admission with 'unknown IOx
+    authority entry' (four devices started in one second, 2026-09-10)."""
+    controller, directory, good = _scan_fixture(tmp_path)
+    for name in (".transcript-Ab12_x.tmp", ".iox-0a1b2c.tmp"):
+        (directory / name).write_bytes(b"partial")
+        os.chmod(directory / name, 0o600)
+    try:
+        found = controller._scan_directory(
+            str(directory), ".transcript", 16, 1024 * 1024)
+        assert found == [str(good)]
+        (directory / "notes.txt").write_bytes(b"")
+        with pytest.raises(ValueError, match="unknown IOx authority entry"):
+            controller._scan_directory(
+                str(directory), ".transcript", 16, 1024 * 1024)
+    finally:
+        controller.close()
+
+
+def test_authority_scan_relooks_at_a_churning_entry_and_skips_a_vanished_one(tmp_path, monkeypatch):
+    controller, directory, good = _scan_fixture(tmp_path)
+    reaped = directory / ("b" * 32 + ".transcript")
+    reaped.write_bytes(b"y")
+    os.chmod(reaped, 0o600)
+    real_stat = os.stat
+    churned = []
+
+    def racing_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == good.name and kwargs.get("dir_fd") is not None and not churned:
+            # First by-name look at the good entry reports a different inode,
+            # as it does when a sibling has just renamed a new file over it.
+            churned.append(True)
+            values = list(result)
+            values[1] = result.st_ino + 1
+            return os.stat_result(values)
+        if path == reaped.name and kwargs.get("dir_fd") is not None:
+            raise FileNotFoundError(path)
+        return result
+    monkeypatch.setattr(os, "stat", racing_stat)
+    try:
+        found = controller._scan_directory(
+            str(directory), ".transcript", 16, 1024 * 1024)
+    finally:
+        controller.close()
+    assert found == [str(good)]
+    assert churned
+
+
+def test_authority_scan_still_refuses_an_entry_that_never_settles(tmp_path, monkeypatch):
+    controller, directory, good = _scan_fixture(tmp_path)
+    real_stat = os.stat
+    counter = [0]
+
+    def always_churning(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == good.name and kwargs.get("dir_fd") is not None:
+            counter[0] += 1
+            values = list(result)
+            values[1] = result.st_ino + counter[0]
+            return os.stat_result(values)
+        return result
+    monkeypatch.setattr(os, "stat", always_churning)
+    try:
+        with pytest.raises(ValueError, match="unsafe IOx authority entry"):
+            controller._scan_directory(
+                str(directory), ".transcript", 16, 1024 * 1024)
+    finally:
+        controller.close()
+
+
 def test_minted_catalog_token_is_stream_redacted_before_recipe_output(
         tmp_path):
     token = b"fixture-catalog-token-SECRET"
