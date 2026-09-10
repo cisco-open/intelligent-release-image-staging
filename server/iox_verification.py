@@ -182,15 +182,15 @@ _IRIS_NAMED_COLLISIONS = (
      "logging discriminator IRISQ"),
     (r"(?m)^logging (?:buffered|console|monitor) discriminator IRISQ\s*$",
      "an IRISQ logging binding"),
-    (r"(?m)^crypto pki trustpoint IRIS\s*$",
-     "crypto pki trustpoint IRIS"),
-    (r"(?m)^ip http client secure-trustpoint IRIS\s*$",
-     "the IRIS HTTP client trustpoint binding"),
 )
-_IOX_RETRY_REINSTATED = frozenset((
-    "crypto pki trustpoint IRIS",
-    "the IRIS HTTP client trustpoint binding",
-))
+# The catalog trustpoint and its HTTP client binding are this recipe's OWN
+# artifacts now (the HTTPS fetch installs them, removing and re-adding the
+# trustpoint first, exactly like device-install.sh), so a leftover from an
+# earlier attempt -- a timed-out paste left `crypto pki trustpoint IRIS`
+# half-configured on two lab devices on 2026-09-10 -- is walked over, not
+# refused. Nothing is reinstated on retry any more; the set stays for the
+# preflight loop that consults it.
+_IOX_RETRY_REINSTATED = frozenset()
 
 # What the transcript writer (tempfile.mkstemp) and the fence/record writers
 # (_durable_json) stage beside the file they are about to rename into place.

@@ -3291,3 +3291,17 @@ def test_pki_sub_mode_prompt_counts_as_a_configuration_prompt():
     assert suffix(b"3400-1(ca-trustpoint)#", 0)[2] == "config"
     # Only that sub-mode: an arbitrary parenthesised word is still no prompt.
     assert suffix(b"3400-1(ca-profile)#", 0) is None
+
+
+def test_hardware_preflight_walks_over_the_recipes_own_trustpoint():
+    """A timed-out trustpoint paste left `crypto pki trustpoint IRIS` (and
+    its HTTP client binding) on iris-c8kv-104 and 3400-1 on 2026-09-10, and
+    the next install refused them as collisions. They are the HTTPS fetch's
+    own artifacts, removed and re-added by its first lines, so a clean
+    device that merely carries them passes preflight."""
+    module, fake, attempt = _preflight(hw.c8000v_preflight(
+        hw.APP_LIST_EMPTY,
+        b"crypto pki trustpoint IRIS\n enrollment terminal\n revocation-check none\n",
+        b"ip http client secure-trustpoint IRIS\n"))
+    module.IoxController._ordinary_install_preflight(fake, attempt)
+    assert attempt.identity == {"status": "passed"}
