@@ -35,6 +35,15 @@ setup() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$REPO/tools/provision-iox-packages.sh"
   chmod +x "$REPO/tools/provision-iox-packages.sh"
   : > "$REPO/artifacts/iris-xr.rpm"
+  # the hand-ins the IOx tooling needs, and a stub XR builder that writes the
+  # two files the placement step copies (issue #204 follow-up)
+  mkdir -p "$REPO/tools/bin" "$REPO/deliverables" "$REPO/instr-roots"
+  : > "$REPO/tools/bin/ioxclient"; chmod +x "$REPO/tools/bin/ioxclient"
+  : > "$REPO/deliverables/aria2c-x86_64"; : > "$REPO/deliverables/aria2c-aarch64"
+  printf 'ssh-ed25519 AAAA root-a\n' > "$REPO/instr-roots/root-a.pub"
+  printf 'ssh-ed25519 AAAA root-b\n' > "$REPO/instr-roots/root-b.pub"
+  printf '#!/usr/bin/env bash\nout=""; while [ $# -gt 0 ]; do [ "$1" = --out ] && out="$2"; shift; done\n: > "$out/iris-xr.rpm"; : > "$out/iris-xr.rpm.manifest"\n' > "$REPO/tools/build-xr-package.sh"
+  chmod +x "$REPO/tools/build-xr-package.sh"
 
   cat > "$STUB/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -45,6 +54,7 @@ case "$1" in
     exit 0 ;;
   inspect) printf 'healthy\n' ;;
   exec) printf 'notBefore=Jan  1 00:00:00 2020 GMT\n' ;;
+  cp) exit 0 ;;
   *) exit 1 ;;
 esac
 STUB
@@ -72,7 +82,9 @@ run_bringup() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   grep -q '^inspect|-f|{{.State.Health.Status}}|iris-dev|$' "$DOCKER_LOG" || {
     echo "$(cat "$DOCKER_LOG")"; return 1; }
-  ! grep -q '^exec|' "$DOCKER_LOG"
+  # the only exec is the XR placement, and it must address the override too
+  ! grep '^exec|' "$DOCKER_LOG" | grep -vq '^exec|iris-dev|'
+  grep -q '^exec|iris-dev|mv|' "$DOCKER_LOG"
 }
 
 @test "an unresolvable container fails loudly instead of poking another project's" {
@@ -118,4 +130,54 @@ run_bringup() {
   [[ "$output" == *"10001"* ]]
   [[ "$output" == *"chown"* ]]
   [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
+}
+
+
+@test "every missing hand-in is reported in one list before anything is built" {
+  # The failure mode this replaces: an install that passed one preflight, built
+  # for ten minutes, then died on the NEXT absent input. All of them, at once.
+  rm -f "$REPO/bin/aria2c" "$REPO/tools/bin/ioxclient" "$REPO/deliverables/aria2c-aarch64" "$REPO/instr-roots/root-b.pub"
+  run_bringup
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing 4 input(s)"* ]]
+  [[ "$output" == *"bin/aria2c"* ]]
+  [[ "$output" == *"ioxclient"* ]]
+  [[ "$output" == *"aria2c for arm64"* ]]
+  [[ "$output" == *"exactly two public roots"* ]]
+  [[ "$output" == *"custody ceremony"* ]]
+  [ ! -s "$DOCKER_LOG" ] || { echo "docker ran anyway:"; cat "$DOCKER_LOG"; return 1; }
+}
+
+@test "the installer never generates trust roots" {
+  grep -q "ssh-keygen" "$REPO/tools/start-compose-server.sh" && {
+    echo "the installer must not mint instruction roots"; return 1; }
+  return 0
+}
+
+@test "public roots are installed into the config volume between bootstrap and up" {
+  run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  bootstrap_line="$(grep -n 'iris-bootstrap' "$DOCKER_LOG" | head -1 | cut -d: -f1)"
+  roots_line="$(grep -n "instr-roots:/pub:ro" "$DOCKER_LOG" | head -1 | cut -d: -f1)"
+  up_line="$(grep -n '|up|-d|' "$DOCKER_LOG" | head -1 | cut -d: -f1)"
+  [ -n "$bootstrap_line" ] && [ -n "$roots_line" ] && [ -n "$up_line" ] || { cat "$DOCKER_LOG"; return 1; }
+  [ "$bootstrap_line" -lt "$roots_line" ] && [ "$roots_line" -lt "$up_line" ] || {
+    echo "roots must be installed after bootstrap and before up:"; cat "$DOCKER_LOG"; return 1; }
+  # read-only, public halves only: never a private key path, never rw
+  ! grep -q "instr-roots:/pub|" "$DOCKER_LOG"
+}
+
+@test "the XR RPM is built into a private dir and placed through the container" {
+  run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q '^cp|.*iris-xr.rpm|c0ffeecafe01:/srv/artifacts/.iris-xr.rpm.tmp|$' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; return 1; }
+  grep -q '^exec|c0ffeecafe01|mv|-f|/srv/artifacts/.iris-xr.rpm.tmp|/srv/artifacts/iris-xr.rpm|$' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; return 1; }
+  [[ "$output" == *"XR package is staged"* ]]
+}
+
+@test "IRIS_SKIP_XR skips the XR build without failing the install" {
+  IRIS_SKIP_XR=1 run_bringup
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  ! grep -q 'iris-xr.rpm.tmp' "$DOCKER_LOG"
+  [[ "$output" == *"not building the XR RPM"* ]]
 }

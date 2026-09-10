@@ -11,6 +11,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+### Added
+- Make `tools/start-compose-server.sh` the complete first start. It lists every
+  handed-in input a fresh clone is missing — `bin/aria2c`, `ioxclient`, the
+  per-architecture `aria2c` deliverables, and the two instruction-root public
+  keys — in one report before building anything, installs the public roots
+  from `IRIS_INSTRUCTION_ROOTS_DIR` into the config volume so the server
+  self-provisions a trust-bound Guest Shell bundle on first start, and builds
+  the XR RPM alongside both IOx packages (`IRIS_SKIP_XR=1` to omit). It never
+  creates roots; those come from the custody ceremony (issue #204).
+
 ### Fixed
 - Grant the runtime uid the `artifacts/` directory during the Compose bring-up,
   or refuse with the exact `chown`. An artifacts directory the server cannot

@@ -88,15 +88,28 @@ manually created volumes, check [Volume permissions](server.md#volume-permission
 
 ## Start the server
 
-`start-compose-server.sh` builds the server and Console images, so hand in the
-pinned `aria2c` binary first — the Dockerfile's `COPY bin/aria2c` step fails without it.
-Then build the images, initialize a fresh encrypted config volume, start the
-stack, and prepare both IOx packages from the repository root:
+`start-compose-server.sh` is the whole first start. Before it builds anything
+it checks every input a fresh clone lacks and reports all of them in one list:
+the handed-in `aria2c` (`bin/aria2c`), `ioxclient`, the per-architecture
+`aria2c` deliverables the IOx builder needs, and the two instruction-root
+public keys. It then grants uid 10001 the `artifacts/` directory (or tells you
+the exact `chown`), builds the images, initializes a fresh encrypted config
+volume, installs the two public roots, starts the stack, waits for health, and
+builds the Guest Shell bundle (self-provisioned by the server), both IOx
+packages and the XR RPM — everything the Console's **Device packages** screen
+lists. From the repository root:
 
 ```bash
 tools/get-aria2c.sh amd64
-tools/start-compose-server.sh
+IRIS_INSTRUCTION_ROOTS_DIR=/path/to/reviewed/roots tools/start-compose-server.sh
 ```
+
+`IRIS_INSTRUCTION_ROOTS_DIR` defaults to `instr-roots/` in the repository and
+must hold exactly two `.pub` files and nothing else. The helper reads those
+public halves and **never creates roots**: they come from the
+[custody ceremony](operations.md#instruction-root-ceremony-and-recovery), and
+the private halves stay with their custodians. Set `IRIS_SKIP_XR=1` on a
+deployment with no XR devices.
 
 `iris-bootstrap` never overwrites existing encrypted state on a plain run: a
 volume that already holds all three `.age` files (and whose files decrypt with
@@ -119,17 +132,20 @@ rotatable credential over pinned HTTPS. The age-encrypted server store lives
 on `iris-config` and is decrypted into `/run/iris` tmpfs; the Console does not
 mount that volume. The separate tier credential persists in `iris-tier-auth`.
 
-`start-compose-server.sh` runs `tools/provision-iox-packages.sh` after the
-container becomes healthy. It produces `iris-arm64.tar` for IE-3400 and
-`iris-amd64.tar` for Catalyst 9300 IOx, both as deployment-neutral wrappers of
-the same canonical device image. Onboarding supplies the current public server
-certificate separately as IOx application data.
+After the container becomes healthy the helper runs
+`tools/provision-iox-packages.sh`, which produces `iris-arm64.tar` for IE-3400
+and `iris-amd64.tar` for Catalyst 9300 IOx as deployment-neutral wrappers of
+the same canonical device image, and then `tools/build-xr-package.sh` for the
+XR RPM, placed through the running container so `artifacts/` stays owned by
+the runtime uid. Onboarding supplies the current public server certificate
+separately as IOx application data.
 
-The helper builds arm64 first. If emulation or a build input is missing, it
-exits nonzero after the stack has started; a reachable Console does not mean
-packages are ready. Fix the reported prerequisite and rerun
-`tools/provision-iox-packages.sh`. A Guest Shell-only deployment can bring up
-the two services without native package builds:
+Because the hand-ins are checked up front, a build failure after the stack is
+up is now limited to emulation or the build itself; a reachable Console still
+does not mean packages are ready, so read the helper's exit status. Fix the
+reported problem and rerun `tools/provision-iox-packages.sh` or
+`tools/build-xr-package.sh --out artifacts/`. A Guest Shell-only deployment can
+bring up the two services without native package builds:
 
 ```bash
 docker compose -f server/docker-compose.yml build --pull

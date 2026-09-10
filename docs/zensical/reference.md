@@ -15,7 +15,7 @@ the catalog schema. Every page is listed in the [Overview](index.md).
 | --- | --- |
 | `docker compose -f server/docker-compose.yml run --rm iris iris-bootstrap` | Initialize a fresh encrypted server config volume. |
 | `docker compose -f server/docker-compose.yml up -d --build` | Build and start the IRIS server and state-free Console. |
-| `tools/start-compose-server.sh` | Bootstrap/start Compose and automatically stage both IOx packages. |
+| `tools/start-compose-server.sh` | The complete first start: list every missing hand-in up front, grant uid 10001 `artifacts/`, build, bootstrap, install the two public instruction roots from `IRIS_INSTRUCTION_ROOTS_DIR`, start, and stage the Guest Shell bundle, both IOx packages and the XR RPM (`IRIS_SKIP_XR=1` to omit). It never creates roots. |
 | `docker compose -f server/docker-compose.yml exec iris iris-publish /opt/images/<image>.bin` | Publish an image into the catalog and seeder. In place: the image is seeded from its own directory and nothing is copied. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign` | Show images and assignments. |
 | `docker compose -f server/docker-compose.yml exec iris iris-assign <device> <image> [<image> ...]` | Merge one or more images into the device's ordered assignment. Use `iris-assign --replace <device> <image> [<image> ...]` to replace and intentionally narrow it. |
