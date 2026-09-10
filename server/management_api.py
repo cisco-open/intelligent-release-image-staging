@@ -1950,6 +1950,17 @@ class _OnboardSubmissionAdapter(object):
                     503, "router undeploy requires an active deployment "
                     "record")
 
+        # The IOx controller validates its request target against a closed
+        # field set that REQUIRES the ownership claim -- and that target is
+        # built from this resolved plan BEFORE the controller ever calls
+        # prepare/pre_apply. Attaching the claim in pre_apply was too late:
+        # it ran inside the controller, after validation had already refused
+        # the request as an incomplete target plan. Every onboard and
+        # undeploy path converges here, including a forced teardown with no
+        # record to read the claim back from.
+        if resolved is not None and resolved.get("platform") == "iox":
+            resolved = _resolved_with_resources(
+                resolved, self._owned_resources(resolved))
         try:
             job_id = self.onboard.start(
                 device_id, action=action, resolved=resolved, prepare=prepare,
@@ -2784,8 +2795,13 @@ class _ScheduledExecutor(object):
             expected_registration_id)
         authority_guard, authority_check, prepare, pre_apply, record_ref = callbacks
         try:
+            scheduled_resolved = plan["resolved"]
+            if scheduled_resolved.get("platform") == "iox":
+                scheduled_resolved = _resolved_with_resources(
+                    scheduled_resolved,
+                    self.submission._owned_resources(scheduled_resolved))
             job_id = self.onboard.start(
-                device_id, action="onboard", resolved=plan["resolved"],
+                device_id, action="onboard", resolved=scheduled_resolved,
                 prepare=prepare, pre_apply=pre_apply,
                 env_extra={
                     "TELEMETRY": ("on" if schedule["payload"]["telemetry"]
