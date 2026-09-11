@@ -322,8 +322,17 @@ def _public_key_bytes(source, *, message="configured root public key"):
     if len(fields) < 2 or fields[0] != "ssh-ed25519" \
             or "-cert-" in fields[0]:
         raise InstructionKeyError("configured root must be a supported bare public key")
+    # CPython's strict base64 decoder changed its mind about surplus padding:
+    # older releases accepted a complete group followed by "=", newer ones
+    # reject it.  Normalising the padding here keeps one spelling of a key
+    # decoding the same way on every interpreter this server runs on.
+    field = fields[1]
+    core = field.rstrip("=")
+    if "=" in core or len(core) % 4 == 1 or len(field) - len(core) > 2:
+        raise InstructionKeyError(message + " is invalid")
     try:
-        decoded = base64.b64decode(fields[1].encode("ascii"), validate=True)
+        decoded = base64.b64decode(
+            (core + "=" * (-len(core) % 4)).encode("ascii"), validate=True)
     except (ValueError, binascii.Error) as exc:
         raise InstructionKeyError(message + " is invalid") from exc
     # The wire blob starts with a length-prefixed algorithm name.  Checking it
@@ -336,9 +345,9 @@ def _public_key_bytes(source, *, message="configured root public key"):
             (32).to_bytes(4, "big") \
             or len(decoded) != 8 + len(algorithm) + 32:
         raise InstructionKeyError(message + " is invalid")
-    # Base64 decoders can accept surplus padding.  Re-encode the validated
-    # wire identity so distinctness, allowed-signers files and attestations all
-    # use one representation for the same Ed25519 key.
+    # More than one base64 spelling reaches this point.  Re-encode the
+    # validated wire identity so distinctness, allowed-signers files and
+    # attestations all use one representation for the same Ed25519 key.
     canonical_blob = base64.b64encode(decoded).decode("ascii")
     return (fields[0] + " " + canonical_blob + "\n").encode("ascii")
 

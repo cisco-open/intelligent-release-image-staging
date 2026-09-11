@@ -25,6 +25,11 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
   staged-file ownership, Splunk accounting, and API diagnostics.
 
 ### Fixed
+- A configured instruction root public key spelled with surplus base64 padding
+  resolves to the same root identity on every Python 3.12 patch release. Newer
+  interpreters tightened their strict base64 decoder, which turned such a file
+  into `configured root public key is invalid` on one host and a recognised
+  root on another.
 - The Console streams static files and the bundled API reference in fixed-size
   chunks, so a stalled client holds one chunk per connection rather than a
   whole file.
