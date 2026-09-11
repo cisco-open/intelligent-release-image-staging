@@ -3178,7 +3178,6 @@ def build_document():
             "version": "1",
             "description": "Canonical contract for the browser console BFF, internal management tier, device catalog, tracker, telemetry and artifact services. Guest Shell static files and staging path capabilities have dedicated access rules; other anonymous routes are limited to /healthz and /readyz.",
         },
-        "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "tags": [{"name": name} for name in
                  ("console", "management", "catalog", "tracker", "telemetry", "artifact")],
         "x-iris-version-policy": {

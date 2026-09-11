@@ -38,6 +38,8 @@ asset uses a CDN or requires Internet access.
 with a canonical explorer. It displays every operation and component directly
 from the loaded contract as deferred, exact JSON, and calls out streaming
 `itemSchema` and serialized examples. It does not transform the OpenAPI document.
-Swagger UI's dialect warning remains visible because its renderer does not claim
-full support for IRIS's explicitly declared generic JSON Schema draft 2020-12
-dialect.
+The contract omits `jsonSchemaDialect`, so the OpenAPI 3.2 default dialect
+applies and Swagger UI renders it without a dialect warning. Declaring a value
+-- even OpenAPI 3.2's own dialect base -- makes this Swagger UI compare it
+against the 3.1 base and warn; the schemas use no OAS-dialect keyword, so the
+declaration bought nothing.
