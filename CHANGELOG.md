@@ -17,11 +17,17 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 - Browsable, self-hosted Swagger API reference for all registered operations,
   with exact canonical schemas and streaming examples, pinned upstream assets,
   and a reproducible update helper included in release archives.
+- The Console serves that API reference locally at `/swagger/`, with its
+  canonical `/openapi.yaml`, offline assets bundled in the Console image, a
+  Help-menu link, and matching documentation and troubleshooting instructions.
 - Central troubleshooting guide, linked from the README, public website,
   documentation index, and navigation, covering schedule identity conflicts,
   staged-file ownership, Splunk accounting, and API diagnostics.
 
 ### Fixed
+- The Console streams static files and the bundled API reference in fixed-size
+  chunks, so a stalled client holds one chunk per connection rather than a
+  whole file.
 - XR parking preserves a shared root file when any historical image record
   marks it adopted or leaves its ownership unknown, including parked records.
 - Scheduled occurrences bind device registration identities at claim time, so

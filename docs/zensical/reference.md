@@ -274,16 +274,27 @@ startup log states which posture is in effect at boot.
 
 ## Console API
 
-The read-only [browsable API reference](swagger/index.html) renders the checked-in
-[OpenAPI 3.2 contract](openapi.yaml), which describes the Console,
-management, catalog, tracker, telemetry, and artifact operations. It is generated
-from `server/openapi_contract.py`, validated against OpenAPI 3.2, and checked
-against the runtime route registry. Job streams describe each parsed SSE event;
-image, artifact and torrent bodies are raw bytes. The API paths remain versioned
-as `/api/v1`, `/internal/v1`, and `/v1`.
-This section explains the operator-facing behavior.
-The running Console and management server do not serve `/swagger`, `/api-docs`,
-or `/openapi.*`; those paths are documentation-site artifacts.
+The Console serves a read-only API reference at
+`https://<console-host>:<console-port>/swagger/`, equivalently
+`<IRIS_CONSOLE_URL>/swagger/`, and the canonical contract at `/openapi.yaml`.
+**Help → Local API reference (Swagger)** opens the local UI. `GET` and `HEAD`
+serve these files publicly. Other methods retain the Console's existing
+authenticated API and unknown-route handling; Swagger adds no write route. The
+files use the Console's existing HTTPS listener and browser certificate and add
+no port, credential, session, or CSRF behavior. Every stylesheet and script is
+bundled in the Console image, so the page needs no Internet access.
+
+The same read-only UI is available on the documentation site as the
+[published API reference](swagger/index.html), backed by the checked-in
+[OpenAPI 3.2 contract](openapi.yaml). The UI has no **Try it out** or
+authorization controls and never executes a documented API operation. The
+contract describes the Console, management, catalog, tracker, telemetry, and
+artifact operations.
+It is generated from `server/openapi_contract.py`, validated against OpenAPI
+3.2, and checked against the runtime route registry. Job streams describe each
+parsed SSE event; image, artifact and torrent bodies are raw bytes. The API
+paths remain versioned as `/api/v1`, `/internal/v1`, and `/v1`. This section
+explains the operator-facing behavior.
 
 The browser calls `/api/v1` on the Console container's HTTPS listener, normally
 port 8080. The Console proxies registered operations to `/internal/v1` on the

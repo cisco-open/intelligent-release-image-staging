@@ -33,6 +33,8 @@ import tier_auth
 
 
 WEBROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webroot")
+DOCSROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs",
+                        "zensical")
 _SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -40,12 +42,32 @@ _SECURITY_HEADERS = (
     ("Content-Security-Policy",
      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
 )
+_SWAGGER_SECURITY_HEADERS = tuple(
+    (name,
+     "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; "
+     "base-uri 'none'; object-src 'none'"
+     if name == "Content-Security-Policy" else value)
+    for name, value in _SECURITY_HEADERS)
+# Static files stream in fixed-size chunks so a slow or stalled client pins one
+# chunk per connection, not a whole file (the bundled contract is about 3 MB).
+_STATIC_CHUNK_BYTES = 64 * 1024
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript",
     ".css": "text/css",
     ".svg": "image/svg+xml",
     ".woff2": "font/woff2",
+    ".yaml": "application/yaml",
+}
+_SWAGGER_STATIC_FILES = {
+    "/swagger/": "swagger/index.html",
+    "/swagger/index.html": "swagger/index.html",
+    "/swagger/swagger-ui.css": "swagger/swagger-ui.css",
+    "/swagger/iris-swagger.css": "swagger/iris-swagger.css",
+    "/swagger/swagger-ui-bundle.js": "swagger/swagger-ui-bundle.js",
+    "/swagger/iris-openapi32.js": "swagger/iris-openapi32.js",
+    "/swagger/swagger-initializer.js": "swagger/swagger-initializer.js",
+    "/openapi.yaml": "openapi.yaml",
 }
 _HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -326,13 +348,14 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
     class Handler(BaseHTTPRequestHandler):
         timeout = 60
 
-        def _send(self, status, content_type, body, headers=()):
+        def _send(self, status, content_type, body, headers=(),
+                  security_headers=_SECURITY_HEADERS):
             if isinstance(body, str):
                 body = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            for name, value in _SECURITY_HEADERS:
+            for name, value in security_headers:
                 self.send_header(name, value)
             for name, value in headers:
                 self.send_header(name, value)
@@ -348,15 +371,21 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             self._send(200 if ready else 503, "application/json", doc,
                        headers)
 
-        def _serve_static(self, raw_path):
-            path = urlsplit(raw_path).path
-            rel = "index.html" if path in ("", "/") else path.lstrip("/")
-            full = os.path.normpath(os.path.join(WEBROOT, rel))
-            if not full.startswith(WEBROOT + os.sep) or not os.path.isfile(full):
+        def _serve_file(self, root, rel, security_headers=_SECURITY_HEADERS):
+            root = os.path.abspath(root)
+            full = os.path.normpath(os.path.join(root, rel))
+            if not full.startswith(root + os.sep) or not os.path.isfile(full):
                 api_problem.send(self, 404, "route-not-found", "Route not found")
                 return
             try:
-                stat_result = os.stat(full)
+                stream = open(full, "rb")
+            except OSError:
+                api_problem.send(self, 404, "route-not-found", "Route not found")
+                return
+            with stream:
+                # Size and mtime come from the opened inode so Content-Length
+                # matches the bytes this handle can actually read.
+                stat_result = os.fstat(stream.fileno())
                 stamp = email.utils.formatdate(int(stat_result.st_mtime), usegmt=True)
                 modified = self.headers.get("If-Modified-Since")
                 if modified:
@@ -366,21 +395,53 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         since = -1
                     if int(since) >= int(stat_result.st_mtime):
                         self.send_response(304)
-                        for name, value in _SECURITY_HEADERS:
+                        for name, value in security_headers:
                             self.send_header(name, value)
                         self.send_header("Cache-Control", "no-cache")
                         self.send_header("Last-Modified", stamp)
                         self.end_headers()
                         return
-                with open(full, "rb") as stream:
-                    body = stream.read()
-            except OSError:
+                self.send_response(200)
+                self.send_header("Content-Type", _CONTENT_TYPES.get(
+                    os.path.splitext(full)[1], "application/octet-stream"))
+                self.send_header("Content-Length", str(stat_result.st_size))
+                for name, value in security_headers:
+                    self.send_header(name, value)
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Last-Modified", stamp)
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                remaining = stat_result.st_size
+                while remaining > 0:
+                    chunk = stream.read(min(_STATIC_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        # The file shrank under us: the client sees a short
+                        # body on a closed connection, never a stalled one.
+                        self.close_connection = True
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
+        def _serve_static(self, raw_path):
+            path = urlsplit(raw_path).path
+            rel = "index.html" if path in ("", "/") else path.lstrip("/")
+            self._serve_file(WEBROOT, rel)
+
+        def _serve_swagger(self, path):
+            if path == "/swagger":
+                self._send(308, "text/plain; charset=utf-8", b"",
+                           (("Location", "/swagger/"),
+                            ("Cache-Control", "no-cache")))
+                return
+            rel = _SWAGGER_STATIC_FILES.get(path)
+            if rel is None:
                 api_problem.send(self, 404, "route-not-found", "Route not found")
                 return
-            self._send(200, _CONTENT_TYPES.get(os.path.splitext(full)[1],
-                                               "application/octet-stream"),
-                       body, (("Cache-Control", "no-cache"),
-                              ("Last-Modified", stamp)))
+            security_headers = (_SWAGGER_SECURITY_HEADERS
+                                if rel == "swagger/index.html"
+                                else _SECURITY_HEADERS)
+            self._serve_file(DOCSROOT, rel, security_headers)
 
         def _request_framing(self):
             """Return one unambiguous request length and any wire error.
@@ -671,6 +732,8 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
                         ConsoleConfigurationError):
                     ready = False
                 self._probe(ready)
+            elif path == "/swagger" or path == "/openapi.yaml" or path.startswith("/swagger/"):
+                self._serve_swagger(path)
             elif path.startswith("/api/") or path == "/swarmmap":
                 self._proxy()
             else:
@@ -689,7 +752,11 @@ def make_server(host, port, api_url, token_file, ca_file, certfile=None,
             self._proxy()
 
         def do_HEAD(self):
-            self._proxy()
+            path = urlsplit(self.path).path
+            if path == "/swagger" or path == "/openapi.yaml" or path.startswith("/swagger/"):
+                self._serve_swagger(path)
+            else:
+                self._proxy()
 
         def do_OPTIONS(self):
             self._proxy()

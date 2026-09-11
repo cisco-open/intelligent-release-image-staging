@@ -24,7 +24,11 @@ deployment JSON, occurrences, or receipts by hand.
 | Peer share says **0%** | Captures exist but contain no measured peer bytes; origin-only and unknown-only captures are measured zero. If `capture_complete=false`, totals are a floor and the partial ratio has unknown bias. |
 | A cumulative ledger tile changes with the time picker | It shows the latest sample inside the selected window, not a delta. A window with no sample is unavailable; **Seeder RPC** uses a fixed 15-minute window. |
 | An API request returns Problem Details | Match `type` or `code` in the [Problem type registry](problems.md). Schedule receipt reasons are durable outcomes, not HTTP problem types. |
-| Swagger's model view warns about `jsonSchemaDialect` | IRIS explicitly declares generic JSON Schema draft 2020-12. Use the page's canonical explorer or [raw OpenAPI 3.2 contract](openapi.yaml) for exact schemas, including conditional constraints. |
+| Swagger's model view warns about `jsonSchemaDialect` | IRIS explicitly declares generic JSON Schema draft 2020-12. Use the page's canonical explorer, the Console's raw `/openapi.yaml`, or the published [raw OpenAPI 3.2 contract](openapi.yaml) for exact schemas, including conditional constraints. |
+| `/swagger/` or `/openapi.yaml` returns 404 | Use the browser-facing Console HTTPS port, normally 8080, not management port 9443 or a device-facing listener. Keep the leading slash and use exact `/swagger/` or `/openapi.yaml`, not a path below `/api/v1`. If the path is still absent, the Console container is running an older image; rebuild or pull the current release and recreate that container. |
+| Swagger loads without styles or scripts | Preserve the `/swagger/` prefix through any reverse proxy and check the browser network log for local `/swagger/...` asset 404s. The shipped page makes no CDN or other Internet request. |
+| Swagger shows no **Try it out** or authorization control | This is expected. The bundled reference is public, static, and read-only; use the Console or an authenticated API client to send requests. |
+| The browser reports a certificate error for Swagger | The reference uses the same HTTPS listener and certificate as the Console. Fix the Console certificate trust or hostname; Swagger has no separate TLS configuration. |
 
 ## Preserve evidence before retrying
 
@@ -44,7 +48,8 @@ and [Splunk troubleshooting](splunk.md#troubleshooting).
 
 ## Escalate with the canonical record
 
-Use the [browsable API reference](swagger/index.html) to find an operation and the raw
-contract link for canonical request, response, SSE, and binary definitions.
-Swagger is documentation only and does not accept credentials or send requests.
-The running Console and management server do not expose a Swagger route.
+Open **Help → Local API reference (Swagger)** in the Console, or use the
+[published API reference](swagger/index.html), to find an operation and its raw
+contract definition. The local canonical document is `/openapi.yaml`. Swagger
+does not accept credentials or execute documented operations; use the Console or an
+authenticated API client for execution.

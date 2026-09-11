@@ -128,9 +128,10 @@ browser before any bytes move.
 The header's **?** button opens a help popover with the running version, the
 stable per-deployment id (with a copy button — quote it when reporting a
 problem so reports from different installations stay distinguishable), a link
-to this documentation site, and two guides the console serves itself —
-*Device-side troubleshooting* and *Server-side setup & troubleshooting* — so
-both stay reachable from a network with no internet access.
+to this documentation site, and three pages the console serves itself —
+the *Local API reference (Swagger)* at `/swagger/`, *Device-side
+troubleshooting*, and *Server-side setup & troubleshooting* — so all of them
+stay reachable from a network with no internet access.
 
 ## Importing images already on disk
 

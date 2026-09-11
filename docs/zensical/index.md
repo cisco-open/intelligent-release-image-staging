@@ -61,7 +61,7 @@ flowchart LR
 | Send IRIS telemetry to Splunk | [Splunk Setup](splunk.md) |
 | Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
 | Troubleshoot a rollout or recover service | [Troubleshooting](troubleshooting.md) |
-| Integrate with the HTTP API | [Browsable API reference](swagger/index.html) and [OpenAPI 3.2 contract](openapi.yaml) |
+| Integrate with the HTTP API | Open Console **Help → Local API reference (Swagger)** at `https://<console-host>:<console-port>/swagger/`, or use the [published API reference](swagger/index.html) and [OpenAPI 3.2 contract](openapi.yaml) |
 
 ## Documentation map
 
@@ -116,7 +116,7 @@ Read these before connecting production devices.
 | Page | What it covers |
 | --- | --- |
 | [Reference](reference.md) | Environment variables, file layouts, API behavior, and the machine-readable contract. |
-| [Browsable API reference](swagger/index.html) | Read-only Swagger UI for the checked-in OpenAPI 3.2 contract. |
+| [Browsable API reference](swagger/index.html) | Read-only Swagger UI bundled with the Console and published documentation; all runtime assets are local. |
 | [Problem type registry](problems.md) | Stable RFC 9457 error identifiers used by API clients. |
 | [Validation](validation.md) | The test suites and lab validation checklist. |
 | [Development](development.md) | Working on IRIS itself. |

@@ -8631,6 +8631,13 @@ def test_help_guide_pages_exist_and_header_help_control_wired():
     assert 'id="help-btn"' in html
     assert 'href="/help-device.html"' in html
     assert 'href="/help-server.html"' in html
+    # The bundled API reference is a Console-served page too; the menu must
+    # use the canonical trailing-slash path (bare /swagger only redirects).
+    assert 'id="help-api-reference" href="/swagger/"' in html
+    with open(os.path.join(gui_server.WEBROOT, "help-server.html")) as f:
+        server_guide = f.read()
+    assert 'href="/swagger/"' in server_guide
+    assert 'href="/openapi.yaml"' in server_guide
 
 
 @pytest.mark.parametrize("options,expected", [

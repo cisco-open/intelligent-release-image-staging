@@ -141,6 +141,12 @@ The checks validate the document, its request and response schemas, and the
 runtime route inventory. The validator's schemas ship with the test dependency;
 validation does not download schemas or add a runtime dependency.
 
+The Console image bundles `docs/zensical/openapi.yaml` and the Swagger UI
+assets under `docs/zensical/swagger/` and serves them at `/openapi.yaml` and
+`/swagger/`. Like the bundled help pages, a regenerated contract or an updated
+Swagger UI needs a Console image rebuild and container recreate before a
+deployment serves it.
+
 Two versions are pinned so a local build matches the published one. Change either only deliberately:
 
 | Pin | Where | Value |
