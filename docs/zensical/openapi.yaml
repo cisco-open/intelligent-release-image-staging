@@ -81956,7 +81956,8 @@
           },
           "reason": {
             "type": "string",
-            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "description": "Machine-readable per-device outcome. `conflict` includes a current registration that differs from the occurrence binding; `identity_unavailable` means fresh work could not prove a durable target identity. See Operations scheduled outcomes."
           },
           "created_at": {
             "type": "integer",
@@ -82030,7 +82031,8 @@
                 },
                 "reason": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+                  "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+                  "description": "Machine-readable per-device outcome. `conflict` includes a current registration that differs from the occurrence binding; `identity_unavailable` means fresh work could not prove a durable target identity. See Operations scheduled outcomes."
                 },
                 "created_at": {
                   "type": "integer",

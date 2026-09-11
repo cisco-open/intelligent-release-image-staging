@@ -128,6 +128,14 @@ third-party tools or runtime assets. They are not linked into the IRIS runtime:
                docs/zensical/javascripts/mermaid.mjs; see that file for the
                version and its Subresource Integrity digest.
 
+  * Swagger UI — Apache License, Version 2.0.
+               Copyright 2020-2021 SmartBear Software Inc.
+               Self-hosted documentation assets are distributed unchanged
+               under docs/zensical/swagger/. That directory preserves the
+               upstream LICENSE, NOTICE, and swagger-ui-bundle.js.LICENSE.txt
+               dependency notices. SOURCE.md records the pinned release,
+               checksums, and reproducible update command.
+
 ------------------------------------------------------------------------------
 Vendored web console assets
 ------------------------------------------------------------------------------

@@ -61,7 +61,8 @@
     iris/tools/build-device-image.sh \
     iris/tools/provision-iox-packages.sh \
     iris/tools/build-xr-package.sh \
-    iris/tools/check-package-freshness.sh; do
+    iris/tools/check-package-freshness.sh \
+    iris/tools/vendor-swagger-ui.sh; do
     tar tzf "$FIX/release/iris.tgz" | grep -qx "$path" || return 1
   done
   for template in roles.csv.example schedules.csv.example; do
@@ -108,7 +109,7 @@ _make_release_fixture() {
            gen-device-installers.sh apply-assignments.sh get-ioxclient.sh \
            stage-iox-package.sh provision-iox-packages.sh build-xr-package.sh \
            build-device-image.sh check-package-freshness.sh \
-           agent-source-freshness.sh start-compose-server.sh; do
+           agent-source-freshness.sh start-compose-server.sh vendor-swagger-ui.sh; do
     echo "# $f" > "$FIX/tools/$f"
   done
   cp "$repo/tools/make-release.sh" "$FIX/tools/make-release.sh"

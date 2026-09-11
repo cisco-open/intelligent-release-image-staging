@@ -5,7 +5,7 @@
     SPDX-License-Identifier: Apache-2.0
   -->
   <label>IRIS — Tracker &amp; Transfer Health</label>
-  <description>Tracker and transfer health with measured device peer captures. The device filter selects receivers in transfer panels and the named peer in tracker panels. All searches use the selected window; active tiles additionally require observations within the last 15 minutes from now. Telemetry last seen covers the full index.</description>
+  <description>Tracker and transfer health with measured device peer captures. The device filter selects receivers in transfer panels and the named peer in tracker panels. All searches use the selected window; active tiles additionally require observations within the last 15 minutes from now. Telemetry last seen covers the full index. The peer chart groups cumulative captures by capture hour, not throughput. Missing captures are unavailable; incomplete captures give partial totals and a percentage with unknown bias.</description>
   <fieldset submitButton="false" autoRun="true">
     <input type="time" token="tr">
       <label>Time window</label>
@@ -190,7 +190,7 @@
         </search>
         <option name="drilldown">none</option>
         <option name="unit">%</option>
-        <option name="underLabel">Measured on receiving devices: peer-device bytes ÷ all captured bytes for the selected receivers and time window. Origin and unknown bytes are included. Repeated cumulative captures count once. Missing captures are unavailable; origin-only captures measure 0%. Captured bytes are exact for retained peers; incomplete captures make traffic totals a floor and the percentage partial, with unknown bias.</option>
+        <option name="underLabel">Captured peer bytes ÷ all captured bytes (origin and unknown included)</option>
         <option name="numberPrecision">0.0</option>
       </single>
     </panel>

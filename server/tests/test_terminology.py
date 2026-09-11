@@ -306,6 +306,35 @@ ALLOWLIST.append((
     ("`GET /api/v1/schedules/{id}/receipts`",),
     "Task 22 schedule-history route path in the operator API reference"))
 
+ALLOWLIST.extend([
+    ("docs/zensical/fleet-workflows.md",
+     ("for recovery. Inspect the occurrence and receipts before scheduling a new run.",),
+     "Task 23 schedule target identity recovery guidance uses the API's "
+     "durable schedule-receipt term"),
+    ("docs/zensical/operations.md",
+     ("Inspect the occurrence and receipts. Recover prepared work only",
+      "8. For a scheduled receipt with",
+      "and receipt"),
+     "Task 23 scheduled-outcome and recovery-checklist guidance uses durable "
+     "schedule receipts"),
+    ("docs/zensical/problems.md",
+     ("Scheduled receipt reason values",),
+     "Task 23 distinguishes durable schedule-receipt outcomes from HTTP "
+     "Problem Details types"),
+    ("docs/zensical/reference.md",
+     ("A receipt reason of",),
+     "Task 23 schedule API reference explains durable schedule-receipt "
+     "identity conflicts"),
+    ("docs/zensical/troubleshooting.md",
+     ("deployment JSON, occurrences, or receipts by hand.",
+      "| A scheduled receipt says",
+      "its receipt records",
+      "Schedule receipt reasons are durable outcomes, not HTTP problem types.",
+      "receipt revision, job id, and selected dashboard time bounds as applicable."),
+     "Task 23 troubleshooting guidance uses durable schedule receipts and "
+     "their identity-binding evidence"),
+])
+
 
 TERM_FILE_ALLOWLIST = [
     ("docs/zensical/openapi.yaml", ("receipt",),
@@ -322,6 +351,11 @@ TERM_FILE_ALLOWLIST = [
      "Task 22 schedule store tests"),
     ("server/tests/test_scheduled_execution.py", ("receipt",),
      "Task 23 scheduled assignment/onboarding receipt and recovery tests"),
+    ("docs/zensical/swagger/swagger-ui-bundle.js", ("attachment",),
+     "vendored swagger-ui-dist 5.32.15 bundle contains upstream download and "
+     "URI-scheme vocabulary; SOURCE.md records its immutable provenance. "
+     "This term-only exemption leaves receipt and every IRIS-authored Swagger "
+     "asset, including iris-openapi32.js, under the guard"),
 ]
 
 

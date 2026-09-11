@@ -142,7 +142,8 @@ Reasons an operator will actually meet:
 
 | Reason | What it means |
 | --- | --- |
-| `conflict` | The device was changed by another writer — usually a **manual** action. Manual work **wins** the conflict: the schedule stands down and records it rather than overwriting. |
+| `conflict` | Another writer changed the device, or the current same-name fleet row has a different registration identity from the occurrence binding. Manual work wins the conflict. Inspect `target_snapshot.registration_ids` and receipt `fleet_registration_id`. Do not force the old occurrence onto a replacement; verify it and schedule new work if intended. |
+| `identity_unavailable` | A legacy or unbound claimed target cannot prove a durable registration identity for fresh work. Inspect the occurrence and receipts. Recover prepared work only when its receipt records `fleet_registration_id`; otherwise verify the current registration and schedule new work. |
 | `vanished` | The device is no longer in the fleet. |
 | `device_revoked` | The device's credentials are revoked; nothing was attempted. |
 | `unclassified_management_type` | The row is inventory only and has no management type yet, so there is no plan to run. See [Management type](management-type.md). |
@@ -925,6 +926,10 @@ agent is running: the agent can remove files it recorded as downloaded by
 IRIS, while retaining adopted files and files of unknown origin. See
 [Unassigned image park](device-agents.md#unassigned-image-park).
 
+When multiple historical image records name the same IOS-XR root file, every
+record must prove downloaded ownership before parking can delete it. An adopted
+or unknown claim protects the file even when that record is already parked.
+
 Deleting an inventory row is not an undeploy — undeploy before deleting anything
 still deployed. See [Bulk device actions](console.md#bulk-device-actions).
 
@@ -1310,3 +1315,9 @@ manifest as evidence in either outcome.
 7. Read the device's job log, heartbeat, and per-image report. Confirm its
    management type, installer, and addresses before retrying. A running agent
    normally requires undeploy before Console onboarding again.
+8. For a scheduled receipt with `conflict` or `identity_unavailable`, read the
+   occurrence `target_snapshot.registration_ids` and receipt
+   `fleet_registration_id` before retrying. Deleting and re-adding the same
+   device name creates a new identity and must not redirect an old occurrence.
+   Recover only prepared work bound to the recorded identity; otherwise verify
+   the current registration and schedule new work.

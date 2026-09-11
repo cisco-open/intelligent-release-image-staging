@@ -522,6 +522,10 @@ missing records, untraced bytes, or peer-share estimates.
 | Log searches work, metric panels are empty | Check the `/metrics` scrape and `metrics/iris9101` pipeline; OTLP metrics alone do not supply all dashboard families. |
 | Metrics work, peer tables are empty | Check OTLP logs and the selected time range; an idle fleet need not emit peer records. |
 | Byte totals look wrong | Select one record family, coerce byte values to numbers, and keep device/image/transfer identity in the grouping. |
+| Imported Simple XML panels are empty but pasted SPL returns rows | Inspect the resolved job in the browser search manager. `search search index=...` means the standalone `<query>` included an extra generating `search` command; re-import the corrected shipped XML and do not add that prefix. |
+| Received data by source is below the captured total | Include `iris.transfer.bytes_unattributed_omitted` as a separate **Untraced capped rows** bucket. Do not redistribute capped bytes into origin, peer device, or unknown. |
+| Peer share shows **No data** or **0%** | No capture rows means unavailable. Origin-only or unknown-only captured rows are a measured 0%. With `capture_complete=false`, displayed row bytes remain exact while capture totals are a floor and the peer ratio is partial with unknown bias. |
+| A ledger tile changes or disappears with a historical window | Ledger tiles show the latest cumulative sample inside the selected window, not a delta. No sample means unavailable. **Seeder RPC** intentionally uses a fixed 15-minute window. |
 
 The anonymous IRIS `https://iris.example.com:9101/healthz` probe reports only
 listener health. Check the Console's telemetry export status and collector

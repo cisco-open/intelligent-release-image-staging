@@ -11,6 +11,16 @@ any `.MICRO` suffix. The current version is in the top-level `VERSION` file.
 
 ## [Unreleased]
 
+## [2026.09.11]
+
+### Added
+- Browsable, self-hosted Swagger API reference for all registered operations,
+  with exact canonical schemas and streaming examples, pinned upstream assets,
+  and a reproducible update helper included in release archives.
+- Central troubleshooting guide, linked from the README, public website,
+  documentation index, and navigation, covering schedule identity conflicts,
+  staged-file ownership, Splunk accounting, and API diagnostics.
+
 ### Fixed
 - XR parking preserves a shared root file when any historical image record
   marks it adopted or leaves its ownership unknown, including parked records.

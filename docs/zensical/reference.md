@@ -274,13 +274,16 @@ startup log states which posture is in effect at boot.
 
 ## Console API
 
-The checked-in [OpenAPI 3.2 contract](openapi.yaml) describes the Console,
+The read-only [browsable API reference](swagger/index.html) renders the checked-in
+[OpenAPI 3.2 contract](openapi.yaml), which describes the Console,
 management, catalog, tracker, telemetry, and artifact operations. It is generated
 from `server/openapi_contract.py`, validated against OpenAPI 3.2, and checked
 against the runtime route registry. Job streams describe each parsed SSE event;
 image, artifact and torrent bodies are raw bytes. The API paths remain versioned
 as `/api/v1`, `/internal/v1`, and `/v1`.
 This section explains the operator-facing behavior.
+The running Console and management server do not serve `/swagger`, `/api-docs`,
+or `/openapi.*`; those paths are documentation-site artifacts.
 
 The browser calls `/api/v1` on the Console container's HTTPS listener, normally
 port 8080. The Console proxies registered operations to `/internal/v1` on the
@@ -768,8 +771,14 @@ deleted.
 | `PATCH /api/v1/schedules/{id}` | Changes named fields only; `{"after": null}` removes a wave gate. Requires `If-Match`. |
 | `DELETE /api/v1/schedules/{id}` | 204. Requires `If-Match`. Occurrences and outcomes are retained. |
 | `POST /api/v1/schedules/{id}/reaffirm` | Empty body. Rewrites `created_by` to the calling operator and bumps `rev`, for a schedule whose creator no longer exists. Requires `If-Match`. |
-| `GET /api/v1/schedules/{id}/occurrences` | `{occurrences: [...], total, offset, truncated}`, oldest first, `limit` ≤ 100. Each occurrence carries its frozen definition, slot, target snapshot, `delta`, state, and any annotations — including the wave gate's counts. |
-| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}` — the durable per-device outcome for every occurrence of the schedule, `limit` ≤ 1000. The response cap bounds the page, never the durable evidence. |
+| `GET /api/v1/schedules/{id}/occurrences` | `{occurrences: [...], total, offset, truncated}`, oldest first, `limit` ≤ 100. Each occurrence carries its frozen definition, slot, target snapshot, `delta`, state, and annotations. `target_snapshot.registration_ids` maps each fired target name to the registration identity frozen at claim time, or to `null` when identity was unavailable then; legacy snapshots can omit the map. |
+| `GET /api/v1/schedules/{id}/receipts` | `{receipts: [...], total, offset, truncated}` — the durable per-device outcome for every occurrence of the schedule, `limit` ≤ 1000. `fleet_registration_id` identifies the bound registration for prepared or recovered work when present. The response cap bounds the page, never the durable evidence. |
+
+A receipt reason of `conflict` can mean the current same-name fleet row has a
+different registration than the occurrence binding. `identity_unavailable`
+means fresh work could not prove a durable target identity. Follow the
+[scheduled outcome recovery actions](operations.md#scheduled-outcomes); do not
+redirect an old occurrence to a replacement device.
 
 `next_fire` is the schedule's current or next slot, computed by the **server**
 from the same authority the runner fires from — `{scheduled_at, window_end,

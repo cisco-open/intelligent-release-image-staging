@@ -157,9 +157,12 @@ def test_schedule_crud_target_preview_creator_and_strong_cas(schedule_api):
     with server.schedule_role_guard(created["schedule"]):
         runner_preview = server.schedule_target_resolver(created["schedule"])
     assert runner_preview["device_ids"] == ["edge-1"]
+    assert runner_preview["registration_ids"] == {
+        "edge-1": server.schedule_executor.fleet.get_device(
+            "edge-1")["registration_id"]}
     assert set(runner_preview) == {
         "revision", "now", "device_ids", "missing_os_family",
-        "role_drift", "quarantined_ids"}
+        "role_drift", "quarantined_ids", "registration_ids"}
 
     listed_status, _, listed_raw = _request(
         server, "GET", "/api/schedules", headers={"Cookie": auth["Cookie"]})

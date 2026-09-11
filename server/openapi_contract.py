@@ -572,7 +572,14 @@ def _schedule_wave_schema():
 
 def _schedule_receipt_schema(*, predecessor=False):
     epoch = _schedule_integer(0, schedules.MAX_EPOCH)
-    reason = {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"}
+    reason_pattern = r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"
+    reason = {
+        "type": "string", "pattern": reason_pattern,
+        "description": (
+            "Machine-readable per-device outcome. `conflict` includes a current registration "
+            "that differs from the occurrence binding; `identity_unavailable` means fresh work "
+            "could not prove a durable target identity. See Operations scheduled outcomes."),
+    }
     properties = {
         "occurrence_id": {"type": "string", "pattern": r"^[0-9a-f]{32}(?![\s\S])"},
         "device_id": _schedule_id_schema(device=True), "rev": _schedule_integer(1),
@@ -581,7 +588,8 @@ def _schedule_receipt_schema(*, predecessor=False):
         "status": {"type": "string", "enum": sorted(schedules.RECEIPT_STATES)},
         "reason": reason, "created_at": epoch, "updated_at": epoch,
         "completed_at": {"oneOf": [epoch, {"type": "null"}]},
-        "notes": {"type": "array", "items": reason, "maxItems": 16},
+        "notes": {"type": "array", "items": {"type": "string", "pattern": reason_pattern},
+                  "maxItems": 16},
     }
     if not predecessor:
         properties["predecessors"] = {"type": "array", "maxItems": schedules.MAX_RECEIPT_ATTEMPTS - 1,

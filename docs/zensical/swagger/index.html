@@ -1,0 +1,41 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Browsable IRIS OpenAPI 3.2 contract">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; font-src 'self'; connect-src 'self'">
+    <title>IRIS API reference</title>
+    <link rel="stylesheet" href="swagger-ui.css">
+    <link rel="stylesheet" href="iris-swagger.css">
+  </head>
+  <body>
+    <header class="iris-api-header">
+      <strong>IRIS API reference</strong>
+      <span>Read-only API reference. Use the Console or an authenticated API client to send requests.</span>
+      <nav aria-label="API documentation links">
+        <a href="../reference/">API guide</a>
+        <a href="../openapi.yaml">OpenAPI 3.2</a>
+      </nav>
+      <p class="iris-api-compatibility">
+        Swagger UI provides operation navigation and JSON Schema 2020-12 views.
+        Its dialect warning identifies a renderer limitation for IRIS's explicitly
+        declared draft 2020-12 dialect; the raw OpenAPI contract is authoritative.
+      </p>
+    </header>
+    <details class="iris-streaming-responses">
+      <summary class="iris-explorer-summary">Canonical schemas and streaming examples</summary>
+      <div id="iris-streaming-responses" hidden></div>
+    </details>
+    <noscript>JavaScript is required to browse this API contract. The raw OpenAPI document is available at ../openapi.yaml.</noscript>
+    <div id="swagger-ui"></div>
+    <script src="swagger-ui-bundle.js"></script>
+    <script src="iris-openapi32.js"></script>
+    <script src="swagger-initializer.js"></script>
+  </body>
+</html>

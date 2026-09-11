@@ -60,6 +60,8 @@ flowchart LR
 | Find out how much of a rollout the peers carried | [Telemetry Export](telemetry-export.md) |
 | Send IRIS telemetry to Splunk | [Splunk Setup](splunk.md) |
 | Find a day-two command or an env var | [Operations](operations.md), [Reference](reference.md) |
+| Troubleshoot a rollout or recover service | [Troubleshooting](troubleshooting.md) |
+| Integrate with the HTTP API | [Browsable API reference](swagger/index.html) and [OpenAPI 3.2 contract](openapi.yaml) |
 
 ## Documentation map
 
@@ -103,7 +105,8 @@ Read these before connecting production devices.
 | --- | --- |
 | [Web Console](console.md) | The admin browser workflow end to end. |
 | [Network Workflows](fleet-workflows.md) | CSV inventory, assignments, and batch operations. |
-| [Operations](operations.md) | Day-two commands, backups, scaling, and cleanup. |
+| [Operations](operations.md) | Recovery, troubleshooting, backups, scaling, cleanup, and day-two commands. |
+| [Troubleshooting](troubleshooting.md) | Symptom-based recovery paths for service, rollout, device, telemetry, and API failures. |
 | [Observability](observability.md) | Metrics, swarm map, OTLP export, and dashboards. |
 | [Telemetry Export](telemetry-export.md) | Peer-distribution accounting: the metric families, the device peer transfer records, and what each figure does and does not measure. |
 | [Splunk Setup](splunk.md) | HTTPS collector setup, Splunk indexes, HEC, dashboard import, and verification searches. |
@@ -112,7 +115,8 @@ Read these before connecting production devices.
 
 | Page | What it covers |
 | --- | --- |
-| [Reference](reference.md) | Environment variables, file layouts, and APIs. |
+| [Reference](reference.md) | Environment variables, file layouts, API behavior, and the machine-readable contract. |
+| [Browsable API reference](swagger/index.html) | Read-only Swagger UI for the checked-in OpenAPI 3.2 contract. |
 | [Problem type registry](problems.md) | Stable RFC 9457 error identifiers used by API clients. |
 | [Validation](validation.md) | The test suites and lab validation checklist. |
 | [Development](development.md) | Working on IRIS itself. |

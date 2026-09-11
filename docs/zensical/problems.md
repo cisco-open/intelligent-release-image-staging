@@ -16,6 +16,10 @@ The BitTorrent tracker is the one protocol-format exception: its errors remain
 BEP-compatible bencoded failure dictionaries. Anonymous `/healthz` and
 `/readyz` probes disclose only an `ok` boolean.
 
+Scheduled receipt reason values such as `conflict` and `identity_unavailable`
+are durable rollout outcomes, not HTTP Problem Details types. See
+[Scheduled outcomes](operations.md#scheduled-outcomes).
+
 ## asymmetric_peers
 
 Raw policy or `iris-role import` input contains an asymmetric relationship
